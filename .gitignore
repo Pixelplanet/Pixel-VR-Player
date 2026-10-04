@@ -1,0 +1,40 @@
+# Build output
+/build/
+/build-*/
+/out/
+/install/
+/dist/
+/sysroot/
+*.o
+*.obj
+*.a
+*.so
+*.so.*
+*.spv
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+compile_commands.json
+
+# Third-party fetched sources
+/third_party/*/src/
+/third_party/*/build/
+
+# GPLv3 reference material (studied, not distributed with this project)
+/matineevr-steam-frame-linux-arm64/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.user
+.cache/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Local secrets / device config
+/local.env
+/secrets/

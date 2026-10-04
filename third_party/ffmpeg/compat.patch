@@ -1,0 +1,218 @@
+--- a/libavcodec/options_table.h
++++ b/libavcodec/options_table.h
+@@ -47,7 +47,7 @@
+ #define AV_CODEC_DEFAULT_BITRATE 200*1000
+ 
+ static const AVOption avcodec_options[] = {
+-{"b", "set bitrate (in bits/s)", OFFSET(bit_rate), AV_OPT_TYPE_INT64, {.i64 = AV_CODEC_DEFAULT_BITRATE }, 0, INT64_MAX, A|V|E},
++{"b", "set bitrate (in bits/s)", OFFSET(bit_rate), AV_OPT_TYPE_INT64, {.i64 = AV_CODEC_DEFAULT_BITRATE }, 0, (double)INT64_MAX, A|V|E},
+ {"ab", "set bitrate (in bits/s)", OFFSET(bit_rate), AV_OPT_TYPE_INT64, {.i64 = 128*1000 }, 0, INT_MAX, A|E},
+ {"bt", "Set video bitrate tolerance (in bits/s). In 1-pass mode, bitrate tolerance specifies how far "
+        "ratecontrol is willing to deviate from the target average bitrate value. This is not related "
+--- a/configure
++++ b/configure
+@@ -6543,7 +6543,7 @@
+ check_struct "sys/stat.h" "struct stat" st_mtim.tv_nsec -D_BSD_SOURCE
+ check_func  strerror_r
+ check_func  sysconf
+-check_func  sysctl
++check_func_headers sys/sysctl.h sysctl
+ check_func  usleep
+ 
+ check_func_headers conio.h kbhit
+--- a/libavutil/mem.c
++++ b/libavutil/mem.c
+@@ -69,7 +69,7 @@
+  * dynamic libraries and remove -Wl,-Bsymbolic from the linker flags.
+  * Note that this will cost performance. */
+ 
+-static atomic_size_t max_alloc_size = ATOMIC_VAR_INIT(INT_MAX);
++static atomic_size_t max_alloc_size = INT_MAX;
+ 
+ void av_max_alloc(size_t max){
+     atomic_store_explicit(&max_alloc_size, max, memory_order_relaxed);
+--- a/libavutil/cpu.c
++++ b/libavutil/cpu.c
+@@ -49,8 +49,8 @@
+ #include <unistd.h>
+ #endif
+ 
+-static atomic_int cpu_flags = ATOMIC_VAR_INIT(-1);
+-static atomic_int cpu_count = ATOMIC_VAR_INIT(-1);
++static atomic_int cpu_flags = -1;
++static atomic_int cpu_count = -1;
+ 
+ static int get_cpu_flags(void)
+ {
+@@ -113,7 +113,7 @@
+ int av_parse_cpu_caps(unsigned *flags, const char *s)
+ {
+         static const AVOption cpuflags_opts[] = {
+-        { "flags"   , NULL, 0, AV_OPT_TYPE_FLAGS, { .i64 = 0 }, INT64_MIN, INT64_MAX, .unit = "flags" },
++        { "flags"   , NULL, 0, AV_OPT_TYPE_FLAGS, { .i64 = 0 }, INT64_MIN, (double)INT64_MAX, .unit = "flags" },
+ #if   ARCH_PPC
+         { "altivec" , NULL, 0, AV_OPT_TYPE_CONST, { .i64 = AV_CPU_FLAG_ALTIVEC  },    .unit = "flags" },
+ #elif ARCH_X86
+@@ -208,7 +208,7 @@
+ 
+ int av_cpu_count(void)
+ {
+-    static atomic_int printed = ATOMIC_VAR_INIT(0);
++    static atomic_int printed = 0;
+ 
+     int nb_cpus = 1;
+     int count   = 0;
+--- a/libavutil/eval.c
++++ b/libavutil/eval.c
+@@ -247,13 +247,13 @@
+ 
+         case e_random: {
+             COMPUTE_NEXT_RANDOM();
+-            return r * (1.0/UINT64_MAX);
++            return r * (1.0/(double)UINT64_MAX);
+         }
+         case e_randomi: {
+             double min = eval_expr(p, e->param[1]);
+             double max = eval_expr(p, e->param[2]);
+             COMPUTE_NEXT_RANDOM();
+-            return min + (max - min) * r / UINT64_MAX;
++            return min + (max - min) * r / (double)UINT64_MAX;
+         }
+         case e_while: {
+             double d = NAN;
+--- a/libswresample/options.c
++++ b/libswresample/options.c
+@@ -107,7 +107,7 @@
+ {"async"                , "simplified 1 parameter audio timestamp matching, 0(disabled), 1(filling and trimming), >1(maximum stretch/squeeze in samples per second)"
+                                                         , OFFSET(async)          , AV_OPT_TYPE_FLOAT ,{.dbl=0                     }, INT_MIN, INT_MAX   , PARAM },
+ {"first_pts"            , "Assume the first pts should be this value (in samples)."
+-                                                        , OFFSET(firstpts_in_samples), AV_OPT_TYPE_INT64 ,{.i64=AV_NOPTS_VALUE    }, INT64_MIN,INT64_MAX, PARAM },
++                                                        , OFFSET(firstpts_in_samples), AV_OPT_TYPE_INT64 ,{.i64=AV_NOPTS_VALUE    }, (double)INT64_MIN,(double)INT64_MAX, PARAM },
+ 
+ { "matrix_encoding"     , "set matrixed stereo encoding" , OFFSET(matrix_encoding), AV_OPT_TYPE_INT   ,{.i64 = AV_MATRIX_ENCODING_NONE}, AV_MATRIX_ENCODING_NONE,     AV_MATRIX_ENCODING_NB-1, PARAM, .unit = "matrix_encoding" },
+     { "none",  "select none",               0, AV_OPT_TYPE_CONST, { .i64 = AV_MATRIX_ENCODING_NONE  }, INT_MIN, INT_MAX, PARAM, .unit = "matrix_encoding" },
+--- a/libavcodec/cngdec.c
++++ b/libavcodec/cngdec.c
+@@ -141,7 +141,7 @@
+     for (i = 0; i < p->order; i++)
+         e *= 1.0 - p->refl_coef[i]*p->refl_coef[i];
+ 
+-    scaling = sqrt(e * p->energy / 1081109975);
++    scaling = sqrt(e * p->energy / (float)1081109975);
+     for (i = 0; i < avctx->frame_size; i++) {
+         int r = (av_lfg_get(&p->lfg) & 0xffff) - 0x8000;
+         p->excitation[i] = scaling * r;
+--- a/libavcodec/imc.c
++++ b/libavcodec/imc.c
+@@ -851,7 +851,7 @@
+                                        chctx->flcoeffs1, chctx->flcoeffs2);
+ 
+     for(i=0; i<BANDS; i++) {
+-        if(chctx->flcoeffs1[i] > INT_MAX) {
++        if(chctx->flcoeffs1[i] > (float)INT_MAX) {
+             av_log(avctx, AV_LOG_ERROR, "scalefactor out of range\n");
+             return AVERROR_INVALIDDATA;
+         }
+--- a/libavcodec/mpc.c
++++ b/libavcodec/mpc.c
+@@ -69,13 +69,13 @@
+                 j = 0;
+                 mul = (mpc_CC+1)[bands[i].res[ch]] * mpc_SCF[bands[i].scf_idx[ch][0] & 0xFF];
+                 for(; j < 12; j++)
+-                    c->sb_samples[ch][j][i] = av_clipf(mul * c->Q[ch][j + off], INT32_MIN, INT32_MAX);
++                    c->sb_samples[ch][j][i] = av_clipf(mul * c->Q[ch][j + off], INT32_MIN, (float)INT32_MAX);
+                 mul = (mpc_CC+1)[bands[i].res[ch]] * mpc_SCF[bands[i].scf_idx[ch][1] & 0xFF];
+                 for(; j < 24; j++)
+-                    c->sb_samples[ch][j][i] = av_clipf(mul * c->Q[ch][j + off], INT32_MIN, INT32_MAX);
++                    c->sb_samples[ch][j][i] = av_clipf(mul * c->Q[ch][j + off], INT32_MIN, (float)INT32_MAX);
+                 mul = (mpc_CC+1)[bands[i].res[ch]] * mpc_SCF[bands[i].scf_idx[ch][2] & 0xFF];
+                 for(; j < 36; j++)
+-                    c->sb_samples[ch][j][i] = av_clipf(mul * c->Q[ch][j + off], INT32_MIN, INT32_MAX);
++                    c->sb_samples[ch][j][i] = av_clipf(mul * c->Q[ch][j + off], INT32_MIN, (float)INT32_MAX);
+             }
+         }
+         if(bands[i].msf){
+--- a/libavcodec/wmavoice.c
++++ b/libavcodec/wmavoice.c
+@@ -654,7 +654,7 @@
+         lpcs[n] = angle_mul * pwr;
+ 
+         /* 70.57 =~ 1/log10(1.0331663) */
+-        idx = av_clipf((pwr * gain_mul - 0.0295) * 70.570526123, 0, INT_MAX / 2);
++        idx = av_clipf((pwr * gain_mul - 0.0295) * 70.570526123, 0, (float)(INT_MAX / 2));
+ 
+         if (idx > 127) { // fall back if index falls outside table range
+             coeffs[n] = wmavoice_energy_table[127] *
+--- a/libavcodec/mpeg4videodec.c
++++ b/libavcodec/mpeg4videodec.c
+@@ -3527,7 +3527,7 @@
+             continue;  // no startcode
+ 
+         if (s->avctx->debug & FF_DEBUG_STARTCODE) {
+-            const char *name;
++            const char *name = "unknown";
+             if (startcode <= 0x11F)
+                 name = "Video Object Start";
+             else if (startcode <= 0x12F)
+--- a/libavcodec/mpegvideo_enc.c
++++ b/libavcodec/mpegvideo_enc.c
+@@ -2781,7 +2781,7 @@
+     int offset = put_bits_count(&s->pb);
+     int mba  = s->mb_x + s->mb_width * (s->mb_y % s->gob_index);
+     int gobn = s->mb_y / s->gob_index;
+-    int pred_x, pred_y;
++    int pred_x = 0, pred_y = 0;
+     if (CONFIG_H263_ENCODER)
+         ff_h263_pred_motion(s, 0, 0, &pred_x, &pred_y);
+     bytestream_put_le32(&ptr, offset);
+--- a/libavcodec/g726.c
++++ b/libavcodec/g726.c
+@@ -159,7 +159,7 @@
+ /**
+  * Paragraph 4.2.2 page 18: Adaptive quantizer.
+  */
+-static inline uint8_t quant(G726Context* c, int d)
++static av_unused inline uint8_t quant(G726Context* c, int d)
+ {
+     int sign, exp, i, dln;
+ 
+--- a/libavcodec/pcm.c
++++ b/libavcodec/pcm.c
+@@ -37,7 +37,7 @@
+ #include "encode.h"
+ #include "pcm_tablegen.h"
+ 
+-static av_cold int pcm_encode_init(AVCodecContext *avctx)
++static av_cold av_unused int pcm_encode_init(AVCodecContext *avctx)
+ {
+     avctx->frame_size = 0;
+ #if !CONFIG_HARDCODED_TABLES
+@@ -92,7 +92,7 @@
+         }                                                               \
+     }
+ 
+-static int pcm_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
++static av_unused int pcm_encode_frame(AVCodecContext *avctx, AVPacket *avpkt,
+                             const AVFrame *frame, int *got_packet_ptr)
+ {
+     int n, c, sample_size, v, ret;
+--- a/libavcodec/sonic.c
++++ b/libavcodec/sonic.c
+@@ -166,7 +166,7 @@
+ }
+ 
+ #if 1
+-static inline int intlist_write(RangeCoder *c, uint8_t *state, int *buf, int entries, int base_2_part)
++static av_unused inline int intlist_write(RangeCoder *c, uint8_t *state, int *buf, int entries, int base_2_part)
+ {
+     int i;
+ 
+@@ -186,7 +186,7 @@
+     return 1;
+ }
+ #elif 1
+-static inline int intlist_write(PutBitContext *pb, int *buf, int entries, int base_2_part)
++static av_unused inline int intlist_write(PutBitContext *pb, int *buf, int entries, int base_2_part)
+ {
+     int i;
+ 
