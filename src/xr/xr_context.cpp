@@ -72,6 +72,18 @@ bool XrContext::createInstanceAndSystem(const char* appName) {
 
     std::vector<const char*> enabledExts{XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME};
 
+    // Optional: real controller models via XR_EXT_render_model (depends on uuid +
+    // interaction_render_model). Enabled only if all three are present.
+    if (has_ext(XR_EXT_RENDER_MODEL_EXTENSION_NAME) &&
+        has_ext(XR_EXT_INTERACTION_RENDER_MODEL_EXTENSION_NAME) &&
+        has_ext(XR_EXT_UUID_EXTENSION_NAME)) {
+        enabledExts.push_back(XR_EXT_UUID_EXTENSION_NAME);
+        enabledExts.push_back(XR_EXT_RENDER_MODEL_EXTENSION_NAME);
+        enabledExts.push_back(XR_EXT_INTERACTION_RENDER_MODEL_EXTENSION_NAME);
+        renderModelEnabled_ = true;
+        PIXELVR_LOG_INFO("Render-model extensions enabled");
+    }
+
     XrInstanceCreateInfo createInfo{XR_TYPE_INSTANCE_CREATE_INFO};
     std::strncpy(createInfo.applicationInfo.applicationName, appName,
                  XR_MAX_APPLICATION_NAME_SIZE - 1);

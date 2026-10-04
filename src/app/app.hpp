@@ -2,6 +2,7 @@
 
 #include "gfx/vulkan_renderer.hpp"
 #include "xr/xr_context.hpp"
+#include "xr/render_model.hpp"
 
 #ifdef PIXELVR_HAVE_MEDIA
 #include "media/media_engine.hpp"
@@ -32,6 +33,7 @@ private:
     // first and therefore destroyed last.
     VulkanRenderer renderer_;
     XrContext xr_;
+    RenderModelSystem renderModels_;
     bool exitRequested_ = false;
 
     // Transport HUD auto-hide timer.

@@ -78,6 +78,7 @@ bool App::init(const std::string& mediaPath) {
     if (!xr_.createActions()) {
         PIXELVR_LOG_WARN("Controller input unavailable; continuing without it");
     }
+    renderModels_.init(xr_.instance(), xr_.session(), xr_.renderModelEnabled());
 
     const std::vector<int64_t> formats = xr_.enumerateSwapchainFormats();
     if (formats.empty()) {
@@ -288,6 +289,12 @@ int App::run() {
             bool interacted = false;
             bool browserOpen = false;
             bool settingsOpen = false;
+
+            // Fetch the runtime-provided controller model once a controller is
+            // tracked (one-shot; subsequent calls return immediately).
+            if (in.controllers[0].active || in.controllers[1].active) {
+                renderModels_.poll();
+            }
 
             // Live settings + place the screen in front on first head tracking.
             renderer_.setSwapEyes(settings_.swapEyes());
@@ -620,6 +627,7 @@ int App::run() {
     if (renderer_.device() != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(renderer_.device());
     }
+    renderModels_.shutdown();  // destroy XR model handles before the session
     PIXELVR_LOG_INFO("Shutting down");
     return 0;
 }

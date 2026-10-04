@@ -94,7 +94,9 @@ public:
 
     // --- Accessors -------------------------------------------------------
     XrInstance instance() const { return instance_; }
+    XrSession session() const { return session_; }
     XrSystemId systemId() const { return systemId_; }
+    bool renderModelEnabled() const { return renderModelEnabled_; }
     uint32_t viewCount() const { return static_cast<uint32_t>(configViews_.size()); }
     const std::vector<XrViewConfigurationView>& configViews() const { return configViews_; }
     const std::vector<ViewSwapchain>& swapchains() const { return swapchains_; }
@@ -118,6 +120,7 @@ private:
 
     XrSessionState sessionState_ = XR_SESSION_STATE_UNKNOWN;
     bool sessionRunning_ = false;
+    bool renderModelEnabled_ = false;
 
     std::vector<XrViewConfigurationView> configViews_;
     std::vector<ViewSwapchain> swapchains_;

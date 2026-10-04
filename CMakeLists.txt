@@ -99,6 +99,7 @@ add_library(pixelvr_core STATIC
     src/util/logging.cpp
     src/xr/xr_result.cpp
     src/xr/xr_context.cpp
+    src/xr/render_model.cpp
     src/gfx/vulkan_renderer.cpp
     src/ui/settings_menu.cpp
     src/app/app.cpp)
