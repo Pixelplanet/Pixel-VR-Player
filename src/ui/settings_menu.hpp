@@ -73,7 +73,7 @@ private:
     int projectionMode_ = 0;
     int stereoMode_ = 0;
     bool swapEyes_ = false;
-    bool drawModels_ = true;  // app-drawn controller models (capsule at aim pose)
+    bool drawModels_ = false;  // off: SteamVR draws the real controllers; laser stays
     bool showStats_ = false;
     float screenDistance_ = 3.0f;
 
