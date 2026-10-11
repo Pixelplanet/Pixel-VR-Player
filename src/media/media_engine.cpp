@@ -2,6 +2,7 @@
 
 #include "util/logging.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -305,8 +306,9 @@ struct MediaEngine::Impl {
     uint64_t serial = 0;                 // guarded by mutex; last frame id
     bool primed = false;                 // guarded by mutex; first frame shown?
     static constexpr std::size_t kMaxQueue = 6;
+    std::size_t maxQueue = kMaxQueue;    // effective cap; reduced for huge frames
     std::atomic<bool> usingDrm{false};
-    PlaybackClock playClock;  // continuous audio-anchored clock for frame selection
+    PlaybackClock playClock;  // video-epoch clock, anchored on the first frame
 
     ~Impl() { teardown(); }
 
@@ -341,6 +343,7 @@ struct MediaEngine::Impl {
         smbReader.shutdown();
 #endif
         clearQueues();
+        maxQueue = kMaxQueue;
         usingDrm.store(false);
         audioEnabled = false;
         audioStream = -1;
@@ -367,7 +370,7 @@ struct MediaEngine::Impl {
     void pushFrame(int w, int h, std::vector<uint8_t>&& y, std::vector<uint8_t>&& uv,
                    int colorspace, bool fullRange, double pts) {
         std::lock_guard<std::mutex> lock(mutex);
-        while (swQueue.size() >= kMaxQueue) {
+        while (swQueue.size() >= maxQueue) {
             swQueue.pop_front();
         }
         VideoFrame f;
@@ -384,7 +387,7 @@ struct MediaEngine::Impl {
 
     void pushDrm(const DrmVideoFrame& f) {
         std::lock_guard<std::mutex> lock(mutex);
-        while (drmQueue.size() >= kMaxQueue) {
+        while (drmQueue.size() >= maxQueue) {
             if (drmQueue.front().fd >= 0) ::close(drmQueue.front().fd);
             drmQueue.pop_front();
         }
@@ -411,6 +414,7 @@ void MediaEngine::Impl::decodeLoop() {
     clock::time_point startTime{};
     double startPts = 0.0;
     bool haveClock = false;
+    bool producedSinceSeek = true;  // gate rapid re-seeks until a frame emerges
 
     auto process_video = [&]() {
         decodedCount.fetch_add(1, std::memory_order_relaxed);
@@ -538,6 +542,7 @@ void MediaEngine::Impl::decodeLoop() {
         } else {
             pushFrame(w, h, std::move(y), std::move(uv), colorspace, fullRange, pts);
         }
+        producedSinceSeek = true;  // a frame emerged; the next seek may apply
     };
 
 #ifdef PIXELVR_HAVE_PULSE
@@ -587,7 +592,15 @@ void MediaEngine::Impl::decodeLoop() {
     };
 
     while (running.load()) {
-        const double seekTo = seekTarget.exchange(-1.0);
+        double seekTo = seekTarget.exchange(-1.0);
+        // During rapid scrubbing, defer a new seek until the decoder has emitted a
+        // frame for the previous one, so each seek yields a preview and playback
+        // recovers instead of being flushed continuously.
+        if (seekTo >= 0.0 && !producedSinceSeek) {
+            double expected = -1.0;
+            seekTarget.compare_exchange_strong(expected, seekTo);  // keep newest
+            seekTo = -1.0;
+        }
         if (seekTo >= 0.0) {
             const int64_t ts = static_cast<int64_t>(seekTo * AV_TIME_BASE);
             avformat_seek_file(format, -1, INT64_MIN, ts, INT64_MAX, 0);
@@ -598,6 +611,7 @@ void MediaEngine::Impl::decodeLoop() {
             haveClock = false;
             masterClock.store(seekTo);
             playClock.reset();  // the next presented frame re-anchors the clock
+            producedSinceSeek = false;
             eof.store(false);
             {
                 std::lock_guard<std::mutex> lock(mutex);
@@ -766,11 +780,20 @@ bool MediaEngine::open(const std::string& path) {
         impl_->codec->pkt_timebase = stream->time_base;
         if (drmPrime && std::strstr(dec->name, "v4l2m2m") != nullptr) {
             // Export decoder output as DMA-BUF (AV_PIX_FMT_DRM_PRIME) for zero-copy
-            // Vulkan import; requires the dmabuf-patched libavcodec. Extra capture
-            // buffers give the decoder headroom while the renderer holds frames.
-            av_opt_set_int(impl_->codec->priv_data, "num_capture_buffers", 16, 0);
+            // Vulkan import; requires the dmabuf-patched libavcodec. Bound the
+            // decoded-buffer memory: at 8K a frame is ~40-80 MiB, so a fixed large
+            // count exhausts the decoder's DMA pool and REQBUFS fails -> POLLERR.
+            const int64_t px = static_cast<int64_t>(stream->codecpar->width) *
+                               stream->codecpar->height;
+            const int64_t frameBytes = highBitDepth ? px * 3 : px * 3 / 2;  // P010/NV12
+            constexpr int64_t kBudget = 320ll << 20;  // ~320 MiB capture pool
+            const int nbuf = static_cast<int>(std::clamp<int64_t>(
+                kBudget / std::max<int64_t>(frameBytes, 1), 4, 16));
+            av_opt_set_int(impl_->codec->priv_data, "num_capture_buffers", nbuf, 0);
             av_opt_set_int(impl_->codec->priv_data, "drm_prime", 1, 0);
             impl_->codec->apply_cropping = 0;
+            // Leave buffers free for the decoder's DPB; the queue holds the rest.
+            impl_->maxQueue = static_cast<std::size_t>(std::clamp(nbuf - 5, 1, 6));
         }
         return avcodec_open2(impl_->codec, dec, nullptr) >= 0;
     };
