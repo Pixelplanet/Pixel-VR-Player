@@ -272,6 +272,7 @@ struct MediaEngine::Impl {
     int width = 0;
     int height = 0;
     double duration = 0.0;
+    double frameRate = 0.0;
     AVRational timeBase{1, 1};
     int drmDiag = 0;
     std::string codecName;
@@ -414,7 +415,8 @@ void MediaEngine::Impl::decodeLoop() {
     clock::time_point startTime{};
     double startPts = 0.0;
     bool haveClock = false;
-    bool producedSinceSeek = true;  // gate rapid re-seeks until a frame emerges
+    bool eofFlushed = false;
+    auto lastSeekWall = clock::now() - std::chrono::seconds(1);
 
     auto process_video = [&]() {
         decodedCount.fetch_add(1, std::memory_order_relaxed);
@@ -542,7 +544,6 @@ void MediaEngine::Impl::decodeLoop() {
         } else {
             pushFrame(w, h, std::move(y), std::move(uv), colorspace, fullRange, pts);
         }
-        producedSinceSeek = true;  // a frame emerged; the next seek may apply
     };
 
 #ifdef PIXELVR_HAVE_PULSE
@@ -562,6 +563,11 @@ void MediaEngine::Impl::decodeLoop() {
             return;
         }
         const std::size_t bytes = static_cast<std::size_t>(got) * kOutChannels * 2;
+        // Mute while actively scrubbing so audio writes don't block video previews
+        // and the sound doesn't stutter across seek positions.
+        if (std::chrono::duration<double>(clock::now() - lastSeekWall).count() < 0.25) {
+            return;
+        }
         int err = 0;
         pa_simple_write(pa, audioBuf.data(), bytes, &err);
 
@@ -593,15 +599,20 @@ void MediaEngine::Impl::decodeLoop() {
 
     while (running.load()) {
         double seekTo = seekTarget.exchange(-1.0);
-        // During rapid scrubbing, defer a new seek until the decoder has emitted a
-        // frame for the previous one, so each seek yields a preview and playback
-        // recovers instead of being flushed continuously.
-        if (seekTo >= 0.0 && !producedSinceSeek) {
-            double expected = -1.0;
-            seekTarget.compare_exchange_strong(expected, seekTo);  // keep newest
-            seekTo = -1.0;
+        // Throttle seek handling to ~8/s. Rapid scrubbing otherwise flushes the
+        // hardware decoder faster than it can emit a frame, wedging it so the
+        // picture freezes; deferred seeks are re-stored so the latest still wins.
+        if (seekTo >= 0.0) {
+            const double since =
+                std::chrono::duration<double>(clock::now() - lastSeekWall).count();
+            if (since < 0.12) {
+                double expected = -1.0;
+                seekTarget.compare_exchange_strong(expected, seekTo);
+                seekTo = -1.0;
+            }
         }
         if (seekTo >= 0.0) {
+            lastSeekWall = clock::now();
             const int64_t ts = static_cast<int64_t>(seekTo * AV_TIME_BASE);
             avformat_seek_file(format, -1, INT64_MIN, ts, INT64_MAX, 0);
             avcodec_flush_buffers(codec);
@@ -611,7 +622,7 @@ void MediaEngine::Impl::decodeLoop() {
             haveClock = false;
             masterClock.store(seekTo);
             playClock.reset();  // the next presented frame re-anchors the clock
-            producedSinceSeek = false;
+            eofFlushed = false;
             eof.store(false);
             {
                 std::lock_guard<std::mutex> lock(mutex);
@@ -627,16 +638,21 @@ void MediaEngine::Impl::decodeLoop() {
         playClock.resume();  // no-op unless resuming from pause
         const int readResult = av_read_frame(format, packet);
         if (readResult < 0) {
-            avcodec_send_packet(codec, nullptr);  // flush video
-            drain(codec, true);
+            if (!eofFlushed) {
+                avcodec_send_packet(codec, nullptr);  // flush video
+                drain(codec, true);
 #ifdef PIXELVR_HAVE_PULSE
-            if (audioEnabled) {
-                avcodec_send_packet(audioCodec, nullptr);
-                drain(audioCodec, false);
-            }
+                if (audioEnabled) {
+                    avcodec_send_packet(audioCodec, nullptr);
+                    drain(audioCodec, false);
+                }
 #endif
-            eof.store(true);
-            break;
+                eofFlushed = true;
+                eof.store(true);
+            }
+            // Stay alive so a seek can resume instead of ending the thread.
+            std::this_thread::sleep_for(std::chrono::milliseconds(15));
+            continue;
         }
 
         if (packet->stream_index == videoStream) {
@@ -735,6 +751,8 @@ bool MediaEngine::open(const std::string& path) {
 
     AVStream* stream = impl_->format->streams[impl_->videoStream];
     impl_->timeBase = stream->time_base;
+    impl_->frameRate = av_q2d(av_guess_frame_rate(impl_->format, stream, nullptr));
+    PIXELVR_LOG_INFO("MediaEngine: source frame rate %.3f fps", impl_->frameRate);
     const AVCodecID codecId = stream->codecpar->codec_id;
 
     // The Iris V4L2-M2M hardware path (H.264/HEVC/VP9) handles 8-bit here; route
@@ -900,6 +918,7 @@ uint64_t MediaEngine::decodedFrames() const {
     return impl_->decodedCount.load(std::memory_order_relaxed);
 }
 double MediaEngine::duration() const { return impl_->duration; }
+double MediaEngine::frameRate() const { return impl_ ? impl_->frameRate : 0.0; }
 bool MediaEngine::eof() const { return impl_->eof.load(); }
 
 void MediaEngine::setPaused(bool paused) {

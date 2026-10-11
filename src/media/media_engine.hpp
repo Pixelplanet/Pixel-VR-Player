@@ -63,6 +63,7 @@ public:
     int width() const;
     int height() const;
     double duration() const;  // seconds; 0 if unknown
+    double frameRate() const;  // source frames per second; 0 if unknown
     std::string codecName() const;   // decoder name + (hw)/(sw)
     uint64_t decodedFrames() const;  // total frames decoded since open
 

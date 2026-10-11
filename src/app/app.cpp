@@ -228,7 +228,8 @@ void App::updateStats() {
         std::snprintf(buf, sizeof(buf), "Video %dx%d  %s", media_.width(),
                       media_.height(), media_.codecName().c_str());
         statsLines_.emplace_back(buf);
-        std::snprintf(buf, sizeof(buf), "Decode %.1f fps", decFps);
+        std::snprintf(buf, sizeof(buf), "Decode %.1f / %.2f fps", decFps,
+                      media_.frameRate());
         statsLines_.emplace_back(buf);
     }
     if (cpuPct >= 0.0f) {
