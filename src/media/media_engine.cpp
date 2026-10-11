@@ -216,27 +216,41 @@ int64_t smb_seek(void* opaque, int64_t offset, int whence) {
 }  // namespace
 #endif
 
-// A continuous playback clock anchored to the audio PTS. Between audio packets it
-// advances with wall time so consumer-side frame selection stays smooth at any
-// video rate; it freezes while paused so video holds instead of racing ahead.
+// Playback clock in the VIDEO PTS timeline. It starts when the first frame is
+// presented and advances with wall time, so consumer-side selection is smooth at
+// any frame rate and independent of the audio PTS epoch. It freezes while paused
+// and resets on seek. Frame production stays audio-paced, so the bounded frame
+// queue keeps video locked to audio without assuming a shared PTS epoch.
 struct PlaybackClock {
     std::atomic<double> basePts{0.0};
-    std::atomic<int64_t> baseWallNs{0};  // steady_clock ns; 0 = frozen/paused
+    std::atomic<int64_t> baseWallNs{0};  // steady_clock ns; 0 = stopped/frozen
+    std::atomic<bool> running{false};
 
     static int64_t nowNs() {
         return std::chrono::duration_cast<std::chrono::nanoseconds>(
                    std::chrono::steady_clock::now().time_since_epoch())
             .count();
     }
-    void anchor(double pts) {
+    void start(double pts) {
         basePts.store(pts);
         baseWallNs.store(nowNs());
+        running.store(true);
     }
     void freeze() {
+        if (!running.exchange(false)) return;
         const int64_t w = baseWallNs.exchange(0);
         if (w != 0) {
             basePts.store(basePts.load() + static_cast<double>(nowNs() - w) / 1e9);
         }
+    }
+    void resume() {
+        if (running.exchange(true)) return;
+        baseWallNs.store(nowNs());
+    }
+    void reset() {
+        running.store(false);
+        baseWallNs.store(0);
+        basePts.store(0.0);
     }
     double now() const {
         const int64_t w = baseWallNs.load();
@@ -344,11 +358,10 @@ struct MediaEngine::Impl {
         primed = false;
     }
 
-    // Playback position in seconds for consumer-side frame selection. With audio,
-    // the continuous audio-anchored clock; without audio, the wall-clock-paced
-    // video PTS written by the decode loop.
+    // Playback position in seconds for consumer-side frame selection, in the
+    // video PTS timeline (anchored to the first presented frame).
     double currentClock() const {
-        return audioEnabled ? playClock.now() : masterClock.load();
+        return playClock.now();
     }
 
     void pushFrame(int w, int h, std::vector<uint8_t>&& y, std::vector<uint8_t>&& uv,
@@ -552,9 +565,7 @@ void MediaEngine::Impl::decodeLoop() {
             ts = frame->pts;
         }
         if (ts != AV_NOPTS_VALUE) {
-            const double apts = ts * av_q2d(audioTimeBase);
-            masterClock.store(apts);
-            playClock.anchor(apts);  // re-anchor the continuous clock each packet
+            masterClock.store(ts * av_q2d(audioTimeBase));
         }
     };
 #endif
@@ -586,7 +597,7 @@ void MediaEngine::Impl::decodeLoop() {
             }
             haveClock = false;
             masterClock.store(seekTo);
-            playClock.anchor(seekTo);  // jump the playback clock to the seek target
+            playClock.reset();  // the next presented frame re-anchors the clock
             eof.store(false);
             {
                 std::lock_guard<std::mutex> lock(mutex);
@@ -599,6 +610,7 @@ void MediaEngine::Impl::decodeLoop() {
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
         }
+        playClock.resume();  // no-op unless resuming from pause
         const int readResult = av_read_frame(format, packet);
         if (readResult < 0) {
             avcodec_send_packet(codec, nullptr);  // flush video
@@ -934,9 +946,11 @@ bool MediaEngine::latestFrame(VideoFrame& out) {
     for (std::size_t i = 0; i < due; ++i) {
         q.pop_front();  // drop superseded (late) frames
     }
+    const bool firstFrame = !impl_->primed;
     out = std::move(q.front());
     q.pop_front();
     impl_->primed = true;
+    if (firstFrame) impl_->playClock.start(out.pts);  // anchor to the first frame
     return true;
 }
 
@@ -963,9 +977,11 @@ bool MediaEngine::latestDrmFrame(DrmVideoFrame& out) {
     if (out.fd >= 0) {
         ::close(out.fd);  // release the caller's previous unconsumed handle
     }
+    const bool firstFrame = !impl_->primed;
     out = std::move(q.front());  // transfers fd + keepAlive ownership to caller
     q.pop_front();
     impl_->primed = true;
+    if (firstFrame) impl_->playClock.start(out.pts);  // anchor to the first frame
     return true;
 }
 
