@@ -664,6 +664,29 @@ int App::run() {
             if (settings_.showStats()) {
                 updateStats();
             }
+            // Always-on periodic perf log so decode-bound vs render-bound stalls
+            // show up in the run log even without the on-screen overlay.
+            if (mediaOpen_) {
+                ++perfFrames_;
+                if (perfLastLog_.time_since_epoch().count() == 0) {
+                    perfLastLog_ = now;
+                    perfLastDecoded_ = media_.decodedFrames();
+                } else {
+                    const double since =
+                        std::chrono::duration<double>(now - perfLastLog_).count();
+                    if (since >= 2.0) {
+                        const uint64_t dec = media_.decodedFrames();
+                        PIXELVR_LOG_INFO(
+                            "PERF: render %.1f fps, decode %.1f/%.2f fps",
+                            perfFrames_ / since,
+                            static_cast<double>(dec - perfLastDecoded_) / since,
+                            media_.frameRate());
+                        perfFrames_ = 0;
+                        perfLastDecoded_ = dec;
+                        perfLastLog_ = now;
+                    }
+                }
+            }
 #endif
             renderer_.setStats(settings_.showStats(), statsLines_);
         } else {

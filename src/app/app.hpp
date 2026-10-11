@@ -50,6 +50,9 @@ private:
     bool seekStepArmed_ = true;  // right-stick +/-30s debounce
     bool scrubbing_ = false;     // dragging the timeline / stick-scrubbing
     double scrubTarget_ = 0.0;   // pending scrub position (seconds)
+    std::chrono::steady_clock::time_point perfLastLog_{};
+    int perfFrames_ = 0;
+    uint64_t perfLastDecoded_ = 0;
 
     // Place the screen in front of the user on the first valid head pose.
     bool didInitialRecenter_ = false;
