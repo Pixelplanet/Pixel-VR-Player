@@ -48,6 +48,8 @@ private:
     float activityAnchorOrient_[2][4] = {{0, 0, 0, 1}, {0, 0, 0, 1}};
     bool activityAnchorValid_[2] = {false, false};
     bool seekStepArmed_ = true;  // right-stick +/-30s debounce
+    bool scrubbing_ = false;     // dragging the timeline / stick-scrubbing
+    double scrubTarget_ = 0.0;   // pending scrub position (seconds)
 
     // Place the screen in front of the user on the first valid head pose.
     bool didInitialRecenter_ = false;

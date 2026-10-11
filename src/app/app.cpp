@@ -113,6 +113,8 @@ void App::loadMedia(const std::string& path) {
     detect_format(path, proj, stereo, stereoFromName);
 
     renderer_.releaseVideoFrame();  // free the previous clip's dma-buf before reopening
+    renderer_.setSphereZoom(1.0f);  // reset the 360/180 viewpoint per clip
+    renderer_.setSpherePitch(0.0f);
     mediaOpen_ = media_.open(path);
     if (!mediaOpen_) {
         // Clear stale video from the previous clip so the renderer shows black
@@ -556,9 +558,23 @@ int App::run() {
                     renderer_.recenterScreen(in.headPos, in.headForward);
                     interacted = true;
                 }
-                if (in.thumbstickY > 0.15f || in.thumbstickY < -0.15f) {
-                    renderer_.adjustScreenDistance(in.thumbstickY * 0.04f);
-                    interacted = true;
+                // Viewpoint: flat screens move nearer/farther; immersive 360/180
+                // content scales (distance = left stick Y) and tilts (angle =
+                // right stick Y).
+                if (settings_.projectionMode() == 0) {
+                    if (in.thumbstickY > 0.15f || in.thumbstickY < -0.15f) {
+                        renderer_.adjustScreenDistance(in.thumbstickY * 0.04f);
+                        interacted = true;
+                    }
+                } else if (dt > 0.0f) {
+                    if (std::fabs(in.thumbstickLY) > 0.15f) {
+                        renderer_.adjustSphereZoom(in.thumbstickLY * dt * 0.6f);
+                        interacted = true;
+                    }
+                    if (std::fabs(in.thumbstickRY) > 0.15f) {
+                        renderer_.adjustSpherePitch(in.thumbstickRY * dt * 0.6f);
+                        interacted = true;
+                    }
                 }
 #ifdef PIXELVR_HAVE_MEDIA
                 if (in.togglePlay && mediaOpen_) {
@@ -581,24 +597,32 @@ int App::run() {
                         seekStepArmed_ = true;
                     }
 
-                    // Left stick scrubs smoothly; speed grows with deflection as
-                    // sign(x) * deadzone(|x|)^2 * maxRate.
-                    constexpr float kDeadzone = 0.15f;
-                    constexpr float kMaxSeekRate = 60.0f;  // seconds per second
-                    const float ax = in.thumbstickLX;
-                    const float absx = std::fabs(ax);
-                    if (absx > kDeadzone && dt > 0.0f) {
-                        const float t = (absx - kDeadzone) / (1.0f - kDeadzone);
-                        const float rate = std::copysign(t * t * kMaxSeekRate, ax);
-                        media_.seekRelative(static_cast<double>(rate * dt));
-                        interacted = true;
-                    }
-
-                    // Grab the timeline dot with the trigger and drag to scrub.
+                    // Scrub: accumulate a target while dragging and commit it with a
+                    // single seek on release. Seeking continuously floods the
+                    // hardware decoder (a reopen each) and stalls it; one seek per
+                    // gesture stays responsive.
+                    bool scrubInput = false;
                     if (renderer_.pointerOnTimeline() && in.selectHeld &&
                         media_.duration() > 0.0) {
-                        media_.seek(renderer_.pointerScrub() * media_.duration());
+                        scrubTarget_ = renderer_.pointerScrub() * media_.duration();
+                        scrubInput = true;
+                    } else if (std::fabs(in.thumbstickLX) > 0.15f && dt > 0.0f &&
+                               media_.duration() > 0.0) {
+                        if (!scrubbing_) scrubTarget_ = media_.position();
+                        const float ax = in.thumbstickLX;
+                        const float t = (std::fabs(ax) - 0.15f) / 0.85f;
+                        const double rate =
+                            std::copysign(static_cast<double>(t * t) * 60.0, ax);
+                        scrubTarget_ = std::clamp(scrubTarget_ + rate * dt, 0.0,
+                                                  media_.duration());
+                        scrubInput = true;
+                    }
+                    if (scrubInput) {
+                        scrubbing_ = true;
                         interacted = true;
+                    } else if (scrubbing_) {
+                        media_.seek(scrubTarget_);  // commit the scrub with one seek
+                        scrubbing_ = false;
                     }
                 }
                 if (interacted) {
@@ -611,8 +635,8 @@ int App::run() {
                                                        in.controllers[1].active)));
                 float progress = 0.0f;
                 if (mediaOpen_ && media_.duration() > 0.0) {
-                    progress =
-                        static_cast<float>(media_.position() / media_.duration());
+                    const double shown = scrubbing_ ? scrubTarget_ : media_.position();
+                    progress = static_cast<float>(shown / media_.duration());
                 }
                 renderer_.setTransport(controlsUp, progress, paused);
 #else

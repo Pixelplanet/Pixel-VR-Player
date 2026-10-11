@@ -1235,21 +1235,24 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
             vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                     layout, 0, 1, &videoSet, 0, nullptr);
-            // Fold the recenter yaw into the camera orientation so immersive
-            // 360/180 content faces the viewer after a recenter.
+            // Fold the recenter yaw + viewpoint tilt into the camera orientation
+            // and scale the FOV by the zoom so 360/180 content can be re-angled and
+            // pushed nearer/farther.
             const Mat4 headRot = fromQuat(Quat{
                 view.pose.orientation.x, view.pose.orientation.y,
                 view.pose.orientation.z, view.pose.orientation.w});
-            const Mat4 rot = multiply(
+            const Mat4 adjust = multiply(
                 fromQuat(Quat{0.0f, std::sin(0.5f * sphereYaw_), 0.0f,
                               std::cos(0.5f * sphereYaw_)}),
-                headRot);
+                fromQuat(Quat{std::sin(0.5f * spherePitch_), 0.0f, 0.0f,
+                              std::cos(0.5f * spherePitch_)}));
+            const Mat4 rot = multiply(adjust, headRot);
             SpherePush push{};
             std::memcpy(push.viewRotation, rot.m, sizeof(push.viewRotation));
-            push.fov[0] = std::tan(view.fov.angleLeft);
-            push.fov[1] = std::tan(view.fov.angleRight);
-            push.fov[2] = std::tan(view.fov.angleUp);
-            push.fov[3] = std::tan(view.fov.angleDown);
+            push.fov[0] = std::tan(view.fov.angleLeft) * sphereZoom_;
+            push.fov[1] = std::tan(view.fov.angleRight) * sphereZoom_;
+            push.fov[2] = std::tan(view.fov.angleUp) * sphereZoom_;
+            push.fov[3] = std::tan(view.fov.angleDown) * sphereZoom_;
             push.mode[0] =
                 (projectionMode_ == ProjectionMode::Equirect180) ? 2.0f : 1.0f;
             push.mode[1] = (stereoMode_ == StereoMode::TopBottom)     ? 2.0f

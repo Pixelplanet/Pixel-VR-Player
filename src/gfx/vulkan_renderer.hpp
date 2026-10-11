@@ -63,6 +63,21 @@ public:
     enum class StereoMode { Mono, SideBySide, TopBottom };
     void setProjectionMode(ProjectionMode mode) { projectionMode_ = mode; }
     void setStereoMode(StereoMode mode) { stereoMode_ = mode; }
+    // 360/180 viewpoint: zoom (>1 = content farther) and vertical tilt (radians).
+    void adjustSphereZoom(float delta) {
+        sphereZoom_ += delta;
+        if (sphereZoom_ < 0.5f) sphereZoom_ = 0.5f;
+        if (sphereZoom_ > 2.5f) sphereZoom_ = 2.5f;
+    }
+    void adjustSpherePitch(float delta) {
+        spherePitch_ += delta;
+        if (spherePitch_ < -0.6f) spherePitch_ = -0.6f;
+        if (spherePitch_ > 0.6f) spherePitch_ = 0.6f;
+    }
+    void setSphereZoom(float z) { sphereZoom_ = z; }
+    void setSpherePitch(float p) { spherePitch_ = p; }
+    float sphereZoom() const { return sphereZoom_; }
+    float spherePitch() const { return spherePitch_; }
     void setSwapEyes(bool on) { swapEyes_ = on; }
     void setDrawModels(bool on) { drawModels_ = on; }
 
@@ -219,6 +234,8 @@ private:
     float screenForward_[3] = {0.0f, 0.0f, -1.0f};
     float screenYaw_ = 0.0f;
     float sphereYaw_ = 0.0f;  // recenter longitude offset for 360/180 content
+    float spherePitch_ = 0.0f;  // 360/180 viewpoint tilt (radians)
+    float sphereZoom_ = 1.0f;   // 360/180 FOV scale (>1 pushes content farther)
     float screenDistance_ = 3.0f;
 
     // Transport HUD state.
