@@ -92,6 +92,13 @@ public:
     void seekRelative(double delta);  // relative to the current position
     double position() const;          // current playback time in seconds
 
+    // Seek/close release handshake: before flushing, the decode thread asks the
+    // renderer to free held dma-buf frames so the V4L2 decoder can reclaim its
+    // capture buffers. The render loop polls needsFrameRelease() and calls
+    // confirmFrameRelease() once it has released them.
+    bool needsFrameRelease() const;
+    void confirmFrameRelease();
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;

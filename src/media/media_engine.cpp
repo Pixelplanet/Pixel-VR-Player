@@ -295,6 +295,8 @@ struct MediaEngine::Impl {
     std::atomic<bool> eof{false};
     std::atomic<bool> paused{false};
     std::atomic<double> seekTarget{-1.0};  // >= 0 requests a seek (seconds)
+    std::atomic<bool> releaseReq{false};   // ask the consumer to free held frames
+    std::condition_variable releaseCv;     // consumer signals release complete
 
     // Decoded video frames awaiting display, ordered by PTS. The render thread
     // selects the frame matching the master clock each vsync (dropping late
@@ -613,6 +615,17 @@ void MediaEngine::Impl::decodeLoop() {
         }
         if (seekTo >= 0.0) {
             lastSeekWall = clock::now();
+            // Release every held dma-buf (queued frames + the renderer's live
+            // frame) before flushing; the V4L2 decoder cannot reclaim its capture
+            // buffers otherwise and wedges ("can't request capture buffers").
+            {
+                std::unique_lock<std::mutex> lock(mutex);
+                clearQueues();  // drop stale pre-seek frames
+                releaseReq.store(true);
+                releaseCv.wait_for(lock, std::chrono::milliseconds(150), [&] {
+                    return !releaseReq.load() || !running.load();
+                });
+            }
             const int64_t ts = static_cast<int64_t>(seekTo * AV_TIME_BASE);
             avformat_seek_file(format, -1, INT64_MIN, ts, INT64_MAX, 0);
             avcodec_flush_buffers(codec);
@@ -624,10 +637,6 @@ void MediaEngine::Impl::decodeLoop() {
             playClock.reset();  // the next presented frame re-anchors the clock
             eofFlushed = false;
             eof.store(false);
-            {
-                std::lock_guard<std::mutex> lock(mutex);
-                clearQueues();  // drop stale pre-seek frames
-            }
         }
         if (paused.load()) {
             haveClock = false;  // re-establish the wall clock on resume
@@ -898,6 +907,11 @@ void MediaEngine::close() {
         return;
     }
     impl_->running.store(false);
+    {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        impl_->releaseReq.store(false);  // wake a decode thread in the seek handshake
+        impl_->releaseCv.notify_all();
+    }
 #ifdef PIXELVR_HAVE_SMB
     impl_->smbReader.abort();  // unblock a decode thread stalled in smb_read
 #endif
@@ -948,6 +962,17 @@ void MediaEngine::seekRelative(double delta) {
 
 double MediaEngine::position() const {
     return impl_ ? impl_->masterClock.load() : 0.0;
+}
+
+bool MediaEngine::needsFrameRelease() const {
+    return impl_ && impl_->releaseReq.load();
+}
+
+void MediaEngine::confirmFrameRelease() {
+    if (!impl_) return;
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    impl_->releaseReq.store(false);
+    impl_->releaseCv.notify_all();
 }
 
 // Chooses the queued frame to display this vsync: the newest whose PTS is due

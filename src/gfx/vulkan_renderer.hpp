@@ -52,6 +52,10 @@ public:
     // through a VkSamplerYcbcrConversion, replacing the CPU NV12 upload. Resolves
     // ownership of frame.fd (imports it into Vulkan or closes it) and clears it.
     void updateVideoDmabuf(DrmVideoFrame& frame);
+    // Releases the imported dma-buf frame and the decoder's capture-buffer ref
+    // while keeping the resolved image on screen; call before the decoder seeks
+    // or a new clip opens so the hardware decoder can reclaim its buffers.
+    void releaseVideoFrame();
     bool hasVideo() const { return hasVideo_; }
     void clearVideo() { hasVideo_ = false; }
 

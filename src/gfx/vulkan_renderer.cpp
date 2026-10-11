@@ -2922,6 +2922,21 @@ void VulkanRenderer::updateVideoDmabuf(DrmVideoFrame& frame) {
     hasVideo_ = true;
 }
 
+void VulkanRenderer::releaseVideoFrame() {
+    if (drmImage_ == VK_NULL_HANDLE && !drmKeepAlive_) {
+        return;
+    }
+    vkDeviceWaitIdle(device_);  // the GPU may still sample the imported image
+    if (drmView_ != VK_NULL_HANDLE) vkDestroyImageView(device_, drmView_, nullptr);
+    if (drmImage_ != VK_NULL_HANDLE) vkDestroyImage(device_, drmImage_, nullptr);
+    if (drmMemory_ != VK_NULL_HANDLE) vkFreeMemory(device_, drmMemory_, nullptr);
+    drmView_ = VK_NULL_HANDLE;
+    drmImage_ = VK_NULL_HANDLE;
+    drmMemory_ = VK_NULL_HANDLE;
+    drmKeepAlive_.reset();  // return the decoder's V4L2 capture buffer
+    // The resolve target keeps the last frame on screen until the next import.
+}
+
 void VulkanRenderer::updateVideoTexture(int width, int height, const uint8_t* y,
                                         const uint8_t* uv, int colorspace,
                                         bool fullRange) {

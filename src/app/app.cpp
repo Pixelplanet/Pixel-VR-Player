@@ -112,6 +112,7 @@ void App::loadMedia(const std::string& path) {
     bool stereoFromName = false;
     detect_format(path, proj, stereo, stereoFromName);
 
+    renderer_.releaseVideoFrame();  // free the previous clip's dma-buf before reopening
     mediaOpen_ = media_.open(path);
     if (!mediaOpen_) {
         // Clear stale video from the previous clip so the renderer shows black
@@ -269,6 +270,12 @@ int App::run() {
             lastFrameTime_ = now;
 
 #ifdef PIXELVR_HAVE_MEDIA
+            // Release held dma-buf frames when the decoder is about to seek so it
+            // can reclaim its V4L2 capture buffers (otherwise it wedges).
+            if (mediaOpen_ && media_.needsFrameRelease()) {
+                renderer_.releaseVideoFrame();
+                media_.confirmFrameRelease();
+            }
             if (mediaOpen_ && media_.drmActive()) {
                 // Zero-copy dma-buf path: import the decoder's frame directly.
                 if (media_.latestDrmFrame(drmFrame_)) {
