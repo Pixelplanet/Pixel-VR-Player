@@ -1038,8 +1038,16 @@ bool MediaEngine::latestFrame(VideoFrame& out) {
     if (q.empty()) {
         return false;
     }
+    double clock = impl_->currentClock();
+    // Re-anchor if the clock has fallen far behind the queued frames (e.g. a
+    // post-seek frame with no PTS anchored it to 0); otherwise every frame stays
+    // "early" forever and the picture freezes while decoding continues.
+    if (impl_->primed && q.front().pts > clock + 0.5) {
+        impl_->playClock.start(q.front().pts);
+        clock = q.front().pts;
+    }
     const std::size_t due = selectDueIndex(
-        impl_->currentClock(), impl_->primed,
+        clock, impl_->primed,
         [&](std::size_t i) { return q[i].pts; }, q.size());
     if (due == static_cast<std::size_t>(-1)) {
         return false;  // all queued frames are still in the future
@@ -1065,8 +1073,18 @@ bool MediaEngine::latestDrmFrame(DrmVideoFrame& out) {
     if (q.empty()) {
         return false;
     }
+    double clock = impl_->currentClock();
+    // Re-anchor if the clock has fallen far behind the queued frames (e.g. a
+    // post-seek frame with no PTS anchored it to 0); otherwise every frame stays
+    // "early" forever and the picture freezes while decoding continues.
+    if (impl_->primed && q.front().pts > clock + 0.5) {
+        PIXELVR_LOG_INFO("MediaEngine: clock resync %.2f -> %.2f", clock,
+                         q.front().pts);
+        impl_->playClock.start(q.front().pts);
+        clock = q.front().pts;
+    }
     const std::size_t due = selectDueIndex(
-        impl_->currentClock(), impl_->primed,
+        clock, impl_->primed,
         [&](std::size_t i) { return q[i].pts; }, q.size());
     if (due == static_cast<std::size_t>(-1)) {
         return false;  // all queued frames are still in the future
@@ -1082,7 +1100,10 @@ bool MediaEngine::latestDrmFrame(DrmVideoFrame& out) {
     out = std::move(q.front());  // transfers fd + keepAlive ownership to caller
     q.pop_front();
     impl_->primed = true;
-    if (firstFrame) impl_->playClock.start(out.pts);  // anchor to the first frame
+    if (firstFrame) {
+        impl_->playClock.start(out.pts);  // anchor to the first frame
+        PIXELVR_LOG_INFO("MediaEngine: prime pts=%.2f clock=%.2f", out.pts, clock);
+    }
     return true;
 }
 
