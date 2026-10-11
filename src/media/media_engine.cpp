@@ -85,6 +85,35 @@ int64_t smb_seek(void* opaque, int64_t offset, int whence) {
 }  // namespace
 #endif
 
+// A continuous playback clock anchored to the audio PTS. Between audio packets it
+// advances with wall time so consumer-side frame selection stays smooth at any
+// video rate; it freezes while paused so video holds instead of racing ahead.
+struct PlaybackClock {
+    std::atomic<double> basePts{0.0};
+    std::atomic<int64_t> baseWallNs{0};  // steady_clock ns; 0 = frozen/paused
+
+    static int64_t nowNs() {
+        return std::chrono::duration_cast<std::chrono::nanoseconds>(
+                   std::chrono::steady_clock::now().time_since_epoch())
+            .count();
+    }
+    void anchor(double pts) {
+        basePts.store(pts);
+        baseWallNs.store(nowNs());
+    }
+    void freeze() {
+        const int64_t w = baseWallNs.exchange(0);
+        if (w != 0) {
+            basePts.store(basePts.load() + static_cast<double>(nowNs() - w) / 1e9);
+        }
+    }
+    double now() const {
+        const int64_t w = baseWallNs.load();
+        if (w == 0) return basePts.load();
+        return basePts.load() + static_cast<double>(nowNs() - w) / 1e9;
+    }
+};
+
 struct MediaEngine::Impl {
     AVFormatContext* format = nullptr;
     AVCodecContext* codec = nullptr;
@@ -132,7 +161,7 @@ struct MediaEngine::Impl {
     bool primed = false;                 // guarded by mutex; first frame shown?
     static constexpr std::size_t kMaxQueue = 6;
     std::atomic<bool> usingDrm{false};
-    std::atomic<double> audioLatency{0.0};  // PulseAudio output latency (seconds)
+    PlaybackClock playClock;  // continuous audio-anchored clock for frame selection
 
     ~Impl() { teardown(); }
 
@@ -190,12 +219,11 @@ struct MediaEngine::Impl {
         primed = false;
     }
 
-    // Master playback position in seconds used for consumer-side frame selection.
-    // With audio, the audible position is the last-queued audio PTS minus the
-    // output latency; without audio it is the wall-clock-paced video PTS.
+    // Playback position in seconds for consumer-side frame selection. With audio,
+    // the continuous audio-anchored clock; without audio, the wall-clock-paced
+    // video PTS written by the decode loop.
     double currentClock() const {
-        const double c = masterClock.load();
-        return audioEnabled ? c - audioLatency.load() : c;
+        return audioEnabled ? playClock.now() : masterClock.load();
     }
 
     void pushFrame(int w, int h, std::vector<uint8_t>&& y, std::vector<uint8_t>&& uv,
@@ -393,17 +421,15 @@ void MediaEngine::Impl::decodeLoop() {
         const std::size_t bytes = static_cast<std::size_t>(got) * kOutChannels * 2;
         int err = 0;
         pa_simple_write(pa, audioBuf.data(), bytes, &err);
-        const pa_usec_t latency = pa_simple_get_latency(pa, &err);
-        if (latency != static_cast<pa_usec_t>(-1)) {
-            audioLatency.store(static_cast<double>(latency) / 1'000'000.0);
-        }
 
         int64_t ts = frame->best_effort_timestamp;
         if (ts == AV_NOPTS_VALUE) {
             ts = frame->pts;
         }
         if (ts != AV_NOPTS_VALUE) {
-            masterClock.store(ts * av_q2d(audioTimeBase));
+            const double apts = ts * av_q2d(audioTimeBase);
+            masterClock.store(apts);
+            playClock.anchor(apts);  // re-anchor the continuous clock each packet
         }
     };
 #endif
@@ -435,6 +461,7 @@ void MediaEngine::Impl::decodeLoop() {
             }
             haveClock = false;
             masterClock.store(seekTo);
+            playClock.anchor(seekTo);  // jump the playback clock to the seek target
             eof.store(false);
             {
                 std::lock_guard<std::mutex> lock(mutex);
@@ -443,6 +470,7 @@ void MediaEngine::Impl::decodeLoop() {
         }
         if (paused.load()) {
             haveClock = false;  // re-establish the wall clock on resume
+            playClock.freeze();  // hold the clock so video doesn't advance
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
         }
