@@ -7,6 +7,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
+#include <functional>
 #include <mutex>
 #include <thread>
 #include <unistd.h>
@@ -118,11 +120,19 @@ struct MediaEngine::Impl {
     std::atomic<bool> paused{false};
     std::atomic<double> seekTarget{-1.0};  // >= 0 requests a seek (seconds)
 
+    // Decoded video frames awaiting display, ordered by PTS. The render thread
+    // selects the frame matching the master clock each vsync (dropping late
+    // frames, holding early ones) so presentation is phase-locked to the
+    // compositor instead of the decode cadence. Audio still paces the decode
+    // loop and drives masterClock; video is scheduled on the consumer side.
     std::mutex mutex;
-    VideoFrame published;        // guarded by mutex
-    DrmVideoFrame publishedDrm;  // guarded by mutex
-    uint64_t serial = 0;         // guarded by mutex
+    std::deque<VideoFrame> swQueue;      // CPU frames, guarded by mutex
+    std::deque<DrmVideoFrame> drmQueue;  // dma-buf frames, guarded by mutex
+    uint64_t serial = 0;                 // guarded by mutex; last frame id
+    bool primed = false;                 // guarded by mutex; first frame shown?
+    static constexpr std::size_t kMaxQueue = 6;
     std::atomic<bool> usingDrm{false};
+    std::atomic<double> audioLatency{0.0};  // PulseAudio output latency (seconds)
 
     ~Impl() { teardown(); }
 
@@ -162,35 +172,59 @@ struct MediaEngine::Impl {
         }
         smbIO = SmbIO{};
 #endif
-        if (publishedDrm.fd >= 0) {
-            ::close(publishedDrm.fd);
-            publishedDrm.fd = -1;
-        }
+        clearQueues();
         usingDrm.store(false);
         audioEnabled = false;
         audioStream = -1;
     }
 
-    void publish(int w, int h, std::vector<uint8_t>&& y, std::vector<uint8_t>&& uv,
-                 int colorspace, bool fullRange, double pts) {
-        std::lock_guard<std::mutex> lock(mutex);
-        published.width = w;
-        published.height = h;
-        published.y = std::move(y);
-        published.uv = std::move(uv);
-        published.colorspace = colorspace;
-        published.fullRange = fullRange;
-        published.pts = pts;
-        published.serial = ++serial;
+    // Drops every queued frame, closing any dma-buf handles they own. The caller
+    // holds `mutex` when the decode thread is running (seek); teardown runs after
+    // the thread has joined, so no lock is needed there.
+    void clearQueues() {
+        for (DrmVideoFrame& f : drmQueue) {
+            if (f.fd >= 0) ::close(f.fd);
+        }
+        drmQueue.clear();
+        swQueue.clear();
+        primed = false;
     }
 
-    void publishDrm(const DrmVideoFrame& f) {
+    // Master playback position in seconds used for consumer-side frame selection.
+    // With audio, the audible position is the last-queued audio PTS minus the
+    // output latency; without audio it is the wall-clock-paced video PTS.
+    double currentClock() const {
+        const double c = masterClock.load();
+        return audioEnabled ? c - audioLatency.load() : c;
+    }
+
+    void pushFrame(int w, int h, std::vector<uint8_t>&& y, std::vector<uint8_t>&& uv,
+                   int colorspace, bool fullRange, double pts) {
         std::lock_guard<std::mutex> lock(mutex);
-        if (publishedDrm.fd >= 0) {
-            ::close(publishedDrm.fd);
+        while (swQueue.size() >= kMaxQueue) {
+            swQueue.pop_front();
         }
-        publishedDrm = f;
-        publishedDrm.serial = ++serial;
+        VideoFrame f;
+        f.width = w;
+        f.height = h;
+        f.y = std::move(y);
+        f.uv = std::move(uv);
+        f.colorspace = colorspace;
+        f.fullRange = fullRange;
+        f.pts = pts;
+        f.serial = ++serial;
+        swQueue.push_back(std::move(f));
+    }
+
+    void pushDrm(const DrmVideoFrame& f) {
+        std::lock_guard<std::mutex> lock(mutex);
+        while (drmQueue.size() >= kMaxQueue) {
+            if (drmQueue.front().fd >= 0) ::close(drmQueue.front().fd);
+            drmQueue.pop_front();
+        }
+        DrmVideoFrame queued = f;
+        queued.serial = ++serial;
+        drmQueue.push_back(std::move(queued));
         usingDrm.store(true);
     }
 
@@ -334,9 +368,9 @@ void MediaEngine::Impl::decodeLoop() {
             return;
         }
         if (isDrm) {
-            publishDrm(drm);
+            pushDrm(drm);
         } else {
-            publish(w, h, std::move(y), std::move(uv), colorspace, fullRange, pts);
+            pushFrame(w, h, std::move(y), std::move(uv), colorspace, fullRange, pts);
         }
     };
 
@@ -359,6 +393,10 @@ void MediaEngine::Impl::decodeLoop() {
         const std::size_t bytes = static_cast<std::size_t>(got) * kOutChannels * 2;
         int err = 0;
         pa_simple_write(pa, audioBuf.data(), bytes, &err);
+        const pa_usec_t latency = pa_simple_get_latency(pa, &err);
+        if (latency != static_cast<pa_usec_t>(-1)) {
+            audioLatency.store(static_cast<double>(latency) / 1'000'000.0);
+        }
 
         int64_t ts = frame->best_effort_timestamp;
         if (ts == AV_NOPTS_VALUE) {
@@ -398,6 +436,10 @@ void MediaEngine::Impl::decodeLoop() {
             haveClock = false;
             masterClock.store(seekTo);
             eof.store(false);
+            {
+                std::lock_guard<std::mutex> lock(mutex);
+                clearQueues();  // drop stale pre-seek frames
+            }
         }
         if (paused.load()) {
             haveClock = false;  // re-establish the wall clock on resume
@@ -703,12 +745,47 @@ double MediaEngine::position() const {
     return impl_ ? impl_->masterClock.load() : 0.0;
 }
 
+// Chooses the queued frame to display this vsync: the newest whose PTS is due
+// against the master clock. Earlier (late) frames are dropped; later (early)
+// frames are held for a future vsync. Returns the index to serve, or npos when
+// every frame is still in the future and the screen has already been primed.
+static std::size_t selectDueIndex(double clock, bool primed,
+                                  const std::function<double(std::size_t)>& ptsAt,
+                                  std::size_t count) {
+    std::size_t due = 0;
+    bool haveDue = false;
+    for (std::size_t i = 0; i < count; ++i) {
+        if (ptsAt(i) <= clock) {
+            due = i;
+            haveDue = true;
+        } else {
+            break;
+        }
+    }
+    if (!haveDue) {
+        return primed ? static_cast<std::size_t>(-1) : 0;  // hold, or prime
+    }
+    return due;
+}
+
 bool MediaEngine::latestFrame(VideoFrame& out) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    if (impl_->serial == 0 || impl_->published.serial == out.serial) {
+    auto& q = impl_->swQueue;
+    if (q.empty()) {
         return false;
     }
-    out = impl_->published;
+    const std::size_t due = selectDueIndex(
+        impl_->currentClock(), impl_->primed,
+        [&](std::size_t i) { return q[i].pts; }, q.size());
+    if (due == static_cast<std::size_t>(-1)) {
+        return false;  // all queued frames are still in the future
+    }
+    for (std::size_t i = 0; i < due; ++i) {
+        q.pop_front();  // drop superseded (late) frames
+    }
+    out = std::move(q.front());
+    q.pop_front();
+    impl_->primed = true;
     return true;
 }
 
@@ -718,16 +795,26 @@ bool MediaEngine::drmActive() const {
 
 bool MediaEngine::latestDrmFrame(DrmVideoFrame& out) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
-    if (impl_->serial == 0 || impl_->publishedDrm.serial == out.serial ||
-        impl_->publishedDrm.fd < 0) {
+    auto& q = impl_->drmQueue;
+    if (q.empty()) {
         return false;
+    }
+    const std::size_t due = selectDueIndex(
+        impl_->currentClock(), impl_->primed,
+        [&](std::size_t i) { return q[i].pts; }, q.size());
+    if (due == static_cast<std::size_t>(-1)) {
+        return false;  // all queued frames are still in the future
+    }
+    for (std::size_t i = 0; i < due; ++i) {
+        if (q.front().fd >= 0) ::close(q.front().fd);  // release dropped dma-buf
+        q.pop_front();
     }
     if (out.fd >= 0) {
         ::close(out.fd);  // release the caller's previous unconsumed handle
     }
-    out = impl_->publishedDrm;
-    impl_->publishedDrm.fd = -1;  // fd ownership transferred to the caller
-    impl_->publishedDrm.keepAlive.reset();  // frame ref transferred to the caller
+    out = std::move(q.front());  // transfers fd + keepAlive ownership to caller
+    q.pop_front();
+    impl_->primed = true;
     return true;
 }
 

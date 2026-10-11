@@ -24,6 +24,8 @@ compile_commands.json
 
 # GPLv3 reference material (studied, not distributed with this project)
 /matineevr-steam-frame-linux-arm64/
+/matineevr/
+/matineevr*.zip
 
 # Editor / IDE
 .vscode/
