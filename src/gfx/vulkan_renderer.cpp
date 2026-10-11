@@ -1242,10 +1242,10 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 view.pose.orientation.x, view.pose.orientation.y,
                 view.pose.orientation.z, view.pose.orientation.w});
             const Mat4 adjust = multiply(
-                fromQuat(Quat{0.0f, std::sin(0.5f * sphereYaw_), 0.0f,
-                              std::cos(0.5f * sphereYaw_)}),
                 fromQuat(Quat{std::sin(0.5f * spherePitch_), 0.0f, 0.0f,
-                              std::cos(0.5f * spherePitch_)}));
+                              std::cos(0.5f * spherePitch_)}),
+                fromQuat(Quat{0.0f, std::sin(0.5f * sphereYaw_), 0.0f,
+                              std::cos(0.5f * sphereYaw_)}));
             const Mat4 rot = multiply(adjust, headRot);
             SpherePush push{};
             std::memcpy(push.viewRotation, rot.m, sizeof(push.viewRotation));

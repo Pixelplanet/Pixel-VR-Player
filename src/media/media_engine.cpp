@@ -653,9 +653,12 @@ void MediaEngine::Impl::decodeLoop() {
             }
             const int64_t ts = static_cast<int64_t>(seekTo * AV_TIME_BASE);
             avformat_seek_file(format, -1, INT64_MIN, ts, INT64_MAX, 0);
-            if (!reopenDecoder()) {  // a fresh decoder avoids the HW wedge on seek
+            const bool reopened = reopenDecoder();  // fresh decoder avoids HW wedge
+            if (!reopened) {
                 PIXELVR_LOG_ERROR("MediaEngine: video decoder reopen failed on seek");
             }
+            PIXELVR_LOG_INFO("MediaEngine: seek %.2fs reopen=%d", seekTo, reopened);
+            drmDiag = 0;  // re-log the first frames so seek recovery is visible
             if (audioCodec != nullptr) {
                 avcodec_flush_buffers(audioCodec);
             }

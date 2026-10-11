@@ -26,6 +26,19 @@ bool contains(const std::string& s, const char* token) {
     return s.find(token) != std::string::npos;
 }
 
+// True if `needle` appears not immediately followed by a digit, so a marker like
+// "360" matches but a resolution like "3600" (or "3600p") does not.
+bool contains_num(const std::string& s, const char* needle) {
+    const std::string n = needle;
+    std::size_t pos = 0;
+    while ((pos = s.find(n, pos)) != std::string::npos) {
+        const std::size_t after = pos + n.size();
+        if (after >= s.size() || s[after] < '0' || s[after] > '9') return true;
+        pos = after;
+    }
+    return false;
+}
+
 // Infers projection and stereo layout from common filename conventions, e.g.
 // "clip_360_tb.mp4", "movie_180_sbs.mkv", "trailer_vr180.mp4". `stereoFromName`
 // reports whether the stereo layout was stated explicitly (so the caller can
@@ -34,10 +47,12 @@ void detect_format(const std::string& path, VulkanRenderer::ProjectionMode& proj
                    VulkanRenderer::StereoMode& stereo, bool& stereoFromName) {
     const std::string p = to_lower(path);
 
-    if (contains(p, "360") || contains(p, "equirect")) {
-        proj = VulkanRenderer::ProjectionMode::Equirect360;
-    } else if (contains(p, "180") || contains(p, "vr180")) {
+    // Check 180 before 360 and ignore digit runs so "vr180.3600p" is 180, not 360
+    // (the resolution "3600" must not match the "360" marker).
+    if (contains(p, "vr180") || contains_num(p, "180")) {
         proj = VulkanRenderer::ProjectionMode::Equirect180;
+    } else if (contains_num(p, "360") || contains(p, "equirect")) {
+        proj = VulkanRenderer::ProjectionMode::Equirect360;
     } else {
         proj = VulkanRenderer::ProjectionMode::Flat;
     }
@@ -558,21 +573,21 @@ int App::run() {
                     renderer_.recenterScreen(in.headPos, in.headForward);
                     interacted = true;
                 }
-                // Viewpoint: flat screens move nearer/farther; immersive 360/180
-                // content scales (distance = left stick Y) and tilts (angle =
-                // right stick Y).
+                // Viewpoint: flat screens move nearer/farther (thumbstick Y);
+                // immersive 360/180 uses the RIGHT stick -- up/down tilts (angle),
+                // left/right pushes content nearer/farther (distance).
                 if (settings_.projectionMode() == 0) {
                     if (in.thumbstickY > 0.15f || in.thumbstickY < -0.15f) {
                         renderer_.adjustScreenDistance(in.thumbstickY * 0.04f);
                         interacted = true;
                     }
                 } else if (dt > 0.0f) {
-                    if (std::fabs(in.thumbstickLY) > 0.15f) {
-                        renderer_.adjustSphereZoom(in.thumbstickLY * dt * 0.6f);
-                        interacted = true;
-                    }
                     if (std::fabs(in.thumbstickRY) > 0.15f) {
                         renderer_.adjustSpherePitch(in.thumbstickRY * dt * 0.6f);
+                        interacted = true;
+                    }
+                    if (std::fabs(in.thumbstickRX) > 0.15f) {
+                        renderer_.adjustSphereZoom(in.thumbstickRX * dt * 0.6f);
                         interacted = true;
                     }
                 }
@@ -582,14 +597,15 @@ int App::run() {
                     interacted = true;
                 }
                 if (mediaOpen_) {
-                    // Right stick left/right steps the video -/+30s (debounced,
-                    // acts as a d-pad jump).
+                    // Right stick left/right steps -/+30s (flat only; in 360/180 the
+                    // right stick drives the viewpoint instead).
                     constexpr double kStep = 30.0;
-                    if (in.thumbstickRX > 0.6f && seekStepArmed_) {
+                    const bool sphereMode = settings_.projectionMode() != 0;
+                    if (!sphereMode && in.thumbstickRX > 0.6f && seekStepArmed_) {
                         media_.seekRelative(kStep);
                         seekStepArmed_ = false;
                         interacted = true;
-                    } else if (in.thumbstickRX < -0.6f && seekStepArmed_) {
+                    } else if (!sphereMode && in.thumbstickRX < -0.6f && seekStepArmed_) {
                         media_.seekRelative(-kStep);
                         seekStepArmed_ = false;
                         interacted = true;
