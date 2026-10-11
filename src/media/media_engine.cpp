@@ -300,6 +300,7 @@ struct MediaEngine::Impl {
     std::atomic<double> seekTarget{-1.0};  // >= 0 requests a seek (seconds)
     std::atomic<bool> releaseReq{false};   // ask the consumer to free held frames
     std::condition_variable releaseCv;     // consumer signals release complete
+    std::condition_variable queueCv;       // a queue slot freed / seek / stop
 
     // Decoded video frames awaiting display, ordered by PTS. The render thread
     // selects the frame matching the master clock each vsync (dropping late
@@ -375,9 +376,21 @@ struct MediaEngine::Impl {
 
     void pushFrame(int w, int h, std::vector<uint8_t>&& y, std::vector<uint8_t>&& uv,
                    int colorspace, bool fullRange, double pts) {
-        std::lock_guard<std::mutex> lock(mutex);
+        std::unique_lock<std::mutex> lock(mutex);
+        // Back-pressure: wait for the consumer to free a slot rather than dropping
+        // frames, so the decoder is paced by presentation and cannot race ahead of
+        // the playback clock. An unpaced decode burst (post-seek audio mute, or the
+        // initial burst on a fresh video) otherwise outran the clock and froze the
+        // picture permanently.
+        queueCv.wait_for(lock, std::chrono::milliseconds(100), [&] {
+            return swQueue.size() < maxQueue || !running.load() ||
+                   seekTarget.load() >= 0.0;
+        });
+        if (!running.load() || seekTarget.load() >= 0.0) {
+            return;  // a stop/seek is pending: drop this stale frame
+        }
         while (swQueue.size() >= maxQueue) {
-            swQueue.pop_front();
+            swQueue.pop_front();  // consumer stalled past the timeout: stay live
         }
         VideoFrame f;
         f.width = w;
@@ -392,10 +405,20 @@ struct MediaEngine::Impl {
     }
 
     void pushDrm(const DrmVideoFrame& f) {
-        std::lock_guard<std::mutex> lock(mutex);
+        std::unique_lock<std::mutex> lock(mutex);
+        // Back-pressure (see pushFrame): pace the decoder to the consumer so a
+        // post-seek or startup decode burst can't outrun the playback clock.
+        queueCv.wait_for(lock, std::chrono::milliseconds(100), [&] {
+            return drmQueue.size() < maxQueue || !running.load() ||
+                   seekTarget.load() >= 0.0;
+        });
+        if (!running.load() || seekTarget.load() >= 0.0) {
+            if (f.fd >= 0) ::close(f.fd);  // stop/seek pending: drop; we own the fd
+            return;
+        }
         while (drmQueue.size() >= maxQueue) {
             if (drmQueue.front().fd >= 0) ::close(drmQueue.front().fd);
-            drmQueue.pop_front();
+            drmQueue.pop_front();  // consumer stalled past the timeout: stay live
         }
         DrmVideoFrame queued = f;
         queued.serial = ++serial;
@@ -945,6 +968,7 @@ void MediaEngine::close() {
         std::lock_guard<std::mutex> lock(impl_->mutex);
         impl_->releaseReq.store(false);  // wake a decode thread in the seek handshake
         impl_->releaseCv.notify_all();
+        impl_->queueCv.notify_all();     // wake a back-pressured decoder to exit
     }
 #ifdef PIXELVR_HAVE_SMB
     impl_->smbReader.abort();  // unblock a decode thread stalled in smb_read
@@ -987,7 +1011,11 @@ void MediaEngine::seek(double seconds) {
         seconds = impl_->duration;
     }
     if (seconds < 0.0) seconds = 0.0;
-    impl_->seekTarget.store(seconds);
+    {
+        std::lock_guard<std::mutex> lock(impl_->mutex);
+        impl_->seekTarget.store(seconds);
+    }
+    impl_->queueCv.notify_all();  // wake a back-pressured decoder to handle the seek
 }
 
 void MediaEngine::seekRelative(double delta) {
@@ -1039,10 +1067,9 @@ bool MediaEngine::latestFrame(VideoFrame& out) {
         return false;
     }
     double clock = impl_->currentClock();
-    // Re-anchor if the clock has fallen far behind the queued frames (e.g. a
-    // post-seek frame with no PTS anchored it to 0); otherwise every frame stays
-    // "early" forever and the picture freezes while decoding continues.
-    if (impl_->primed && q.front().pts > clock + 0.5) {
+    // Safety net: re-anchor if the clock has fallen behind the queued frames,
+    // so the picture can never freeze "early forever" while decoding continues.
+    if (impl_->primed && q.front().pts > clock + 0.25) {
         impl_->playClock.start(q.front().pts);
         clock = q.front().pts;
     }
@@ -1060,6 +1087,7 @@ bool MediaEngine::latestFrame(VideoFrame& out) {
     q.pop_front();
     impl_->primed = true;
     if (firstFrame) impl_->playClock.start(out.pts);  // anchor to the first frame
+    impl_->queueCv.notify_one();  // slot freed: wake a back-pressured decoder
     return true;
 }
 
@@ -1074,10 +1102,9 @@ bool MediaEngine::latestDrmFrame(DrmVideoFrame& out) {
         return false;
     }
     double clock = impl_->currentClock();
-    // Re-anchor if the clock has fallen far behind the queued frames (e.g. a
-    // post-seek frame with no PTS anchored it to 0); otherwise every frame stays
-    // "early" forever and the picture freezes while decoding continues.
-    if (impl_->primed && q.front().pts > clock + 0.5) {
+    // Safety net: re-anchor if the clock has fallen behind the queued frames,
+    // so the picture can never freeze "early forever" while decoding continues.
+    if (impl_->primed && q.front().pts > clock + 0.25) {
         PIXELVR_LOG_INFO("MediaEngine: clock resync %.2f -> %.2f", clock,
                          q.front().pts);
         impl_->playClock.start(q.front().pts);
@@ -1104,6 +1131,7 @@ bool MediaEngine::latestDrmFrame(DrmVideoFrame& out) {
         impl_->playClock.start(out.pts);  // anchor to the first frame
         PIXELVR_LOG_INFO("MediaEngine: prime pts=%.2f clock=%.2f", out.pts, clock);
     }
+    impl_->queueCv.notify_one();  // slot freed: wake a back-pressured decoder
     return true;
 }
 
