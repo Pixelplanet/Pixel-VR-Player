@@ -770,6 +770,8 @@ void VulkanRenderer::recenterScreen(const float headPos[3],
     screenForward_[2] = fz;
     // The quad normal at yaw 0 is +Z; rotate it to face back toward the viewer.
     screenYaw_ = std::atan2(-fx, -fz);
+    // Longitude offset so equirect 360/180 content re-centers to the head yaw.
+    sphereYaw_ = std::atan2(fx, -fz);
     screenDistance_ = 3.0f;
 }
 
@@ -1233,9 +1235,15 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
             vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                     layout, 0, 1, &videoSet, 0, nullptr);
-            const Mat4 rot = fromQuat(Quat{
+            // Fold the recenter yaw into the camera orientation so immersive
+            // 360/180 content faces the viewer after a recenter.
+            const Mat4 headRot = fromQuat(Quat{
                 view.pose.orientation.x, view.pose.orientation.y,
                 view.pose.orientation.z, view.pose.orientation.w});
+            const Mat4 rot = multiply(
+                fromQuat(Quat{0.0f, std::sin(0.5f * sphereYaw_), 0.0f,
+                              std::cos(0.5f * sphereYaw_)}),
+                headRot);
             SpherePush push{};
             std::memcpy(push.viewRotation, rot.m, sizeof(push.viewRotation));
             push.fov[0] = std::tan(view.fov.angleLeft);

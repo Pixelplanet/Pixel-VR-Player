@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
@@ -44,42 +45,172 @@ namespace pixelvr {
 #ifdef PIXELVR_HAVE_SMB
 namespace {
 
-// Streams an smb:// URL through libsmbclient behind a FFmpeg AVIOContext so the
-// media engine can demux network files on demand, without downloading first.
-struct SmbIO {
-    SMBCCTX* ctx = nullptr;
-    SMBCFILE* file = nullptr;
-    smbc_read_fn readFn = nullptr;
-    smbc_lseek_fn lseekFn = nullptr;
-    smbc_fstat_fn fstatFn = nullptr;
-    smbc_close_fn closeFn = nullptr;
-};
-
 void smb_auth(SMBCCTX*, const char*, const char*, char*, int, char* un, int unlen,
               char* pw, int pwlen) {
     if (un != nullptr && unlen > 0) un[0] = '\0';  // guest / anonymous
     if (pw != nullptr && pwlen > 0) pw[0] = '\0';
 }
 
+// Streams an smb:// URL through libsmbclient behind a FFmpeg AVIOContext. A
+// background thread prefetches the file into a ring buffer so the demux read
+// callback serves from memory; network jitter then no longer stalls decoding.
+// Only the prefetch thread touches the SMB handle (read/lseek); the AVIO
+// callbacks only touch the ring and request seeks.
+struct SmbReadAhead {
+    static constexpr std::size_t kCapacity = 32u << 20;  // 32 MiB cushion
+    static constexpr std::size_t kChunk = 256u << 10;    // 256 KiB network reads
+
+    SMBCCTX* ctx = nullptr;
+    SMBCFILE* file = nullptr;
+    smbc_read_fn readFn = nullptr;
+    smbc_lseek_fn lseekFn = nullptr;
+    smbc_close_fn closeFn = nullptr;
+    int64_t fileSize = -1;
+
+    std::mutex mutex;
+    std::condition_variable dataCv;   // data available / eof / stop
+    std::condition_variable spaceCv;  // space available / seek / stop
+    std::thread thread;
+    std::vector<uint8_t> ring;
+    std::size_t head = 0;      // ring index of the next byte to read out
+    std::size_t fill = 0;      // bytes currently buffered
+    int64_t consumePos = 0;    // absolute offset of the next consumer byte
+    int64_t prefetchPos = 0;   // absolute offset the prefetch thread reads from
+    bool pendingSeek = false;
+    bool eof = false;
+    bool stop = false;
+
+    bool start(SMBCCTX* c, SMBCFILE* f) {
+        ctx = c;
+        file = f;
+        readFn = smbc_getFunctionRead(ctx);
+        lseekFn = smbc_getFunctionLseek(ctx);
+        closeFn = smbc_getFunctionClose(ctx);
+        smbc_fstat_fn fstatFn = smbc_getFunctionFstat(ctx);
+        struct stat st{};
+        fileSize = (fstatFn != nullptr && fstatFn(ctx, file, &st) == 0)
+                       ? static_cast<int64_t>(st.st_size)
+                       : -1;
+        head = fill = 0;
+        consumePos = prefetchPos = 0;
+        pendingSeek = eof = stop = false;
+        ring.assign(kCapacity, 0);
+        thread = std::thread([this] { run(); });
+        return true;
+    }
+
+    void run() {
+        int64_t pos = 0;
+        std::vector<uint8_t> chunk(kChunk);
+        for (;;) {
+            std::size_t want;
+            {
+                std::unique_lock<std::mutex> lk(mutex);
+                spaceCv.wait(lk, [this] {
+                    return stop || pendingSeek || (!eof && fill < ring.size());
+                });
+                if (stop) return;
+                if (pendingSeek) {
+                    pendingSeek = false;
+                    head = fill = 0;
+                    eof = false;
+                    pos = prefetchPos;
+                    lseekFn(ctx, file, static_cast<off_t>(pos), SEEK_SET);
+                }
+                if (eof) continue;
+                want = std::min(ring.size() - fill, chunk.size());
+            }
+            if (want == 0) continue;
+            const ssize_t n = readFn(ctx, file, chunk.data(), want);
+            std::lock_guard<std::mutex> lk(mutex);
+            if (stop || pendingSeek) continue;  // a seek/stop superseded this read
+            if (n <= 0) {
+                eof = true;
+                dataCv.notify_all();
+                continue;
+            }
+            const std::size_t w = (head + fill) % ring.size();
+            const std::size_t first = std::min(static_cast<std::size_t>(n), ring.size() - w);
+            std::memcpy(ring.data() + w, chunk.data(), first);
+            if (static_cast<std::size_t>(n) > first) {
+                std::memcpy(ring.data(), chunk.data() + first,
+                            static_cast<std::size_t>(n) - first);
+            }
+            fill += static_cast<std::size_t>(n);
+            pos += n;
+            prefetchPos = pos;
+            dataCv.notify_all();
+        }
+    }
+
+    int read(uint8_t* buf, int size) {
+        if (size <= 0) return 0;
+        std::unique_lock<std::mutex> lk(mutex);
+        dataCv.wait(lk, [this] { return stop || fill > 0 || eof; });
+        if (stop) return AVERROR_EXIT;
+        if (fill == 0) return AVERROR_EOF;
+        const std::size_t n = std::min(static_cast<std::size_t>(size), fill);
+        const std::size_t first = std::min(n, ring.size() - head);
+        std::memcpy(buf, ring.data() + head, first);
+        if (n > first) std::memcpy(buf + first, ring.data(), n - first);
+        head = (head + n) % ring.size();
+        fill -= n;
+        consumePos += static_cast<int64_t>(n);
+        spaceCv.notify_all();
+        return static_cast<int>(n);
+    }
+
+    int64_t seek(int64_t offset, int whence) {
+        if ((whence & ~AVSEEK_FORCE) == AVSEEK_SIZE) return fileSize;
+        std::lock_guard<std::mutex> lk(mutex);
+        const int w = whence & ~AVSEEK_FORCE;
+        int64_t target;
+        if (w == SEEK_SET) target = offset;
+        else if (w == SEEK_CUR) target = consumePos + offset;
+        else if (w == SEEK_END) target = (fileSize >= 0) ? fileSize + offset : -1;
+        else return -1;
+        if (target < 0) return -1;
+        consumePos = prefetchPos = target;
+        head = fill = 0;  // discard data buffered from the old position
+        eof = false;
+        pendingSeek = true;
+        spaceCv.notify_all();
+        dataCv.notify_all();
+        return target;
+    }
+
+    // Unblocks a consumer stalled in read() so the decode thread can exit; the
+    // prefetch thread is joined later in shutdown().
+    void abort() {
+        std::lock_guard<std::mutex> lk(mutex);
+        stop = true;
+        dataCv.notify_all();
+        spaceCv.notify_all();
+    }
+
+    void shutdown() {
+        {
+            std::lock_guard<std::mutex> lk(mutex);
+            stop = true;
+            dataCv.notify_all();
+            spaceCv.notify_all();
+        }
+        if (thread.joinable()) thread.join();
+        if (file != nullptr && closeFn != nullptr) closeFn(ctx, file);
+        if (ctx != nullptr) smbc_free_context(ctx, 1);
+        ctx = nullptr;
+        file = nullptr;
+        ring.clear();
+        ring.shrink_to_fit();
+    }
+};
+
 int smb_read(void* opaque, uint8_t* buf, int size) {
-    auto* io = static_cast<SmbIO*>(opaque);
-    const ssize_t n = io->readFn(io->ctx, io->file, buf, static_cast<size_t>(size));
-    if (n < 0) return AVERROR(errno);
-    if (n == 0) return AVERROR_EOF;
-    return static_cast<int>(n);
+    return static_cast<SmbReadAhead*>(opaque)->read(buf, size);
 }
 
 int64_t smb_seek(void* opaque, int64_t offset, int whence) {
-    auto* io = static_cast<SmbIO*>(opaque);
-    if ((whence & ~AVSEEK_FORCE) == AVSEEK_SIZE) {
-        struct stat st{};
-        if (io->fstatFn(io->ctx, io->file, &st) < 0) return AVERROR(errno);
-        return static_cast<int64_t>(st.st_size);
-    }
-    const off_t r = io->lseekFn(io->ctx, io->file, static_cast<off_t>(offset),
-                                whence & ~AVSEEK_FORCE);
-    if (r < 0) return AVERROR(errno);
-    return static_cast<int64_t>(r);
+    return static_cast<SmbReadAhead*>(opaque)->seek(offset, whence);
 }
 
 }  // namespace
@@ -120,7 +251,7 @@ struct MediaEngine::Impl {
     SwsContext* sws = nullptr;
 #ifdef PIXELVR_HAVE_SMB
     AVIOContext* avio = nullptr;
-    SmbIO smbIO;
+    SmbReadAhead smbReader;
 #endif
     int videoStream = -1;
     int width = 0;
@@ -193,13 +324,7 @@ struct MediaEngine::Impl {
             av_freep(&avio->buffer);
             avio_context_free(&avio);
         }
-        if (smbIO.file != nullptr && smbIO.closeFn != nullptr) {
-            smbIO.closeFn(smbIO.ctx, smbIO.file);
-        }
-        if (smbIO.ctx != nullptr) {
-            smbc_free_context(smbIO.ctx, 1);
-        }
-        smbIO = SmbIO{};
+        smbReader.shutdown();
 #endif
         clearQueues();
         usingDrm.store(false);
@@ -536,17 +661,12 @@ bool MediaEngine::open(const std::string& path) {
             PIXELVR_LOG_ERROR("MediaEngine: cannot open SMB stream %s", path.c_str());
             return false;
         }
-        impl_->smbIO.ctx = ctx;
-        impl_->smbIO.file = file;
-        impl_->smbIO.readFn = smbc_getFunctionRead(ctx);
-        impl_->smbIO.lseekFn = smbc_getFunctionLseek(ctx);
-        impl_->smbIO.fstatFn = smbc_getFunctionFstat(ctx);
-        impl_->smbIO.closeFn = smbc_getFunctionClose(ctx);
+        impl_->smbReader.start(ctx, file);
 
-        constexpr int kBuf = 1 << 16;  // 64 KiB streaming buffer
+        constexpr int kBuf = 1 << 16;  // 64 KiB AVIO buffer (ring is separate)
         auto* buffer = static_cast<unsigned char*>(av_malloc(kBuf));
         impl_->avio = (buffer != nullptr)
-                          ? avio_alloc_context(buffer, kBuf, 0, &impl_->smbIO,
+                          ? avio_alloc_context(buffer, kBuf, 0, &impl_->smbReader,
                                                &smb_read, nullptr, &smb_seek)
                           : nullptr;
         if (impl_->avio == nullptr) {
@@ -725,6 +845,9 @@ void MediaEngine::close() {
         return;
     }
     impl_->running.store(false);
+#ifdef PIXELVR_HAVE_SMB
+    impl_->smbReader.abort();  // unblock a decode thread stalled in smb_read
+#endif
     if (impl_->thread.joinable()) {
         impl_->thread.join();
     }

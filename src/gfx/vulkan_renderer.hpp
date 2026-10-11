@@ -214,6 +214,7 @@ private:
     float screenPivot_[3] = {0.0f, 0.0f, 0.0f};
     float screenForward_[3] = {0.0f, 0.0f, -1.0f};
     float screenYaw_ = 0.0f;
+    float sphereYaw_ = 0.0f;  // recenter longitude offset for 360/180 content
     float screenDistance_ = 3.0f;
 
     // Transport HUD state.
