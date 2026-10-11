@@ -276,6 +276,9 @@ struct MediaEngine::Impl {
     AVRational timeBase{1, 1};
     int drmDiag = 0;
     std::string codecName;
+    const AVCodec* videoDecoder = nullptr;  // retained for reopen-on-seek
+    bool decoderDrm = false;                // apply drm_prime opts on reopen
+    int captureBuffers = 0;                 // num_capture_buffers for reopen
     std::atomic<uint64_t> decodedCount{0};
 
     int audioStream = -1;
@@ -398,6 +401,28 @@ struct MediaEngine::Impl {
         queued.serial = ++serial;
         drmQueue.push_back(std::move(queued));
         usingDrm.store(true);
+    }
+
+    // Reopens the video decoder from scratch (matineevr's seek strategy): a flushed
+    // V4L2 hardware decoder can wedge under rapid seeking, but a fresh one cannot.
+    bool reopenDecoder() {
+        if (codec != nullptr) {
+            avcodec_free_context(&codec);
+        }
+        if (videoDecoder == nullptr || format == nullptr) return false;
+        AVStream* s = format->streams[videoStream];
+        codec = avcodec_alloc_context3(videoDecoder);
+        if (codec == nullptr ||
+            avcodec_parameters_to_context(codec, s->codecpar) < 0) {
+            return false;
+        }
+        codec->pkt_timebase = s->time_base;
+        if (decoderDrm) {
+            av_opt_set_int(codec->priv_data, "num_capture_buffers", captureBuffers, 0);
+            av_opt_set_int(codec->priv_data, "drm_prime", 1, 0);
+            codec->apply_cropping = 0;
+        }
+        return avcodec_open2(codec, videoDecoder, nullptr) >= 0;
     }
 
     void decodeLoop();
@@ -628,7 +653,9 @@ void MediaEngine::Impl::decodeLoop() {
             }
             const int64_t ts = static_cast<int64_t>(seekTo * AV_TIME_BASE);
             avformat_seek_file(format, -1, INT64_MIN, ts, INT64_MAX, 0);
-            avcodec_flush_buffers(codec);
+            if (!reopenDecoder()) {  // a fresh decoder avoids the HW wedge on seek
+                PIXELVR_LOG_ERROR("MediaEngine: video decoder reopen failed on seek");
+            }
             if (audioCodec != nullptr) {
                 avcodec_flush_buffers(audioCodec);
             }
@@ -805,7 +832,9 @@ bool MediaEngine::open(const std::string& path) {
             return false;
         }
         impl_->codec->pkt_timebase = stream->time_base;
-        if (drmPrime && std::strstr(dec->name, "v4l2m2m") != nullptr) {
+        impl_->videoDecoder = dec;  // retained so the decode thread can reopen on seek
+        impl_->decoderDrm = drmPrime && std::strstr(dec->name, "v4l2m2m") != nullptr;
+        if (impl_->decoderDrm) {
             // Export decoder output as DMA-BUF (AV_PIX_FMT_DRM_PRIME) for zero-copy
             // Vulkan import; requires the dmabuf-patched libavcodec. Bound the
             // decoded-buffer memory: at 8K a frame is ~40-80 MiB, so a fixed large
@@ -814,13 +843,15 @@ bool MediaEngine::open(const std::string& path) {
                                stream->codecpar->height;
             const int64_t frameBytes = highBitDepth ? px * 3 : px * 3 / 2;  // P010/NV12
             constexpr int64_t kBudget = 320ll << 20;  // ~320 MiB capture pool
-            const int nbuf = static_cast<int>(std::clamp<int64_t>(
+            impl_->captureBuffers = static_cast<int>(std::clamp<int64_t>(
                 kBudget / std::max<int64_t>(frameBytes, 1), 4, 16));
-            av_opt_set_int(impl_->codec->priv_data, "num_capture_buffers", nbuf, 0);
+            av_opt_set_int(impl_->codec->priv_data, "num_capture_buffers",
+                           impl_->captureBuffers, 0);
             av_opt_set_int(impl_->codec->priv_data, "drm_prime", 1, 0);
             impl_->codec->apply_cropping = 0;
             // Leave buffers free for the decoder's DPB; the queue holds the rest.
-            impl_->maxQueue = static_cast<std::size_t>(std::clamp(nbuf - 5, 1, 6));
+            impl_->maxQueue =
+                static_cast<std::size_t>(std::clamp(impl_->captureBuffers - 5, 1, 6));
         }
         return avcodec_open2(impl_->codec, dec, nullptr) >= 0;
     };
