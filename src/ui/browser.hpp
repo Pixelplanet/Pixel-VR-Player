@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -55,15 +56,25 @@ public:
     // Advances any in-progress SMB download. Returns Result::Play with a LOCAL
     // playPath when a download finishes; otherwise Result::None.
     Result poll(std::string& playPath);
-    bool isBusy() const { return dlActive_.load(); }
+    bool isBusy() const { return dlActive_.load() || scanning_.load(); }
 
     ~Browser();
     Browser(const Browser&) = delete;
     Browser& operator=(const Browser&) = delete;
 
 private:
-    void scanLocal(const std::string& dir);
-    void scanSmb(const std::string& uri);  // "smb://" enumerates the network
+    // Enumerated directory listing (local or SMB) produced off the main thread.
+    struct ScanResult {
+        std::vector<Entry> entries;
+        std::string title;
+        std::string status;
+        std::string location;
+        bool inSmb = false;
+    };
+    void beginScan(const std::string& location, bool isSmb);  // async navigate
+    void runScan(std::string location, bool isSmb);           // worker body
+    void scanLocalInto(const std::string& dir, ScanResult& out);
+    void scanSmbInto(const std::string& uri, ScanResult& out);
     void startDownload(const std::string& uri, const std::string& name);
 
     bool open_ = false;
@@ -72,9 +83,17 @@ private:
     std::string status_;
     std::string location_;   // current local dir or smb:// URI
     std::string homeDir_;
-    std::string lastLocalDir_;  // remembered across re-opens (until app restart)
+    std::string lastLocation_;  // last folder visited (local or smb), for re-open
+    bool lastInSmb_ = false;
     std::vector<Entry> entries_;
     int selected_ = 0;
+
+    // Async directory scan (SMB discovery / large dirs) off the main thread.
+    std::thread scanThread_;
+    std::atomic<bool> scanning_{false};
+    std::atomic<bool> scanReady_{false};  // results waiting to publish
+    std::mutex scanMutex_;                 // guards scanResult_
+    ScanResult scanResult_;
 
     // Async SMB download.
     std::thread dlThread_;

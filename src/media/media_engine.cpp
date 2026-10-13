@@ -1,6 +1,7 @@
 #include "media/media_engine.hpp"
 
 #include "util/logging.hpp"
+#include "util/smb_lock.hpp"
 
 #include <algorithm>
 #include <atomic>
@@ -105,6 +106,8 @@ struct SmbReadAhead {
         std::vector<uint8_t> chunk(kChunk);
         for (;;) {
             std::size_t want;
+            bool doSeek = false;
+            int64_t seekPos = 0;
             {
                 std::unique_lock<std::mutex> lk(mutex);
                 spaceCv.wait(lk, [this] {
@@ -116,13 +119,24 @@ struct SmbReadAhead {
                     head = fill = 0;
                     eof = false;
                     pos = prefetchPos;
-                    lseekFn(ctx, file, static_cast<off_t>(pos), SEEK_SET);
+                    doSeek = true;
+                    seekPos = pos;
                 }
                 if (eof) continue;
                 want = std::min(ring.size() - fill, chunk.size());
             }
+            // libsmbclient is not thread-safe; serialize the network syscalls
+            // against the browser's scans/downloads (per chunk, so they interleave).
+            if (doSeek) {
+                std::lock_guard<std::mutex> smb(smbGlobalLock());
+                lseekFn(ctx, file, static_cast<off_t>(seekPos), SEEK_SET);
+            }
             if (want == 0) continue;
-            const ssize_t n = readFn(ctx, file, chunk.data(), want);
+            ssize_t n;
+            {
+                std::lock_guard<std::mutex> smb(smbGlobalLock());
+                n = readFn(ctx, file, chunk.data(), want);
+            }
             std::lock_guard<std::mutex> lk(mutex);
             if (stop || pendingSeek) continue;  // a seek/stop superseded this read
             if (n <= 0) {
@@ -197,8 +211,11 @@ struct SmbReadAhead {
             spaceCv.notify_all();
         }
         if (thread.joinable()) thread.join();
-        if (file != nullptr && closeFn != nullptr) closeFn(ctx, file);
-        if (ctx != nullptr) smbc_free_context(ctx, 1);
+        {
+            std::lock_guard<std::mutex> smb(smbGlobalLock());
+            if (file != nullptr && closeFn != nullptr) closeFn(ctx, file);
+            if (ctx != nullptr) smbc_free_context(ctx, 1);
+        }
         ctx = nullptr;
         file = nullptr;
         ring.clear();
@@ -749,19 +766,30 @@ bool MediaEngine::open(const std::string& path) {
 
 #ifdef PIXELVR_HAVE_SMB
     if (path.rfind("smb://", 0) == 0) {
-        SMBCCTX* ctx = smbc_new_context();
-        if (ctx != nullptr) {
-            smbc_setFunctionAuthDataWithContext(ctx, &smb_auth);
-            if (smbc_init_context(ctx) == nullptr) {
+        // libsmbclient is not thread-safe; serialize context setup against the
+        // browser's scans/downloads, which share Samba's global state.
+        SMBCCTX* ctx = nullptr;
+        SMBCFILE* file = nullptr;
+        {
+            std::lock_guard<std::mutex> smb(smbGlobalLock());
+            ctx = smbc_new_context();
+            if (ctx != nullptr) {
+                smbc_setFunctionAuthDataWithContext(ctx, &smb_auth);
+                if (smbc_init_context(ctx) == nullptr) {
+                    smbc_free_context(ctx, 1);
+                    ctx = nullptr;
+                }
+            }
+            smbc_open_fn openFn =
+                (ctx != nullptr) ? smbc_getFunctionOpen(ctx) : nullptr;
+            file = (openFn != nullptr) ? openFn(ctx, path.c_str(), O_RDONLY, 0)
+                                       : nullptr;
+            if (file == nullptr && ctx != nullptr) {
                 smbc_free_context(ctx, 1);
                 ctx = nullptr;
             }
         }
-        smbc_open_fn openFn = (ctx != nullptr) ? smbc_getFunctionOpen(ctx) : nullptr;
-        SMBCFILE* file =
-            (openFn != nullptr) ? openFn(ctx, path.c_str(), O_RDONLY, 0) : nullptr;
         if (file == nullptr) {
-            if (ctx != nullptr) smbc_free_context(ctx, 1);
             PIXELVR_LOG_ERROR("MediaEngine: cannot open SMB stream %s", path.c_str());
             return false;
         }

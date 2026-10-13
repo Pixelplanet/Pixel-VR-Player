@@ -1,12 +1,14 @@
 #include "ui/browser.hpp"
 
 #include "util/logging.hpp"
+#include "util/smb_lock.hpp"
 
 #include <algorithm>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <mutex>
 #include <set>
 
 #ifdef PIXELVR_HAVE_SMB
@@ -90,17 +92,20 @@ Browser::Browser() {
 
 void Browser::open() {
     open_ = true;
-    inSmb_ = false;
     status_.clear();
-    // Resume in the last local folder visited this session, if it still exists.
+    // Resume where the user last was this session (local folder or SMB share).
+    if (lastInSmb_ && !lastLocation_.empty()) {
+        beginScan(lastLocation_, true);
+        return;
+    }
     std::string start = homeDir_;
-    if (!lastLocalDir_.empty()) {
+    if (!lastInSmb_ && !lastLocation_.empty()) {
         std::error_code ec;
-        if (fs::is_directory(lastLocalDir_, ec)) {
-            start = lastLocalDir_;
+        if (fs::is_directory(lastLocation_, ec)) {
+            start = lastLocation_;
         }
     }
-    scanLocal(start);
+    beginScan(start, false);
 }
 
 void Browser::move(int delta) {
@@ -112,19 +117,17 @@ void Browser::move(int delta) {
     }
 }
 
-void Browser::scanLocal(const std::string& dir) {
-    inSmb_ = false;
-    location_ = dir;
-    lastLocalDir_ = dir;  // remember for the next open()
-    title_ = dir;
-    entries_.clear();
-    selected_ = 0;
+void Browser::scanLocalInto(const std::string& dir, ScanResult& out) {
+    out.inSmb = false;
+    out.location = dir;
+    out.title = dir;
+    out.entries.clear();
 
     if (dir == homeDir_) {
-        entries_.push_back({"[ Network (SMB) ]", "", false, false, false, true});
+        out.entries.push_back({"[ Network (SMB) ]", "", false, false, false, true});
     }
     if (dir != "/") {
-        entries_.push_back({".. (up)", "", false, false, true, false});
+        out.entries.push_back({".. (up)", "", false, false, true, false});
     }
 
     std::vector<Entry> dirs, files;
@@ -141,56 +144,62 @@ void Browser::scanLocal(const std::string& dir) {
             files.push_back({name, p.string(), false, true, false, false});
         }
     }
-    sort_and_append(entries_, dirs, files);
+    sort_and_append(out.entries, dirs, files);
 }
 
-void Browser::scanSmb(const std::string& uri) {
-    inSmb_ = true;
-    location_ = uri;
-    title_ = uri;
-    entries_.clear();
-    selected_ = 0;
-    entries_.push_back({".. (up)", "", false, false, true, false});
+void Browser::scanSmbInto(const std::string& uri, ScanResult& out) {
+    out.inSmb = true;
+    out.location = uri;
+    out.title = uri;
+    out.entries.clear();
+    out.entries.push_back({".. (up)", "", false, false, true, false});
 
 #ifdef PIXELVR_HAVE_SMB
-    if (!ensure_smb()) {
-        status_ = "SMB unavailable";
-        return;
-    }
-    const int dh = smbc_opendir(uri.c_str());
-    if (dh < 0) {
-        status_ = "Cannot browse " + uri;
-        return;
-    }
     std::vector<Entry> dirs, files;
-    struct smbc_dirent* de = nullptr;
-    while ((de = smbc_readdir(dh)) != nullptr) {
-        const std::string name = de->name;
-        if (name.empty() || name == "." || name == "..") continue;
-        if (name.back() == '$') continue;  // hidden admin shares
-        std::string child = uri;
-        if (child.empty() || child.back() != '/') child += '/';
-        child += name;
-        switch (de->smbc_type) {
-            case SMBC_WORKGROUP:
-            case SMBC_SERVER:
-            case SMBC_FILE_SHARE:
-            case SMBC_DIR:
-                dirs.push_back({name + "/", child, true, false, false, false});
-                break;
-            case SMBC_FILE:
-                if (is_video(name)) {
-                    files.push_back({name, child, false, true, false, false});
+    bool browsed = false;
+    {
+        // libsmbclient is not thread-safe: hold the global SMB lock across the
+        // whole enumeration so it can't race the media stream's prefetch thread
+        // (concurrent use aborts inside Samba name resolution).
+        std::lock_guard<std::mutex> smb(smbGlobalLock());
+        if (!ensure_smb()) {
+            out.status = "SMB unavailable";
+            return;
+        }
+        const int dh = smbc_opendir(uri.c_str());
+        if (dh >= 0) {
+            browsed = true;
+            struct smbc_dirent* de = nullptr;
+            while ((de = smbc_readdir(dh)) != nullptr) {
+                const std::string name = de->name;
+                if (name.empty() || name == "." || name == "..") continue;
+                if (name.back() == '$') continue;  // hidden admin shares
+                std::string child = uri;
+                if (child.empty() || child.back() != '/') child += '/';
+                child += name;
+                switch (de->smbc_type) {
+                    case SMBC_WORKGROUP:
+                    case SMBC_SERVER:
+                    case SMBC_FILE_SHARE:
+                    case SMBC_DIR:
+                        dirs.push_back({name + "/", child, true, false, false, false});
+                        break;
+                    case SMBC_FILE:
+                        if (is_video(name)) {
+                            files.push_back({name, child, false, true, false, false});
+                        }
+                        break;
+                    default:
+                        break;
                 }
-                break;
-            default:
-                break;
+            }
+            smbc_closedir(dh);
         }
     }
-    smbc_closedir(dh);
 
-    // NetBIOS browsing often misses modern servers; augment the network root
-    // with mDNS-advertised SMB hosts (NAS, macOS, Samba+avahi).
+    // NetBIOS browsing often misses modern servers; augment the network root with
+    // mDNS-advertised SMB hosts (NAS, macOS, Samba+avahi). The slow network probe
+    // runs OUTSIDE the SMB lock (it is not a libsmbclient call).
     if (uri == "smb://") {
         std::set<std::string> seen;
         for (const auto& d : dirs) seen.insert(d.path);
@@ -219,13 +228,48 @@ void Browser::scanSmb(const std::string& uri) {
             }
             pclose(pipe);
         }
+        browsed = browsed || !dirs.empty();
     }
 
-    sort_and_append(entries_, dirs, files);
-    status_ = std::to_string(entries_.size() - 1) + " items";
+    if (!browsed) {
+        out.status = "Cannot browse " + uri;
+        return;
+    }
+    sort_and_append(out.entries, dirs, files);
+    out.status = std::to_string(out.entries.size() - 1) + " items";
 #else
-    status_ = "SMB support not built";
+    out.status = "SMB support not built";
 #endif
+}
+
+// Starts a background scan so SMB discovery (NetBIOS + mDNS, seconds) and large
+// directories never freeze the render loop. poll() publishes the result.
+void Browser::beginScan(const std::string& location, bool isSmb) {
+    if (scanThread_.joinable()) scanThread_.join();  // previous scan has finished
+    scanReady_.store(false);
+    scanning_.store(true);
+    title_ = location;
+    status_ = "Scanning...";
+    entries_.clear();
+    entries_.push_back({"Scanning...", "", false, false, false, false});
+    selected_ = 0;
+    scanThread_ =
+        std::thread([this, location, isSmb] { runScan(location, isSmb); });
+}
+
+void Browser::runScan(std::string location, bool isSmb) {
+    ScanResult r;
+    if (isSmb) {
+        scanSmbInto(location, r);
+    } else {
+        scanLocalInto(location, r);
+    }
+    {
+        std::lock_guard<std::mutex> lk(scanMutex_);
+        scanResult_ = std::move(r);
+    }
+    scanReady_.store(true);
+    scanning_.store(false);  // last: keeps isBusy() true until results are ready
 }
 
 Browser::Result Browser::activate(std::string& playPath) {
@@ -238,26 +282,22 @@ Browser::Result Browser::activate(std::string& playPath) {
         if (inSmb_) {
             const std::string parent = smb_parent(location_);
             if (parent.empty()) {
-                scanLocal(homeDir_);
+                beginScan(homeDir_, false);
             } else {
-                scanSmb(parent);
+                beginScan(parent, true);
             }
         } else {
             const fs::path p(location_);
-            scanLocal(p.has_parent_path() ? p.parent_path().string() : "/");
+            beginScan(p.has_parent_path() ? p.parent_path().string() : "/", false);
         }
         return Result::Navigated;
     }
     if (e.isNetwork) {
-        scanSmb("smb://");
+        beginScan("smb://", true);
         return Result::Navigated;
     }
     if (e.isDir) {
-        if (inSmb_) {
-            scanSmb(e.path);
-        } else {
-            scanLocal(e.path);
-        }
+        beginScan(e.path, inSmb_);
         return Result::Navigated;
     }
     if (e.isVideo) {
@@ -285,6 +325,7 @@ bool Browser::downloadFocused() {
 }
 
 Browser::~Browser() {
+    if (scanThread_.joinable()) scanThread_.join();
     if (dlThread_.joinable()) dlThread_.join();
 }
 
@@ -307,9 +348,13 @@ void Browser::startDownload(const std::string& uri, const std::string& name) {
         const std::string local = home + "/media/" + name;
 
         struct stat st{};
-        const long long total =
-            (smbc_stat(uri.c_str(), &st) == 0) ? static_cast<long long>(st.st_size)
-                                               : 0;
+        long long total = 0;
+        {
+            std::lock_guard<std::mutex> smb(smbGlobalLock());
+            if (smbc_stat(uri.c_str(), &st) == 0) {
+                total = static_cast<long long>(st.st_size);
+            }
+        }
         dlTotal_.store(total);
 
         // Reuse a previous complete download instead of fetching again.
@@ -323,7 +368,11 @@ void Browser::startDownload(const std::string& uri, const std::string& name) {
             return;
         }
 
-        const int fd = smbc_open(uri.c_str(), O_RDONLY, 0);
+        int fd = -1;
+        {
+            std::lock_guard<std::mutex> smb(smbGlobalLock());
+            fd = smbc_open(uri.c_str(), O_RDONLY, 0);
+        }
         if (fd < 0) {
             dlDone_.store(true);
             dlActive_.store(false);
@@ -339,13 +388,21 @@ void Browser::startDownload(const std::string& uri, const std::string& name) {
         std::vector<char> buf(1 << 20);
         ssize_t n = 0;
         long long got = 0;
-        while ((n = smbc_read(fd, buf.data(), buf.size())) > 0) {
+        for (;;) {
+            {
+                std::lock_guard<std::mutex> smb(smbGlobalLock());
+                n = smbc_read(fd, buf.data(), buf.size());
+            }
+            if (n <= 0) break;
             std::fwrite(buf.data(), 1, static_cast<std::size_t>(n), out);
             got += n;
             dlBytes_.store(got);
         }
         std::fclose(out);
-        smbc_close(fd);
+        {
+            std::lock_guard<std::mutex> smb(smbGlobalLock());
+            smbc_close(fd);
+        }
 
         dlLocalPath_ = local;
         dlOk_.store(n >= 0 && got > 0);
@@ -360,6 +417,19 @@ void Browser::startDownload(const std::string& uri, const std::string& name) {
 }
 
 Browser::Result Browser::poll(std::string& playPath) {
+    // Publish a finished async directory scan (SMB discovery / large dirs).
+    if (scanReady_.exchange(false)) {
+        if (scanThread_.joinable()) scanThread_.join();
+        std::lock_guard<std::mutex> lk(scanMutex_);
+        entries_ = std::move(scanResult_.entries);
+        title_ = std::move(scanResult_.title);
+        status_ = std::move(scanResult_.status);
+        location_ = scanResult_.location;
+        inSmb_ = scanResult_.inSmb;
+        selected_ = 0;
+        lastLocation_ = location_;  // remember for the next open()
+        lastInSmb_ = inSmb_;
+    }
     if (dlActive_.load()) {
         const long long b = dlBytes_.load();
         const long long t = dlTotal_.load();

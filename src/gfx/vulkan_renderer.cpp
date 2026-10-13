@@ -978,7 +978,7 @@ bool VulkanRenderer::initText() {
         "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
     };
     for (const char* path : kFonts) {
-        fontAtlas_ = buildFontAtlas(path, 40);
+        fontAtlas_ = buildFontAtlas(path, 64);
         if (fontAtlas_.ok) break;
     }
     if (!fontAtlas_.ok) {
