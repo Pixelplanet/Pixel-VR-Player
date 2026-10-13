@@ -64,6 +64,19 @@ inline float ctrl_button_x(int i) {
     return (static_cast<float>(i) - 0.5f * (kBtnCount - 1)) * kBtnSpacing;
 }
 
+// Seconds -> "M:SS" or "H:MM:SS" for the transport time readout.
+inline std::string format_time(double sec) {
+    if (sec < 0.0) sec = 0.0;
+    const int t = static_cast<int>(sec + 0.5);
+    const int h = t / 3600, m = (t % 3600) / 60, s = t % 60;
+    auto two = [](int v) {
+        const std::string r = std::to_string(v);
+        return r.size() < 2 ? "0" + r : r;
+    };
+    if (h > 0) return std::to_string(h) + ":" + two(m) + ":" + two(s);
+    return std::to_string(m) + ":" + two(s);
+}
+
 #define PIXELVR_VK_CHECK(expr)                                        \
     do {                                                              \
         VkResult _res = (expr);                                       \
@@ -831,6 +844,7 @@ void VulkanRenderer::updatePointer() {
     pointerRow_ = -1;
     pointerButton_ = -1;
     pointerOnTimeline_ = false;
+    pointerOnTimeToggle_ = false;
     pointerHand_ = -1;
     browserHovered_ = -1;
     settingsHovered_ = -1;
@@ -932,6 +946,18 @@ void VulkanRenderer::updatePointer() {
             break;
         }
 
+        // Clickable total/remaining time readout (right end, above the track).
+        if (transportDuration_ > 0.0 && hx >= 0.30f && hx <= 0.56f &&
+            hyy >= kBarY + 0.16f && hyy <= kBarY + 0.24f) {
+            pointerActive_ = true;
+            pointerHand_ = h;
+            pointerOnTimeToggle_ = true;
+            pointerHit_[0] = world.x;
+            pointerHit_[1] = world.y;
+            pointerHit_[2] = world.z;
+            break;
+        }
+
         // Draggable timeline track (sits just above the button row).
         {
             const float trackY = kBarY + 0.11f;
@@ -986,17 +1012,24 @@ bool VulkanRenderer::initText() {
         return false;
     }
 
-    // R8 atlas texture.
+    // R8 atlas texture with a short mip chain so minified menu text doesn't
+    // shimmer. Capped at 4 levels so adjacent (cell-padded) glyphs don't bleed.
+    uint32_t mipLevels = 1;
+    for (int d = std::max(fontAtlas_.width, fontAtlas_.height);
+         d > 1 && mipLevels < 4; d /= 2) {
+        ++mipLevels;
+    }
     VkImageCreateInfo img{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     img.imageType = VK_IMAGE_TYPE_2D;
     img.format = VK_FORMAT_R8_UNORM;
     img.extent = {static_cast<uint32_t>(fontAtlas_.width),
                   static_cast<uint32_t>(fontAtlas_.height), 1};
-    img.mipLevels = 1;
+    img.mipLevels = mipLevels;
     img.arrayLayers = 1;
     img.samples = VK_SAMPLE_COUNT_1_BIT;
     img.tiling = VK_IMAGE_TILING_OPTIMAL;
-    img.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    img.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                VK_IMAGE_USAGE_SAMPLED_BIT;
     img.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     PIXELVR_VK_CHECK(vkCreateImage(device_, &img, nullptr, &fontImage_));
 
@@ -1014,7 +1047,7 @@ bool VulkanRenderer::initText() {
     iv.viewType = VK_IMAGE_VIEW_TYPE_2D;
     iv.format = VK_FORMAT_R8_UNORM;
     iv.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-    iv.subresourceRange.levelCount = 1;
+    iv.subresourceRange.levelCount = mipLevels;
     iv.subresourceRange.layerCount = 1;
     PIXELVR_VK_CHECK(vkCreateImageView(device_, &iv, nullptr, &fontView_));
 
@@ -1046,33 +1079,57 @@ bool VulkanRenderer::initText() {
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(uploadCmd_, &begin);
-    auto barrier = [&](VkImageLayout from, VkImageLayout to, VkAccessFlags src,
-                       VkAccessFlags dst, VkPipelineStageFlags ss,
-                       VkPipelineStageFlags ds) {
+    auto imgBarrier = [&](uint32_t baseMip, uint32_t count, VkImageLayout from,
+                          VkImageLayout to, VkAccessFlags src, VkAccessFlags dst,
+                          VkPipelineStageFlags ss, VkPipelineStageFlags ds) {
         VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
         b.oldLayout = from;
         b.newLayout = to;
         b.srcAccessMask = src;
         b.dstAccessMask = dst;
         b.image = fontImage_;
-        b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, baseMip, count, 0, 1};
         b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         vkCmdPipelineBarrier(uploadCmd_, ss, ds, 0, 0, nullptr, 0, nullptr, 1, &b);
     };
-    barrier(VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
-            VK_ACCESS_TRANSFER_WRITE_BIT, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-            VK_PIPELINE_STAGE_TRANSFER_BIT);
+    imgBarrier(0, mipLevels, VK_IMAGE_LAYOUT_UNDEFINED,
+               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0, VK_ACCESS_TRANSFER_WRITE_BIT,
+               VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
     VkBufferImageCopy region{};
     region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     region.imageExtent = {static_cast<uint32_t>(fontAtlas_.width),
                           static_cast<uint32_t>(fontAtlas_.height), 1};
     vkCmdCopyBufferToImage(uploadCmd_, staging, fontImage_,
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-    barrier(VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-            VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
-            VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-            VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    // Build the mip chain with successive linear half-blits.
+    int32_t mw = fontAtlas_.width, mh = fontAtlas_.height;
+    for (uint32_t i = 1; i < mipLevels; ++i) {
+        imgBarrier(i - 1, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+                   VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                   VK_PIPELINE_STAGE_TRANSFER_BIT);
+        const int32_t nw = std::max(1, mw / 2), nh = std::max(1, mh / 2);
+        VkImageBlit blit{};
+        blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i - 1, 0, 1};
+        blit.srcOffsets[1] = {mw, mh, 1};
+        blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i, 0, 1};
+        blit.dstOffsets[1] = {nw, nh, 1};
+        vkCmdBlitImage(uploadCmd_, fontImage_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                       fontImage_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
+                       VK_FILTER_LINEAR);
+        imgBarrier(i - 1, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                   VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT,
+                   VK_PIPELINE_STAGE_TRANSFER_BIT,
+                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+        mw = nw;
+        mh = nh;
+    }
+    imgBarrier(mipLevels - 1, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+               VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
+               VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+               VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
     vkEndCommandBuffer(uploadCmd_);
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = 1;
@@ -1396,6 +1453,61 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             const float iconHalfW = kBtnHalfW * 0.48f;
             const float iconHalfH = kBtnHalfH * 0.48f;
             drawUiElement(vpPanel, bx, kBarY, iconHalfW, iconHalfH, iconShape, iconCol);
+        }
+
+        // Time readout above the track: elapsed (left) and total/remaining
+        // (right, tinted + clickable to toggle between total and time-left).
+        if (textReady_ && transportDuration_ > 0.0) {
+            vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                              textPipeline_);
+            vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
+            const float sc = 0.055f / fontAtlas_.lineHeight;
+            const float timeY = kBarY + 0.20f;
+            const float elCol[4] = {0.90f, 0.93f, 0.98f, 1.0f};
+            const float tgCol[4] = {0.55f, 0.75f, 1.0f, 1.0f};
+            auto glyphRun = [&](float x, const float cc[4], const std::string& s) {
+                float penX = x;
+                for (char rawc : s) {
+                    unsigned char c = static_cast<unsigned char>(rawc);
+                    if (c < 32 || c > 126) c = '?';
+                    const Glyph& g = fontAtlas_.glyphs[c];
+                    if (g.width > 0.0f && g.height > 0.0f) {
+                        TextPush push{};
+                        std::memcpy(push.mvp, vpPanel.m, sizeof(push.mvp));
+                        std::memcpy(push.color, cc, sizeof(push.color));
+                        push.rect[0] = penX + g.bearingX * sc;
+                        push.rect[1] = timeY - (g.height - g.bearingY) * sc;
+                        push.rect[2] = g.width * sc;
+                        push.rect[3] = g.height * sc;
+                        push.uv[0] = g.u0;
+                        push.uv[1] = g.v0;
+                        push.uv[2] = g.u1;
+                        push.uv[3] = g.v1;
+                        vkCmdPushConstants(commandBuffer_, textPipelineLayout_,
+                                           VK_SHADER_STAGE_VERTEX_BIT |
+                                               VK_SHADER_STAGE_FRAGMENT_BIT,
+                                           0, sizeof(TextPush), &push);
+                        vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
+                    }
+                    penX += g.advance * sc;
+                }
+            };
+            auto measure = [&](const std::string& s) {
+                float w = 0.0f;
+                for (char rawc : s) {
+                    unsigned char c = static_cast<unsigned char>(rawc);
+                    if (c < 32 || c > 126) c = '?';
+                    w += fontAtlas_.glyphs[c].advance * sc;
+                }
+                return w;
+            };
+            glyphRun(-0.54f, elCol, format_time(transportElapsed_));
+            const std::string right =
+                timeShowRemaining_
+                    ? "-" + format_time(transportDuration_ - transportElapsed_)
+                    : format_time(transportDuration_);
+            glyphRun(0.54f - measure(right), tgCol, right);
         }
     }
 

@@ -268,6 +268,25 @@ void App::updateStats() {
 }
 #endif
 
+int App::navStep(float axisY, std::chrono::steady_clock::time_point now) {
+    using namespace std::chrono_literals;
+    if (axisY > 0.6f || axisY < -0.6f) {
+        const int dir = (axisY > 0.0f) ? -1 : 1;  // push up = toward the top row
+        if (navArmed_) {  // first press: step now, then pause before repeating
+            navArmed_ = false;
+            navNextRepeat_ = now + 400ms;
+            return dir;
+        }
+        if (now >= navNextRepeat_) {  // held down: auto-repeat
+            navNextRepeat_ = now + 110ms;
+            return dir;
+        }
+        return 0;
+    }
+    if (axisY > -0.3f && axisY < 0.3f) navArmed_ = true;  // released: re-arm
+    return 0;
+}
+
 int App::run() {
     using namespace std::chrono_literals;
 
@@ -452,15 +471,9 @@ int App::run() {
 
 #ifdef PIXELVR_HAVE_FREETYPE
             if (browser_.isOpen() && !browser_.isBusy()) {
-                if (in.thumbstickY > 0.6f || in.thumbstickY < -0.6f) {
-                    if (navArmed_) {
-                        const int delta = (in.thumbstickY > 0.0f) ? -1 : 1;
-                        browser_.move(delta);
-                        renderer_.scrollBrowser(delta);
-                        navArmed_ = false;
-                    }
-                } else if (in.thumbstickY > -0.3f && in.thumbstickY < 0.3f) {
-                    navArmed_ = true;
+                if (const int d = navStep(in.thumbstickY, nowT)) {
+                    browser_.move(d);
+                    renderer_.scrollBrowser(d);
                 }
 
                 const int hovered = renderer_.browserHovered();
@@ -488,13 +501,8 @@ int App::run() {
 #endif
 
             if (settings_.isOpen()) {
-                if (in.thumbstickY > 0.6f || in.thumbstickY < -0.6f) {
-                    if (navArmed_) {
-                        settings_.move(in.thumbstickY > 0.0f ? -1 : 1);
-                        navArmed_ = false;
-                    }
-                } else if (in.thumbstickY > -0.3f && in.thumbstickY < 0.3f) {
-                    navArmed_ = true;
+                if (const int d = navStep(in.thumbstickY, nowT)) {
+                    settings_.move(d);
                 }
 
                 const int hovered = renderer_.settingsHovered();
@@ -567,6 +575,10 @@ int App::run() {
                         media_.seekRelative(10.0);
                     }
 #endif
+                    interacted = true;
+                }
+                if (in.select && renderer_.pointerOnTimeToggle()) {
+                    renderer_.toggleTimeDisplay();  // total <-> time remaining
                     interacted = true;
                 }
                 if (in.recenter && in.headValid) {
@@ -650,11 +662,13 @@ int App::run() {
                     (paused || (controllersEngaged && (in.controllers[0].active ||
                                                        in.controllers[1].active)));
                 float progress = 0.0f;
+                double elapsed = 0.0, total = 0.0;
                 if (mediaOpen_ && media_.duration() > 0.0) {
-                    const double shown = scrubbing_ ? scrubTarget_ : media_.position();
-                    progress = static_cast<float>(shown / media_.duration());
+                    total = media_.duration();
+                    elapsed = scrubbing_ ? scrubTarget_ : media_.position();
+                    progress = static_cast<float>(elapsed / total);
                 }
-                renderer_.setTransport(controlsUp, progress, paused);
+                renderer_.setTransport(controlsUp, progress, paused, elapsed, total);
 #else
                 (void)interacted;
 #endif

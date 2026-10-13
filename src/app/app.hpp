@@ -48,6 +48,8 @@ private:
     float activityAnchorOrient_[2][4] = {{0, 0, 0, 1}, {0, 0, 0, 1}};
     bool activityAnchorValid_[2] = {false, false};
     bool seekStepArmed_ = true;  // right-stick +/-30s debounce
+    bool navArmed_ = true;       // menu nav: armed for the next stick press
+    std::chrono::steady_clock::time_point navNextRepeat_{};  // nav auto-repeat
     bool scrubbing_ = false;     // dragging the timeline / stick-scrubbing
     double scrubTarget_ = 0.0;   // pending scrub position (seconds)
     std::chrono::steady_clock::time_point perfLastLog_{};
@@ -65,10 +67,11 @@ private:
     unsigned long long cpuPrevTotal_ = 0;
     std::vector<std::string> statsLines_;
     void updateStats();
+    // Menu nav stick auto-repeat: -1/+1 to step (initial press + hold), else 0.
+    int navStep(float axisY, std::chrono::steady_clock::time_point now);
 
 #ifdef PIXELVR_HAVE_FREETYPE
     Browser browser_;
-    bool navArmed_ = true;
 #endif
 
     SettingsMenu settings_;

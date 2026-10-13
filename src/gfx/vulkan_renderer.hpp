@@ -91,11 +91,17 @@ public:
     void adjustScreenDistance(float delta);
 
     // Transport HUD: progress in [0,1]. Drawn head-locked when visible.
-    void setTransport(bool visible, float progress, bool paused) {
+    void setTransport(bool visible, float progress, bool paused,
+                      double elapsedSec = 0.0, double durationSec = 0.0) {
         transportVisible_ = visible;
         transportProgress_ = progress;
         transportPaused_ = paused;
+        transportElapsed_ = elapsedSec;
+        transportDuration_ = durationSec;
     }
+    // True when the pointer is over the clickable total/remaining time readout.
+    bool pointerOnTimeToggle() const { return pointerOnTimeToggle_; }
+    void toggleTimeDisplay() { timeShowRemaining_ = !timeShowRemaining_; }
 
     // File browser overlay: a title, list rows, selected index and a status line.
     void setBrowser(bool visible, const std::string& title,
@@ -242,6 +248,10 @@ private:
     bool transportVisible_ = false;
     float transportProgress_ = 0.0f;
     bool transportPaused_ = false;
+    double transportElapsed_ = 0.0;   // seconds played
+    double transportDuration_ = 0.0;  // seconds total
+    bool timeShowRemaining_ = false;  // right readout shows time-left vs. total
+    bool pointerOnTimeToggle_ = false;
 
     // Text rendering (FreeType glyph atlas) + file browser overlay.
     FontAtlas fontAtlas_;
