@@ -22,6 +22,7 @@ struct PushConstants {
     float mvp[16];
     float conversion[4];
     float range[4];
+    float stereo[4];  // x: mode (0 mono/1 SBS/2 TB), y: eye index, z: swap eyes
 };
 
 struct SpherePush {
@@ -1268,14 +1269,22 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             const float hy = 0.5f * screenYaw_;
             const Mat4 yawRot =
                 fromQuat(Quat{0.0f, std::sin(hy), 0.0f, std::cos(hy)});
+            // SBS halves each eye's width and Top/Bottom halves its height, so the
+            // visible per-eye aspect (and thus the screen shape) changes.
+            float eyeAspect = videoAspect_;
+            if (stereoMode_ == StereoMode::SideBySide) eyeAspect *= 0.5f;
+            else if (stereoMode_ == StereoMode::TopBottom) eyeAspect *= 2.0f;
             const Mat4 model = multiply(
                 multiply(translation(center), yawRot),
-                scaling(Vec3{videoAspect_ / (16.0f / 9.0f), 1.0f, 1.0f}));
+                scaling(Vec3{eyeAspect / (16.0f / 9.0f), 1.0f, 1.0f}));
             const Mat4 mvp = multiply(multiply(proj, viewMat), model);
             PushConstants push{};
             std::memcpy(push.mvp, mvp.m, sizeof(push.mvp));
             std::memcpy(push.conversion, conversion_, sizeof(push.conversion));
             std::memcpy(push.range, range_, sizeof(push.range));
+            push.stereo[0] = static_cast<float>(static_cast<int>(stereoMode_));
+            push.stereo[1] = static_cast<float>(viewIndex);
+            push.stereo[2] = swapEyes_ ? 1.0f : 0.0f;
             if (ycbcr) {  // reuse conversion.xy as the crop UV scale
                 push.conversion[0] = drmUvScaleX_;
                 push.conversion[1] = drmUvScaleY_;

@@ -7,6 +7,22 @@
 
 ---
 
+## Active backlog (2026-10-14)
+
+Carried over:
+- [ ] A. Full-pitch recenter (usable lying down) — reorient screen + controls + 360/180 to full head orientation, not just horizon yaw.
+- [ ] B. Real controller models (glTF) rendered with depth.
+- [ ] C. Dynamic controller button labels from the user's bindings.
+
+New (2026-10-14):
+- [x] D. Flat SBS/TB: detect + a working flat-stereo render mode (split per eye).
+- [ ] E. Settings split into sections.
+- [ ] F. Settings: pick video stream, audio stream, and a default audio language.
+- [ ] G. Downloads view: active downloads + speed + ETA; keep running in background.
+- [ ] H. Sharper menu text (SDF).
+
+---
+
 ## 1. Build / deploy / test (the loop that works)
 
 **Build NATIVELY ON THE DEVICE** (cross-compiling risks a libstdc++/FFmpeg SONAME

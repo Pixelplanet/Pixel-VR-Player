@@ -144,17 +144,19 @@ void App::loadMedia(const std::string& path) {
     // (360 mono 2:1, SBS 4:1, OU 1:1; 180 mono 1:1, SBS 2:1, OU 1:2).
     const int w = media_.width();
     const int h = media_.height();
-    if (!stereoFromName && h > 0 &&
-        proj != VulkanRenderer::ProjectionMode::Flat) {
+    if (!stereoFromName && h > 0) {
         const float ar = static_cast<float>(w) / static_cast<float>(h);
         if (proj == VulkanRenderer::ProjectionMode::Equirect360) {
             stereo = ar >= 3.0f   ? VulkanRenderer::StereoMode::SideBySide
                      : ar <= 1.3f ? VulkanRenderer::StereoMode::TopBottom
                                   : VulkanRenderer::StereoMode::Mono;
-        } else {
+        } else if (proj == VulkanRenderer::ProjectionMode::Equirect180) {
             stereo = ar >= 1.6f   ? VulkanRenderer::StereoMode::SideBySide
                      : ar <= 0.7f ? VulkanRenderer::StereoMode::TopBottom
                                   : VulkanRenderer::StereoMode::Mono;
+        } else {  // Flat: full-frame SBS roughly doubles the width.
+            stereo = ar >= 2.9f ? VulkanRenderer::StereoMode::SideBySide
+                                : VulkanRenderer::StereoMode::Mono;
         }
     }
 

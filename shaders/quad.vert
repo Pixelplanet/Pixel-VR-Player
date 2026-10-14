@@ -8,6 +8,7 @@ layout(push_constant) uniform Push {
     mat4 mvp;
     vec4 conversion;
     vec4 range;
+    vec4 stereo;
 } pc;
 
 layout(location = 0) out vec2 vUV;
