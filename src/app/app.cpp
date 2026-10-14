@@ -9,6 +9,7 @@
 #include <fstream>
 #include <string>
 #include <thread>
+#include <utility>
 #include <vector>
 
 namespace pixelvr {
@@ -122,6 +123,8 @@ bool App::init(const std::string& mediaPath) {
 
 #ifdef PIXELVR_HAVE_MEDIA
 void App::loadMedia(const std::string& path) {
+    const bool sameFile = (path == currentMediaPath_);
+    currentMediaPath_ = path;
     VulkanRenderer::ProjectionMode proj = VulkanRenderer::ProjectionMode::Flat;
     VulkanRenderer::StereoMode stereo = VulkanRenderer::StereoMode::Mono;
     bool stereoFromName = false;
@@ -130,6 +133,11 @@ void App::loadMedia(const std::string& path) {
     renderer_.releaseVideoFrame();  // free the previous clip's dma-buf before reopening
     renderer_.setSphereZoom(1.0f);  // reset the 360/180 viewpoint per clip
     renderer_.setSpherePitch(0.0f);
+    media_.setPreferredAudioLanguage(settings_.audioLanguage());
+    if (!sameFile) {  // a new file starts from automatic track selection
+        media_.setPreferredVideoStream(-1);
+        media_.setPreferredAudioStream(-1);
+    }
     mediaOpen_ = media_.open(path);
     if (!mediaOpen_) {
         // Clear stale video from the previous clip so the renderer shows black
@@ -164,11 +172,28 @@ void App::loadMedia(const std::string& path) {
     renderer_.setStereoMode(stereo);
     settings_.setProjectionMode(static_cast<int>(proj));
     settings_.setStereoMode(static_cast<int>(stereo));
+    // Publish selectable tracks for the settings Audio/Video section.
+    std::vector<std::pair<int, std::string>> vlist, alist;
+    for (const auto& s : media_.videoStreams()) vlist.emplace_back(s.index, s.label);
+    for (const auto& s : media_.audioStreams()) alist.emplace_back(s.index, s.label);
+    settings_.setStreams(vlist, alist, media_.currentVideoStream(),
+                         media_.currentAudioStream());
     static const char* const kProj[] = {"flat", "360", "180"};
     static const char* const kStereo[] = {"mono", "SBS", "TB"};
     PIXELVR_LOG_INFO("Loaded %s (%dx%d, %s/%s)", path.c_str(), w, h,
                      kProj[static_cast<int>(proj)],
                      kStereo[static_cast<int>(stereo)]);
+}
+
+void App::switchTracks(bool byLanguage) {
+    if (currentMediaPath_.empty() || !mediaOpen_) return;
+    const double pos = media_.position();
+    media_.setPreferredAudioLanguage(settings_.audioLanguage());
+    media_.setPreferredVideoStream(settings_.selectedVideoStream());
+    media_.setPreferredAudioStream(byLanguage ? -1
+                                              : settings_.selectedAudioStream());
+    loadMedia(currentMediaPath_);  // same file: keeps the preferences set above
+    if (pos > 0.5 && media_.duration() > 0.0) media_.seek(pos);
 }
 
 void App::updateStats() {
@@ -532,6 +557,14 @@ int App::run() {
                         } else if (act == SettingsMenu::Action::CycleDistance) {
                             renderer_.adjustScreenDistance(settings_.screenDistance() - 3.0f);
                         }
+#ifdef PIXELVR_HAVE_MEDIA
+                        else if (act == SettingsMenu::Action::CycleVideoStream ||
+                                 act == SettingsMenu::Action::CycleAudioStream) {
+                            switchTracks(false);
+                        } else if (act == SettingsMenu::Action::CycleLanguage) {
+                            switchTracks(true);
+                        }
+#endif
                     }
                 }
                 if (in.recenter && in.headValid) {

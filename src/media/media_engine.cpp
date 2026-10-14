@@ -8,6 +8,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -297,6 +298,12 @@ struct MediaEngine::Impl {
     bool decoderDrm = false;                // apply drm_prime opts on reopen
     int captureBuffers = 0;                 // num_capture_buffers for reopen
     std::atomic<uint64_t> decodedCount{0};
+
+    std::vector<MediaEngine::StreamInfo> videoStreamList;
+    std::vector<MediaEngine::StreamInfo> audioStreamList;
+    int preferredVideoStream = -1;  // container index to force, or -1 = auto
+    int preferredAudioStream = -1;
+    std::string preferredLanguage;  // ISO code to auto-pick audio, or empty
 
     int audioStream = -1;
     AVCodecContext* audioCodec = nullptr;
@@ -831,8 +838,37 @@ bool MediaEngine::open(const std::string& path) {
         return false;
     }
 
-    impl_->videoStream =
-        av_find_best_stream(impl_->format, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+    // Enumerate selectable video/audio tracks (with language metadata) so the UI
+    // can offer track + language selection.
+    impl_->videoStreamList.clear();
+    impl_->audioStreamList.clear();
+    for (unsigned si = 0; si < impl_->format->nb_streams; ++si) {
+        AVStream* s = impl_->format->streams[si];
+        const AVCodecParameters* cp = s->codecpar;
+        std::string lang;
+        if (AVDictionaryEntry* e =
+                av_dict_get(s->metadata, "language", nullptr, 0)) {
+            lang = e->value;
+        }
+        const AVCodec* dc = avcodec_find_decoder(cp->codec_id);
+        char buf[160];
+        if (cp->codec_type == AVMEDIA_TYPE_VIDEO) {
+            std::snprintf(buf, sizeof(buf), "%s %dx%d%s%s", dc ? dc->name : "?",
+                          cp->width, cp->height, lang.empty() ? "" : " ",
+                          lang.c_str());
+            impl_->videoStreamList.push_back({static_cast<int>(si), buf, lang});
+        } else if (cp->codec_type == AVMEDIA_TYPE_AUDIO) {
+            std::snprintf(buf, sizeof(buf), "%s %dch%s%s", dc ? dc->name : "?",
+                          cp->ch_layout.nb_channels, lang.empty() ? "" : " ",
+                          lang.c_str());
+            impl_->audioStreamList.push_back({static_cast<int>(si), buf, lang});
+        }
+    }
+
+    const int wantVideo =
+        (impl_->preferredVideoStream >= 0) ? impl_->preferredVideoStream : -1;
+    impl_->videoStream = av_find_best_stream(impl_->format, AVMEDIA_TYPE_VIDEO,
+                                             wantVideo, -1, nullptr, 0);
     if (impl_->videoStream < 0) {
         PIXELVR_LOG_ERROR("MediaEngine: no video stream in %s", path.c_str());
         close();
@@ -944,8 +980,17 @@ bool MediaEngine::open(const std::string& path) {
 
 #ifdef PIXELVR_HAVE_PULSE
     const AVCodec* adec = nullptr;
-    impl_->audioStream =
-        av_find_best_stream(impl_->format, AVMEDIA_TYPE_AUDIO, -1, -1, &adec, 0);
+    int wantAudio = impl_->preferredAudioStream;
+    if (wantAudio < 0 && !impl_->preferredLanguage.empty()) {
+        for (const auto& si : impl_->audioStreamList) {
+            if (si.language == impl_->preferredLanguage) {
+                wantAudio = si.index;
+                break;
+            }
+        }
+    }
+    impl_->audioStream = av_find_best_stream(impl_->format, AVMEDIA_TYPE_AUDIO,
+                                             wantAudio, -1, &adec, 0);
     if (impl_->audioStream >= 0 && adec != nullptr) {
         AVStream* as = impl_->format->streams[impl_->audioStream];
         impl_->audioTimeBase = as->time_base;
@@ -1052,6 +1097,34 @@ void MediaEngine::seekRelative(double delta) {
 
 double MediaEngine::position() const {
     return impl_ ? impl_->masterClock.load() : 0.0;
+}
+
+std::vector<MediaEngine::StreamInfo> MediaEngine::videoStreams() const {
+    return impl_ ? impl_->videoStreamList : std::vector<StreamInfo>{};
+}
+
+std::vector<MediaEngine::StreamInfo> MediaEngine::audioStreams() const {
+    return impl_ ? impl_->audioStreamList : std::vector<StreamInfo>{};
+}
+
+int MediaEngine::currentVideoStream() const {
+    return impl_ ? impl_->videoStream : -1;
+}
+
+int MediaEngine::currentAudioStream() const {
+    return impl_ ? impl_->audioStream : -1;
+}
+
+void MediaEngine::setPreferredVideoStream(int containerIndex) {
+    if (impl_) impl_->preferredVideoStream = containerIndex;
+}
+
+void MediaEngine::setPreferredAudioStream(int containerIndex) {
+    if (impl_) impl_->preferredAudioStream = containerIndex;
+}
+
+void MediaEngine::setPreferredAudioLanguage(const std::string& isoLang) {
+    if (impl_) impl_->preferredLanguage = isoLang;
 }
 
 bool MediaEngine::needsFrameRelease() const {

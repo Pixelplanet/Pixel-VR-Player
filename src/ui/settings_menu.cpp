@@ -17,6 +17,13 @@ const char* kMenuOptions[] = {"B / Y Button", "Menu Button", "Thumbstick Click"}
 const char* kSelectOptions[] = {"Trigger", "A / X Button"};
 const char* kRecenterOptions[] = {"Grip", "Thumbstick Click", "B / Y Button"};
 
+const char* kLangNames[] = {"Auto",    "English",  "German",  "French",
+                           "Spanish", "Japanese", "Italian", "Russian",
+                           "Chinese", "Korean"};
+const char* kLangCodes[] = {"",    "eng", "deu", "fra", "spa",
+                           "jpn", "ita", "rus", "chi", "kor"};
+constexpr int kLangCount = 10;
+
 std::string getConfigPath() {
 #ifdef _WIN32
     const char* appData = std::getenv("APPDATA");
@@ -56,26 +63,75 @@ void SettingsMenu::move(int delta) {
 void SettingsMenu::refresh() {
     rows_.clear();
 
-    const char* projNames[] = {"Flat Screen", "360 Equirectangular", "180 Equirectangular"};
-    const char* stereoNames[] = {"2D Mono", "Side-by-Side (SBS)", "Top-Bottom (OU)"};
+    if (section_ < 0) {  // top-level section list
+        title_ = "Settings";
+        rows_.push_back({"Display & Projection", ">", Action::EnterDisplay});
+        rows_.push_back({"Controls & Bindings", ">", Action::EnterControls});
+        rows_.push_back({"Audio / Video Tracks", ">", Action::EnterStreams});
+        rows_.push_back({"System & Debug", ">", Action::EnterSystem});
+        rows_.push_back({"Recenter Screen View", "[ Trigger to Recenter ]",
+                         Action::RecenterScreen});
+        rows_.push_back({"Close Settings", "[ Back to Player ]", Action::Close});
+        return;
+    }
 
-    std::ostringstream distStream;
-    distStream << std::fixed;
-    distStream.precision(1);
-    distStream << screenDistance_ << " m";
-
-    rows_.push_back({"Play / Pause Binding", kPlayOptions[bindPlayIdx_ % 4], Action::CyclePlayBinding});
-    rows_.push_back({"Menu / Browser Binding", kMenuOptions[bindMenuIdx_ % 3], Action::CycleMenuBinding});
-    rows_.push_back({"Select / Click Binding", kSelectOptions[bindSelectIdx_ % 2], Action::CycleSelectBinding});
-    rows_.push_back({"Recenter View Binding", kRecenterOptions[bindRecenterIdx_ % 3], Action::CycleRecenterBinding});
-    rows_.push_back({"Projection Mode", projNames[projectionMode_ % 3], Action::CycleProjection});
-    rows_.push_back({"Stereo 3D Format", stereoNames[stereoMode_ % 3], Action::CycleStereo});
-    rows_.push_back({"Swap Left/Right Eye", swapEyes_ ? "On" : "Off", Action::ToggleSwapEyes});
-    rows_.push_back({"Controller Models", drawModels_ ? "On" : "Off", Action::ToggleModels});
-    rows_.push_back({"Debug Statistics", showStats_ ? "On" : "Off", Action::ToggleStats});
-    rows_.push_back({"Screen Distance", distStream.str(), Action::CycleDistance});
-    rows_.push_back({"Recenter Screen View", "[ Trigger to Recenter ]", Action::RecenterScreen});
-    rows_.push_back({"Close Settings", "[ Back to Player ]", Action::Close});
+    if (section_ == 0) {
+        title_ = "Display & Projection";
+        const char* projNames[] = {"Flat Screen", "360 Equirectangular",
+                                   "180 Equirectangular"};
+        const char* stereoNames[] = {"2D Mono", "Side-by-Side (SBS)",
+                                     "Top-Bottom (OU)"};
+        std::ostringstream distStream;
+        distStream << std::fixed;
+        distStream.precision(1);
+        distStream << screenDistance_ << " m";
+        rows_.push_back({"Projection Mode", projNames[projectionMode_ % 3],
+                         Action::CycleProjection});
+        rows_.push_back({"Stereo 3D Format", stereoNames[stereoMode_ % 3],
+                         Action::CycleStereo});
+        rows_.push_back({"Swap Left/Right Eye", swapEyes_ ? "On" : "Off",
+                         Action::ToggleSwapEyes});
+        rows_.push_back({"Screen Distance", distStream.str(),
+                         Action::CycleDistance});
+    } else if (section_ == 1) {
+        title_ = "Controls & Bindings";
+        rows_.push_back({"Play / Pause Binding", kPlayOptions[bindPlayIdx_ % 4],
+                         Action::CyclePlayBinding});
+        rows_.push_back({"Menu / Browser Binding", kMenuOptions[bindMenuIdx_ % 3],
+                         Action::CycleMenuBinding});
+        rows_.push_back({"Select / Click Binding",
+                         kSelectOptions[bindSelectIdx_ % 2],
+                         Action::CycleSelectBinding});
+        rows_.push_back({"Recenter View Binding",
+                         kRecenterOptions[bindRecenterIdx_ % 3],
+                         Action::CycleRecenterBinding});
+        rows_.push_back({"Controller Models", drawModels_ ? "On" : "Off",
+                         Action::ToggleModels});
+    } else if (section_ == 2) {
+        title_ = "Audio / Video Tracks";
+        const std::string vLabel =
+            videoStreams_.empty()
+                ? "(none)"
+                : videoStreams_[std::min<std::size_t>(videoSel_,
+                                                      videoStreams_.size() - 1)]
+                      .second;
+        const std::string aLabel =
+            audioStreams_.empty()
+                ? "(none)"
+                : audioStreams_[std::min<std::size_t>(audioSel_,
+                                                      audioStreams_.size() - 1)]
+                      .second;
+        rows_.push_back({"Video Track", vLabel, Action::CycleVideoStream});
+        rows_.push_back({"Audio Track", aLabel, Action::CycleAudioStream});
+        rows_.push_back({"Preferred Audio Language",
+                         kLangNames[audioLangIdx_ % kLangCount],
+                         Action::CycleLanguage});
+    } else {
+        title_ = "System & Debug";
+        rows_.push_back({"Debug Statistics", showStats_ ? "On" : "Off",
+                         Action::ToggleStats});
+    }
+    rows_.push_back({"< Back", "", Action::Back});
 }
 
 SettingsMenu::Action SettingsMenu::activate() {
@@ -84,6 +140,11 @@ SettingsMenu::Action SettingsMenu::activate() {
     }
     const Action act = rows_[selected_].action;
     switch (act) {
+        case Action::EnterDisplay:  section_ = 0; selected_ = 0; refresh(); break;
+        case Action::EnterControls: section_ = 1; selected_ = 0; refresh(); break;
+        case Action::EnterStreams:  section_ = 2; selected_ = 0; refresh(); break;
+        case Action::EnterSystem:   section_ = 3; selected_ = 0; refresh(); break;
+        case Action::Back:          section_ = -1; selected_ = 0; refresh(); break;
         case Action::CyclePlayBinding:
             bindPlayIdx_ = (bindPlayIdx_ + 1) % 4;
             saveConfig();
@@ -135,6 +196,21 @@ SettingsMenu::Action SettingsMenu::activate() {
             saveConfig();
             refresh();
             break;
+        case Action::CycleVideoStream:
+            if (!videoStreams_.empty())
+                videoSel_ = (videoSel_ + 1) % static_cast<int>(videoStreams_.size());
+            refresh();
+            break;
+        case Action::CycleAudioStream:
+            if (!audioStreams_.empty())
+                audioSel_ = (audioSel_ + 1) % static_cast<int>(audioStreams_.size());
+            refresh();
+            break;
+        case Action::CycleLanguage:
+            audioLangIdx_ = (audioLangIdx_ + 1) % kLangCount;
+            saveConfig();
+            refresh();
+            break;
         case Action::RecenterScreen:
             break;
         case Action::Close:
@@ -144,6 +220,37 @@ SettingsMenu::Action SettingsMenu::activate() {
             break;
     }
     return act;
+}
+
+void SettingsMenu::setStreams(
+    const std::vector<std::pair<int, std::string>>& video,
+    const std::vector<std::pair<int, std::string>>& audio, int currentVideo,
+    int currentAudio) {
+    videoStreams_ = video;
+    audioStreams_ = audio;
+    videoSel_ = 0;
+    for (std::size_t i = 0; i < video.size(); ++i)
+        if (video[i].first == currentVideo) videoSel_ = static_cast<int>(i);
+    audioSel_ = 0;
+    for (std::size_t i = 0; i < audio.size(); ++i)
+        if (audio[i].first == currentAudio) audioSel_ = static_cast<int>(i);
+    if (open_) refresh();
+}
+
+int SettingsMenu::selectedVideoStream() const {
+    return (videoSel_ >= 0 && videoSel_ < static_cast<int>(videoStreams_.size()))
+               ? videoStreams_[videoSel_].first
+               : -1;
+}
+
+int SettingsMenu::selectedAudioStream() const {
+    return (audioSel_ >= 0 && audioSel_ < static_cast<int>(audioStreams_.size()))
+               ? audioStreams_[audioSel_].first
+               : -1;
+}
+
+std::string SettingsMenu::audioLanguage() const {
+    return kLangCodes[audioLangIdx_ % kLangCount];
 }
 
 void SettingsMenu::loadConfig() {
@@ -168,6 +275,7 @@ void SettingsMenu::loadConfig() {
         else if (key == "bind_menu") bindMenuIdx_ = std::clamp(std::stoi(val), 0, 2);
         else if (key == "bind_select") bindSelectIdx_ = std::clamp(std::stoi(val), 0, 1);
         else if (key == "bind_recenter") bindRecenterIdx_ = std::clamp(std::stoi(val), 0, 2);
+        else if (key == "audio_lang") audioLangIdx_ = std::clamp(std::stoi(val), 0, kLangCount - 1);
     }
     PIXELVR_LOG_INFO("Loaded settings from %s", path.c_str());
 }
@@ -191,6 +299,7 @@ void SettingsMenu::saveConfig() const {
             file << "bind_menu=" << bindMenuIdx_ << "\n";
             file << "bind_select=" << bindSelectIdx_ << "\n";
             file << "bind_recenter=" << bindRecenterIdx_ << "\n";
+            file << "audio_lang=" << audioLangIdx_ << "\n";
         }
     } catch (const std::exception& e) {
         PIXELVR_LOG_WARN("Could not save settings: %s", e.what());

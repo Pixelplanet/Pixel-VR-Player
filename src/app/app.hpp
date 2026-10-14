@@ -81,7 +81,9 @@ private:
     VideoFrame frame_;
     DrmVideoFrame drmFrame_;
     bool mediaOpen_ = false;
+    std::string currentMediaPath_;  // for reloading on a track/language change
     void loadMedia(const std::string& path);
+    void switchTracks(bool byLanguage);  // reload current media at its position
 #endif
 };
 

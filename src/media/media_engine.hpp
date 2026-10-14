@@ -99,6 +99,22 @@ public:
     bool needsFrameRelease() const;
     void confirmFrameRelease();
 
+    // --- Track selection (multiple audio/video streams + language) --------
+    struct StreamInfo {
+        int index = -1;        // stream index within the container
+        std::string label;     // human-readable (codec + channels/size + lang)
+        std::string language;  // ISO-639 code from metadata, or empty
+    };
+    std::vector<StreamInfo> videoStreams() const;
+    std::vector<StreamInfo> audioStreams() const;
+    int currentVideoStream() const;  // container index in use, or -1
+    int currentAudioStream() const;  // container index in use, or -1
+    // Applied on the next open(): force a container stream index (-1 = auto), or
+    // auto-pick the audio track whose metadata language matches.
+    void setPreferredVideoStream(int containerIndex);
+    void setPreferredAudioStream(int containerIndex);
+    void setPreferredAudioLanguage(const std::string& isoLang);
+
 private:
     struct Impl;
     std::unique_ptr<Impl> impl_;
