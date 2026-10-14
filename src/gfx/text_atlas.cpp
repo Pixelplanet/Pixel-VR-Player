@@ -30,7 +30,7 @@ FontAtlas buildFontAtlas(const char* ttfPath, int pixelHeight) {
     constexpr int kCols = 16;
     const int count = kLast - kFirst + 1;
     const int rows = (count + kCols - 1) / kCols;
-    const int cell = pixelHeight + pixelHeight / 2 + 2;  // generous glyph box
+    const int cell = pixelHeight * 2;  // room for the glyph plus the SDF border
 
     atlas.width = kCols * cell;
     atlas.height = rows * cell;
@@ -39,10 +39,17 @@ FontAtlas buildFontAtlas(const char* ttfPath, int pixelHeight) {
     atlas.ascent = face->size->metrics.ascender / 64.0f;
 
     for (int ch = kFirst; ch <= kLast; ++ch) {
-        if (FT_Load_Char(face, static_cast<FT_ULong>(ch), FT_LOAD_RENDER) != 0) {
+        if (FT_Load_Char(face, static_cast<FT_ULong>(ch), FT_LOAD_DEFAULT) != 0) {
             continue;
         }
         const FT_GlyphSlot g = face->glyph;
+        // Render a signed-distance field (crisp at any VR distance); fall back to
+        // a coverage bitmap if the SDF module is unavailable.
+        if (FT_Render_Glyph(g, FT_RENDER_MODE_SDF) == 0) {
+            atlas.sdf = true;
+        } else {
+            FT_Render_Glyph(g, FT_RENDER_MODE_NORMAL);
+        }
         const int idx = ch - kFirst;
         const int cx = (idx % kCols) * cell;
         const int cy = (idx / kCols) * cell;
@@ -73,8 +80,8 @@ FontAtlas buildFontAtlas(const char* ttfPath, int pixelHeight) {
     FT_Done_Face(face);
     FT_Done_FreeType(lib);
     atlas.ok = true;
-    PIXELVR_LOG_INFO("Font atlas %dx%d from %s (%dpx)", atlas.width, atlas.height,
-                     ttfPath, pixelHeight);
+    PIXELVR_LOG_INFO("Font atlas %dx%d from %s (%dpx%s)", atlas.width, atlas.height,
+                     ttfPath, pixelHeight, atlas.sdf ? " SDF" : "");
 #else
     (void)ttfPath;
     (void)pixelHeight;

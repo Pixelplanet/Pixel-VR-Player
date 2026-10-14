@@ -17,10 +17,11 @@ struct Glyph {
 struct FontAtlas {
     int width = 0;
     int height = 0;
-    std::vector<uint8_t> pixels;  // single channel (coverage)
+    std::vector<uint8_t> pixels;  // single channel (SDF, or coverage fallback)
     Glyph glyphs[128];            // indexed by ASCII code
     float lineHeight = 0.0f;
     float ascent = 0.0f;
+    bool sdf = false;             // true = signed-distance field (crisp at scale)
     bool ok = false;
 };
 
