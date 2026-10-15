@@ -727,6 +727,7 @@ Browser::Result Browser::poll(std::string& playPath) {
     }
     if (dlActive_.load()) {
         const long long b = dlBytes_.load();
+        const long long t = dlTotal_.load();
         const auto now = std::chrono::steady_clock::now();
         if (speedTime_.time_since_epoch().count() == 0) {
             speedTime_ = now;
