@@ -889,7 +889,6 @@ int App::run() {
                             switchTracks(true);
                         }
 #endif
-                    }
                 }
                 if (in.recenter && in.headValid) {
                     renderer_.recenterScreen(in.headPos, in.headForward);
