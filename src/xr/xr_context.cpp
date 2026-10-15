@@ -400,26 +400,57 @@ bool XrContext::createActions() {
              {gripPoseAction_, path("/user/hand/right/input/grip/pose")},
              {gripPoseAction_, path("/user/hand/left/input/grip/pose")}});
 
-    // Native Steam Frame controller: a/b on the right, analog grip = recenter,
-    // trigger = select, thumbstick + poses on both hands. (Left face buttons are
-    // a dpad; full per-button remapping is layered on top of this.)
+    // Native Steam Frame profile: the runtime rejects the whole set if any path
+    // is invalid, so probe each candidate individually, keep the accepted ones,
+    // then suggest the working subset. Rejected paths are logged so the exact
+    // native component paths become known.
     if (frameControllerProfile_) {
-        suggest(
-            "/interaction_profiles/valve/frame_controller",
-            {{selectAction_, path("/user/hand/left/input/trigger/value")},
-             {selectAction_, path("/user/hand/right/input/trigger/value")},
-             {togglePlayAction_, path("/user/hand/right/input/a/click")},
-             {browserAction_, path("/user/hand/right/input/b/click")},
-             {recenterAction_, path("/user/hand/left/input/grip/value")},
-             {recenterAction_, path("/user/hand/right/input/grip/value")},
-             {thumbstickAction_, path("/user/hand/left/input/thumbstick")},
-             {thumbstickAction_, path("/user/hand/right/input/thumbstick")},
-             {thumbstickLeftAction_, path("/user/hand/left/input/thumbstick")},
-             {thumbstickRightAction_, path("/user/hand/right/input/thumbstick")},
-             {aimPoseAction_, path("/user/hand/left/input/aim/pose")},
-             {aimPoseAction_, path("/user/hand/right/input/aim/pose")},
-             {gripPoseAction_, path("/user/hand/left/input/grip/pose")},
-             {gripPoseAction_, path("/user/hand/right/input/grip/pose")}});
+        const XrPath frameProfile =
+            path("/interaction_profiles/valve/frame_controller");
+        std::vector<XrActionSuggestedBinding> frameBinds;
+        auto probe = [&](XrAction act, const char* p) {
+            const XrActionSuggestedBinding one{act, path(p)};
+            XrInteractionProfileSuggestedBinding s{
+                XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+            s.interactionProfile = frameProfile;
+            s.suggestedBindings = &one;
+            s.countSuggestedBindings = 1;
+            if (XR_SUCCEEDED(xrSuggestInteractionProfileBindings(instance_, &s))) {
+                frameBinds.push_back(one);
+            } else {
+                PIXELVR_LOG_WARN("frame path rejected: %s", p);
+            }
+        };
+        probe(aimPoseAction_, "/user/hand/left/input/aim/pose");
+        probe(aimPoseAction_, "/user/hand/right/input/aim/pose");
+        probe(gripPoseAction_, "/user/hand/left/input/grip/pose");
+        probe(gripPoseAction_, "/user/hand/right/input/grip/pose");
+        probe(selectAction_, "/user/hand/left/input/trigger/value");
+        probe(selectAction_, "/user/hand/right/input/trigger/value");
+        probe(recenterAction_, "/user/hand/left/input/squeeze/value");
+        probe(recenterAction_, "/user/hand/right/input/squeeze/value");
+        probe(recenterAction_, "/user/hand/left/input/grip/value");
+        probe(recenterAction_, "/user/hand/right/input/grip/value");
+        probe(togglePlayAction_, "/user/hand/right/input/a/click");
+        probe(browserAction_, "/user/hand/right/input/b/click");
+        probe(browserAction_, "/user/hand/left/input/view/click");
+        probe(thumbstickAction_, "/user/hand/left/input/thumbstick");
+        probe(thumbstickAction_, "/user/hand/right/input/thumbstick");
+        probe(thumbstickLeftAction_, "/user/hand/left/input/thumbstick");
+        probe(thumbstickRightAction_, "/user/hand/right/input/thumbstick");
+        if (!frameBinds.empty()) {
+            XrInteractionProfileSuggestedBinding s{
+                XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+            s.interactionProfile = frameProfile;
+            s.suggestedBindings = frameBinds.data();
+            s.countSuggestedBindings = static_cast<uint32_t>(frameBinds.size());
+            if (XR_SUCCEEDED(xrSuggestInteractionProfileBindings(instance_, &s))) {
+                PIXELVR_LOG_INFO("Steam Frame native profile: %zu bindings accepted",
+                                 frameBinds.size());
+            } else {
+                PIXELVR_LOG_WARN("Steam Frame native profile final suggest failed");
+            }
+        }
     }
 
     XrSessionActionSetsAttachInfo attach{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
