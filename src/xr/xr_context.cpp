@@ -338,6 +338,41 @@ bool XrContext::createActions() {
         }
     }
 
+    // Physical buttons for user-configurable bindings (native Steam Frame paths).
+    static const struct {
+        const char* name;
+        const char* p0;
+        const char* p1;
+    } kBtns[] = {
+        {"btn_a", "/user/hand/right/input/a/click", nullptr},
+        {"btn_b", "/user/hand/right/input/b/click", nullptr},
+        {"btn_x", "/user/hand/right/input/x/click", nullptr},
+        {"btn_y", "/user/hand/right/input/y/click", nullptr},
+        {"btn_menu", "/user/hand/right/input/menu/click", nullptr},
+        {"btn_view", "/user/hand/left/input/view/click", nullptr},
+        {"btn_bumper", "/user/hand/left/input/bumper/click",
+         "/user/hand/right/input/bumper/click"},
+        {"btn_thumb", "/user/hand/left/input/thumbstick/click",
+         "/user/hand/right/input/thumbstick/click"},
+        {"btn_grip", "/user/hand/left/input/squeeze/value",
+         "/user/hand/right/input/squeeze/value"},
+        {"btn_dpad_up", "/user/hand/left/input/dpad_up/click", nullptr},
+        {"btn_dpad_down", "/user/hand/left/input/dpad_down/click", nullptr},
+        {"btn_dpad_left", "/user/hand/left/input/dpad_left/click", nullptr},
+        {"btn_dpad_right", "/user/hand/left/input/dpad_right/click", nullptr},
+    };
+    static_assert(sizeof(kBtns) / sizeof(kBtns[0]) == XrInputState::BtnCount,
+                  "button table must match XrInputState::Button");
+    for (int i = 0; i < XrInputState::BtnCount; ++i) {
+        XrActionCreateInfo bai{XR_TYPE_ACTION_CREATE_INFO};
+        std::strcpy(bai.actionName, kBtns[i].name);
+        std::strcpy(bai.localizedActionName, kBtns[i].name);
+        bai.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
+        if (XR_FAILED(xrCreateAction(actionSet_, &bai, &buttonActions_[i]))) {
+            buttonActions_[i] = XR_NULL_HANDLE;
+        }
+    }
+
     // Suggest bindings per interaction profile. Controls favour the face buttons
     // and trigger over thumbstick clicks: A/X play/pause, B/Y open the menu,
     // trigger selects, grip recenters. Every profile also tracks the aim pose.
@@ -438,6 +473,11 @@ bool XrContext::createActions() {
         probe(thumbstickAction_, "/user/hand/right/input/thumbstick");
         probe(thumbstickLeftAction_, "/user/hand/left/input/thumbstick");
         probe(thumbstickRightAction_, "/user/hand/right/input/thumbstick");
+        for (int i = 0; i < XrInputState::BtnCount; ++i) {
+            if (buttonActions_[i] == XR_NULL_HANDLE) continue;
+            if (kBtns[i].p0) probe(buttonActions_[i], kBtns[i].p0);
+            if (kBtns[i].p1) probe(buttonActions_[i], kBtns[i].p1);
+        }
         if (!frameBinds.empty()) {
             XrInteractionProfileSuggestedBinding s{
                 XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
@@ -502,6 +542,7 @@ void XrContext::syncActions() {
     input_.thumbstickLY = 0.0f;
     input_.thumbstickRX = 0.0f;
     input_.thumbstickRY = 0.0f;
+    for (int i = 0; i < XrInputState::BtnCount; ++i) input_.buttonDown[i] = false;
     if (!actionsReady_) {
         return;
     }
@@ -575,6 +616,18 @@ void XrContext::syncActions() {
     read_stick(thumbstickAction_, input_.thumbstickX, input_.thumbstickY);
     read_stick(thumbstickLeftAction_, input_.thumbstickLX, input_.thumbstickLY);
     read_stick(thumbstickRightAction_, input_.thumbstickRX, input_.thumbstickRY);
+
+    // Physical buttons (rising edge) for user-configurable function bindings.
+    for (int i = 0; i < XrInputState::BtnCount; ++i) {
+        if (buttonActions_[i] == XR_NULL_HANDLE) continue;
+        XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO};
+        gi.action = buttonActions_[i];
+        XrActionStateBoolean st{XR_TYPE_ACTION_STATE_BOOLEAN};
+        if (XR_SUCCEEDED(xrGetActionStateBoolean(session_, &gi, &st))) {
+            input_.buttonDown[i] =
+                st.isActive && st.currentState && st.changedSinceLastSync;
+        }
+    }
 }
 
 void XrContext::handleSessionStateChange(const XrEventDataSessionStateChanged& ev,

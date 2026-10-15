@@ -13,10 +13,13 @@ layout(push_constant) uniform Push {
     mat4 mvp;
     vec4 quat;   // controller orientation (x,y,z,w)
     vec4 color;
+    vec4 eye;     // world-space eye position (xyz)
+    vec4 origin;  // world-space model origin (xyz)
 } pc;
 
 layout(location = 0) out vec3 vNormal;
 layout(location = 1) out vec2 vUV;
+layout(location = 2) out vec3 vView;  // world-space direction to the eye
 
 vec3 rotate_quat(vec4 q, vec3 v) {
     return v + 2.0 * cross(q.xyz, cross(q.xyz, v) + q.w * v);
@@ -25,5 +28,7 @@ vec3 rotate_quat(vec4 q, vec3 v) {
 void main() {
     gl_Position = pc.mvp * vec4(inPos, 1.0);
     vNormal = rotate_quat(pc.quat, inNormal);
+    vec3 worldPos = rotate_quat(pc.quat, inPos) + pc.origin.xyz;
+    vView = pc.eye.xyz - worldPos;
     vUV = inUV;
 }

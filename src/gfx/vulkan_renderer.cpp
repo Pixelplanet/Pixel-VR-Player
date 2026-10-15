@@ -1831,9 +1831,12 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             const Quat q{qp[0], qp[1], qp[2], qp[3]};
             const Vec3 o{op[0], op[1], op[2]};
             const Mat4 mvp = multiply(vpWorld, multiply(translation(o), fromQuat(q)));
-            float push[24];
+            float push[32];
             std::memcpy(push, mvp.m, sizeof(float) * 16);
             push[16] = q.x; push[17] = q.y; push[18] = q.z; push[19] = q.w;
+            push[24] = view.pose.position.x; push[25] = view.pose.position.y;
+            push[26] = view.pose.position.z; push[27] = 0.0f;
+            push[28] = o.x; push[29] = o.y; push[30] = o.z; push[31] = 0.0f;
             const auto drawPart = [&](VkDescriptorSet set, const float col[4],
                                       uint32_t first, uint32_t count) {
                 push[20] = col[0]; push[21] = col[1];
@@ -1844,7 +1847,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 vkCmdPushConstants(commandBuffer_, modelLayout_,
                                    VK_SHADER_STAGE_VERTEX_BIT |
                                        VK_SHADER_STAGE_FRAGMENT_BIT,
-                                   0, sizeof(float) * 24, push);
+                                   0, sizeof(float) * 32, push);
                 vkCmdDrawIndexed(commandBuffer_, count, 1, first, 0, 0);
             };
             if (modelSubmeshes_.empty()) {
@@ -2005,6 +2008,43 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 penX += g.advance * scale;
             }
             lineY -= fontAtlas_.lineHeight * scale * 1.35f;
+        }
+    }
+
+    // Background download status: one head-locked line near the bottom edge, so
+    // an in-progress download stays visible after the browser panel is closed.
+    if (downloadStatusVisible_ && textReady_ && !downloadStatusText_.empty()) {
+        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          textPipeline_);
+        vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
+        const Mat4 mvp = multiply(proj, translation(Vec3{-0.28f, -0.30f, -1.0f}));
+        const float scale = 0.030f / fontAtlas_.lineHeight;
+        const float col[4] = {0.55f, 0.85f, 1.0f, 1.0f};
+        float penX = 0.0f;
+        for (char rawc : downloadStatusText_) {
+            unsigned char c = static_cast<unsigned char>(rawc);
+            if (c < 32 || c > 126) c = '?';
+            const Glyph& g = fontAtlas_.glyphs[c];
+            if (g.width > 0.0f && g.height > 0.0f) {
+                TextPush push{};
+                std::memcpy(push.mvp, mvp.m, sizeof(push.mvp));
+                std::memcpy(push.color, col, sizeof(push.color));
+                push.rect[0] = penX + g.bearingX * scale;
+                push.rect[1] = -(g.height - g.bearingY) * scale;
+                push.rect[2] = g.width * scale;
+                push.rect[3] = g.height * scale;
+                push.uv[0] = g.u0;
+                push.uv[1] = g.v0;
+                push.uv[2] = g.u1;
+                push.uv[3] = g.v1;
+                vkCmdPushConstants(commandBuffer_, textPipelineLayout_,
+                                   VK_SHADER_STAGE_VERTEX_BIT |
+                                       VK_SHADER_STAGE_FRAGMENT_BIT,
+                                   0, sizeof(TextPush), &push);
+                vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
+            }
+            penX += g.advance * scale;
         }
     }
 
@@ -2796,7 +2836,7 @@ bool VulkanRenderer::createModelPipeline() {
 
     VkPushConstantRange pc{};
     pc.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
-    pc.size = sizeof(float) * 24;  // mat4 + vec4 quat + vec4 color
+    pc.size = sizeof(float) * 32;  // mat4 + quat + color + eye + origin
     VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     pli.setLayoutCount = 1;
     pli.pSetLayouts = &modelSetLayout_;

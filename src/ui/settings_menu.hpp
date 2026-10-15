@@ -15,10 +15,10 @@ public:
         EnterStreams,
         EnterSystem,
         Back,
-        CyclePlayBinding,
-        CycleMenuBinding,
-        CycleSelectBinding,
-        CycleRecenterBinding,
+        ListenPlay,
+        ListenMenu,
+        ListenRecenter,
+        CycleDownloadDir,
         CycleProjection,
         CycleStereo,
         ToggleSwapEyes,
@@ -69,6 +69,12 @@ public:
     void setSwapEyes(bool s) { swapEyes_ = s; refresh(); }
     bool drawModels() const { return drawModels_; }
     bool showStats() const { return showStats_; }
+    int bindPlay() const { return bindPlayBtn_; }
+    int bindMenu() const { return bindMenuBtn_; }
+    int bindRecenter() const { return bindRecenterBtn_; }
+    bool isListening() const { return listeningFunc_ >= 0; }
+    void assignListening(int button);
+    std::string downloadDir() const;
     float screenDistance() const { return screenDistance_; }
     void setScreenDistance(float d) { screenDistance_ = d; refresh(); }
 
@@ -100,11 +106,12 @@ private:
     bool showStats_ = false;
     float screenDistance_ = 3.0f;
 
-    // Configurable binding labels
-    int bindPlayIdx_ = 0;      // 0: A/X, 1: Trigger, 2: Grip, 3: ThumbClick
-    int bindMenuIdx_ = 0;      // 0: B/Y, 1: Menu Button, 2: ThumbClick
-    int bindSelectIdx_ = 0;    // 0: Trigger, 1: A/X
-    int bindRecenterIdx_ = 0;  // 0: Grip, 1: ThumbClick, 2: B/Y
+    // Function -> physical button (XrInputState::Button index); press-to-bind.
+    int bindPlayBtn_ = 0;      // default A
+    int bindMenuBtn_ = 1;      // default B
+    int bindRecenterBtn_ = 8;  // default Grip
+    int listeningFunc_ = -1;   // 0=play 1=menu 2=recenter while binding, else -1
+    int downloadDirIdx_ = 0;   // index into the download-destination presets
 
     int section_ = -1;  // -1 = top-level section list; 0..3 = a section's rows
     std::vector<std::pair<int, std::string>> videoStreams_;  // (index, label)

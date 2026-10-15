@@ -402,7 +402,25 @@ int App::run() {
             });
 
             // Apply controller input that renderFrame synced this frame.
-            const XrInputState& in = xr_.input();
+            XrInputState in = xr_.input();
+            // Route the remappable functions from the user's chosen physical
+            // buttons (press-to-bind). While the settings menu is listening, the
+            // next button press is captured as the binding, not a function.
+            if (settings_.isListening()) {
+                for (int b = 0; b < XrInputState::BtnCount; ++b) {
+                    if (in.buttonDown[b]) {
+                        settings_.assignListening(b);
+                        break;
+                    }
+                }
+                in.togglePlay = false;
+                in.browserToggle = false;
+                in.recenter = false;
+            } else {
+                in.togglePlay = in.buttonDown[settings_.bindPlay()];
+                in.browserToggle = in.buttonDown[settings_.bindMenu()];
+                in.recenter = in.buttonDown[settings_.bindRecenter()];
+            }
             bool interacted = false;
             bool browserOpen = false;
             bool settingsOpen = false;
@@ -474,8 +492,11 @@ int App::run() {
                     browser_.open();
                 }
             }
-            if (browser_.isOpen()) {
-                // A finished SMB download auto-plays and closes the browser.
+            // Downloads run on their own thread and keep going while the browser
+            // is closed; poll every frame so completion is handled regardless of
+            // whether the panel is visible.
+            browser_.setDownloadDir(settings_.downloadDir());
+            {
                 std::string donePath;
                 if (browser_.poll(donePath) == Browser::Result::Play &&
                     !donePath.empty()) {
@@ -485,6 +506,8 @@ int App::run() {
                     browser_.setOpen(false);
                 }
             }
+            renderer_.setDownloadStatus(browser_.downloadActive() && !browser_.isOpen(),
+                                        browser_.downloadText());
             // Publish the browser panel first so the pointer can raycast it.
             if (browser_.isOpen()) {
                 std::vector<std::string> rows;

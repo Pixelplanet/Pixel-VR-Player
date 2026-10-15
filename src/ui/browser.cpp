@@ -88,6 +88,7 @@ void sort_and_append(std::vector<Browser::Entry>& out,
 Browser::Browser() {
     const char* home = std::getenv("HOME");
     homeDir_ = (home != nullptr) ? home : "/home/steamos";
+    downloadDir_ = homeDir_ + "/media";
 }
 
 void Browser::open() {
@@ -342,10 +343,11 @@ void Browser::startDownload(const std::string& uri, const std::string& name) {
     dlActive_.store(true);
     status_ = "Downloading " + name + " ...";
     const std::string home = homeDir_;
-    dlThread_ = std::thread([this, uri, name, home]() {
+    const std::string destDir = downloadDir_.empty() ? home + "/media" : downloadDir_;
+    dlThread_ = std::thread([this, uri, name, destDir]() {
         std::error_code ec;
-        std::filesystem::create_directories(home + "/media", ec);
-        const std::string local = home + "/media/" + name;
+        std::filesystem::create_directories(destDir, ec);
+        const std::string local = destDir + "/" + name;
 
         struct stat st{};
         long long total = 0;
@@ -431,15 +433,7 @@ Browser::Result Browser::poll(std::string& playPath) {
         lastInSmb_ = inSmb_;
     }
     if (dlActive_.load()) {
-        const long long b = dlBytes_.load();
-        const long long t = dlTotal_.load();
-        if (t > 0) {
-            status_ = "Downloading " + dlName_ + "  " +
-                      std::to_string(b * 100 / t) + "%";
-        } else {
-            status_ = "Downloading " + dlName_ + "  " +
-                      std::to_string(b / (1024 * 1024)) + " MB";
-        }
+        status_ = downloadText();
         return Result::None;
     }
     if (dlDone_.exchange(false)) {
@@ -452,6 +446,23 @@ Browser::Result Browser::poll(std::string& playPath) {
         status_ = "Download failed: " + dlName_;
     }
     return Result::None;
+}
+
+std::string Browser::downloadText() const {
+    const long long b = dlBytes_.load();
+    const long long t = dlTotal_.load();
+    std::string s = "Downloading " + dlName_ + "  ";
+    if (t > 0) {
+        s += std::to_string(b * 100 / t) + "%";
+        const double mb = static_cast<double>(b) / (1024.0 * 1024.0);
+        const double tot = static_cast<double>(t) / (1024.0 * 1024.0);
+        char buf[64];
+        std::snprintf(buf, sizeof(buf), "  (%.0f / %.0f MB)", mb, tot);
+        s += buf;
+    } else {
+        s += std::to_string(b / (1024 * 1024)) + " MB";
+    }
+    return s;
 }
 
 } // namespace pixelvr

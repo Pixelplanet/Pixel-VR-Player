@@ -58,6 +58,14 @@ public:
     Result poll(std::string& playPath);
     bool isBusy() const { return dlActive_.load() || scanning_.load(); }
 
+    // Directory the "Download" action copies into (default ~/media).
+    void setDownloadDir(const std::string& dir) { downloadDir_ = dir; }
+
+    // Download state for a background status line shown even when the browser is
+    // closed (downloads keep running while the panel is hidden).
+    bool downloadActive() const { return dlActive_.load(); }
+    std::string downloadText() const;
+
     ~Browser();
     Browser(const Browser&) = delete;
     Browser& operator=(const Browser&) = delete;
@@ -104,6 +112,7 @@ private:
     std::atomic<long long> dlTotal_{0};
     std::string dlLocalPath_;
     std::string dlName_;
+    std::string downloadDir_;  // "" => default ~/media
 };
 
 } // namespace pixelvr

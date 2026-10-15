@@ -48,6 +48,14 @@ struct XrInputState {
         float gripOrientation[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     };
     ControllerPose controllers[2];
+
+    // Physical controller buttons (rising edge this frame). The app maps the
+    // play/menu/recenter functions onto these for user-configurable bindings.
+    enum Button {
+        BtnA, BtnB, BtnX, BtnY, BtnMenu, BtnView, BtnBumper, BtnThumb, BtnGrip,
+        BtnDpadUp, BtnDpadDown, BtnDpadLeft, BtnDpadRight, BtnCount
+    };
+    bool buttonDown[BtnCount] = {};
 };
 
 // Owns the OpenXR instance, system, session, reference space, and swapchains,
@@ -147,6 +155,7 @@ private:
     XrAction thumbstickRightAction_ = XR_NULL_HANDLE;
     XrAction aimPoseAction_ = XR_NULL_HANDLE;
     XrAction gripPoseAction_ = XR_NULL_HANDLE;
+    XrAction buttonActions_[XrInputState::BtnCount] = {};
     XrPath handPaths_[2] = {XR_NULL_PATH, XR_NULL_PATH};
     XrSpace aimSpaces_[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
     XrSpace gripSpaces_[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};

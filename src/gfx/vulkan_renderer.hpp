@@ -84,6 +84,13 @@ public:
     // Debug statistics overlay (FPS, decode, system load). Drawn head-locked.
     void setStats(bool visible, const std::vector<std::string>& lines);
 
+    // Background download status line, drawn head-locked near the bottom edge so
+    // downloads are visible after the browser panel is closed.
+    void setDownloadStatus(bool visible, const std::string& text) {
+        downloadStatusVisible_ = visible;
+        downloadStatusText_ = text;
+    }
+
     // Repositions the flat screen in front of the given head pose (headForward is
     // a world-space direction); resets the viewing distance to the default.
     void recenterScreen(const float headPos[3], const float headForward[3]);
@@ -244,6 +251,8 @@ private:
 
     bool statsVisible_ = false;
     std::vector<std::string> statsLines_;
+    bool downloadStatusVisible_ = false;
+    std::string downloadStatusText_;
 
     // Flat-screen placement in the app reference space (updated by recenter and
     // thumbstick distance control).

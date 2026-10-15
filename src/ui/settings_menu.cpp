@@ -12,10 +12,15 @@ namespace pixelvr {
 
 namespace {
 
-const char* kPlayOptions[] = {"A / X Button", "Trigger", "Grip", "Thumbstick Click"};
-const char* kMenuOptions[] = {"B / Y Button", "Menu Button", "Thumbstick Click"};
-const char* kSelectOptions[] = {"Trigger", "A / X Button"};
-const char* kRecenterOptions[] = {"Grip", "Thumbstick Click", "B / Y Button"};
+// Must match XrInputState::Button ordering.
+const char* kButtonNames[] = {"A",          "B",          "X",
+                              "Y",          "Menu",       "View",
+                              "Bumper",     "Thumbstick", "Grip",
+                              "D-Pad Up",   "D-Pad Down", "D-Pad Left",
+                              "D-Pad Right"};
+constexpr int kButtonCount = 13;
+const char* kDownloadDirs[] = {"~/media", "~/Downloads", "~/Videos"};
+constexpr int kDownloadDirCount = 3;
 
 const char* kLangNames[] = {"Auto",    "English",  "German",  "French",
                            "Spanish", "Japanese", "Italian", "Russian",
@@ -95,16 +100,18 @@ void SettingsMenu::refresh() {
                          Action::CycleDistance});
     } else if (section_ == 1) {
         title_ = "Controls & Bindings";
-        rows_.push_back({"Play / Pause Binding", kPlayOptions[bindPlayIdx_ % 4],
-                         Action::CyclePlayBinding});
-        rows_.push_back({"Menu / Browser Binding", kMenuOptions[bindMenuIdx_ % 3],
-                         Action::CycleMenuBinding});
-        rows_.push_back({"Select / Click Binding",
-                         kSelectOptions[bindSelectIdx_ % 2],
-                         Action::CycleSelectBinding});
-        rows_.push_back({"Recenter View Binding",
-                         kRecenterOptions[bindRecenterIdx_ % 3],
-                         Action::CycleRecenterBinding});
+        auto btnLabel = [&](int func, int btn) -> std::string {
+            return listeningFunc_ == func
+                       ? std::string("[ press a button ]")
+                       : std::string(kButtonNames[btn % kButtonCount]);
+        };
+        rows_.push_back({"Play / Pause", btnLabel(0, bindPlayBtn_),
+                         Action::ListenPlay});
+        rows_.push_back({"Open Menu / Browser", btnLabel(1, bindMenuBtn_),
+                         Action::ListenMenu});
+        rows_.push_back({"Recenter View", btnLabel(2, bindRecenterBtn_),
+                         Action::ListenRecenter});
+        rows_.push_back({"Select / Click", "Trigger", Action::None});
         rows_.push_back({"Controller Models", drawModels_ ? "On" : "Off",
                          Action::ToggleModels});
     } else if (section_ == 2) {
@@ -134,6 +141,9 @@ void SettingsMenu::refresh() {
         title_ = "System & Debug";
         rows_.push_back({"Debug Statistics", showStats_ ? "On" : "Off",
                          Action::ToggleStats});
+        rows_.push_back({"Download Folder",
+                         kDownloadDirs[downloadDirIdx_ % kDownloadDirCount],
+                         Action::CycleDownloadDir});
     } else if (section_ == 10) {
         title_ = "Select Video Track";
         for (std::size_t i = 0; i < videoStreams_.size(); ++i) {
@@ -182,23 +192,23 @@ SettingsMenu::Action SettingsMenu::activate() {
             selected_ = 0;
             refresh();
             break;
-        case Action::CyclePlayBinding:
-            bindPlayIdx_ = (bindPlayIdx_ + 1) % 4;
-            saveConfig();
+        case Action::ListenPlay:
+            listeningFunc_ = 0;
+            status_ = "Press any controller button for Play / Pause";
             refresh();
             break;
-        case Action::CycleMenuBinding:
-            bindMenuIdx_ = (bindMenuIdx_ + 1) % 3;
-            saveConfig();
+        case Action::ListenMenu:
+            listeningFunc_ = 1;
+            status_ = "Press any controller button for Open Menu";
             refresh();
             break;
-        case Action::CycleSelectBinding:
-            bindSelectIdx_ = (bindSelectIdx_ + 1) % 2;
-            saveConfig();
+        case Action::ListenRecenter:
+            listeningFunc_ = 2;
+            status_ = "Press any controller button for Recenter";
             refresh();
             break;
-        case Action::CycleRecenterBinding:
-            bindRecenterIdx_ = (bindRecenterIdx_ + 1) % 3;
+        case Action::CycleDownloadDir:
+            downloadDirIdx_ = (downloadDirIdx_ + 1) % kDownloadDirCount;
             saveConfig();
             refresh();
             break;
@@ -294,6 +304,25 @@ std::string SettingsMenu::audioLanguage() const {
     return kLangCodes[audioLangIdx_ % kLangCount];
 }
 
+void SettingsMenu::assignListening(int button) {
+    if (listeningFunc_ < 0) return;
+    const int b = (button < 0 || button >= kButtonCount) ? 0 : button;
+    if (listeningFunc_ == 0) bindPlayBtn_ = b;
+    else if (listeningFunc_ == 1) bindMenuBtn_ = b;
+    else if (listeningFunc_ == 2) bindRecenterBtn_ = b;
+    listeningFunc_ = -1;
+    status_ = "Bound to " + std::string(kButtonNames[b]);
+    saveConfig();
+    refresh();
+}
+
+std::string SettingsMenu::downloadDir() const {
+    const char* home = std::getenv("HOME");
+    const std::string base = home ? home : ".";
+    const char* d = kDownloadDirs[downloadDirIdx_ % kDownloadDirCount];
+    return d[0] == '~' ? base + (d + 1) : std::string(d);
+}
+
 void SettingsMenu::loadConfig() {
     const std::string path = getConfigPath();
     std::ifstream file(path);
@@ -312,10 +341,10 @@ void SettingsMenu::loadConfig() {
         else if (key == "draw_models") drawModels_ = (val == "1");
         else if (key == "show_stats") showStats_ = (val == "1");
         else if (key == "distance") screenDistance_ = std::clamp(std::stof(val), 1.0f, 10.0f);
-        else if (key == "bind_play") bindPlayIdx_ = std::clamp(std::stoi(val), 0, 3);
-        else if (key == "bind_menu") bindMenuIdx_ = std::clamp(std::stoi(val), 0, 2);
-        else if (key == "bind_select") bindSelectIdx_ = std::clamp(std::stoi(val), 0, 1);
-        else if (key == "bind_recenter") bindRecenterIdx_ = std::clamp(std::stoi(val), 0, 2);
+        else if (key == "bind_play_btn") bindPlayBtn_ = std::clamp(std::stoi(val), 0, kButtonCount - 1);
+        else if (key == "bind_menu_btn") bindMenuBtn_ = std::clamp(std::stoi(val), 0, kButtonCount - 1);
+        else if (key == "bind_recenter_btn") bindRecenterBtn_ = std::clamp(std::stoi(val), 0, kButtonCount - 1);
+        else if (key == "download_dir") downloadDirIdx_ = std::clamp(std::stoi(val), 0, kDownloadDirCount - 1);
         else if (key == "audio_lang") audioLangIdx_ = std::clamp(std::stoi(val), 0, kLangCount - 1);
     }
     PIXELVR_LOG_INFO("Loaded settings from %s", path.c_str());
@@ -336,10 +365,10 @@ void SettingsMenu::saveConfig() const {
             file << "draw_models=" << (drawModels_ ? 1 : 0) << "\n";
             file << "show_stats=" << (showStats_ ? 1 : 0) << "\n";
             file << "distance=" << screenDistance_ << "\n";
-            file << "bind_play=" << bindPlayIdx_ << "\n";
-            file << "bind_menu=" << bindMenuIdx_ << "\n";
-            file << "bind_select=" << bindSelectIdx_ << "\n";
-            file << "bind_recenter=" << bindRecenterIdx_ << "\n";
+            file << "bind_play_btn=" << bindPlayBtn_ << "\n";
+            file << "bind_menu_btn=" << bindMenuBtn_ << "\n";
+            file << "bind_recenter_btn=" << bindRecenterBtn_ << "\n";
+            file << "download_dir=" << downloadDirIdx_ << "\n";
             file << "audio_lang=" << audioLangIdx_ << "\n";
         }
     } catch (const std::exception& e) {
