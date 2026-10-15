@@ -40,6 +40,28 @@ V4L2 M2M decoders. For zero-copy dma-buf decoding, build the patched FFmpeg into
 back to the system FFmpeg with CPU colour conversion.
 
 
+## Controls
+
+The laser pointer and the control bar are **separate** input paths, so the bar
+stays usable while a panel is open.
+
+| Input | Action |
+| --- | --- |
+| Thumbstick | Move the highlight in a panel; left/right seeks while playing |
+| **A** | Open the highlighted browser entry — folder navigates, video plays / streams. Outside the browser it is play / pause |
+| **B** | Open or close the file browser; also closes the settings panel and cancels the download dialog |
+| **Trigger** | Laser pointer: click a panel row, or a control-bar button |
+| **Grip** | Recenter the view in front of you |
+
+The control bar has a dedicated **Download** button (arrow) that downloads the
+entry highlighted in the browser — folders ask for confirmation and show their
+size first. The **Downloads** button (list icon) opens the downloads manager,
+where you can pause, resume, stop and clear jobs, then play a finished file or
+open a finished folder.
+
+All button bindings can be changed in **Settings ▸ Controls** (press-to-bind).
+
+
 ## Repository layout
 
 ```
