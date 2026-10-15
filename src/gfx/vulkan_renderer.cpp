@@ -179,6 +179,26 @@ VulkanRenderer::~VulkanRenderer() {
             vkDestroyBuffer(device_, modelIndexBuffer_, nullptr);
         if (modelIndexMemory_ != VK_NULL_HANDLE)
             vkFreeMemory(device_, modelIndexMemory_, nullptr);
+        for (auto& t : modelTextures_) {
+            if (t.view != VK_NULL_HANDLE)
+                vkDestroyImageView(device_, t.view, nullptr);
+            if (t.image != VK_NULL_HANDLE)
+                vkDestroyImage(device_, t.image, nullptr);
+            if (t.memory != VK_NULL_HANDLE)
+                vkFreeMemory(device_, t.memory, nullptr);
+        }
+        if (modelWhite_.view != VK_NULL_HANDLE)
+            vkDestroyImageView(device_, modelWhite_.view, nullptr);
+        if (modelWhite_.image != VK_NULL_HANDLE)
+            vkDestroyImage(device_, modelWhite_.image, nullptr);
+        if (modelWhite_.memory != VK_NULL_HANDLE)
+            vkFreeMemory(device_, modelWhite_.memory, nullptr);
+        if (modelSampler_ != VK_NULL_HANDLE)
+            vkDestroySampler(device_, modelSampler_, nullptr);
+        if (modelDescPool_ != VK_NULL_HANDLE)
+            vkDestroyDescriptorPool(device_, modelDescPool_, nullptr);
+        if (modelSetLayout_ != VK_NULL_HANDLE)
+            vkDestroyDescriptorSetLayout(device_, modelSetLayout_, nullptr);
         if (textPipeline_ != VK_NULL_HANDLE)
             vkDestroyPipeline(device_, textPipeline_, nullptr);
         if (textPipelineLayout_ != VK_NULL_HANDLE)
@@ -1814,12 +1834,27 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             float push[24];
             std::memcpy(push, mvp.m, sizeof(float) * 16);
             push[16] = q.x; push[17] = q.y; push[18] = q.z; push[19] = q.w;
-            push[20] = 0.13f; push[21] = 0.13f; push[22] = 0.16f; push[23] = 1.0f;
-            vkCmdPushConstants(commandBuffer_, modelLayout_,
-                               VK_SHADER_STAGE_VERTEX_BIT |
-                                   VK_SHADER_STAGE_FRAGMENT_BIT,
-                               0, sizeof(float) * 24, push);
-            vkCmdDrawIndexed(commandBuffer_, modelIndexCount_, 1, 0, 0, 0);
+            const auto drawPart = [&](VkDescriptorSet set, const float col[4],
+                                      uint32_t first, uint32_t count) {
+                push[20] = col[0]; push[21] = col[1];
+                push[22] = col[2]; push[23] = col[3];
+                vkCmdBindDescriptorSets(commandBuffer_,
+                                        VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        modelLayout_, 0, 1, &set, 0, nullptr);
+                vkCmdPushConstants(commandBuffer_, modelLayout_,
+                                   VK_SHADER_STAGE_VERTEX_BIT |
+                                       VK_SHADER_STAGE_FRAGMENT_BIT,
+                                   0, sizeof(float) * 24, push);
+                vkCmdDrawIndexed(commandBuffer_, count, 1, first, 0, 0);
+            };
+            if (modelSubmeshes_.empty()) {
+                const float capsuleColor[4] = {0.13f, 0.13f, 0.16f, 1.0f};
+                drawPart(modelWhite_.set, capsuleColor, 0, modelIndexCount_);
+            } else {
+                for (const ModelSubmesh& sm : modelSubmeshes_) {
+                    drawPart(sm.set, sm.color, sm.firstIndex, sm.indexCount);
+                }
+            }
         }
     }
 
@@ -2602,10 +2637,10 @@ void VulkanRenderer::destroyResolveTarget() {
 
 bool VulkanRenderer::createModelPipeline() {
     // Procedural capsule mesh (controller body): two hemispheres joined by a
-    // cylinder, long axis along local Z. Convex, so back-face culling alone
-    // gives correct occlusion without a depth buffer.
+    // cylinder, long axis along local Z. Used until the runtime glTF model is
+    // fetched; UVs are zero (it samples the flat white fallback texture).
     struct V {
-        float px, py, pz, nx, ny, nz;
+        float px, py, pz, nx, ny, nz, u, v;
     };
     std::vector<V> verts;
     std::vector<uint16_t> idx;
@@ -2620,8 +2655,8 @@ bool VulkanRenderer::createModelPipeline() {
         for (int s = 0; s <= seg; ++s) {
             const float a = static_cast<float>(s) / seg * 6.2831853f;
             const float ca = std::cos(a), sa = std::sin(a);
-            verts.push_back(
-                {ca * ringR, sa * ringR, z, ca * cosPhi, sa * cosPhi, sinPhi});
+            verts.push_back({ca * ringR, sa * ringR, z, ca * cosPhi, sa * cosPhi,
+                             sinPhi, 0.0f, 0.0f});
         }
     };
     for (int i = 0; i <= capRings; ++i) {  // bottom hemisphere: phi -90..0
@@ -2714,13 +2749,56 @@ bool VulkanRenderer::createModelPipeline() {
         return false;
     }
 
+    // Descriptor set 0, binding 0: the submesh base-color texture (fragment).
+    VkDescriptorSetLayoutBinding texBind{};
+    texBind.binding = 0;
+    texBind.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    texBind.descriptorCount = 1;
+    texBind.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkDescriptorSetLayoutCreateInfo sl{
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
+    sl.bindingCount = 1;
+    sl.pBindings = &texBind;
+    PIXELVR_VK_CHECK(
+        vkCreateDescriptorSetLayout(device_, &sl, nullptr, &modelSetLayout_));
+
+    VkSamplerCreateInfo smp{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    smp.magFilter = VK_FILTER_LINEAR;
+    smp.minFilter = VK_FILTER_LINEAR;
+    smp.mipmapMode = VK_SAMPLER_MIPMAP_MODE_LINEAR;
+    smp.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    smp.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    smp.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    smp.maxLod = VK_LOD_CLAMP_NONE;
+    PIXELVR_VK_CHECK(vkCreateSampler(device_, &smp, nullptr, &modelSampler_));
+
+    // One descriptor set per part texture plus the white fallback, with headroom
+    // for a model reload.
+    VkDescriptorPoolSize dps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32};
+    VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
+    dpi.maxSets = 32;
+    dpi.poolSizeCount = 1;
+    dpi.pPoolSizes = &dps;
+    PIXELVR_VK_CHECK(
+        vkCreateDescriptorPool(device_, &dpi, nullptr, &modelDescPool_));
+
     VkPushConstantRange pc{};
     pc.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
     pc.size = sizeof(float) * 24;  // mat4 + vec4 quat + vec4 color
     VkPipelineLayoutCreateInfo pli{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    pli.setLayoutCount = 1;
+    pli.pSetLayouts = &modelSetLayout_;
     pli.pushConstantRangeCount = 1;
     pli.pPushConstantRanges = &pc;
     PIXELVR_VK_CHECK(vkCreatePipelineLayout(device_, &pli, nullptr, &modelLayout_));
+
+    // Default 1x1 white texture so the capsule and any untextured submesh sample
+    // white (then tinted by the push-constant color).
+    const uint8_t white[4] = {255, 255, 255, 255};
+    if (!createModelTexture(white, 1, 1, modelWhite_)) {
+        PIXELVR_LOG_WARN("Controller model: white texture failed");
+        return false;
+    }
 
     VkShaderModule vert = loadShaderModule("model.vert.spv");
     VkShaderModule frag = loadShaderModule("model.frag.spv");
@@ -2737,16 +2815,17 @@ bool VulkanRenderer::createModelPipeline() {
     stages[1].module = frag;
     stages[1].pName = "main";
 
-    VkVertexInputBindingDescription vb{0, sizeof(float) * 6,
+    VkVertexInputBindingDescription vb{0, sizeof(float) * 8,
                                        VK_VERTEX_INPUT_RATE_VERTEX};
-    std::array<VkVertexInputAttributeDescription, 2> va{};
+    std::array<VkVertexInputAttributeDescription, 3> va{};
     va[0] = {0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0};
     va[1] = {1, 0, VK_FORMAT_R32G32B32_SFLOAT, sizeof(float) * 3};
+    va[2] = {2, 0, VK_FORMAT_R32G32_SFLOAT, sizeof(float) * 6};
     VkPipelineVertexInputStateCreateInfo vi{
         VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
     vi.vertexBindingDescriptionCount = 1;
     vi.pVertexBindingDescriptions = &vb;
-    vi.vertexAttributeDescriptionCount = 2;
+    vi.vertexAttributeDescriptionCount = 3;
     vi.pVertexAttributeDescriptions = va.data();
 
     VkPipelineInputAssemblyStateCreateInfo ia{
@@ -2816,6 +2895,120 @@ bool VulkanRenderer::createModelPipeline() {
                          static_cast<int>(res));
         return false;
     }
+    return true;
+}
+
+bool VulkanRenderer::createModelTexture(const uint8_t* rgba, int width,
+                                        int height, ModelTexture& out) {
+    const VkDeviceSize size = static_cast<VkDeviceSize>(width) * height * 4;
+    VkBuffer staging = VK_NULL_HANDLE;
+    VkDeviceMemory stagingMem = VK_NULL_HANDLE;
+    VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bi.size = size;
+    bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateBuffer(device_, &bi, nullptr, &staging) != VK_SUCCESS) return false;
+    VkMemoryRequirements rq{};
+    vkGetBufferMemoryRequirements(device_, staging, &rq);
+    VkMemoryAllocateInfo ma{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    ma.allocationSize = rq.size;
+    ma.memoryTypeIndex = findMemoryType(rq.memoryTypeBits,
+                                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    vkAllocateMemory(device_, &ma, nullptr, &stagingMem);
+    vkBindBufferMemory(device_, staging, stagingMem, 0);
+    void* p = nullptr;
+    vkMapMemory(device_, stagingMem, 0, size, 0, &p);
+    std::memcpy(p, rgba, static_cast<std::size_t>(size));
+    vkUnmapMemory(device_, stagingMem);
+
+    VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ii.imageType = VK_IMAGE_TYPE_2D;
+    ii.format = VK_FORMAT_R8G8B8A8_UNORM;  // sampled as stored (display-referred)
+    ii.extent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
+    ii.mipLevels = 1;
+    ii.arrayLayers = 1;
+    ii.samples = VK_SAMPLE_COUNT_1_BIT;
+    ii.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ii.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    ii.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (vkCreateImage(device_, &ii, nullptr, &out.image) != VK_SUCCESS) {
+        vkDestroyBuffer(device_, staging, nullptr);
+        vkFreeMemory(device_, stagingMem, nullptr);
+        return false;
+    }
+    vkGetImageMemoryRequirements(device_, out.image, &rq);
+    ma.allocationSize = rq.size;
+    ma.memoryTypeIndex =
+        findMemoryType(rq.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    vkAllocateMemory(device_, &ma, nullptr, &out.memory);
+    vkBindImageMemory(device_, out.image, out.memory, 0);
+
+    vkResetCommandBuffer(uploadCmd_, 0);
+    VkCommandBufferBeginInfo cb{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    cb.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(uploadCmd_, &cb);
+    VkImageMemoryBarrier toDst{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    toDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    toDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toDst.image = out.image;
+    toDst.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    toDst.srcAccessMask = 0;
+    toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(uploadCmd_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr,
+                         1, &toDst);
+    VkBufferImageCopy region{};
+    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.imageExtent = {static_cast<uint32_t>(width),
+                          static_cast<uint32_t>(height), 1};
+    vkCmdCopyBufferToImage(uploadCmd_, staging, out.image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    VkImageMemoryBarrier toRead = toDst;
+    toRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toRead.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    toRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(uploadCmd_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
+                         nullptr, 1, &toRead);
+    vkEndCommandBuffer(uploadCmd_);
+    VkSubmitInfo su{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    su.commandBufferCount = 1;
+    su.pCommandBuffers = &uploadCmd_;
+    vkQueueSubmit(queue_, 1, &su, uploadFence_);
+    vkWaitForFences(device_, 1, &uploadFence_, VK_TRUE, UINT64_MAX);
+    vkResetFences(device_, 1, &uploadFence_);
+    vkDestroyBuffer(device_, staging, nullptr);
+    vkFreeMemory(device_, stagingMem, nullptr);
+
+    VkImageViewCreateInfo iv{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    iv.image = out.image;
+    iv.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    iv.format = VK_FORMAT_R8G8B8A8_UNORM;
+    iv.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    if (vkCreateImageView(device_, &iv, nullptr, &out.view) != VK_SUCCESS)
+        return false;
+    VkDescriptorSetAllocateInfo da{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+    da.descriptorPool = modelDescPool_;
+    da.descriptorSetCount = 1;
+    da.pSetLayouts = &modelSetLayout_;
+    if (vkAllocateDescriptorSets(device_, &da, &out.set) != VK_SUCCESS)
+        return false;
+    VkDescriptorImageInfo dii{};
+    dii.sampler = modelSampler_;
+    dii.imageView = out.view;
+    dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    w.dstSet = out.set;
+    w.dstBinding = 0;
+    w.descriptorCount = 1;
+    w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w.pImageInfo = &dii;
+    vkUpdateDescriptorSets(device_, 1, &w, 0, nullptr);
     return true;
 }
 
@@ -2902,7 +3095,42 @@ bool VulkanRenderer::loadControllerModel(const std::vector<uint8_t>& glb) {
     }
     modelIndexCount_ = static_cast<uint32_t>(mesh.indices.size());
     modelIndexType_ = VK_INDEX_TYPE_UINT32;
-    PIXELVR_LOG_INFO("Controller model loaded: %u indices", modelIndexCount_);
+
+    // Free any textures from a previous model, then upload this model's base-
+    // color textures (one per part) and build the submesh draw list.
+    for (auto& t : modelTextures_) {
+        if (t.view != VK_NULL_HANDLE) vkDestroyImageView(device_, t.view, nullptr);
+        if (t.image != VK_NULL_HANDLE) vkDestroyImage(device_, t.image, nullptr);
+        if (t.memory != VK_NULL_HANDLE) vkFreeMemory(device_, t.memory, nullptr);
+    }
+    modelTextures_.clear();
+    modelSubmeshes_.clear();
+
+    std::vector<VkDescriptorSet> imageSets(mesh.images.size(), modelWhite_.set);
+    for (std::size_t i = 0; i < mesh.images.size(); ++i) {
+        const GltfImage& img = mesh.images[i];
+        if (img.rgba.empty() || img.width <= 0 || img.height <= 0) continue;
+        ModelTexture t;
+        if (createModelTexture(img.rgba.data(), img.width, img.height, t)) {
+            imageSets[i] = t.set;
+            modelTextures_.push_back(t);
+        }
+    }
+    modelSubmeshes_.reserve(mesh.submeshes.size());
+    for (const GltfSubmesh& s : mesh.submeshes) {
+        ModelSubmesh ms;
+        ms.firstIndex = s.firstIndex;
+        ms.indexCount = s.indexCount;
+        ms.set = (s.image >= 0 &&
+                  static_cast<std::size_t>(s.image) < imageSets.size())
+                     ? imageSets[s.image]
+                     : modelWhite_.set;
+        for (int k = 0; k < 4; ++k) ms.color[k] = s.baseColor[k];
+        modelSubmeshes_.push_back(ms);
+    }
+    PIXELVR_LOG_INFO(
+        "Controller model loaded: %u indices, %zu submeshes, %zu textures",
+        modelIndexCount_, modelSubmeshes_.size(), modelTextures_.size());
     return true;
 }
 

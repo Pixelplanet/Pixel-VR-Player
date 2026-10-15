@@ -79,6 +79,16 @@ if(NOT cgltf_POPULATED)
     FetchContent_Populate(cgltf)
 endif()
 
+# Single-header image decoder (PNG/JPEG) for render-model base-color textures.
+FetchContent_Declare(stb
+    GIT_REPOSITORY https://github.com/nothings/stb.git
+    GIT_TAG master
+    GIT_SHALLOW ON)
+FetchContent_GetProperties(stb)
+if(NOT stb_POPULATED)
+    FetchContent_Populate(stb)
+endif()
+
 # ---------------------------------------------------------------------------
 # Shader compilation (GLSL -> SPIR-V at build time)
 # ---------------------------------------------------------------------------
@@ -118,7 +128,7 @@ add_library(pixelvr_core STATIC
 
 target_include_directories(pixelvr_core PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src")
-target_include_directories(pixelvr_core PRIVATE "${cgltf_SOURCE_DIR}")
+target_include_directories(pixelvr_core PRIVATE "${cgltf_SOURCE_DIR}" "${stb_SOURCE_DIR}")
 
 target_compile_definitions(pixelvr_core PUBLIC
     XR_USE_GRAPHICS_API_VULKAN

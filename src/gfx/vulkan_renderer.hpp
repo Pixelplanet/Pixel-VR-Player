@@ -405,8 +405,10 @@ private:
     int resolveH_ = 0;
     uint32_t resolveMips_ = 1;
 
-    // Lit 3D controller models (procedural capsule geometry, back-face culled so
-    // no depth buffer is required). Drawn at each tracked controller pose.
+    // Lit, textured 3D controller render models. The merged glTF geometry is
+    // split into submeshes by material; each samples its own base-color texture
+    // (which carries the part colors and printed button labels). Drawn with the
+    // depth buffer so near parts occlude far ones.
     VkPipelineLayout modelLayout_ = VK_NULL_HANDLE;
     VkPipeline modelPipeline_ = VK_NULL_HANDLE;
     VkBuffer modelVertexBuffer_ = VK_NULL_HANDLE;
@@ -415,6 +417,27 @@ private:
     VkDeviceMemory modelIndexMemory_ = VK_NULL_HANDLE;
     uint32_t modelIndexCount_ = 0;
     VkIndexType modelIndexType_ = VK_INDEX_TYPE_UINT16;  // UINT32 for glTF models
+
+    struct ModelTexture {
+        VkImage image = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        VkImageView view = VK_NULL_HANDLE;
+        VkDescriptorSet set = VK_NULL_HANDLE;
+    };
+    struct ModelSubmesh {
+        uint32_t firstIndex = 0;
+        uint32_t indexCount = 0;
+        VkDescriptorSet set = VK_NULL_HANDLE;  // base-color texture descriptor
+        float color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    };
+    VkDescriptorSetLayout modelSetLayout_ = VK_NULL_HANDLE;
+    VkDescriptorPool modelDescPool_ = VK_NULL_HANDLE;
+    VkSampler modelSampler_ = VK_NULL_HANDLE;
+    ModelTexture modelWhite_;  // 1x1 white fallback for untextured submeshes
+    std::vector<ModelTexture> modelTextures_;
+    std::vector<ModelSubmesh> modelSubmeshes_;
+    bool createModelTexture(const uint8_t* rgba, int width, int height,
+                            ModelTexture& out);
 };
 
 } // namespace pixelvr
