@@ -68,6 +68,17 @@ FetchContent_Declare(OpenXR
     GIT_SHALLOW ON)
 FetchContent_MakeAvailable(OpenXR)
 
+# Single-header glTF/GLB parser for controller render models. Header-only, so
+# populate it without add_subdirectory (we only need the include path).
+FetchContent_Declare(cgltf
+    GIT_REPOSITORY https://github.com/jkuhlmann/cgltf.git
+    GIT_TAG v1.14
+    GIT_SHALLOW ON)
+FetchContent_GetProperties(cgltf)
+if(NOT cgltf_POPULATED)
+    FetchContent_Populate(cgltf)
+endif()
+
 # ---------------------------------------------------------------------------
 # Shader compilation (GLSL -> SPIR-V at build time)
 # ---------------------------------------------------------------------------
@@ -101,11 +112,13 @@ add_library(pixelvr_core STATIC
     src/xr/xr_context.cpp
     src/xr/render_model.cpp
     src/gfx/vulkan_renderer.cpp
+    src/gfx/gltf_mesh.cpp
     src/ui/settings_menu.cpp
     src/app/app.cpp)
 
 target_include_directories(pixelvr_core PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/src")
+target_include_directories(pixelvr_core PRIVATE "${cgltf_SOURCE_DIR}")
 
 target_compile_definitions(pixelvr_core PUBLIC
     XR_USE_GRAPHICS_API_VULKAN

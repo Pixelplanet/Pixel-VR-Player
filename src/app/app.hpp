@@ -58,6 +58,7 @@ private:
 
     // Place the screen in front of the user on the first valid head pose.
     bool didInitialRecenter_ = false;
+    bool controllerModelLoaded_ = false;  // real glTF model uploaded once
 
     // Debug statistics (recomputed a few times per second).
     std::chrono::steady_clock::time_point lastStatsUpdate_{};

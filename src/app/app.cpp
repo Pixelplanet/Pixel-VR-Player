@@ -369,7 +369,10 @@ int App::run() {
             // Fetch the runtime-provided controller model once a controller is
             // tracked (one-shot; subsequent calls return immediately).
             if (in.controllers[0].active || in.controllers[1].active) {
-                renderModels_.poll();
+                if (renderModels_.poll() && !controllerModelLoaded_) {
+                    controllerModelLoaded_ =
+                        renderer_.loadControllerModel(renderModels_.gltf());
+                }
             }
 
             // Live settings + place the screen in front on first head tracking.

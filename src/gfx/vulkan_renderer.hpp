@@ -118,6 +118,10 @@ public:
     };
     void setControllers(const ControllerVis& left, const ControllerVis& right);
 
+    // Replaces the procedural controller geometry with the runtime-provided glTF
+    // render model (parsed from the GLB bytes). Call once when the asset is ready.
+    bool loadControllerModel(const std::vector<uint8_t>& glb);
+
     enum class UiShape : int {
         RoundedBox = 0,
         Play = 1,
@@ -397,6 +401,7 @@ private:
     VkBuffer modelIndexBuffer_ = VK_NULL_HANDLE;
     VkDeviceMemory modelIndexMemory_ = VK_NULL_HANDLE;
     uint32_t modelIndexCount_ = 0;
+    VkIndexType modelIndexType_ = VK_INDEX_TYPE_UINT16;  // UINT32 for glTF models
 };
 
 } // namespace pixelvr
