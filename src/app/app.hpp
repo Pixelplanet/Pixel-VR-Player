@@ -64,6 +64,12 @@ private:
     bool modelCorrValid_ = false;
     float modelCorrPos_[3] = {0.0f, 0.0f, 0.0f};
     float modelCorrQuat_[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    // Low-pass smoothed model pose per hand (the raw hand pose jitters; the
+    // system's own controller model is visibly smoothed).
+    bool modelSmoothInit_[2] = {false, false};
+    float modelSmoothPos_[2][3] = {{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}};
+    float modelSmoothQuat_[2][4] = {{0.0f, 0.0f, 0.0f, 1.0f},
+                                    {0.0f, 0.0f, 0.0f, 1.0f}};
 
     // Debug statistics (recomputed a few times per second).
     std::chrono::steady_clock::time_point lastStatsUpdate_{};

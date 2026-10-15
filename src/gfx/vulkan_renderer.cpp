@@ -1936,23 +1936,27 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                          controllers_[h].orientation[1],
                          controllers_[h].orientation[2],
                          controllers_[h].orientation[3]};
-            // Start the ray at the controller body (render-model origin) so it
-            // visually connects to the model, not the floating aim point.
-            const Vec3 o = controllers_[h].gripActive
-                               ? Vec3{controllers_[h].gripPosition[0],
-                                      controllers_[h].gripPosition[1],
-                                      controllers_[h].gripPosition[2]}
-                               : Vec3{controllers_[h].position[0],
-                                      controllers_[h].position[1],
-                                      controllers_[h].position[2]};
+            // Emanate the ray from the controller's front (aim pose); with the
+            // model now correctly placed this reads as coming from the tip.
+            const Vec3 o{controllers_[h].position[0], controllers_[h].position[1],
+                         controllers_[h].position[2]};
             Vec3 d = normalize(rotate(q, Vec3{0.0f, 0.0f, -1.0f}));
             float rayLen = 2.5f;
             if (pointerActive_ && pointerHand_ == h) {
-                const Vec3 hit{pointerHit_[0], pointerHit_[1], pointerHit_[2]};
-                d = normalize(hit - o);  // aim the visible ray through the hit
-                rayLen = length(hit - o);
+                rayLen = length(
+                    Vec3{pointerHit_[0], pointerHit_[1], pointerHit_[2]} - o);
             }
-            segment(o + d * 0.09f, o + d * rayLen, 0.005f, rayCol);
+            // Tapered beam: thin at the controller, widening toward the hit, so
+            // it reads as a 3D cone rather than a flat stick.
+            const Vec3 start = o + d * 0.02f;
+            const int kSeg = 12;
+            for (int s = 0; s < kSeg; ++s) {
+                const float t0 = static_cast<float>(s) / kSeg;
+                const float t1 = static_cast<float>(s + 1) / kSeg;
+                const float w = 0.0012f + 0.0040f * t1;
+                segment(start + d * (rayLen * t0), start + d * (rayLen * t1), w,
+                        rayCol);
+            }
         }
         if (pointerActive_) {
             dot(Vec3{pointerHit_[0], pointerHit_[1], pointerHit_[2]}, 0.020f,

@@ -43,6 +43,20 @@ void composePose(const float pa[3], const float qa[4], const float pb[3],
     po[2] = r[2] + pa[2];
 }
 
+// Normalized lerp between quaternions (shortest path) for pose smoothing.
+void quatNlerp(const float a[4], const float b[4], float t, float o[4]) {
+    const float dot = a[0] * b[0] + a[1] * b[1] + a[2] * b[2] + a[3] * b[3];
+    const float s = dot < 0.0f ? -1.0f : 1.0f;
+    float len = 0.0f;
+    for (int i = 0; i < 4; ++i) {
+        o[i] = a[i] * (1.0f - t) + b[i] * s * t;
+        len += o[i] * o[i];
+    }
+    len = std::sqrt(len);
+    if (len > 1e-6f)
+        for (int i = 0; i < 4; ++i) o[i] /= len;
+}
+
 std::string to_lower(std::string s) {
     for (char& c : s) {
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -543,25 +557,6 @@ int App::run() {
                         }
                     }
                 }
-                auto vis = [&](const XrInputState::ControllerPose& c) {
-                    VulkanRenderer::ControllerVis v;
-                    v.active = c.active;
-                    for (int k = 0; k < 3; ++k) v.position[k] = c.position[k];
-                    for (int k = 0; k < 4; ++k) v.orientation[k] = c.orientation[k];
-                    v.gripActive = c.gripActive;
-                    if (c.gripActive && modelCorrValid_) {
-                        // renderPose = compose(grip, correction).
-                        composePose(c.gripPosition, c.gripOrientation,
-                                    modelCorrPos_, modelCorrQuat_, v.gripPosition,
-                                    v.gripOrientation);
-                    } else {
-                        for (int k = 0; k < 3; ++k)
-                            v.gripPosition[k] = c.gripPosition[k];
-                        for (int k = 0; k < 4; ++k)
-                            v.gripOrientation[k] = c.gripOrientation[k];
-                    }
-                    return v;
-                };
                 const bool uiPanelActive = browserOpen || settingsOpen;
                 // Controls (buttons + timeline) show only while a controller is
                 // actively moving; they fade after a few seconds of stillness.
@@ -571,12 +566,48 @@ int App::run() {
                 // Laser + models stay up while a panel is open (to point at it),
                 // otherwise they follow the same activity timeout.
                 const bool showLaser = uiPanelActive || controllersEngaged;
-                auto gated = [&](XrInputState::ControllerPose c) {
-                    if (!showLaser) c.active = false;
-                    return vis(c);
+                // Build each controller's render state: corrected model pose,
+                // low-pass smoothed (the raw hand pose jitters), while the aim
+                // pose stays raw so the laser remains responsive.
+                auto build = [&](int h) {
+                    const XrInputState::ControllerPose& c = in.controllers[h];
+                    VulkanRenderer::ControllerVis v;
+                    v.active = c.active && showLaser;
+                    for (int k = 0; k < 3; ++k) v.position[k] = c.position[k];
+                    for (int k = 0; k < 4; ++k) v.orientation[k] = c.orientation[k];
+                    v.gripActive = c.gripActive;
+                    float gp[3], gq[4];
+                    if (c.gripActive && modelCorrValid_) {
+                        composePose(c.gripPosition, c.gripOrientation,
+                                    modelCorrPos_, modelCorrQuat_, gp, gq);
+                    } else {
+                        for (int k = 0; k < 3; ++k) gp[k] = c.gripPosition[k];
+                        for (int k = 0; k < 4; ++k) gq[k] = c.gripOrientation[k];
+                    }
+                    if (c.gripActive) {
+                        const float a = 0.4f;  // lower = smoother (more lag)
+                        if (!modelSmoothInit_[h]) {
+                            modelSmoothInit_[h] = true;
+                            for (int k = 0; k < 3; ++k) modelSmoothPos_[h][k] = gp[k];
+                            for (int k = 0; k < 4; ++k) modelSmoothQuat_[h][k] = gq[k];
+                        } else {
+                            for (int k = 0; k < 3; ++k)
+                                modelSmoothPos_[h][k] +=
+                                    (gp[k] - modelSmoothPos_[h][k]) * a;
+                            quatNlerp(modelSmoothQuat_[h], gq, a,
+                                      modelSmoothQuat_[h]);
+                        }
+                        for (int k = 0; k < 3; ++k)
+                            v.gripPosition[k] = modelSmoothPos_[h][k];
+                        for (int k = 0; k < 4; ++k)
+                            v.gripOrientation[k] = modelSmoothQuat_[h][k];
+                    } else {
+                        for (int k = 0; k < 3; ++k) v.gripPosition[k] = gp[k];
+                        for (int k = 0; k < 4; ++k) v.gripOrientation[k] = gq[k];
+                    }
+                    return v;
                 };
-                renderer_.setControllers(gated(in.controllers[0]),
-                                         gated(in.controllers[1]));
+                renderer_.setControllers(build(0), build(1));
             }
 
 #ifdef PIXELVR_HAVE_FREETYPE
