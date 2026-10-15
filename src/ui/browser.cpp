@@ -817,18 +817,6 @@ Browser::Result Browser::poll(std::string& playPath) {
         }
     }
     if (dlActive_.load()) {
-        // Auto-pause the child while the browse panel is open, so directory
-        // listing always responds (resumes when the panel closes).
-        const int cpid = dlPid_.load();
-        if (cpid > 0) {
-            if (browseOpen_.load() && !pausedByBrowse_) {
-                kill(cpid, SIGSTOP);
-                pausedByBrowse_ = true;
-            } else if (!browseOpen_.load() && pausedByBrowse_) {
-                kill(cpid, SIGCONT);
-                pausedByBrowse_ = false;
-            }
-        }
         // Progress: a single file from its own size; a folder from completed
         // files plus the in-flight file.
         if (!dlLocalPath_.empty()) {
