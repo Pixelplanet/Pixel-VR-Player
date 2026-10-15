@@ -15,11 +15,14 @@
 #ifdef PIXELVR_HAVE_SMB
 #include <fcntl.h>
 #include <signal.h>
+#include <spawn.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
 #include <libsmbclient.h>
+
+extern char** environ;
 #endif
 
 namespace pixelvr {
@@ -478,8 +481,9 @@ void Browser::startDownloadFile(const std::string& uri, const std::string& local
 #endif
 }
 
-// Forks a child that copies `uri` (smb://) to `local`; returns its pid. Uses
+// Spawns a child that copies `uri` (smb://) to `local`; returns its pid. Uses
 // Samba's own smbclient (same stack as our libsmbclient) so guest access matches.
+// NOTE: posix_spawn (not fork) — forking a multithreaded process can deadlock.
 int Browser::spawnCurl(const std::string& uri, const std::string& local) {
     std::string rest = uri;
     if (rest.rfind("smb://", 0) == 0) rest = rest.substr(6);
@@ -489,13 +493,30 @@ int Browser::spawnCurl(const std::string& uri, const std::string& local) {
     if (s2 == std::string::npos) return -1;
     const std::string service = "//" + rest.substr(0, s2);
     const std::string remote = rest.substr(s2 + 1);
-    const std::string cmd = "get \"" + remote + "\" \"" + local + "\"";
-    const pid_t pid = fork();
-    if (pid < 0) return -1;
-    if (pid == 0) {
-        execlp("smbclient", "smbclient", service.c_str(), "-N", "-c", cmd.c_str(),
-               static_cast<char*>(nullptr));
-        _exit(127);
+    std::string cmd = "get \"";
+    cmd += remote;
+    cmd += "\" \"";
+    cmd += local;
+    cmd += "\"";
+    PIXELVR_LOG_INFO("DL spawn: smbclient %s -N -c '%s'", service.c_str(),
+                     cmd.c_str());
+    char* argv[] = {const_cast<char*>("smbclient"),
+                    const_cast<char*>(service.c_str()),
+                    const_cast<char*>("-N"),
+                    const_cast<char*>("-c"),
+                    const_cast<char*>(cmd.c_str()),
+                    nullptr};
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    // Take stdin from /dev/null so smbclient can never block on an auth prompt.
+    posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
+    pid_t pid = -1;
+    const int rc = posix_spawn(&pid, "/usr/bin/smbclient", &fa, nullptr, argv,
+                               environ);
+    posix_spawn_file_actions_destroy(&fa);
+    if (rc != 0) {
+        PIXELVR_LOG_WARN("DL: posix_spawn failed rc=%d", rc);
+        return -1;
     }
     return static_cast<int>(pid);
 }
