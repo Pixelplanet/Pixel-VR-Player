@@ -749,9 +749,14 @@ int App::run() {
                 }
                 const bool uiPanelActive = browserOpen || settingsOpen ||
                                            downloadsWindow_ || !pendingDl_.empty();
+                // The control bar sits below the panels, so keep it available
+                // while the file browser is open (lets you jump straight to the
+                // Downloads window); only hide it for the modal states.
+                const bool barBlocked = settingsOpen || downloadsWindow_ ||
+                                        !pendingDl_.empty();
                 // Controls (buttons + timeline) show only while a controller is
                 // actively moving; they fade after a few seconds of stillness.
-                renderer_.setControlBar(!uiPanelActive && controllersEngaged &&
+                renderer_.setControlBar(!barBlocked && controllersEngaged &&
                                         (in.controllers[0].active ||
                                          in.controllers[1].active));
                 // Laser + models stay up while a panel is open (to point at it),

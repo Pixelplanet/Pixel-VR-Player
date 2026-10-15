@@ -989,7 +989,7 @@ void VulkanRenderer::updatePointer() {
     downloadsHovered_ = -1;
     downloadsBtnHovered_ = -1;
 
-    const bool controlBar = controlBarVisible_ && !browserVisible_ && !settingsVisible_ &&
+    const bool controlBar = controlBarVisible_ && !settingsVisible_ &&
                             !downloadsVisible_;
     if (!browserVisible_ && !settingsVisible_ && !downloadsVisible_ && !controlBar) {
         return;  // No UI surface to point at.
@@ -1576,7 +1576,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
 
     // Media control bar: point-and-click transport shown below the video
     // (active in both Flat and 360/180 spherical modes).
-    if (controlBarVisible_ && !browserVisible_ && !settingsVisible_ && uiPipeline_ != VK_NULL_HANDLE) {
+    if (controlBarVisible_ && !settingsVisible_ && uiPipeline_ != VK_NULL_HANDLE) {
         vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipeline_);
         const float barBg[4] = {0.03f, 0.035f, 0.05f, 0.88f};
         const float barBorder[4] = {0.20f, 0.25f, 0.38f, 0.70f};
