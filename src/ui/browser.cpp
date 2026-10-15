@@ -478,12 +478,22 @@ void Browser::startDownloadFile(const std::string& uri, const std::string& local
 #endif
 }
 
-// Forks a curl child that copies `uri` (smb://) to `local`; returns its pid.
+// Forks a child that copies `uri` (smb://) to `local`; returns its pid. Uses
+// Samba's own smbclient (same stack as our libsmbclient) so guest access matches.
 int Browser::spawnCurl(const std::string& uri, const std::string& local) {
+    std::string rest = uri;
+    if (rest.rfind("smb://", 0) == 0) rest = rest.substr(6);
+    const std::size_t s1 = rest.find('/');
+    const std::size_t s2 =
+        (s1 == std::string::npos) ? std::string::npos : rest.find('/', s1 + 1);
+    if (s2 == std::string::npos) return -1;
+    const std::string service = "//" + rest.substr(0, s2);
+    const std::string remote = rest.substr(s2 + 1);
+    const std::string cmd = "get \"" + remote + "\" \"" + local + "\"";
     const pid_t pid = fork();
     if (pid < 0) return -1;
     if (pid == 0) {
-        execlp("curl", "curl", "-sS", "--fail", "-o", local.c_str(), uri.c_str(),
+        execlp("smbclient", "smbclient", service.c_str(), "-N", "-c", cmd.c_str(),
                static_cast<char*>(nullptr));
         _exit(127);
     }

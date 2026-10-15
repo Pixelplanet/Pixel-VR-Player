@@ -209,9 +209,10 @@ public:
 
     // Badge on the control-bar Downloads button: a count while downloading, or a
     // green tick once all downloads are done (drives the on-button indicator).
-    void setDownloadsBadge(bool active, bool allDone) {
+    void setDownloadsBadge(bool active, bool allDone, bool failed = false) {
         downloadsActive_ = active;
         downloadsAllDone_ = allDone;
+        downloadsFailed_ = failed;
     }
 
     // Settings overlay panel (re-uses panel & pointer interaction)
@@ -301,6 +302,7 @@ private:
     std::string downloadsStatus_;
     bool downloadsActive_ = false;
     bool downloadsAllDone_ = false;
+    bool downloadsFailed_ = false;
     bool downloadsModal_ = false;
     std::vector<std::string> downloadsButtons_;
     int downloadsBtnHovered_ = -1;

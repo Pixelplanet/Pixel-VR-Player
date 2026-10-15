@@ -542,12 +542,17 @@ int App::run() {
                 dlWasActive_ = false;
             }
             const bool dlRecent = browser_.downloadActive() || nowT < downloadToast_;
+            bool dlFailed = false;
+            for (const auto& j : browser_.downloadJobs()) {
+                if (j.state == 2) dlFailed = true;
+            }
             // No head-locked download text (it followed the view); progress lives
             // in the Downloads window and the control-bar badge.
             renderer_.setDownloadStatus(false, "");
             renderer_.setDownloadsBadge(browser_.downloadActive(),
                                         !browser_.downloadActive() &&
-                                            browser_.hasDownloads() && dlRecent);
+                                            browser_.hasDownloads() && dlRecent,
+                                        !browser_.downloadActive() && dlFailed);
             // Downloads window: job list plus action buttons at the bottom.
             std::vector<std::string> drows;
             std::vector<std::string> dbtns;

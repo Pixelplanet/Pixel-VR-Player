@@ -52,7 +52,7 @@ struct TextPush {
 // and the pointer raycast so the cursor and highlight line up exactly.
 constexpr float kPanelW = 1.0f;
 constexpr float kPanelTop = 0.8f;
-constexpr float kRowH = 0.09f;
+constexpr float kRowH = 0.105f;
 // Downloads-window action buttons (content-sized, along the bottom edge).
 constexpr float kDlBtnH = 0.11f;
 constexpr float kDlBtnGap = 0.05f;
@@ -1617,10 +1617,17 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             // Downloads button indicator: green tick when all done, or a pulsing
             // blue dot while downloads are active.
             if (static_cast<CtrlButton>(b) == CtrlButton::Downloads &&
-                (downloadsActive_ || downloadsAllDone_)) {
+                (downloadsActive_ || downloadsAllDone_ || downloadsFailed_)) {
                 const float badgeX = bx + kBtnHalfW * 0.55f;
                 const float badgeY = kBarY + kBtnHalfH * 0.55f;
-                if (downloadsAllDone_) {
+                if (downloadsFailed_) {
+                    const float failBg[4] = {0.80f, 0.15f, 0.15f, 1.0f};
+                    drawUiElement(vpPanel, badgeX, badgeY, kBtnHalfH * 0.55f,
+                                  kBtnHalfH * 0.55f, UiShape::RoundedBox, failBg,
+                                  0.50f, 0.0f, nullptr);
+                    drawUiElement(vpPanel, badgeX, badgeY, kBtnHalfH * 0.34f,
+                                  kBtnHalfH * 0.34f, UiShape::Close, iconCol);
+                } else if (downloadsAllDone_) {
                     const float tickBg[4] = {0.10f, 0.65f, 0.25f, 1.0f};
                     drawUiElement(vpPanel, badgeX, badgeY, kBtnHalfH * 0.55f,
                                   kBtnHalfH * 0.55f, UiShape::RoundedBox, tickBg,
