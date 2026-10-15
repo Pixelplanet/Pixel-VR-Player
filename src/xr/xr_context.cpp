@@ -84,6 +84,19 @@ bool XrContext::createInstanceAndSystem(const char* appName) {
         PIXELVR_LOG_INFO("Render-model extensions enabled");
     }
 
+    // Native Steam Frame controller profile (/interaction_profiles/valve/
+    // frame_controller): exposes a/b/x/y, dpad, view, bumper, analog grip, etc.,
+    // instead of SteamVR's lossy auto-remap onto the Index/Touch profiles.
+    static constexpr char kFrameControllerExt[] =
+        "XR_VALVE_frame_controller_interaction";
+    if (has_ext(kFrameControllerExt)) {
+        enabledExts.push_back(kFrameControllerExt);
+        frameControllerProfile_ = true;
+        PIXELVR_LOG_INFO("Steam Frame controller profile extension enabled");
+    } else {
+        PIXELVR_LOG_WARN("XR_VALVE_frame_controller_interaction unavailable");
+    }
+
     XrInstanceCreateInfo createInfo{XR_TYPE_INSTANCE_CREATE_INFO};
     std::strncpy(createInfo.applicationInfo.applicationName, appName,
                  XR_MAX_APPLICATION_NAME_SIZE - 1);
@@ -387,6 +400,28 @@ bool XrContext::createActions() {
              {gripPoseAction_, path("/user/hand/right/input/grip/pose")},
              {gripPoseAction_, path("/user/hand/left/input/grip/pose")}});
 
+    // Native Steam Frame controller: a/b on the right, analog grip = recenter,
+    // trigger = select, thumbstick + poses on both hands. (Left face buttons are
+    // a dpad; full per-button remapping is layered on top of this.)
+    if (frameControllerProfile_) {
+        suggest(
+            "/interaction_profiles/valve/frame_controller",
+            {{selectAction_, path("/user/hand/left/input/trigger/value")},
+             {selectAction_, path("/user/hand/right/input/trigger/value")},
+             {togglePlayAction_, path("/user/hand/right/input/a/click")},
+             {browserAction_, path("/user/hand/right/input/b/click")},
+             {recenterAction_, path("/user/hand/left/input/grip/value")},
+             {recenterAction_, path("/user/hand/right/input/grip/value")},
+             {thumbstickAction_, path("/user/hand/left/input/thumbstick")},
+             {thumbstickAction_, path("/user/hand/right/input/thumbstick")},
+             {thumbstickLeftAction_, path("/user/hand/left/input/thumbstick")},
+             {thumbstickRightAction_, path("/user/hand/right/input/thumbstick")},
+             {aimPoseAction_, path("/user/hand/left/input/aim/pose")},
+             {aimPoseAction_, path("/user/hand/right/input/aim/pose")},
+             {gripPoseAction_, path("/user/hand/left/input/grip/pose")},
+             {gripPoseAction_, path("/user/hand/right/input/grip/pose")}});
+    }
+
     XrSessionActionSetsAttachInfo attach{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
     attach.countActionSets = 1;
     attach.actionSets = &actionSet_;
@@ -446,6 +481,29 @@ void XrContext::syncActions() {
     sync.activeActionSets = &active;
     if (XR_FAILED(xrSyncActions(session_, &sync))) {
         return;  // Not focused yet: no input this frame.
+    }
+
+    // One-shot: log which interaction profile the runtime actually bound, so we
+    // can confirm the native Steam Frame profile is active (vs a remap).
+    if (!profileLogged_) {
+        bool allBound = true;
+        for (int h = 0; h < 2; ++h) {
+            XrInteractionProfileState ips{XR_TYPE_INTERACTION_PROFILE_STATE};
+            if (XR_SUCCEEDED(xrGetCurrentInteractionProfile(
+                    session_, handPaths_[h], &ips)) &&
+                ips.interactionProfile != XR_NULL_PATH) {
+                char buf[XR_MAX_PATH_LENGTH];
+                uint32_t len = 0;
+                if (XR_SUCCEEDED(xrPathToString(instance_, ips.interactionProfile,
+                                                sizeof(buf), &len, buf))) {
+                    PIXELVR_LOG_INFO("Active interaction profile [%s]: %s",
+                                     h == 0 ? "left" : "right", buf);
+                }
+            } else {
+                allBound = false;  // retry next frame until the runtime binds it
+            }
+        }
+        profileLogged_ = allBound;
     }
 
     auto rising_edge = [&](XrAction a) -> bool {

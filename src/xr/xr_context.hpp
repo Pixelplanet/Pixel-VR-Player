@@ -129,6 +129,8 @@ private:
     XrSessionState sessionState_ = XR_SESSION_STATE_UNKNOWN;
     bool sessionRunning_ = false;
     bool renderModelEnabled_ = false;
+    bool frameControllerProfile_ = false;  // native Steam Frame profile bound
+    bool profileLogged_ = false;
 
     std::vector<XrViewConfigurationView> configViews_;
     std::vector<ViewSwapchain> swapchains_;
