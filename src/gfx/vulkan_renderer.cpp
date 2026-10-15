@@ -1579,16 +1579,16 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 const float badgeY = kBarY + kBtnHalfH * 0.55f;
                 if (downloadsAllDone_) {
                     const float tickBg[4] = {0.10f, 0.65f, 0.25f, 1.0f};
-                    drawUiElement(vpPanel, badgeX, badgeY, kBtnHalfH * 0.36f,
-                                  kBtnHalfH * 0.36f, UiShape::RoundedBox, tickBg,
+                    drawUiElement(vpPanel, badgeX, badgeY, kBtnHalfH * 0.62f,
+                                  kBtnHalfH * 0.62f, UiShape::RoundedBox, tickBg,
                                   0.50f, 0.0f, nullptr);
-                    drawUiElement(vpPanel, badgeX, badgeY, kBtnHalfH * 0.24f,
-                                  kBtnHalfH * 0.24f, UiShape::Checkmark,
+                    drawUiElement(vpPanel, badgeX, badgeY, kBtnHalfH * 0.44f,
+                                  kBtnHalfH * 0.44f, UiShape::Checkmark,
                                   iconCol);
                 } else {
                     const float dotCol[4] = {0.30f, 0.75f, 1.0f, 1.0f};
-                    drawUiElement(vpPanel, badgeX, badgeY, kBtnHalfH * 0.22f,
-                                  kBtnHalfH * 0.22f, UiShape::Cursor, dotCol);
+                    drawUiElement(vpPanel, badgeX, badgeY, kBtnHalfH * 0.34f,
+                                  kBtnHalfH * 0.34f, UiShape::Cursor, dotCol);
                 }
             }
         }
@@ -1956,6 +1956,10 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                     !modelNodeStates_.empty() && !modelNodeStates_[0].name.empty();
                 for (std::size_t si = 0; si < modelSubmeshes_.size(); ++si) {
                     const ModelSubmesh& sm = modelSubmeshes_[si];
+                    // The 'status' display node maps the whole atlas to a tiny
+                    // quad (the runtime normally textures it); skip it so it does
+                    // not render as a tiny sheet of labels on the body.
+                    if (sm.nodeName == "status") continue;
                     const float* np = identityPos;
                     const float* nq = identityQuat;
                     if (haveNames) {

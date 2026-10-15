@@ -533,10 +533,9 @@ int App::run() {
                 downloadToast_ = nowT + std::chrono::seconds(10);
             }
             const bool dlRecent = browser_.downloadActive() || nowT < downloadToast_;
-            // Head-locked line only while a download is actually running; the
-            // completion is shown by the Downloads window / green button badge.
-            renderer_.setDownloadStatus(!browser_.isOpen() && browser_.downloadActive(),
-                                        browser_.downloadText());
+            // No head-locked download text (it followed the view); progress lives
+            // in the Downloads window and the control-bar badge.
+            renderer_.setDownloadStatus(false, "");
             renderer_.setDownloadsBadge(browser_.downloadActive(),
                                         !browser_.downloadActive() &&
                                             browser_.hasDownloads() && dlRecent);

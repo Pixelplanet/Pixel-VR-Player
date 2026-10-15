@@ -499,6 +499,48 @@ void Browser::startDownloadFolder(const std::string& uri,
         long long got = 0;
         long long count = 0;
         bool ok = true;
+        // Pre-walk the tree to total the size, so % progress and ETA can be shown.
+        long long total = 0;
+        std::function<void(const std::string&)> sumSizes =
+            [&](const std::string& src) {
+                int d = -1;
+                {
+                    std::lock_guard<std::mutex> smb(smbGlobalLock());
+                    d = smbc_opendir(src.c_str());
+                }
+                if (d < 0) return;
+                for (;;) {
+                    std::string nm;
+                    int typ = 0;
+                    {
+                        std::lock_guard<std::mutex> smb(smbGlobalLock());
+                        struct smbc_dirent* de = smbc_readdir(d);
+                        if (de == nullptr) break;
+                        nm = de->name;
+                        typ = de->smbc_type;
+                    }
+                    if (nm.empty() || nm == "." || nm == "..") continue;
+                    std::string s = src;
+                    if (!s.empty() && s.back() != '/') s += '/';
+                    s += nm;
+                    if (typ == SMBC_DIR) {
+                        sumSizes(s);
+                    } else {
+                        struct stat st{};
+                        {
+                            std::lock_guard<std::mutex> smb(smbGlobalLock());
+                            smbc_stat(s.c_str(), &st);
+                        }
+                        total += static_cast<long long>(st.st_size);
+                    }
+                }
+                {
+                    std::lock_guard<std::mutex> smb(smbGlobalLock());
+                    smbc_closedir(d);
+                }
+            };
+        sumSizes(uri);
+        dlTotal_.store(total);
         // Depth-first copy of an SMB folder. Recomputes a running byte total so
         // the overlay can show progress as files complete.
         std::function<void(const std::string&, const std::string&)> copyDir;
@@ -551,20 +593,21 @@ void Browser::startDownloadFolder(const std::string& uri,
                 return;
             }
             for (;;) {
-                struct smbc_dirent* de = nullptr;
+                std::string nm;
+                int typ = 0;
                 {
                     std::lock_guard<std::mutex> smb(smbGlobalLock());
-                    de = smbc_readdir(d);
+                    struct smbc_dirent* de = smbc_readdir(d);
+                    if (de == nullptr) break;
+                    nm = de->name;
+                    typ = de->smbc_type;
                 }
-                if (de == nullptr) break;
-                const std::string nm = de->name;
                 if (nm.empty() || nm == "." || nm == "..") continue;
                 std::string s = src;
                 if (!s.empty() && s.back() != '/') s += '/';
                 s += nm;
                 const std::string t = dst + "/" + nm;
-                const bool isDirEnt = (de->smbc_type == SMBC_DIR);
-                if (isDirEnt) {
+                if (typ == SMBC_DIR) {
                     copyDir(s, t);
                 } else {
                     copyFile(s, t);
@@ -640,11 +683,16 @@ std::string Browser::downloadText() const {
     const long long b = dlBytes_.load();
     const long long t = dlTotal_.load();
     std::string n = dlName_;
-    if (n.size() > 26) n = n.substr(0, 25) + "~";
-    std::string s = "Downloading " + n + "  ";
-    char buf[128];
+    if (n.size() > 24) n = n.substr(0, 23) + "~";
+    std::string s = n + "  ";
+    char buf[160];
+    const double mb = static_cast<double>(b) / (1024.0 * 1024.0);
     if (t > 0) {
-        std::snprintf(buf, sizeof(buf), "%lld%%", b * 100 / t);
+        std::snprintf(buf, sizeof(buf), "%lld%%  %.0f/%.0f MB", b * 100 / t, mb,
+                      static_cast<double>(t) / (1024.0 * 1024.0));
+        s += buf;
+    } else {
+        std::snprintf(buf, sizeof(buf), "%.0f MB", mb);
         s += buf;
     }
     if (dlSpeed_ > 1.0) {
@@ -652,11 +700,10 @@ std::string Browser::downloadText() const {
                       dlSpeed_ / (1024.0 * 1024.0));
         s += buf;
         if (t > 0) {
-            double eta = (t - b) / dlSpeed_;
+            double eta = static_cast<double>(t - b) / dlSpeed_;
             if (eta < 0.0) eta = 0.0;
             const int secs = static_cast<int>(eta);
-            std::snprintf(buf, sizeof(buf), "  ETA %d:%02d", secs / 60,
-                          secs % 60);
+            std::snprintf(buf, sizeof(buf), "  ETA %d:%02d", secs / 60, secs % 60);
             s += buf;
         }
     }
