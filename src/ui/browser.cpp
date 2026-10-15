@@ -350,6 +350,8 @@ void Browser::startDownload(const std::string& uri, const std::string& name) {
     const std::string destDir = downloadDir_.empty() ? home + "/media" : downloadDir_;
     PIXELVR_LOG_INFO("Download start: %s -> %s", uri.c_str(),
                      (destDir + "/" + name).c_str());
+    dlRows_.push_back(name + "  0%");
+    if (dlRows_.size() > 8) dlRows_.erase(dlRows_.begin());
     dlThread_ = std::thread([this, uri, name, destDir]() {
         std::error_code ec;
         std::filesystem::create_directories(destDir, ec);
@@ -445,6 +447,7 @@ Browser::Result Browser::poll(std::string& playPath) {
     }
     if (dlActive_.load()) {
         status_ = downloadText();
+        if (!dlRows_.empty()) dlRows_.back() = status_;
         return Result::None;
     }
     if (dlDone_.exchange(false)) {
@@ -452,9 +455,11 @@ Browser::Result Browser::poll(std::string& playPath) {
         if (dlOk_.load()) {
             playPath = dlLocalPath_;
             status_ = "Playing " + dlName_;
+            if (!dlRows_.empty()) dlRows_.back() = "Done: " + dlName_;
             return Result::Play;
         }
         status_ = "Download failed: " + dlName_;
+        if (!dlRows_.empty()) dlRows_.back() = "Failed: " + dlName_;
     }
     return Result::None;
 }

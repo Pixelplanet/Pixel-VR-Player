@@ -66,6 +66,10 @@ public:
     bool downloadActive() const { return dlActive_.load(); }
     std::string downloadText() const;
 
+    // Recent download jobs ("name 42%", "Done: name", ...), oldest first.
+    bool hasDownloads() const { return !dlRows_.empty(); }
+    const std::vector<std::string>& downloadRows() const { return dlRows_; }
+
     ~Browser();
     Browser(const Browser&) = delete;
     Browser& operator=(const Browser&) = delete;
@@ -113,6 +117,7 @@ private:
     std::string dlLocalPath_;
     std::string dlName_;
     std::string downloadDir_;  // "" => default ~/media
+    std::vector<std::string> dlRows_;  // recent job lines for the overlay
 };
 
 } // namespace pixelvr

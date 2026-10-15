@@ -115,6 +115,17 @@ public:
                     const std::vector<std::string>& rows, int selected,
                     const std::string& status);
 
+    // Downloads overlay: a simple list of download jobs plus a status line,
+    // shown while downloads run (and briefly after) with the browser closed.
+    void setDownloads(bool visible, const std::string& title,
+                      const std::vector<std::string>& rows,
+                      const std::string& status) {
+        downloadsVisible_ = visible;
+        downloadsTitle_ = title;
+        downloadsRows_ = rows;
+        downloadsStatus_ = status;
+    }
+
     // Tracked controllers: aim poses used to draw pointer rays, controller
     // models and the UI cursor. Index 0 = left, 1 = right. Call once per frame,
     // after setBrowser, so the pointer can be raycast against the current panel.
@@ -263,6 +274,12 @@ private:
     std::vector<std::string> statsLines_;
     bool downloadStatusVisible_ = false;
     std::string downloadStatusText_;
+
+    // Downloads overlay (list of jobs).
+    bool downloadsVisible_ = false;
+    std::string downloadsTitle_;
+    std::vector<std::string> downloadsRows_;
+    std::string downloadsStatus_;
 
     // Flat-screen placement in the app reference space (updated by recenter and
     // thumbstick distance control).

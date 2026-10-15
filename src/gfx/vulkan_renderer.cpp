@@ -1809,6 +1809,63 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         }
     }
 
+    // Downloads overlay: a compact list of download jobs with a status line.
+    if (downloadsVisible_ && textReady_) {
+        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipeline_);
+        const float panelW = kPanelW;
+        const float panelTop = kPanelTop;
+        const float rowH = kRowH;
+        const float panelBg[4] = {0.02f, 0.03f, 0.05f, 0.94f};
+        const float panelBorder[4] = {0.25f, 0.45f, 0.65f, 0.85f};
+        drawUiElement(vpPanel, 0.0f, 0.0f, panelW, panelTop, UiShape::RoundedBox,
+                      panelBg, 0.05f, 0.015f, panelBorder);
+        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline_);
+        vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
+        const float sc = (rowH * 0.62f) / fontAtlas_.lineHeight;
+        const float white2[4] = {0.96f, 0.96f, 0.96f, 1.0f};
+        const float dim[4] = {0.55f, 0.7f, 0.9f, 1.0f};
+        const float cyan[4] = {0.35f, 0.75f, 1.0f, 1.0f};
+        auto drawString = [&](float x, float baseline, float scale, const float col[4],
+                              const std::string& s) {
+            float penX = x;
+            for (char rawc : s) {
+                unsigned char c = static_cast<unsigned char>(rawc);
+                if (c < 32 || c > 126) c = '?';
+                const Glyph& g = fontAtlas_.glyphs[c];
+                if (g.width > 0.0f && g.height > 0.0f) {
+                    TextPush push{};
+                    std::memcpy(push.mvp, vpPanel.m, sizeof(push.mvp));
+                    std::memcpy(push.color, col, sizeof(push.color));
+                    push.rect[0] = penX + g.bearingX * scale;
+                    push.rect[1] = baseline - (g.height - g.bearingY) * scale;
+                    push.rect[2] = g.width * scale;
+                    push.rect[3] = g.height * scale;
+                    push.uv[0] = g.u0;
+                    push.uv[1] = g.v0;
+                    push.uv[2] = g.u1;
+                    push.uv[3] = g.v1;
+                    vkCmdPushConstants(commandBuffer_, textPipelineLayout_,
+                                       VK_SHADER_STAGE_VERTEX_BIT |
+                                           VK_SHADER_STAGE_FRAGMENT_BIT,
+                                       0, sizeof(TextPush), &push);
+                    vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
+                }
+                penX += g.advance * scale;
+            }
+        };
+        drawString(-panelW + 0.04f, panelTop - 0.1f, sc, cyan,
+                   downloadsTitle_.substr(0, 42));
+        for (std::size_t i = 0; i < downloadsRows_.size(); ++i) {
+            const float ry = panelTop - 0.2f - static_cast<float>(i) * rowH;
+            drawString(-panelW + 0.05f, ry, sc, white2, downloadsRows_[i].substr(0, 46));
+        }
+        if (!downloadsStatus_.empty()) {
+            drawString(-panelW + 0.04f, -panelTop + 0.05f, sc * 0.82f, dim,
+                       downloadsStatus_.substr(0, 52));
+        }
+    }
+
     // Tracked controller 3D models (lit capsule), drawn before the laser/cursor.
     if (drawModels_ &&
         (controllers_[0].active || controllers_[1].active) &&
@@ -1881,27 +1938,26 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                     if (sm.nodeName == "status") continue;  // full-atlas screen node
                     const float* np = identityPos;
                     const float* nq = identityQuat;
-                    bool visible = true;
-                    bool matched = false;
                     if (haveNames) {
                         for (const NodeStateVis& ns : modelNodeStates_) {
                             if (ns.name == sm.nodeName) {
                                 np = ns.pos;
                                 nq = ns.quat;
-                                visible = ns.visible;
-                                matched = true;
                                 break;
                             }
                         }
                     } else if (si < modelNodeStates_.size()) {
-                        const NodeStateVis& ns = modelNodeStates_[si];
-                        np = ns.pos;
-                        nq = ns.quat;
-                        visible = ns.visible;
-                        matched = true;
+                        np = modelNodeStates_[si].pos;
+                        nq = modelNodeStates_[si].quat;
                     }
-                    (void)matched;
-                    if (!visible) continue;  // node hidden by the runtime
+                    // Guard against an unpopulated/degenerate pose (a zero
+                    // quaternion would collapse the part and hide the model).
+                    const float qlen2 = nq[0] * nq[0] + nq[1] * nq[1] +
+                                        nq[2] * nq[2] + nq[3] * nq[3];
+                    if (qlen2 < 0.5f) {
+                        np = identityPos;
+                        nq = identityQuat;
+                    }
                     drawPart(sm.set, sm.color, sm.firstIndex, sm.indexCount, np, nq);
                 }
             }

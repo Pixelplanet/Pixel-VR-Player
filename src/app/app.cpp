@@ -528,14 +528,15 @@ int App::run() {
             }
             if (browser_.downloadActive()) {
                 downloadToastText_ = browser_.downloadText();
-                downloadToast_ = nowT + std::chrono::seconds(8);
+                downloadToast_ = nowT + std::chrono::seconds(10);
             }
-            const bool showDownload =
-                !browser_.isOpen() &&
-                (browser_.downloadActive() || nowT < downloadToast_);
-            renderer_.setDownloadStatus(
-                showDownload, browser_.downloadActive() ? downloadToastText_
-                                                        : browser_.status());
+            const bool dlRecent = browser_.downloadActive() || nowT < downloadToast_;
+            const std::string dlLine =
+                browser_.downloadActive() ? downloadToastText_ : browser_.status();
+            renderer_.setDownloadStatus(!browser_.isOpen() && dlRecent, dlLine);
+            renderer_.setDownloads(!browser_.isOpen() && !settings_.isOpen() &&
+                                       browser_.hasDownloads() && dlRecent,
+                                   "Downloads", browser_.downloadRows(), dlLine);
             // Publish the browser panel first so the pointer can raycast it.
             if (browser_.isOpen()) {
                 std::vector<std::string> rows;
@@ -545,7 +546,11 @@ int App::run() {
                 }
                 std::string status = browser_.status();
                 if (browser_.onNetwork() && !browser_.isBusy()) {
-                    status = "Point + Trigger: Stream      A: Download";
+                    // Keep any message (e.g. a download hint) visible; just add
+                    // the action hint rather than replacing it.
+                    status = status.empty()
+                                 ? std::string("Point + Trigger: Stream      A: Download")
+                                 : status + "      [A: Download]";
                 }
                 renderer_.setBrowser(true, browser_.title(), rows,
                                      browser_.selected(), status);
