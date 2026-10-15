@@ -1005,7 +1005,7 @@ bool VulkanRenderer::initText() {
         "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
     };
     for (const char* path : kFonts) {
-        fontAtlas_ = buildFontAtlas(path, 64);
+        fontAtlas_ = buildFontAtlas(path, 96);
         if (fontAtlas_.ok) break;
     }
     if (!fontAtlas_.ok) {
@@ -1013,13 +1013,9 @@ bool VulkanRenderer::initText() {
         return false;
     }
 
-    // R8 atlas texture with a short mip chain so minified menu text doesn't
-    // shimmer. Capped at 4 levels so adjacent (cell-padded) glyphs don't bleed.
-    uint32_t mipLevels = 1;
-    for (int d = std::max(fontAtlas_.width, fontAtlas_.height);
-         d > 1 && mipLevels < 4; d /= 2) {
-        ++mipLevels;
-    }
+    // R8 SDF atlas. Signed-distance text is scale-independent (the shader does
+    // screen-space AA), so one level stays crisp without any mip blur.
+    const uint32_t mipLevels = 1;
     VkImageCreateInfo img{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     img.imageType = VK_IMAGE_TYPE_2D;
     img.format = VK_FORMAT_R8_UNORM;
@@ -1103,31 +1099,7 @@ bool VulkanRenderer::initText() {
                           static_cast<uint32_t>(fontAtlas_.height), 1};
     vkCmdCopyBufferToImage(uploadCmd_, staging, fontImage_,
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
-    // Build the mip chain with successive linear half-blits.
-    int32_t mw = fontAtlas_.width, mh = fontAtlas_.height;
-    for (uint32_t i = 1; i < mipLevels; ++i) {
-        imgBarrier(i - 1, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
-                   VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
-                   VK_ACCESS_TRANSFER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                   VK_PIPELINE_STAGE_TRANSFER_BIT);
-        const int32_t nw = std::max(1, mw / 2), nh = std::max(1, mh / 2);
-        VkImageBlit blit{};
-        blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i - 1, 0, 1};
-        blit.srcOffsets[1] = {mw, mh, 1};
-        blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, i, 0, 1};
-        blit.dstOffsets[1] = {nw, nh, 1};
-        vkCmdBlitImage(uploadCmd_, fontImage_, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                       fontImage_, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
-                       VK_FILTER_LINEAR);
-        imgBarrier(i - 1, 1, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
-                   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
-                   VK_ACCESS_TRANSFER_READ_BIT, VK_ACCESS_SHADER_READ_BIT,
-                   VK_PIPELINE_STAGE_TRANSFER_BIT,
-                   VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
-        mw = nw;
-        mh = nh;
-    }
-    imgBarrier(mipLevels - 1, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+    imgBarrier(0, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
                VK_ACCESS_SHADER_READ_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
@@ -1269,11 +1241,15 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             const float hy = 0.5f * screenYaw_;
             const Mat4 yawRot =
                 fromQuat(Quat{0.0f, std::sin(hy), 0.0f, std::cos(hy)});
-            // SBS halves each eye's width and Top/Bottom halves its height, so the
-            // visible per-eye aspect (and thus the screen shape) changes.
+            // Each eye shows half the frame. Full-width SBS (~2x wide) is halved
+            // back to a normal shape; half-SBS already has per-eye shape so it is
+            // stretched (no change). Same idea vertically for full vs half OU.
             float eyeAspect = videoAspect_;
-            if (stereoMode_ == StereoMode::SideBySide) eyeAspect *= 0.5f;
-            else if (stereoMode_ == StereoMode::TopBottom) eyeAspect *= 2.0f;
+            if (stereoMode_ == StereoMode::SideBySide) {
+                if (videoAspect_ >= 2.6f) eyeAspect = videoAspect_ * 0.5f;
+            } else if (stereoMode_ == StereoMode::TopBottom) {
+                if (videoAspect_ <= 1.2f) eyeAspect = videoAspect_ * 2.0f;
+            }
             const Mat4 model = multiply(
                 multiply(translation(center), yawRot),
                 scaling(Vec3{eyeAspect / (16.0f / 9.0f), 1.0f, 1.0f}));

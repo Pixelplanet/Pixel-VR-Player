@@ -60,16 +60,15 @@ void detect_format(const std::string& path, VulkanRenderer::ProjectionMode& proj
 
     stereoFromName = true;
     if (contains(p, "_tb") || contains(p, "-tb") || contains(p, "_ou") ||
-        contains(p, "overunder") || contains(p, "over-under")) {
+        contains(p, "overunder") || contains(p, "over-under") ||
+        contains(p, "htab") || contains(p, "h-tab")) {
         stereo = VulkanRenderer::StereoMode::TopBottom;
-    } else if (contains(p, "_sbs") || contains(p, "-sbs") || contains(p, "_lr") ||
-               contains(p, "sidebyside") || contains(p, "side-by-side") ||
-               contains(p, "half-sbs")) {
-        stereo = VulkanRenderer::StereoMode::SideBySide;
+    } else if (contains(p, "sbs") || contains(p, "_lr") ||
+               contains(p, "sidebyside") || contains(p, "side-by-side")) {
+        stereo = VulkanRenderer::StereoMode::SideBySide;  // incl. HSBS / half-SBS
     } else if (contains(p, "3d")) {
-        stereo = (proj == VulkanRenderer::ProjectionMode::Equirect180)
-                     ? VulkanRenderer::StereoMode::SideBySide
-                     : VulkanRenderer::StereoMode::TopBottom;
+        // Bare "3D" with no explicit layout: half-SBS dominates movie rips.
+        stereo = VulkanRenderer::StereoMode::SideBySide;
     } else {
         stereo = VulkanRenderer::StereoMode::Mono;
         stereoFromName = false;  // no explicit layout; refine from aspect ratio

@@ -16,10 +16,10 @@ Carried over:
 
 New (2026-10-14):
 - [x] D. Flat SBS/TB: detect + a working flat-stereo render mode (split per eye).
-- [ ] E. Settings split into sections.
-- [ ] F. Settings: pick video stream, audio stream, and a default audio language.
+- [x] E. Settings split into sections.
+- [x] F. Settings: pick video stream, audio stream, and a default audio language.
 - [ ] G. Downloads view: active downloads + speed + ETA; keep running in background.
-- [ ] H. Sharper menu text (SDF).
+- [x] H. Sharper menu text (SDF).
 
 ---
 
