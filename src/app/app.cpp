@@ -609,10 +609,17 @@ int App::run() {
                     if (hov >= 0 && hov < static_cast<int>(jobs.size()) &&
                         jobs[static_cast<std::size_t>(hov)].state == 1 &&
                         !jobs[static_cast<std::size_t>(hov)].localPath.empty()) {
+                        const auto& j = jobs[static_cast<std::size_t>(hov)];
+                        if (j.isDir) {
+                            // A finished folder opens in the file browser.
+                            browser_.openPath(j.localPath);
+                            downloadsWindow_ = false;
+                        } else {
 #ifdef PIXELVR_HAVE_MEDIA
-                        loadMedia(jobs[static_cast<std::size_t>(hov)].localPath);
-                        downloadsWindow_ = false;
+                            loadMedia(j.localPath);
+                            downloadsWindow_ = false;
 #endif
+                        }
                         interacted = true;
                     }
                 }
@@ -810,15 +817,17 @@ int App::run() {
                     // The pointer drives the selection, so A acts on the entry
                     // actually being pointed at (not just the last trigger press).
                     browser_.setSelected(hovered);
-                    if (in.select) {
-                        std::string playPath;
-                        if (browser_.activate(playPath) == Browser::Result::Play &&
-                            !playPath.empty()) {
+                }
+                // Trigger activates the selection whether it was made with the
+                // laser (hovered row) or moved with the thumbstick.
+                if (in.select) {
+                    std::string playPath;
+                    if (browser_.activate(playPath) == Browser::Result::Play &&
+                        !playPath.empty()) {
 #ifdef PIXELVR_HAVE_MEDIA
-                            loadMedia(playPath);
+                        loadMedia(playPath);
 #endif
-                            browser_.setOpen(false);
-                        }
+                        browser_.setOpen(false);
                     }
                 }
                 // A: download the focused entry; folders prompt for confirmation.
@@ -848,13 +857,15 @@ int App::run() {
                 const int hovered = renderer_.settingsHovered();
                 if (hovered >= 0) {
                     renderer_.setSettingsSelected(hovered);
-                    if (in.select) {
-                        settings_.setSelected(hovered);
-                        auto act = settings_.activate();
-                        if (act == SettingsMenu::Action::RecenterScreen) {
-                            if (in.headValid) {
-                                renderer_.recenterScreen(in.headPos, in.headForward);
-                            }
+                    settings_.setSelected(hovered);
+                }
+                // Trigger activates the selection made by the laser or the stick.
+                if (in.select) {
+                    auto act = settings_.activate();
+                    if (act == SettingsMenu::Action::RecenterScreen) {
+                        if (in.headValid) {
+                            renderer_.recenterScreen(in.headPos, in.headForward);
+                        }
                         } else if (act == SettingsMenu::Action::CycleProjection) {
                             int pm = settings_.projectionMode();
                             renderer_.setProjectionMode(

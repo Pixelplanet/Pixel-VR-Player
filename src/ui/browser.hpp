@@ -30,6 +30,9 @@ public:
 
     // (Re)opens the browser at the start location (local home directory).
     void open();
+    // Opens the browser directly at a local directory (used when a finished
+    // folder download is selected).
+    void openPath(const std::string& localDir);
     bool isOpen() const { return open_; }
     // The download worker yields the shared SMB connection while the browser is
     // open, so directory listing stays responsive (downloads resume afterwards).

@@ -298,6 +298,13 @@ void Browser::beginScan(const std::string& location, bool isSmb) {
         std::thread([this, location, isSmb] { runScan(location, isSmb); });
 }
 
+void Browser::openPath(const std::string& localDir) {
+    open_ = true;
+    browseOpen_.store(true);
+    status_.clear();
+    beginScan(localDir, false);
+}
+
 void Browser::runScan(std::string location, bool isSmb) {
     ScanResult r;
     if (isSmb) {
@@ -875,9 +882,10 @@ Browser::Result Browser::poll(std::string& playPath) {
         if (dlStopped_.load()) {
             status_ = "Stopped " + dlName_;
         } else if (dlOk_.load()) {
-            playPath = dlLocalPath_;
-            status_ = "Playing " + dlName_;
-            return Result::Play;
+            // Completing a download must NOT interrupt current playback (it used
+            // to auto-play, and for a folder that fed a directory to the media
+            // engine). Finished items are played from the downloads window.
+            status_ = "Downloaded " + dlName_;
         } else {
             status_ = "Download failed: " + dlName_;
         }
