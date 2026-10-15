@@ -531,6 +531,15 @@ int App::run() {
             if (browser_.downloadActive()) {
                 downloadToastText_ = browser_.downloadText();
                 downloadToast_ = nowT + std::chrono::seconds(10);
+                // On the rising edge of a download, close the file browser and
+                // open the downloads window so progress is immediately visible.
+                if (!dlWasActive_) {
+                    dlWasActive_ = true;
+                    downloadsWindow_ = true;
+                    browser_.setOpen(false);
+                }
+            } else {
+                dlWasActive_ = false;
             }
             const bool dlRecent = browser_.downloadActive() || nowT < downloadToast_;
             // No head-locked download text (it followed the view); progress lives

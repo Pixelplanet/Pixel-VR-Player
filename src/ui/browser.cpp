@@ -864,13 +864,15 @@ std::string Browser::downloadText() const {
         std::snprintf(buf, sizeof(buf), "  %.1f MB/s",
                       dlSpeed_ / (1024.0 * 1024.0));
         s += buf;
-        if (t > 0) {
-            double eta = static_cast<double>(t - b) / dlSpeed_;
-            if (eta < 0.0) eta = 0.0;
-            const int secs = static_cast<int>(eta);
-            std::snprintf(buf, sizeof(buf), "  ETA %d:%02d", secs / 60, secs % 60);
-            s += buf;
-        }
+    }
+    if (t > 0 && !dlPaused_.load() && dlSpeed_ >= 100 * 1024.0) {
+        double eta = static_cast<double>(t - b) / dlSpeed_;
+        if (eta < 0.0) eta = 0.0;
+        const int secs = static_cast<int>(eta);
+        std::snprintf(buf, sizeof(buf), "  ETA %d:%02d", secs / 60, secs % 60);
+        s += buf;
+    } else if (t > 0) {
+        s += "  ETA --:--";
     }
     return s;
 }
