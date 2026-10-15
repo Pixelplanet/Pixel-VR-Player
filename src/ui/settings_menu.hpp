@@ -25,9 +25,12 @@ public:
         ToggleModels,
         ToggleStats,
         CycleDistance,
-        CycleVideoStream,
-        CycleAudioStream,
-        CycleLanguage,
+        EnterVideoList,
+        EnterAudioList,
+        EnterLangList,
+        PickVideoStream,
+        PickAudioStream,
+        PickLanguage,
         RecenterScreen,
         Close
     };
@@ -36,6 +39,8 @@ public:
         std::string label;
         std::string value;
         Action action = Action::None;
+        bool enabled = true;  // disabled rows render greyed and do nothing
+        int data = -1;        // payload: stream position or language index
     };
 
     SettingsMenu();

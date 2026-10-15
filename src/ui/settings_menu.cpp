@@ -109,27 +109,57 @@ void SettingsMenu::refresh() {
                          Action::ToggleModels});
     } else if (section_ == 2) {
         title_ = "Audio / Video Tracks";
-        const std::string vLabel =
-            videoStreams_.empty()
-                ? "(none)"
-                : videoStreams_[std::min<std::size_t>(videoSel_,
-                                                      videoStreams_.size() - 1)]
-                      .second;
-        const std::string aLabel =
-            audioStreams_.empty()
-                ? "(none)"
-                : audioStreams_[std::min<std::size_t>(audioSel_,
-                                                      audioStreams_.size() - 1)]
-                      .second;
-        rows_.push_back({"Video Track", vLabel, Action::CycleVideoStream});
-        rows_.push_back({"Audio Track", aLabel, Action::CycleAudioStream});
+        Row v{"Video Track",
+              videoStreams_.empty()
+                  ? "(none)"
+                  : videoStreams_[std::min<std::size_t>(
+                                      videoSel_, videoStreams_.size() - 1)].second,
+              Action::EnterVideoList};
+        v.enabled = videoStreams_.size() > 1;  // nothing to pick with 0/1 track
+        if (!v.enabled) v.action = Action::None;
+        rows_.push_back(v);
+        Row a{"Audio Track",
+              audioStreams_.empty()
+                  ? "(none)"
+                  : audioStreams_[std::min<std::size_t>(
+                                      audioSel_, audioStreams_.size() - 1)].second,
+              Action::EnterAudioList};
+        a.enabled = audioStreams_.size() > 1;
+        if (!a.enabled) a.action = Action::None;
+        rows_.push_back(a);
         rows_.push_back({"Preferred Audio Language",
                          kLangNames[audioLangIdx_ % kLangCount],
-                         Action::CycleLanguage});
-    } else {
+                         Action::EnterLangList});
+    } else if (section_ == 3) {
         title_ = "System & Debug";
         rows_.push_back({"Debug Statistics", showStats_ ? "On" : "Off",
                          Action::ToggleStats});
+    } else if (section_ == 10) {
+        title_ = "Select Video Track";
+        for (std::size_t i = 0; i < videoStreams_.size(); ++i) {
+            Row r{videoStreams_[i].second,
+                  static_cast<int>(i) == videoSel_ ? "<" : "",
+                  Action::PickVideoStream};
+            r.data = static_cast<int>(i);
+            rows_.push_back(r);
+        }
+    } else if (section_ == 11) {
+        title_ = "Select Audio Track";
+        for (std::size_t i = 0; i < audioStreams_.size(); ++i) {
+            Row r{audioStreams_[i].second,
+                  static_cast<int>(i) == audioSel_ ? "<" : "",
+                  Action::PickAudioStream};
+            r.data = static_cast<int>(i);
+            rows_.push_back(r);
+        }
+    } else {  // section_ == 12: preferred-language list
+        title_ = "Preferred Audio Language";
+        for (int i = 0; i < kLangCount; ++i) {
+            Row r{kLangNames[i], i == audioLangIdx_ ? "<" : "",
+                  Action::PickLanguage};
+            r.data = i;
+            rows_.push_back(r);
+        }
     }
     rows_.push_back({"< Back", "", Action::Back});
 }
@@ -144,7 +174,14 @@ SettingsMenu::Action SettingsMenu::activate() {
         case Action::EnterControls: section_ = 1; selected_ = 0; refresh(); break;
         case Action::EnterStreams:  section_ = 2; selected_ = 0; refresh(); break;
         case Action::EnterSystem:   section_ = 3; selected_ = 0; refresh(); break;
-        case Action::Back:          section_ = -1; selected_ = 0; refresh(); break;
+        case Action::EnterVideoList: section_ = 10; selected_ = 0; refresh(); break;
+        case Action::EnterAudioList: section_ = 11; selected_ = 0; refresh(); break;
+        case Action::EnterLangList:  section_ = 12; selected_ = 0; refresh(); break;
+        case Action::Back:
+            section_ = (section_ >= 10) ? 2 : -1;  // list -> Tracks; else -> root
+            selected_ = 0;
+            refresh();
+            break;
         case Action::CyclePlayBinding:
             bindPlayIdx_ = (bindPlayIdx_ + 1) % 4;
             saveConfig();
@@ -196,19 +233,23 @@ SettingsMenu::Action SettingsMenu::activate() {
             saveConfig();
             refresh();
             break;
-        case Action::CycleVideoStream:
-            if (!videoStreams_.empty())
-                videoSel_ = (videoSel_ + 1) % static_cast<int>(videoStreams_.size());
+        case Action::PickVideoStream:
+            videoSel_ = rows_[selected_].data;
+            section_ = 2;
+            selected_ = 0;
             refresh();
             break;
-        case Action::CycleAudioStream:
-            if (!audioStreams_.empty())
-                audioSel_ = (audioSel_ + 1) % static_cast<int>(audioStreams_.size());
+        case Action::PickAudioStream:
+            audioSel_ = rows_[selected_].data;
+            section_ = 2;
+            selected_ = 0;
             refresh();
             break;
-        case Action::CycleLanguage:
-            audioLangIdx_ = (audioLangIdx_ + 1) % kLangCount;
+        case Action::PickLanguage:
+            audioLangIdx_ = rows_[selected_].data;
             saveConfig();
+            section_ = 2;
+            selected_ = 0;
             refresh();
             break;
         case Action::RecenterScreen:

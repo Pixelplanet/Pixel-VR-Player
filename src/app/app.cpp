@@ -457,12 +457,17 @@ int App::run() {
             // Settings panel overlay
             if (settings_.isOpen()) {
                 std::vector<std::string> sRows;
+                std::vector<uint8_t> sEnabled;
                 sRows.reserve(settings_.rows().size());
+                sEnabled.reserve(settings_.rows().size());
                 for (const auto& r : settings_.rows()) {
-                    sRows.push_back(r.label + " : " + r.value);
+                    sRows.push_back(r.value.empty() ? r.label
+                                                    : (r.label + " : " + r.value));
+                    sEnabled.push_back(r.enabled ? 1 : 0);
                 }
                 renderer_.setSettings(true, settings_.title(), sRows,
-                                      settings_.selected(), settings_.status());
+                                      settings_.selected(), settings_.status(),
+                                      sEnabled);
                 settingsOpen = true;
             } else {
                 renderer_.setSettings(false, "", {}, 0, "");
@@ -557,10 +562,10 @@ int App::run() {
                             renderer_.adjustScreenDistance(settings_.screenDistance() - 3.0f);
                         }
 #ifdef PIXELVR_HAVE_MEDIA
-                        else if (act == SettingsMenu::Action::CycleVideoStream ||
-                                 act == SettingsMenu::Action::CycleAudioStream) {
+                        else if (act == SettingsMenu::Action::PickVideoStream ||
+                                 act == SettingsMenu::Action::PickAudioStream) {
                             switchTracks(false);
-                        } else if (act == SettingsMenu::Action::CycleLanguage) {
+                        } else if (act == SettingsMenu::Action::PickLanguage) {
                             switchTracks(true);
                         }
 #endif

@@ -165,7 +165,8 @@ public:
     // Settings overlay panel (re-uses panel & pointer interaction)
     void setSettings(bool visible, const std::string& title,
                      const std::vector<std::string>& rows, int selected,
-                     const std::string& status);
+                     const std::string& status,
+                     const std::vector<uint8_t>& enabled = {});
     bool settingsVisible() const { return settingsVisible_; }
     int settingsRow() const { return settingsRow_; }
     int settingsHovered() const { return settingsHovered_; }
@@ -279,6 +280,7 @@ private:
     std::string settingsTitle_;
     std::string settingsStatus_;
     std::vector<std::string> settingsRows_;
+    std::vector<uint8_t> settingsEnabled_;  // per-row: 0 = greyed/disabled
     int settingsSelected_ = 0;
     int settingsHovered_ = -1;
     int settingsRow_ = -1;

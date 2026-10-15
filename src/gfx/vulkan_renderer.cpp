@@ -838,12 +838,14 @@ void VulkanRenderer::scrollBrowser(int deltaRows) {
 
 void VulkanRenderer::setSettings(bool visible, const std::string& title,
                                  const std::vector<std::string>& rows, int selected,
-                                 const std::string& status) {
+                                 const std::string& status,
+                                 const std::vector<uint8_t>& enabled) {
     settingsVisible_ = visible;
     settingsTitle_ = title;
     settingsRows_ = rows;
     settingsSelected_ = selected;
     settingsStatus_ = status;
+    settingsEnabled_ = enabled;
 }
 
 void VulkanRenderer::setStats(bool visible, const std::vector<std::string>& lines) {
@@ -1624,7 +1626,10 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         const int total = static_cast<int>(settingsRows_.size());
         for (int i = 0; i < total; ++i) {
             const float ry = panelTop - 0.2f - i * rowH;
-            const bool hovered = (i == settingsHovered_);
+            const bool en = settingsEnabled_.empty() ||
+                            (i < static_cast<int>(settingsEnabled_.size()) &&
+                             settingsEnabled_[i] != 0);
+            const bool hovered = (i == settingsHovered_) && en;
             const bool selected = (i == settingsSelected_);
             if (hovered || selected) {
                 const float* rowBg = hovered ? hlCol : selBg;
@@ -1641,6 +1646,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         const float white2[4] = {0.96f, 0.96f, 0.96f, 1.0f};
         const float dim[4] = {0.55f, 0.7f, 0.9f, 1.0f};
         const float cyan[4] = {0.35f, 0.75f, 1.0f, 1.0f};
+        const float disabledCol[4] = {0.40f, 0.43f, 0.48f, 1.0f};
         auto drawString = [&](float x, float baseline, float scale, const float col[4],
                               const std::string& s) {
             float penX = x;
@@ -1673,7 +1679,10 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                    settingsTitle_.substr(0, 42));
         for (int i = 0; i < total; ++i) {
             const float ry = panelTop - 0.2f - i * rowH;
-            drawString(-panelW + 0.05f, ry, sc, white2,
+            const bool en = settingsEnabled_.empty() ||
+                            (i < static_cast<int>(settingsEnabled_.size()) &&
+                             settingsEnabled_[i] != 0);
+            drawString(-panelW + 0.05f, ry, sc, en ? white2 : disabledCol,
                        settingsRows_[static_cast<std::size_t>(i)].substr(0, 46));
         }
         if (!settingsStatus_.empty()) {
