@@ -81,9 +81,23 @@ public:
     double downloadSpeed() const { return dlSpeed_; }  // bytes/sec
     const std::string& downloadName() const { return dlName_; }
 
-    // Recent download jobs ("name 42%", "Done: name", ...), oldest first.
-    bool hasDownloads() const { return !dlRows_.empty(); }
-    const std::vector<std::string>& downloadRows() const { return dlRows_; }
+    // Recent download jobs (for the downloads window), oldest first.
+    struct DownloadJob {
+        std::string name;
+        std::string localPath;
+        std::string uri;
+        int state = 0;  // 0 downloading, 1 done, 2 failed, 3 stopped
+        long long bytes = 0;
+        long long total = 0;
+        bool isDir = false;
+    };
+    const std::vector<DownloadJob>& downloadJobs() const { return dlJobs_; }
+    bool hasDownloads() const { return !dlJobs_.empty(); }
+    bool downloadPaused() const { return dlPaused_.load(); }
+    void togglePause() { dlPaused_.store(!dlPaused_.load()); }
+    void stopDownload() { dlAbort_.store(true); }
+    // Removes finished/stopped/failed jobs (deleting any partial files).
+    void clearFinished();
 
     ~Browser();
     Browser(const Browser&) = delete;
@@ -133,7 +147,11 @@ private:
     std::string dlLocalPath_;
     std::string dlName_;
     std::string downloadDir_;  // "" => default ~/media
-    std::vector<std::string> dlRows_;  // recent job lines for the overlay
+    std::vector<DownloadJob> dlJobs_;
+    int dlActiveJob_ = -1;             // index of the job in flight, or -1
+    std::atomic<bool> dlPaused_{false};
+    std::atomic<bool> dlAbort_{false};
+    std::atomic<bool> dlStopped_{false};
     double dlSpeed_ = 0.0;             // EMA bytes/sec for the status readout
     long long speedBytes_ = 0;
     std::chrono::steady_clock::time_point speedTime_{};

@@ -391,11 +391,18 @@ void Browser::startDownloadFile(const std::string& uri, const std::string& local
     dlSpeed_ = 0.0;
     speedBytes_ = 0;
     speedTime_ = {};
+    dlStopped_.store(false);
+    dlPaused_.store(false);
+    dlAbort_.store(false);
     dlActive_.store(true);
     status_ = "Downloading " + dlName_ + " ...";
     PIXELVR_LOG_INFO("Download file: %s -> %s", uri.c_str(), local.c_str());
-    dlRows_.push_back(dlName_ + "  0%");
-    if (dlRows_.size() > 8) dlRows_.erase(dlRows_.begin());
+    dlJobs_.push_back({dlName_, local, uri, 0, 0, 0, false});
+    dlActiveJob_ = static_cast<int>(dlJobs_.size()) - 1;
+    if (dlJobs_.size() > 12) {
+        dlJobs_.erase(dlJobs_.begin());
+        dlActiveJob_ = static_cast<int>(dlJobs_.size()) - 1;
+    }
     const std::string name = dlName_;
     dlThread_ = std::thread([this, uri, local, name]() {
         std::error_code ec;
@@ -446,7 +453,22 @@ void Browser::startDownloadFile(const std::string& uri, const std::string& local
         std::vector<char> buf(1 << 18);  // small chunks so the SMB lock is freed
         ssize_t n = 0;
         long long got = 0;
+        bool stopped = false;
         for (;;) {
+            if (dlAbort_.load()) {
+                stopped = true;
+                break;
+            }
+            // Give the browser's directory scan priority so navigation stays
+            // responsive while a download runs, and honour pause.
+            while (!dlAbort_.load() &&
+                   (scanning_.load() || dlPaused_.load())) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            if (dlAbort_.load()) {
+                stopped = true;
+                break;
+            }
             {
                 std::lock_guard<std::mutex> smb(smbGlobalLock());
                 n = smbc_read(fd, buf.data(), buf.size());
@@ -455,12 +477,22 @@ void Browser::startDownloadFile(const std::string& uri, const std::string& local
             std::fwrite(buf.data(), 1, static_cast<std::size_t>(n), out);
             got += n;
             dlBytes_.store(got);
-            std::this_thread::yield();  // let the browser's scan take the lock
+            std::this_thread::yield();
         }
         std::fclose(out);
         {
             std::lock_guard<std::mutex> smb(smbGlobalLock());
             smbc_close(fd);
+        }
+        if (stopped) {
+            std::error_code rec;
+            std::filesystem::remove(local, rec);  // no partial file left behind
+            dlStopped_.store(true);
+            dlOk_.store(false);
+            dlDone_.store(true);
+            dlActive_.store(false);
+            PIXELVR_LOG_INFO("Download stopped: %s", name.c_str());
+            return;
         }
 
         dlLocalPath_ = local;
@@ -492,8 +524,15 @@ void Browser::startDownloadFolder(const std::string& uri,
     dlActive_.store(true);
     status_ = "Downloading folder " + dlName_ + " ...";
     PIXELVR_LOG_INFO("Download folder: %s -> %s", uri.c_str(), destDir.c_str());
-    dlRows_.push_back(dlName_ + "/ (folder)");
-    if (dlRows_.size() > 8) dlRows_.erase(dlRows_.begin());
+    dlStopped_.store(false);
+    dlPaused_.store(false);
+    dlAbort_.store(false);
+    dlJobs_.push_back({dlName_, destDir, uri, 0, 0, 0, true});
+    dlActiveJob_ = static_cast<int>(dlJobs_.size()) - 1;
+    if (dlJobs_.size() > 12) {
+        dlJobs_.erase(dlJobs_.begin());
+        dlActiveJob_ = static_cast<int>(dlJobs_.size()) - 1;
+    }
     dlThread_ = std::thread([this, uri, destDir]() {
         std::error_code ec;
         long long got = 0;
@@ -563,6 +602,13 @@ void Browser::startDownloadFolder(const std::string& uri,
             }
             std::vector<char> buf(1 << 18);  // small chunks: yield the SMB lock
             for (;;) {
+                if (dlAbort_.load()) {
+                    ok = false;
+                    break;
+                }
+                while (!dlAbort_.load() && (scanning_.load() || dlPaused_.load())) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                }
                 ssize_t n = 0;
                 {
                     std::lock_guard<std::mutex> smb(smbGlobalLock());
@@ -620,6 +666,16 @@ void Browser::startDownloadFolder(const std::string& uri,
             }
         };
         copyDir(uri, destDir);
+        if (dlAbort_.load()) {
+            std::error_code rec;
+            std::filesystem::remove_all(destDir, rec);  // no partial folder
+            dlStopped_.store(true);
+            dlOk_.store(false);
+            dlDone_.store(true);
+            dlActive_.store(false);
+            PIXELVR_LOG_INFO("Download folder stopped: %s", destDir.c_str());
+            return;
+        }
         dlOk_.store(ok);
         dlDone_.store(true);
         dlActive_.store(false);
@@ -631,6 +687,28 @@ void Browser::startDownloadFolder(const std::string& uri,
     (void)destDir;
     status_ = "SMB support not built";
 #endif
+}
+
+void Browser::clearFinished() {
+    std::vector<DownloadJob> keep;
+    keep.reserve(dlJobs_.size());
+    for (const DownloadJob& j : dlJobs_) {
+        if (j.state == 0) {
+            keep.push_back(j);  // keep the in-flight job
+            continue;
+        }
+        // Remove partial files from stopped/failed single-file downloads.
+        if (j.state != 1 && !j.isDir && !j.localPath.empty()) {
+            std::error_code ec;
+            std::filesystem::remove(j.localPath, ec);
+        }
+    }
+    dlJobs_.swap(keep);
+    dlActiveJob_ = -1;
+    for (std::size_t i = 0; i < dlJobs_.size(); ++i) {
+        if (dlJobs_[i].state == 0) dlActiveJob_ = static_cast<int>(i);
+    }
+    status_ = "Cleared finished downloads";
 }
 
 Browser::Result Browser::poll(std::string& playPath) {
@@ -662,19 +740,30 @@ Browser::Result Browser::poll(std::string& playPath) {
             speedTime_ = now;
         }
         status_ = downloadText();
-        if (!dlRows_.empty()) dlRows_.back() = status_;
+        if (dlActiveJob_ >= 0 && dlActiveJob_ < static_cast<int>(dlJobs_.size())) {
+            dlJobs_[dlActiveJob_].bytes = b;
+            dlJobs_[dlActiveJob_].total = t;
+        }
         return Result::None;
     }
     if (dlDone_.exchange(false)) {
         if (dlThread_.joinable()) dlThread_.join();
-        if (dlOk_.load()) {
+        if (dlActiveJob_ >= 0 && dlActiveJob_ < static_cast<int>(dlJobs_.size())) {
+            DownloadJob& j = dlJobs_[dlActiveJob_];
+            j.bytes = dlBytes_.load();
+            j.total = dlTotal_.load();
+            j.state = dlStopped_.load() ? 3 : (dlOk_.load() ? 1 : 2);
+        }
+        dlActiveJob_ = -1;
+        if (dlStopped_.load()) {
+            status_ = "Stopped " + dlName_;
+        } else if (dlOk_.load()) {
             playPath = dlLocalPath_;
             status_ = "Playing " + dlName_;
-            if (!dlRows_.empty()) dlRows_.back() = "Done: " + dlName_;
             return Result::Play;
+        } else {
+            status_ = "Download failed: " + dlName_;
         }
-        status_ = "Download failed: " + dlName_;
-        if (!dlRows_.empty()) dlRows_.back() = "Failed: " + dlName_;
     }
     return Result::None;
 }

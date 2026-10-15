@@ -539,20 +539,73 @@ int App::run() {
             renderer_.setDownloadsBadge(browser_.downloadActive(),
                                         !browser_.downloadActive() &&
                                             browser_.hasDownloads() && dlRecent);
-            // The downloads window (opened from the control-bar button) shows the
-            // job list with progress, speed and ETA.
-            std::string dlWindowStatus;
+            // Downloads window: job list + Pause/Stop/Clear actions. Rows are
+            // clickable (completed files play, actions run).
+            std::vector<std::string> drows;
+            std::vector<int> dact;  // 1 pause/resume, 2 stop, 3 clear, 100+i play
             if (browser_.downloadActive()) {
-                dlWindowStatus = browser_.downloadText();
-            } else if (browser_.hasDownloads()) {
-                dlWindowStatus = "All downloads complete";
-            } else {
-                dlWindowStatus = "No downloads yet";
+                drows.push_back(browser_.downloadPaused() ? "[ Resume ]" : "[ Pause ]");
+                dact.push_back(1);
+                drows.push_back("[ Stop ]");
+                dact.push_back(2);
             }
-            renderer_.setDownloads(downloadsWindow_ && !browser_.isOpen() &&
-                                       !settings_.isOpen(),
-                                   "Downloads", browser_.downloadRows(),
-                                   dlWindowStatus);
+            {
+                const auto& jobs = browser_.downloadJobs();
+                for (std::size_t i = 0; i < jobs.size(); ++i) {
+                    const auto& j = jobs[i];
+                    std::string nm = j.name;
+                    if (nm.size() > 30) nm = nm.substr(0, 29) + "~";
+                    char buf[192];
+                    if (j.state == 0) {
+                        const int pct =
+                            j.total > 0 ? static_cast<int>(j.bytes * 100 / j.total) : 0;
+                        std::snprintf(buf, sizeof(buf), "%s  %d%%  %.0f/%.0f MB",
+                                      nm.c_str(), pct, j.bytes / 1048576.0,
+                                      j.total / 1048576.0);
+                    } else if (j.state == 1) {
+                        std::snprintf(buf, sizeof(buf), "%s  done  (trigger to play)",
+                                      nm.c_str());
+                    } else if (j.state == 3) {
+                        std::snprintf(buf, sizeof(buf), "%s  stopped", nm.c_str());
+                    } else {
+                        std::snprintf(buf, sizeof(buf), "%s  failed", nm.c_str());
+                    }
+                    drows.push_back(buf);
+                    dact.push_back(j.state == 1 ? (100 + static_cast<int>(i)) : 0);
+                }
+            }
+            drows.push_back("[ Clear finished ]");
+            dact.push_back(3);
+
+            const bool dlWin = downloadsWindow_ && !browser_.isOpen() &&
+                               !settings_.isOpen();
+            renderer_.setDownloads(dlWin, "Downloads", drows,
+                                   browser_.downloadActive()
+                                       ? browser_.downloadText()
+                                       : "Trigger: select     B: close");
+            if (dlWin && in.select) {
+                const int hov = renderer_.downloadsHovered();
+                if (hov >= 0 && hov < static_cast<int>(dact.size())) {
+                    const int a = dact[static_cast<std::size_t>(hov)];
+                    if (a == 1) {
+                        browser_.togglePause();
+                    } else if (a == 2) {
+                        browser_.stopDownload();
+                    } else if (a == 3) {
+                        browser_.clearFinished();
+                    } else if (a >= 100) {
+                        const auto& jobs = browser_.downloadJobs();
+                        const std::size_t ji = static_cast<std::size_t>(a - 100);
+                        if (ji < jobs.size() && !jobs[ji].localPath.empty()) {
+#ifdef PIXELVR_HAVE_MEDIA
+                            loadMedia(jobs[ji].localPath);
+                            downloadsWindow_ = false;
+#endif
+                        }
+                    }
+                    interacted = true;
+                }
+            }
 
             // Folder-download confirmation overlay (overrides the downloads panel).
             if (!pendingDl_.empty()) {

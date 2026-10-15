@@ -28,7 +28,7 @@ void main() {
     // with plain diffuse only (no specular/rim) so there is no shimmer, while the
     // printed button labels still read.
     float diff = max(dot(N, L), 0.0);
-    float amb = 0.08 + 0.07 * (N.y * 0.5 + 0.5);
-    outColor = vec4(tex.rgb * (amb + 0.55 * diff) * pc.color.rgb,
+    float amb = 0.05 + 0.05 * (N.y * 0.5 + 0.5);
+    outColor = vec4(tex.rgb * (amb + 0.40 * diff) * pc.color.rgb,
                     tex.a * pc.color.a);
 }

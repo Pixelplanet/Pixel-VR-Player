@@ -125,6 +125,8 @@ public:
         downloadsRows_ = rows;
         downloadsStatus_ = status;
     }
+    // The downloads-window row under the pointer, or -1 if none.
+    int downloadsHovered() const { return downloadsHovered_; }
 
     // Tracked controllers: aim poses used to draw pointer rays, controller
     // models and the UI cursor. Index 0 = left, 1 = right. Call once per frame,
@@ -290,6 +292,7 @@ private:
     std::string downloadsStatus_;
     bool downloadsActive_ = false;
     bool downloadsAllDone_ = false;
+    int downloadsHovered_ = -1;
 
     // Flat-screen placement in the app reference space (updated by recenter and
     // thumbstick distance control).

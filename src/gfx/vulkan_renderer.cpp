@@ -982,9 +982,11 @@ void VulkanRenderer::updatePointer() {
     browserHovered_ = -1;
     settingsHovered_ = -1;
     settingsRow_ = -1;
+    downloadsHovered_ = -1;
 
-    const bool controlBar = controlBarVisible_ && !browserVisible_ && !settingsVisible_;
-    if (!browserVisible_ && !settingsVisible_ && !controlBar) {
+    const bool controlBar = controlBarVisible_ && !browserVisible_ && !settingsVisible_ &&
+                            !downloadsVisible_;
+    if (!browserVisible_ && !settingsVisible_ && !downloadsVisible_ && !controlBar) {
         return;  // No UI surface to point at.
     }
 
@@ -1071,6 +1073,26 @@ void VulkanRenderer::updatePointer() {
                 if (idxFromTop >= 0 && idxFromTop < total) {
                     settingsRow_ = idxFromTop;
                     settingsHovered_ = idxFromTop;
+                }
+            }
+            break;
+        }
+
+        if (downloadsVisible_) {
+            if (hx < -kPanelW || hx > kPanelW || hyy < -kPanelTop || hyy > kPanelTop) {
+                continue;
+            }
+            pointerActive_ = true;
+            pointerHand_ = h;
+            pointerHit_[0] = world.x;
+            pointerHit_[1] = world.y;
+            pointerHit_[2] = world.z;
+            const int total = static_cast<int>(downloadsRows_.size());
+            if (total > 0) {
+                const float relY = kFirstRowY + 0.5f * kRowH - hyy;
+                const int idxFromTop = static_cast<int>(std::floor(relY / kRowH));
+                if (idxFromTop >= 0 && idxFromTop < total) {
+                    downloadsHovered_ = idxFromTop;
                 }
             }
             break;
@@ -1840,6 +1862,15 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         const float panelBorder[4] = {0.25f, 0.45f, 0.65f, 0.85f};
         drawUiElement(vpPanel, 0.0f, 0.0f, panelW, panelTop, UiShape::RoundedBox,
                       panelBg, 0.05f, 0.015f, panelBorder);
+        const float hlCol[4] = {0.18f, 0.45f, 0.85f, 0.85f};
+        for (std::size_t i = 0; i < downloadsRows_.size(); ++i) {
+            if (static_cast<int>(i) == downloadsHovered_) {
+                const float ry = panelTop - 0.2f - static_cast<float>(i) * rowH;
+                drawUiElement(vpPanel, 0.0f, ry + rowH * 0.28f, panelW - 0.04f,
+                              rowH * 0.44f, UiShape::RoundedBox, hlCol, 0.20f,
+                              0.0f, nullptr);
+            }
+        }
         vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline_);
         vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
