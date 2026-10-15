@@ -64,6 +64,10 @@ private:
     bool modelCorrValid_ = false;
     float modelCorrPos_[3] = {0.0f, 0.0f, 0.0f};
     float modelCorrQuat_[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    // Background download status line: shown while active and briefly after a
+    // download finishes (so success/failure is visible with the browser closed).
+    std::chrono::steady_clock::time_point downloadToast_{};
+    std::string downloadToastText_;
     // Low-pass smoothed model pose per hand (the raw hand pose jitters; the
     // system's own controller model is visibly smoothed).
     bool modelSmoothInit_[2] = {false, false};

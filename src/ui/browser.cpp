@@ -318,15 +318,12 @@ bool Browser::downloadFocused() {
         return false;
     }
     const Entry e = entries_[static_cast<std::size_t>(selected_)];
-    if (!e.isVideo) {
-        status_ = "Highlight a video file, then press download";
-        return false;
+    if (!e.isVideo || !inSmb_) {
+        PIXELVR_LOG_WARN("Download: no SMB video focused (isVideo=%d inSmb=%d)",
+                         e.isVideo ? 1 : 0, inSmb_ ? 1 : 0);
+        return false;  // Only network videos can be downloaded to local storage.
     }
-    if (!inSmb_) {
-        status_ = "Only network (SMB) videos can be downloaded";
-        return false;
-    }
-    startDownload(e.path, e.label);  // async copy to the download folder, then play
+    startDownload(e.path, e.label);  // async copy to ~/media, then Play via poll()
     return true;
 }
 
@@ -349,9 +346,8 @@ void Browser::startDownload(const std::string& uri, const std::string& name) {
     status_ = "Downloading " + name + " ...";
     const std::string home = homeDir_;
     const std::string destDir = downloadDir_.empty() ? home + "/media" : downloadDir_;
-    PIXELVR_LOG_INFO("Download start: %s -> %s", uri.c_str(), destDir.c_str());
-    jobs_.push_back(DlJob{name, destDir, true, false, 0, 0});
-    if (jobs_.size() > 8) jobs_.erase(jobs_.begin());
+    PIXELVR_LOG_INFO("Download start: %s -> %s", uri.c_str(),
+                     (destDir + "/" + name).c_str());
     dlThread_ = std::thread([this, uri, name, destDir]() {
         std::error_code ec;
         std::filesystem::create_directories(destDir, ec);
@@ -366,6 +362,7 @@ void Browser::startDownload(const std::string& uri, const std::string& name) {
             }
         }
         dlTotal_.store(total);
+        PIXELVR_LOG_INFO("Download: %s size=%lld bytes", name.c_str(), total);
 
         // Reuse a previous complete download instead of fetching again.
         std::error_code lec;
@@ -384,7 +381,7 @@ void Browser::startDownload(const std::string& uri, const std::string& name) {
             fd = smbc_open(uri.c_str(), O_RDONLY, 0);
         }
         if (fd < 0) {
-            PIXELVR_LOG_WARN("Download: cannot open %s", uri.c_str());
+            PIXELVR_LOG_WARN("Download: smbc_open failed: %s", uri.c_str());
             dlDone_.store(true);
             dlActive_.store(false);
             return;
@@ -418,10 +415,10 @@ void Browser::startDownload(const std::string& uri, const std::string& name) {
 
         dlLocalPath_ = local;
         dlOk_.store(n >= 0 && got > 0);
-        PIXELVR_LOG_INFO("Download finished: %s (%lld bytes) -> %s",
-                         name.c_str(), got, local.c_str());
         dlDone_.store(true);
         dlActive_.store(false);
+        PIXELVR_LOG_INFO("Download done: %s %lld bytes -> %s (ok=%d)", name.c_str(),
+                         got, local.c_str(), (n >= 0 && got > 0) ? 1 : 0);
     });
 #else
     (void)uri;
@@ -446,20 +443,10 @@ Browser::Result Browser::poll(std::string& playPath) {
     }
     if (dlActive_.load()) {
         status_ = downloadText();
-        if (!jobs_.empty()) {
-            jobs_.back().bytes = dlBytes_.load();
-            jobs_.back().total = dlTotal_.load();
-        }
         return Result::None;
     }
     if (dlDone_.exchange(false)) {
         if (dlThread_.joinable()) dlThread_.join();
-        if (!jobs_.empty()) {
-            jobs_.back().active = false;
-            jobs_.back().ok = dlOk_.load();
-            jobs_.back().bytes = dlBytes_.load();
-            jobs_.back().total = dlTotal_.load();
-        }
         if (dlOk_.load()) {
             playPath = dlLocalPath_;
             status_ = "Playing " + dlName_;

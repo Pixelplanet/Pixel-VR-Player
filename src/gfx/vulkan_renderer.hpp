@@ -84,11 +84,11 @@ public:
     // Debug statistics overlay (FPS, decode, system load). Drawn head-locked.
     void setStats(bool visible, const std::vector<std::string>& lines);
 
-    // Background downloads list, drawn head-locked near the bottom edge so
-    // downloads stay visible after the browser panel is closed.
-    void setDownloadStatus(bool visible, const std::vector<std::string>& lines) {
+    // Background download status line, drawn head-locked near the bottom edge so
+    // downloads are visible after the browser panel is closed.
+    void setDownloadStatus(bool visible, const std::string& text) {
         downloadStatusVisible_ = visible;
-        downloadStatusLines_ = lines;
+        downloadStatusText_ = text;
     }
 
     // Repositions the flat screen in front of the given head pose (headForward is
@@ -262,7 +262,7 @@ private:
     bool statsVisible_ = false;
     std::vector<std::string> statsLines_;
     bool downloadStatusVisible_ = false;
-    std::vector<std::string> downloadStatusLines_;
+    std::string downloadStatusText_;
 
     // Flat-screen placement in the app reference space (updated by recenter and
     // thumbstick distance control).
@@ -449,7 +449,6 @@ private:
         VkDescriptorSet set = VK_NULL_HANDLE;  // base-color texture descriptor
         float color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
         std::string nodeName;  // matched to an animated render-model node state
-        int nodeIndex = -1;    // glTF node index (node states are parallel to it)
     };
     VkDescriptorSetLayout modelSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool modelDescPool_ = VK_NULL_HANDLE;
