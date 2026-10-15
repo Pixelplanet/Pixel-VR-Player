@@ -542,12 +542,15 @@ int App::run() {
             // Downloads window: job list + Pause/Stop/Clear actions. Rows are
             // clickable (completed files play, actions run).
             std::vector<std::string> drows;
-            std::vector<int> dact;  // 1 pause/resume, 2 stop, 3 clear, 100+i play
+            std::vector<int> dact;    // 1 pause/resume, 2 stop, 3 clear, 100+i play
+            std::vector<uint8_t> dkind;  // 0 text, 1 button
             if (browser_.downloadActive()) {
-                drows.push_back(browser_.downloadPaused() ? "[ Resume ]" : "[ Pause ]");
+                drows.push_back(browser_.downloadPaused() ? "Resume" : "Pause");
                 dact.push_back(1);
-                drows.push_back("[ Stop ]");
+                dkind.push_back(1);
+                drows.push_back("Stop");
                 dact.push_back(2);
+                dkind.push_back(1);
             }
             {
                 const auto& jobs = browser_.downloadJobs();
@@ -563,8 +566,7 @@ int App::run() {
                                       nm.c_str(), pct, j.bytes / 1048576.0,
                                       j.total / 1048576.0);
                     } else if (j.state == 1) {
-                        std::snprintf(buf, sizeof(buf), "%s  done  (trigger to play)",
-                                      nm.c_str());
+                        std::snprintf(buf, sizeof(buf), "%s  done", nm.c_str());
                     } else if (j.state == 3) {
                         std::snprintf(buf, sizeof(buf), "%s  stopped", nm.c_str());
                     } else {
@@ -572,17 +574,21 @@ int App::run() {
                     }
                     drows.push_back(buf);
                     dact.push_back(j.state == 1 ? (100 + static_cast<int>(i)) : 0);
+                    dkind.push_back(0);
                 }
             }
-            drows.push_back("[ Clear finished ]");
+            drows.push_back("Clear finished");
             dact.push_back(3);
+            dkind.push_back(1);
 
             const bool dlWin = downloadsWindow_ && !browser_.isOpen() &&
-                               !settings_.isOpen();
+                               !settings_.isOpen() && pendingDl_.empty();
+            renderer_.setDownloadsModal(false);
             renderer_.setDownloads(dlWin, "Downloads", drows,
                                    browser_.downloadActive()
                                        ? browser_.downloadText()
-                                       : "Trigger: select     B: close");
+                                       : "Point + Trigger to select      B: close",
+                                   dkind);
             if (dlWin && in.select) {
                 const int hov = renderer_.downloadsHovered();
                 if (hov >= 0 && hov < static_cast<int>(dact.size())) {
@@ -607,23 +613,41 @@ int App::run() {
                 }
             }
 
-            // Folder-download confirmation overlay (overrides the downloads panel).
+            // Folder-download confirmation: a modal with the size and two buttons.
             if (!pendingDl_.empty()) {
+                bool confirmNow = false;
                 if (pendingDlFresh_) {
                     pendingDlFresh_ = false;  // ignore the press that opened it
                 } else if (in.togglePlay) {
-                    browser_.startDownload(pendingDl_, pendingDlName_, true);
-                    pendingDl_.clear();
+                    confirmNow = true;
                 } else if (in.browserToggle) {
                     pendingDl_.clear();
                 }
                 if (!pendingDl_.empty()) {
-                    std::vector<std::string> crows{
-                        "Folder: " + pendingDlName_,
-                        "Download this folder and everything in it?"};
+                    char sz[96];
+                    std::snprintf(sz, sizeof(sz), "Size: %.2f GB%s",
+                                  browser_.measuredSize() / 1073741824.0,
+                                  browser_.measuring() ? "  (scanning...)" : "");
+                    std::vector<std::string> crows{"Download this folder?",
+                                                   pendingDlName_, sz, "Download",
+                                                   "Cancel"};
+                    std::vector<uint8_t> ckind{0, 0, 0, 2, 1};
+                    renderer_.setDownloadsModal(true);
                     renderer_.setDownloads(true, "Confirm Download", crows,
-                                           "A: Download      B: Cancel");
+                                           "A: Download        B: Cancel", ckind);
+                    const int hov = renderer_.downloadsHovered();
+                    if (in.select && hov == 3) {
+                        confirmNow = true;
+                    } else if (in.select && hov == 4) {
+                        pendingDl_.clear();
+                    }
                 }
+                if (confirmNow && !pendingDl_.empty()) {
+                    browser_.startDownload(pendingDl_, pendingDlName_, true);
+                    pendingDl_.clear();
+                }
+            } else {
+                renderer_.setDownloadsModal(false);
             }
             // Publish the browser panel first so the pointer can raycast it.
             if (browser_.isOpen()) {
@@ -793,6 +817,7 @@ int App::run() {
                         pendingDl_ = fe->path;
                         pendingDlName_ = fe->label;
                         pendingDlFresh_ = true;
+                        browser_.measureFolder(fe->path);  // size for the dialog
                     } else {
                         browser_.downloadFocused();
                     }

@@ -1601,16 +1601,16 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 const float badgeY = kBarY + kBtnHalfH * 0.55f;
                 if (downloadsAllDone_) {
                     const float tickBg[4] = {0.10f, 0.65f, 0.25f, 1.0f};
-                    drawUiElement(vpPanel, badgeX, badgeY, kBtnHalfH * 0.62f,
-                                  kBtnHalfH * 0.62f, UiShape::RoundedBox, tickBg,
+                    drawUiElement(vpPanel, badgeX, badgeY, kBtnHalfH * 0.85f,
+                                  kBtnHalfH * 0.85f, UiShape::RoundedBox, tickBg,
                                   0.50f, 0.0f, nullptr);
-                    drawUiElement(vpPanel, badgeX, badgeY, kBtnHalfH * 0.44f,
-                                  kBtnHalfH * 0.44f, UiShape::Checkmark,
+                    drawUiElement(vpPanel, badgeX, badgeY, kBtnHalfH * 0.62f,
+                                  kBtnHalfH * 0.62f, UiShape::Checkmark,
                                   iconCol);
                 } else {
                     const float dotCol[4] = {0.30f, 0.75f, 1.0f, 1.0f};
-                    drawUiElement(vpPanel, badgeX, badgeY, kBtnHalfH * 0.34f,
-                                  kBtnHalfH * 0.34f, UiShape::Cursor, dotCol);
+                    drawUiElement(vpPanel, badgeX, badgeY, kBtnHalfH * 0.45f,
+                                  kBtnHalfH * 0.45f, UiShape::Cursor, dotCol);
                 }
             }
         }
@@ -1860,15 +1860,32 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         const float rowH = kRowH;
         const float panelBg[4] = {0.02f, 0.03f, 0.05f, 0.94f};
         const float panelBorder[4] = {0.25f, 0.45f, 0.65f, 0.85f};
+        if (downloadsModal_) {  // dim backdrop so a confirmation reads as a modal
+            const float backdrop[4] = {0.0f, 0.0f, 0.0f, 0.55f};
+            drawUiElement(vpPanel, 0.0f, 0.0f, panelW * 1.35f, panelTop * 1.25f,
+                          UiShape::RoundedBox, backdrop, 0.06f, 0.0f, nullptr);
+        }
         drawUiElement(vpPanel, 0.0f, 0.0f, panelW, panelTop, UiShape::RoundedBox,
                       panelBg, 0.05f, 0.015f, panelBorder);
         const float hlCol[4] = {0.18f, 0.45f, 0.85f, 0.85f};
+        const float btnBg[4] = {0.10f, 0.14f, 0.22f, 0.95f};
+        const float btnBgHover[4] = {0.18f, 0.42f, 0.82f, 0.95f};
+        const float btnBorder[4] = {0.30f, 0.45f, 0.65f, 0.80f};
+        const float primBg[4] = {0.12f, 0.50f, 0.22f, 0.95f};
         for (std::size_t i = 0; i < downloadsRows_.size(); ++i) {
-            if (static_cast<int>(i) == downloadsHovered_) {
-                const float ry = panelTop - 0.2f - static_cast<float>(i) * rowH;
+            const float ry = panelTop - 0.2f - static_cast<float>(i) * rowH;
+            const uint8_t kind =
+                (i < downloadsKinds_.size()) ? downloadsKinds_[i] : 0;
+            const bool hovered = (static_cast<int>(i) == downloadsHovered_);
+            if (kind != 0) {
+                const float* bg = hovered ? btnBgHover : (kind == 2 ? primBg : btnBg);
+                drawUiElement(vpPanel, 0.0f, ry + rowH * 0.30f, panelW - 0.06f,
+                              rowH * 0.50f, UiShape::RoundedBox, bg, 0.25f, 0.03f,
+                              btnBorder);
+            } else if (hovered) {
                 drawUiElement(vpPanel, 0.0f, ry + rowH * 0.28f, panelW - 0.04f,
-                              rowH * 0.44f, UiShape::RoundedBox, hlCol, 0.20f,
-                              0.0f, nullptr);
+                              rowH * 0.44f, UiShape::RoundedBox, hlCol, 0.20f, 0.0f,
+                              nullptr);
             }
         }
         vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline_);

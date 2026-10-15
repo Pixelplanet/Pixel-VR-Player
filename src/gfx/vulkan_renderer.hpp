@@ -119,12 +119,16 @@ public:
     // shown while downloads run (and briefly after) with the browser closed.
     void setDownloads(bool visible, const std::string& title,
                       const std::vector<std::string>& rows,
-                      const std::string& status) {
+                      const std::string& status,
+                      const std::vector<uint8_t>& kinds = {}) {
         downloadsVisible_ = visible;
         downloadsTitle_ = title;
         downloadsRows_ = rows;
         downloadsStatus_ = status;
+        downloadsKinds_ = kinds;  // 0 = item text, 1 = button, 2 = primary button
     }
+    // Draws a stronger modal backdrop behind the panel (for confirmations).
+    void setDownloadsModal(bool modal) { downloadsModal_ = modal; }
     // The downloads-window row under the pointer, or -1 if none.
     int downloadsHovered() const { return downloadsHovered_; }
 
@@ -292,6 +296,8 @@ private:
     std::string downloadsStatus_;
     bool downloadsActive_ = false;
     bool downloadsAllDone_ = false;
+    bool downloadsModal_ = false;
+    std::vector<uint8_t> downloadsKinds_;
     int downloadsHovered_ = -1;
 
     // Flat-screen placement in the app reference space (updated by recenter and

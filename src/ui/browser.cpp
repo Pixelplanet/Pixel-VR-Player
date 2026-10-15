@@ -267,6 +267,15 @@ void Browser::scanSmbInto(const std::string& uri, ScanResult& out) {
 // Starts a background scan so SMB discovery (NetBIOS + mDNS, seconds) and large
 // directories never freeze the render loop. poll() publishes the result.
 void Browser::beginScan(const std::string& location, bool isSmb) {
+    if (scanning_.load()) {
+        // A scan is already running (possibly waiting on the SMB lock held by a
+        // download). Defer this request rather than joining on the main thread,
+        // which would freeze the UI until the download's read returns.
+        pendingScanLoc_ = location;
+        pendingScanSmb_ = isSmb;
+        hasPendingScan_ = true;
+        return;
+    }
     if (scanThread_.joinable()) scanThread_.join();  // previous scan has finished
     scanReady_.store(false);
     scanning_.store(true);
@@ -360,6 +369,7 @@ const Browser::Entry* Browser::focused() const {
 Browser::~Browser() {
     if (scanThread_.joinable()) scanThread_.join();
     if (dlThread_.joinable()) dlThread_.join();
+    if (measureThread_.joinable()) measureThread_.join();
 }
 
 void Browser::startDownload(const std::string& uri, const std::string& nameIn,
@@ -711,19 +721,81 @@ void Browser::clearFinished() {
     status_ = "Cleared finished downloads";
 }
 
+void Browser::measureFolder(const std::string& uri) {
+#ifdef PIXELVR_HAVE_SMB
+    if (measuring_.load()) return;
+    if (measureThread_.joinable()) measureThread_.join();
+    measuredSize_.store(0);
+    measuring_.store(true);
+    measureThread_ = std::thread([this, uri]() {
+        long long total = 0;
+        std::function<void(const std::string&)> sum = [&](const std::string& src) {
+            int d = -1;
+            {
+                std::lock_guard<std::mutex> smb(smbGlobalLock());
+                d = smbc_opendir(src.c_str());
+            }
+            if (d < 0) return;
+            for (;;) {
+                std::string nm;
+                int typ = 0;
+                {
+                    std::lock_guard<std::mutex> smb(smbGlobalLock());
+                    struct smbc_dirent* de = smbc_readdir(d);
+                    if (de == nullptr) break;
+                    nm = de->name;
+                    typ = de->smbc_type;
+                }
+                if (nm.empty() || nm == "." || nm == "..") continue;
+                std::string s = src;
+                if (!s.empty() && s.back() != '/') s += '/';
+                s += nm;
+                if (typ == SMBC_DIR) {
+                    sum(s);
+                } else {
+                    struct stat st{};
+                    {
+                        std::lock_guard<std::mutex> smb(smbGlobalLock());
+                        smbc_stat(s.c_str(), &st);
+                    }
+                    total += static_cast<long long>(st.st_size);
+                    measuredSize_.store(total);  // live-updating estimate
+                }
+            }
+            {
+                std::lock_guard<std::mutex> smb(smbGlobalLock());
+                smbc_closedir(d);
+            }
+        };
+        sum(uri);
+        measuredSize_.store(total);
+        measuring_.store(false);
+    });
+#else
+    (void)uri;
+#endif
+}
+
 Browser::Result Browser::poll(std::string& playPath) {
     // Publish a finished async directory scan (SMB discovery / large dirs).
     if (scanReady_.exchange(false)) {
         if (scanThread_.joinable()) scanThread_.join();
-        std::lock_guard<std::mutex> lk(scanMutex_);
-        entries_ = std::move(scanResult_.entries);
-        title_ = std::move(scanResult_.title);
-        status_ = std::move(scanResult_.status);
-        location_ = scanResult_.location;
-        inSmb_ = scanResult_.inSmb;
-        selected_ = 0;
-        lastLocation_ = location_;  // remember for the next open()
-        lastInSmb_ = inSmb_;
+        {
+            std::lock_guard<std::mutex> lk(scanMutex_);
+            entries_ = std::move(scanResult_.entries);
+            title_ = std::move(scanResult_.title);
+            status_ = std::move(scanResult_.status);
+            location_ = scanResult_.location;
+            inSmb_ = scanResult_.inSmb;
+            selected_ = 0;
+            lastLocation_ = location_;  // remember for the next open()
+            lastInSmb_ = inSmb_;
+        }
+        // Run a navigation the user requested while this scan was busy.
+        if (hasPendingScan_) {
+            hasPendingScan_ = false;
+            beginScan(pendingScanLoc_, pendingScanSmb_);
+        }
     }
     if (dlActive_.load()) {
         const long long b = dlBytes_.load();

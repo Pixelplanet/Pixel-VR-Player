@@ -99,6 +99,11 @@ public:
     // Removes finished/stopped/failed jobs (deleting any partial files).
     void clearFinished();
 
+    // Background size probe for a folder (shown on the download confirmation).
+    void measureFolder(const std::string& uri);
+    bool measuring() const { return measuring_.load(); }
+    long long measuredSize() const { return measuredSize_.load(); }
+
     ~Browser();
     Browser(const Browser&) = delete;
     Browser& operator=(const Browser&) = delete;
@@ -114,6 +119,11 @@ private:
     };
     void beginScan(const std::string& location, bool isSmb);  // async navigate
     void runScan(std::string location, bool isSmb);           // worker body
+    // Navigation requested while a scan was already running (deferred so the
+    // main thread never blocks joining a scan stuck on the SMB lock).
+    std::string pendingScanLoc_;
+    bool pendingScanSmb_ = false;
+    bool hasPendingScan_ = false;
     void scanLocalInto(const std::string& dir, ScanResult& out);
     void scanSmbInto(const std::string& uri, ScanResult& out);
     void startDownloadFile(const std::string& uri, const std::string& local);
@@ -133,8 +143,7 @@ private:
     // Async directory scan (SMB discovery / large dirs) off the main thread.
     std::thread scanThread_;
     std::atomic<bool> scanning_{false};
-    std::atomic<bool> scanReady_{false};  // results waiting to publish
-    std::mutex scanMutex_;                 // guards scanResult_
+    std::atomic<bool> scanReady_{false};  // results waiting to publish    std::mutex scanMutex_;                 // guards scanResult_
     ScanResult scanResult_;
 
     // Async SMB download.
@@ -152,6 +161,10 @@ private:
     std::atomic<bool> dlPaused_{false};
     std::atomic<bool> dlAbort_{false};
     std::atomic<bool> dlStopped_{false};
+    // Folder size probe (background).
+    std::thread measureThread_;
+    std::atomic<bool> measuring_{false};
+    std::atomic<long long> measuredSize_{0};
     double dlSpeed_ = 0.0;             // EMA bytes/sec for the status readout
     long long speedBytes_ = 0;
     std::chrono::steady_clock::time_point speedTime_{};
