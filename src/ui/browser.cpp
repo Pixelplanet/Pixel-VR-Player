@@ -460,7 +460,7 @@ void Browser::startDownloadFile(const std::string& uri, const std::string& local
             dlActive_.store(false);
             return;
         }
-        std::vector<char> buf(1 << 18);  // small chunks so the SMB lock is freed
+        std::vector<char> buf(1 << 20);  // 1 MiB reads for SMB throughput
         ssize_t n = 0;
         long long got = 0;
         bool stopped = false;
@@ -610,7 +610,7 @@ void Browser::startDownloadFolder(const std::string& uri,
                 ok = false;
                 return;
             }
-            std::vector<char> buf(1 << 18);  // small chunks: yield the SMB lock
+            std::vector<char> buf(1 << 20);  // 1 MiB reads for SMB throughput
             for (;;) {
                 if (dlAbort_.load()) {
                     ok = false;

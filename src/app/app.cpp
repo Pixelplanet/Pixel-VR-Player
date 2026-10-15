@@ -723,7 +723,8 @@ int App::run() {
                         }
                     }
                 }
-                const bool uiPanelActive = browserOpen || settingsOpen;
+                const bool uiPanelActive = browserOpen || settingsOpen ||
+                                           downloadsWindow_ || !pendingDl_.empty();
                 // Controls (buttons + timeline) show only while a controller is
                 // actively moving; they fade after a few seconds of stillness.
                 renderer_.setControlBar(!uiPanelActive && controllersEngaged &&
