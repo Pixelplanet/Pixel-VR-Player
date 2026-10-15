@@ -73,6 +73,9 @@ public:
     // playPath when a download finishes; otherwise Result::None.
     Result poll(std::string& playPath);
     bool isBusy() const { return dlActive_.load() || scanning_.load(); }
+    // A directory scan is in flight (downloads are excluded: they run in a
+    // separate process and must not block browsing).
+    bool isScanning() const { return scanning_.load(); }
 
     // Directory the "Download" action copies into (default ~/media).
     void setDownloadDir(const std::string& dir) { downloadDir_ = dir; }

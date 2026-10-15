@@ -795,7 +795,10 @@ int App::run() {
             }
 
 #ifdef PIXELVR_HAVE_FREETYPE
-            if (browser_.isOpen() && !browser_.isBusy()) {
+            // Browsing stays interactive during downloads: they run in a separate
+            // process now, so they no longer block directory access. (Only guard
+            // against an in-flight SMB directory scan.)
+            if (browser_.isOpen() && !browser_.isScanning()) {
                 if (const int d = navStep(in.thumbstickY, nowT)) {
                     browser_.move(d);
                     renderer_.scrollBrowser(d);
