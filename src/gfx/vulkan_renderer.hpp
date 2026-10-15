@@ -120,17 +120,18 @@ public:
     void setDownloads(bool visible, const std::string& title,
                       const std::vector<std::string>& rows,
                       const std::string& status,
-                      const std::vector<uint8_t>& kinds = {}) {
+                      const std::vector<std::string>& buttons = {}) {
         downloadsVisible_ = visible;
         downloadsTitle_ = title;
         downloadsRows_ = rows;
         downloadsStatus_ = status;
-        downloadsKinds_ = kinds;  // 0 = item text, 1 = button, 2 = primary button
+        downloadsButtons_ = buttons;  // content-sized buttons along the bottom
     }
     // Draws a stronger modal backdrop behind the panel (for confirmations).
     void setDownloadsModal(bool modal) { downloadsModal_ = modal; }
-    // The downloads-window row under the pointer, or -1 if none.
+    // The downloads-window list row / button under the pointer, or -1.
     int downloadsHovered() const { return downloadsHovered_; }
+    int downloadsButtonHovered() const { return downloadsBtnHovered_; }
 
     // Tracked controllers: aim poses used to draw pointer rays, controller
     // models and the UI cursor. Index 0 = left, 1 = right. Call once per frame,
@@ -245,6 +246,10 @@ private:
     bool createResolveTarget(int width, int height);
     void destroyResolveTarget();
     bool createModelPipeline();
+    // Content-sized layout for the downloads-window buttons (centered, along the
+    // bottom). Fills centre-x and half-width per button.
+    void downloadsButtonLayout(std::vector<float>& cx,
+                               std::vector<float>& halfW) const;
     bool importDmabufImage(const DrmVideoFrame& frame, VkImage& image,
                            VkDeviceMemory& memory, VkImageView& view,
                            bool& fdConsumed);
@@ -297,7 +302,8 @@ private:
     bool downloadsActive_ = false;
     bool downloadsAllDone_ = false;
     bool downloadsModal_ = false;
-    std::vector<uint8_t> downloadsKinds_;
+    std::vector<std::string> downloadsButtons_;
+    int downloadsBtnHovered_ = -1;
     int downloadsHovered_ = -1;
 
     // Flat-screen placement in the app reference space (updated by recenter and

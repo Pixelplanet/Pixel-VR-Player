@@ -539,19 +539,14 @@ int App::run() {
             renderer_.setDownloadsBadge(browser_.downloadActive(),
                                         !browser_.downloadActive() &&
                                             browser_.hasDownloads() && dlRecent);
-            // Downloads window: job list + Pause/Stop/Clear actions. Rows are
-            // clickable (completed files play, actions run).
+            // Downloads window: job list plus action buttons at the bottom.
             std::vector<std::string> drows;
-            std::vector<int> dact;    // 1 pause/resume, 2 stop, 3 clear, 100+i play
-            std::vector<uint8_t> dkind;  // 0 text, 1 button
+            std::vector<std::string> dbtns;
             if (browser_.downloadActive()) {
-                drows.push_back(browser_.downloadPaused() ? "Resume" : "Pause");
-                dact.push_back(1);
-                dkind.push_back(1);
-                drows.push_back("Stop");
-                dact.push_back(2);
-                dkind.push_back(1);
+                dbtns.push_back(browser_.downloadPaused() ? "Resume" : "Pause");
+                dbtns.push_back("Stop");
             }
+            dbtns.push_back("Clear finished");
             {
                 const auto& jobs = browser_.downloadJobs();
                 for (std::size_t i = 0; i < jobs.size(); ++i) {
@@ -573,43 +568,40 @@ int App::run() {
                         std::snprintf(buf, sizeof(buf), "%s  failed", nm.c_str());
                     }
                     drows.push_back(buf);
-                    dact.push_back(j.state == 1 ? (100 + static_cast<int>(i)) : 0);
-                    dkind.push_back(0);
                 }
             }
-            drows.push_back("Clear finished");
-            dact.push_back(3);
-            dkind.push_back(1);
-
             const bool dlWin = downloadsWindow_ && !browser_.isOpen() &&
                                !settings_.isOpen() && pendingDl_.empty();
             renderer_.setDownloadsModal(false);
-            renderer_.setDownloads(dlWin, "Downloads", drows,
-                                   browser_.downloadActive()
-                                       ? browser_.downloadText()
-                                       : "Point + Trigger to select      B: close",
-                                   dkind);
+            renderer_.setDownloads(
+                dlWin, "Downloads", drows,
+                browser_.downloadActive()
+                    ? browser_.downloadText()
+                    : "Point + Trigger to select     B: close",
+                dbtns);
             if (dlWin && in.select) {
-                const int hov = renderer_.downloadsHovered();
-                if (hov >= 0 && hov < static_cast<int>(dact.size())) {
-                    const int a = dact[static_cast<std::size_t>(hov)];
-                    if (a == 1) {
-                        browser_.togglePause();
-                    } else if (a == 2) {
-                        browser_.stopDownload();
-                    } else if (a == 3) {
+                const int bi = renderer_.downloadsButtonHovered();
+                if (bi >= 0) {
+                    if (browser_.downloadActive()) {
+                        if (bi == 0) browser_.togglePause();
+                        else if (bi == 1) browser_.stopDownload();
+                        else if (bi == 2) browser_.clearFinished();
+                    } else if (bi == 0) {
                         browser_.clearFinished();
-                    } else if (a >= 100) {
-                        const auto& jobs = browser_.downloadJobs();
-                        const std::size_t ji = static_cast<std::size_t>(a - 100);
-                        if (ji < jobs.size() && !jobs[ji].localPath.empty()) {
-#ifdef PIXELVR_HAVE_MEDIA
-                            loadMedia(jobs[ji].localPath);
-                            downloadsWindow_ = false;
-#endif
-                        }
                     }
                     interacted = true;
+                } else {
+                    const int hov = renderer_.downloadsHovered();
+                    const auto& jobs = browser_.downloadJobs();
+                    if (hov >= 0 && hov < static_cast<int>(jobs.size()) &&
+                        jobs[static_cast<std::size_t>(hov)].state == 1 &&
+                        !jobs[static_cast<std::size_t>(hov)].localPath.empty()) {
+#ifdef PIXELVR_HAVE_MEDIA
+                        loadMedia(jobs[static_cast<std::size_t>(hov)].localPath);
+                        downloadsWindow_ = false;
+#endif
+                        interacted = true;
+                    }
                 }
             }
 
@@ -629,16 +621,15 @@ int App::run() {
                                   browser_.measuredSize() / 1073741824.0,
                                   browser_.measuring() ? "  (scanning...)" : "");
                     std::vector<std::string> crows{"Download this folder?",
-                                                   pendingDlName_, sz, "Download",
-                                                   "Cancel"};
-                    std::vector<uint8_t> ckind{0, 0, 0, 2, 1};
+                                                   pendingDlName_, sz};
+                    std::vector<std::string> cbtns{"Download", "Cancel"};
                     renderer_.setDownloadsModal(true);
                     renderer_.setDownloads(true, "Confirm Download", crows,
-                                           "A: Download        B: Cancel", ckind);
-                    const int hov = renderer_.downloadsHovered();
-                    if (in.select && hov == 3) {
+                                           "A: Download        B: Cancel", cbtns);
+                    const int cbi = renderer_.downloadsButtonHovered();
+                    if (in.select && cbi == 0) {
                         confirmNow = true;
-                    } else if (in.select && hov == 4) {
+                    } else if (in.select && cbi == 1) {
                         pendingDl_.clear();
                     }
                 }

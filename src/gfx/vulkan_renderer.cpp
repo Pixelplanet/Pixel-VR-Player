@@ -53,6 +53,10 @@ struct TextPush {
 constexpr float kPanelW = 1.0f;
 constexpr float kPanelTop = 0.8f;
 constexpr float kRowH = 0.09f;
+// Downloads-window action buttons (content-sized, along the bottom edge).
+constexpr float kDlBtnH = 0.11f;
+constexpr float kDlBtnGap = 0.05f;
+constexpr float kDlBtnPadX = 0.07f;
 constexpr int kMaxRows = 13;
 constexpr float kFirstRowY = kPanelTop - 0.2f;  // baseline of the first visible row
 
@@ -983,6 +987,7 @@ void VulkanRenderer::updatePointer() {
     settingsHovered_ = -1;
     settingsRow_ = -1;
     downloadsHovered_ = -1;
+    downloadsBtnHovered_ = -1;
 
     const bool controlBar = controlBarVisible_ && !browserVisible_ && !settingsVisible_ &&
                             !downloadsVisible_;
@@ -1079,7 +1084,8 @@ void VulkanRenderer::updatePointer() {
         }
 
         if (downloadsVisible_) {
-            if (hx < -kPanelW || hx > kPanelW || hyy < -kPanelTop || hyy > kPanelTop) {
+            if (hx < -kPanelW * 1.4f || hx > kPanelW * 1.4f ||
+                hyy < -kPanelTop * 1.3f || hyy > kPanelTop * 1.3f) {
                 continue;
             }
             pointerActive_ = true;
@@ -1087,12 +1093,25 @@ void VulkanRenderer::updatePointer() {
             pointerHit_[0] = world.x;
             pointerHit_[1] = world.y;
             pointerHit_[2] = world.z;
-            const int total = static_cast<int>(downloadsRows_.size());
-            if (total > 0) {
-                const float relY = kFirstRowY + 0.5f * kRowH - hyy;
-                const int idxFromTop = static_cast<int>(std::floor(relY / kRowH));
-                if (idxFromTop >= 0 && idxFromTop < total) {
-                    downloadsHovered_ = idxFromTop;
+            const float btnCy = -kPanelTop + 0.18f;
+            if (!downloadsButtons_.empty() && hyy >= btnCy - kDlBtnH * 0.5f &&
+                hyy <= btnCy + kDlBtnH * 0.5f) {
+                std::vector<float> cx, halfW;
+                downloadsButtonLayout(cx, halfW);
+                for (std::size_t i = 0; i < cx.size(); ++i) {
+                    if (std::fabs(hx - cx[i]) <= halfW[i]) {
+                        downloadsBtnHovered_ = static_cast<int>(i);
+                        break;
+                    }
+                }
+            } else {
+                const int total = static_cast<int>(downloadsRows_.size());
+                if (total > 0) {
+                    const float relY = kFirstRowY + 0.5f * kRowH - hyy;
+                    const int idxFromTop = static_cast<int>(std::floor(relY / kRowH));
+                    if (idxFromTop >= 0 && idxFromTop < total) {
+                        downloadsHovered_ = idxFromTop;
+                    }
                 }
             }
             break;
@@ -1601,16 +1620,16 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 const float badgeY = kBarY + kBtnHalfH * 0.55f;
                 if (downloadsAllDone_) {
                     const float tickBg[4] = {0.10f, 0.65f, 0.25f, 1.0f};
-                    drawUiElement(vpPanel, badgeX, badgeY, kBtnHalfH * 0.85f,
-                                  kBtnHalfH * 0.85f, UiShape::RoundedBox, tickBg,
+                    drawUiElement(vpPanel, badgeX, badgeY, kBtnHalfH * 0.55f,
+                                  kBtnHalfH * 0.55f, UiShape::RoundedBox, tickBg,
                                   0.50f, 0.0f, nullptr);
-                    drawUiElement(vpPanel, badgeX, badgeY, kBtnHalfH * 0.62f,
-                                  kBtnHalfH * 0.62f, UiShape::Checkmark,
+                    drawUiElement(vpPanel, badgeX, badgeY, kBtnHalfH * 0.40f,
+                                  kBtnHalfH * 0.40f, UiShape::Checkmark,
                                   iconCol);
                 } else {
                     const float dotCol[4] = {0.30f, 0.75f, 1.0f, 1.0f};
-                    drawUiElement(vpPanel, badgeX, badgeY, kBtnHalfH * 0.45f,
-                                  kBtnHalfH * 0.45f, UiShape::Cursor, dotCol);
+                    drawUiElement(vpPanel, badgeX, badgeY, kBtnHalfH * 0.62f,
+                                  kBtnHalfH * 0.62f, UiShape::Cursor, dotCol);
                 }
             }
         }
@@ -1872,26 +1891,33 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         const float btnBgHover[4] = {0.18f, 0.42f, 0.82f, 0.95f};
         const float btnBorder[4] = {0.30f, 0.45f, 0.65f, 0.80f};
         const float primBg[4] = {0.12f, 0.50f, 0.22f, 0.95f};
+        const float btnCy = -panelTop + 0.18f;
+        std::vector<float> btnCx, btnHalfW;
+        downloadsButtonLayout(btnCx, btnHalfW);
+        // Row highlights only in the list area (above the button band).
+        int visibleRows = 0;
         for (std::size_t i = 0; i < downloadsRows_.size(); ++i) {
             const float ry = panelTop - 0.2f - static_cast<float>(i) * rowH;
-            const uint8_t kind =
-                (i < downloadsKinds_.size()) ? downloadsKinds_[i] : 0;
-            const bool hovered = (static_cast<int>(i) == downloadsHovered_);
-            if (kind != 0) {
-                const float* bg = hovered ? btnBgHover : (kind == 2 ? primBg : btnBg);
-                drawUiElement(vpPanel, 0.0f, ry + rowH * 0.30f, panelW - 0.06f,
-                              rowH * 0.50f, UiShape::RoundedBox, bg, 0.25f, 0.03f,
-                              btnBorder);
-            } else if (hovered) {
+            if (ry < btnCy + kDlBtnH * 0.5f) break;
+            ++visibleRows;
+            if (static_cast<int>(i) == downloadsHovered_) {
                 drawUiElement(vpPanel, 0.0f, ry + rowH * 0.28f, panelW - 0.04f,
                               rowH * 0.44f, UiShape::RoundedBox, hlCol, 0.20f, 0.0f,
                               nullptr);
             }
         }
+        // Action buttons along the bottom, sized to their labels.
+        for (std::size_t i = 0; i < btnCx.size(); ++i) {
+            const bool hov = (static_cast<int>(i) == downloadsBtnHovered_);
+            const float* bg = hov ? btnBgHover : (i == 0 ? primBg : btnBg);
+            drawUiElement(vpPanel, btnCx[i], btnCy, btnHalfW[i], kDlBtnH * 0.5f,
+                          UiShape::RoundedBox, bg, 0.30f, 0.03f, btnBorder);
+        }
         vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline_);
         vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
         const float sc = (rowH * 0.62f) / fontAtlas_.lineHeight;
+        const float btnLabelScale = (kDlBtnH * 0.52f) / fontAtlas_.lineHeight;
         const float white2[4] = {0.96f, 0.96f, 0.96f, 1.0f};
         const float dim[4] = {0.55f, 0.7f, 0.9f, 1.0f};
         const float cyan[4] = {0.35f, 0.75f, 1.0f, 1.0f};
@@ -1925,13 +1951,25 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         };
         drawString(-panelW + 0.04f, panelTop - 0.1f, sc, cyan,
                    downloadsTitle_.substr(0, 42));
-        for (std::size_t i = 0; i < downloadsRows_.size(); ++i) {
+        for (int i = 0; i < visibleRows; ++i) {
             const float ry = panelTop - 0.2f - static_cast<float>(i) * rowH;
-            drawString(-panelW + 0.05f, ry, sc, white2, downloadsRows_[i].substr(0, 62));
+            drawString(-panelW + 0.05f, ry, sc, white2,
+                       downloadsRows_[static_cast<std::size_t>(i)].substr(0, 62));
         }
         if (!downloadsStatus_.empty()) {
-            drawString(-panelW + 0.04f, -panelTop + 0.05f, sc * 0.82f, dim,
-                       downloadsStatus_.substr(0, 70));
+            drawString(-panelW + 0.04f, btnCy + kDlBtnH * 0.5f + 0.06f, sc * 0.82f,
+                       dim, downloadsStatus_.substr(0, 70));
+        }
+        // Button labels, centred on each button.
+        for (std::size_t i = 0; i < btnCx.size(); ++i) {
+            float tw = 0.0f;
+            for (char rawc : downloadsButtons_[i]) {
+                unsigned char c = static_cast<unsigned char>(rawc);
+                if (c < 32 || c > 126) c = '?';
+                tw += fontAtlas_.glyphs[c].advance * btnLabelScale;
+            }
+            drawString(btnCx[i] - tw * 0.5f, btnCy - 0.5f * kDlBtnH * 0.30f,
+                       btnLabelScale, white2, downloadsButtons_[i]);
         }
     }
 
@@ -2860,6 +2898,35 @@ void VulkanRenderer::destroyResolveTarget() {
     resolveW_ = 0;
     resolveH_ = 0;
     resolveMips_ = 1;
+}
+
+void VulkanRenderer::downloadsButtonLayout(std::vector<float>& cx,
+                                           std::vector<float>& halfW) const {
+    cx.assign(downloadsButtons_.size(), 0.0f);
+    halfW.assign(downloadsButtons_.size(), 0.0f);
+    if (downloadsButtons_.empty() || fontAtlas_.lineHeight <= 0.0f) return;
+    const float labelScale = (kDlBtnH * 0.52f) / fontAtlas_.lineHeight;
+    std::vector<float> w(downloadsButtons_.size(), 0.0f);
+    float total = 0.0f;
+    for (std::size_t i = 0; i < downloadsButtons_.size(); ++i) {
+        float tw = 0.0f;
+        for (char rawc : downloadsButtons_[i]) {
+            unsigned char c = static_cast<unsigned char>(rawc);
+            if (c < 32 || c > 126) c = '?';
+            tw += fontAtlas_.glyphs[c].advance * labelScale;
+        }
+        w[i] = std::min(tw + 2.0f * kDlBtnPadX, kPanelW * 1.2f);
+        total += w[i];
+    }
+    if (downloadsButtons_.size() > 1) {
+        total += kDlBtnGap * static_cast<float>(downloadsButtons_.size() - 1);
+    }
+    float x = -total * 0.5f;
+    for (std::size_t i = 0; i < w.size(); ++i) {
+        cx[i] = x + w[i] * 0.5f;
+        halfW[i] = w[i] * 0.5f;
+        x += w[i] + kDlBtnGap;
+    }
 }
 
 bool VulkanRenderer::createModelPipeline() {
