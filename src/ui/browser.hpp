@@ -171,6 +171,11 @@ private:
     // Downloads run as a CHILD PROCESS (curl) so they use their own SMB
     // connection and never contend with the browser's libsmbclient.
     std::atomic<int> dlPid_{-1};
+    // Folder progress: bytes of completed files + the in-flight file's path.
+    std::atomic<long long> dlBaseBytes_{0};
+    std::mutex dlCurMutex_;
+    std::string dlCurFile_;
+    bool pausedByBrowse_ = false;  // child SIGSTOPped because the panel is open
     int spawnCurl(const std::string& uri, const std::string& local);
     // Folder size probe (background).
     std::thread measureThread_;

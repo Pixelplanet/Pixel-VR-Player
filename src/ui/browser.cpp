@@ -410,6 +410,12 @@ void Browser::startDownloadFile(const std::string& uri, const std::string& local
     speedTime_ = {};
     dlStopped_.store(false);
     dlPid_.store(-1);
+    dlBaseBytes_.store(0);
+    pausedByBrowse_ = false;
+    {
+        std::lock_guard<std::mutex> lk(dlCurMutex_);
+        dlCurFile_.clear();
+    }
     dlPaused_.store(false);
     dlAbort_.store(false);
     dlActive_.store(true);
@@ -603,7 +609,11 @@ void Browser::startDownloadFolder(const std::string& uri,
                 ok = false;
                 return;
             }
-            // Each file is copied by its own curl child (its own SMB connection).
+            {
+                std::lock_guard<std::mutex> lk(dlCurMutex_);
+                dlCurFile_ = dst;  // for live progress in poll()
+            }
+            // Each file is copied by its own smbclient child (own SMB connection).
             const int pid = spawnCurl(src, dst);
             if (pid <= 0) {
                 ok = false;
@@ -614,12 +624,21 @@ void Browser::startDownloadFolder(const std::string& uri,
             while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
             }
             dlPid_.store(-1);
+            {
+                std::lock_guard<std::mutex> lk(dlCurMutex_);
+                dlCurFile_.clear();
+            }
             if (!(WIFEXITED(status) && WEXITSTATUS(status) == 0)) {
+                // Report partial bytes too, so progress is not lost on failure.
+                std::error_code pec;
+                got += static_cast<long long>(std::filesystem::file_size(dst, pec));
+                dlBaseBytes_.store(got);
                 ok = false;
                 return;
             }
             std::error_code sec;
             got += static_cast<long long>(std::filesystem::file_size(dst, sec));
+            dlBaseBytes_.store(got);
             dlBytes_.store(got);
             ++count;
         };
@@ -798,12 +817,36 @@ Browser::Result Browser::poll(std::string& playPath) {
         }
     }
     if (dlActive_.load()) {
-        // File copies run in a curl child; take progress from the destination.
+        // Auto-pause the child while the browse panel is open, so directory
+        // listing always responds (resumes when the panel closes).
+        const int cpid = dlPid_.load();
+        if (cpid > 0) {
+            if (browseOpen_.load() && !pausedByBrowse_) {
+                kill(cpid, SIGSTOP);
+                pausedByBrowse_ = true;
+            } else if (!browseOpen_.load() && pausedByBrowse_) {
+                kill(cpid, SIGCONT);
+                pausedByBrowse_ = false;
+            }
+        }
+        // Progress: a single file from its own size; a folder from completed
+        // files plus the in-flight file.
         if (!dlLocalPath_.empty()) {
             std::error_code sec;
             if (std::filesystem::is_regular_file(dlLocalPath_, sec)) {
                 const auto sz = std::filesystem::file_size(dlLocalPath_, sec);
                 if (!sec) dlBytes_.store(static_cast<long long>(sz));
+            } else {
+                long long cur = 0;
+                {
+                    std::lock_guard<std::mutex> lk(dlCurMutex_);
+                    if (!dlCurFile_.empty()) {
+                        std::error_code cec;
+                        cur = static_cast<long long>(
+                            std::filesystem::file_size(dlCurFile_, cec));
+                    }
+                }
+                dlBytes_.store(dlBaseBytes_.load() + cur);
             }
         }
         const long long b = dlBytes_.load();
