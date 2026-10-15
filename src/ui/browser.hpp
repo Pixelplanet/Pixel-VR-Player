@@ -99,8 +99,8 @@ public:
     const std::vector<DownloadJob>& downloadJobs() const { return dlJobs_; }
     bool hasDownloads() const { return !dlJobs_.empty(); }
     bool downloadPaused() const { return dlPaused_.load(); }
-    void togglePause() { dlPaused_.store(!dlPaused_.load()); }
-    void stopDownload() { dlAbort_.store(true); }
+    void togglePause();   // SIGSTOP/SIGCONT the curl child
+    void stopDownload();  // SIGKILL the child and drop the partial file
     // Removes finished/stopped/failed jobs (deleting any partial files).
     void clearFinished();
 
@@ -168,6 +168,10 @@ private:
     std::atomic<bool> dlAbort_{false};
     std::atomic<bool> dlStopped_{false};
     std::atomic<bool> browseOpen_{false};  // worker yields while the panel is open
+    // Downloads run as a CHILD PROCESS (curl) so they use their own SMB
+    // connection and never contend with the browser's libsmbclient.
+    std::atomic<int> dlPid_{-1};
+    int spawnCurl(const std::string& uri, const std::string& local);
     // Folder size probe (background).
     std::thread measureThread_;
     std::atomic<bool> measuring_{false};

@@ -14,7 +14,10 @@
 
 #ifdef PIXELVR_HAVE_SMB
 #include <fcntl.h>
+#include <signal.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
+#include <unistd.h>
 
 #include <libsmbclient.h>
 #endif
@@ -403,6 +406,7 @@ void Browser::startDownloadFile(const std::string& uri, const std::string& local
     speedBytes_ = 0;
     speedTime_ = {};
     dlStopped_.store(false);
+    dlPid_.store(-1);
     dlPaused_.store(false);
     dlAbort_.store(false);
     dlActive_.store(true);
@@ -415,6 +419,9 @@ void Browser::startDownloadFile(const std::string& uri, const std::string& local
         dlActiveJob_ = static_cast<int>(dlJobs_.size()) - 1;
     }
     const std::string name = dlName_;
+    dlLocalPath_ = local;
+    // Copy with a curl child process: it opens its own SMB connection, so the
+    // browser's libsmbclient is never blocked and browsing keeps working.
     dlThread_ = std::thread([this, uri, local, name]() {
         std::error_code ec;
         std::filesystem::create_directories(
@@ -435,89 +442,52 @@ void Browser::startDownloadFile(const std::string& uri, const std::string& local
         std::error_code lec;
         if (total > 0 && std::filesystem::exists(local, lec) &&
             static_cast<long long>(std::filesystem::file_size(local, lec)) == total) {
-            dlLocalPath_ = local;
             dlOk_.store(true);
             dlDone_.store(true);
             dlActive_.store(false);
             return;
         }
 
-        int fd = -1;
-        {
-            std::lock_guard<std::mutex> smb(smbGlobalLock());
-            fd = smbc_open(uri.c_str(), O_RDONLY, 0);
-        }
-        if (fd < 0) {
-            PIXELVR_LOG_WARN("Download: smbc_open failed: %s", uri.c_str());
+        const int pid = spawnCurl(uri, local);
+        dlPid_.store(pid);
+        if (pid <= 0) {
+            PIXELVR_LOG_WARN("Download: spawn curl failed for %s", uri.c_str());
             dlDone_.store(true);
             dlActive_.store(false);
             return;
         }
-        FILE* out = std::fopen(local.c_str(), "wb");
-        if (out == nullptr) {
-            PIXELVR_LOG_WARN("Download: cannot write %s", local.c_str());
-            smbc_close(fd);
-            dlDone_.store(true);
-            dlActive_.store(false);
-            return;
+        int status = 0;
+        while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
         }
-        std::vector<char> buf(1 << 20);  // 1 MiB reads for SMB throughput
-        ssize_t n = 0;
-        long long got = 0;
-        bool stopped = false;
-        for (;;) {
-            if (dlAbort_.load()) {
-                stopped = true;
-                break;
-            }
-            // Give the browser's directory scan priority so navigation stays
-            // responsive while a download runs, and honour pause.
-            while (!dlAbort_.load() &&
-                   (scanning_.load() || dlPaused_.load() || browseOpen_.load())) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(10));
-            }
-            if (dlAbort_.load()) {
-                stopped = true;
-                break;
-            }
-            {
-                std::lock_guard<std::mutex> smb(smbGlobalLock());
-                n = smbc_read(fd, buf.data(), buf.size());
-            }
-            if (n <= 0) break;
-            std::fwrite(buf.data(), 1, static_cast<std::size_t>(n), out);
-            got += n;
-            dlBytes_.store(got);
-            std::this_thread::yield();
-        }
-        std::fclose(out);
-        {
-            std::lock_guard<std::mutex> smb(smbGlobalLock());
-            smbc_close(fd);
-        }
-        if (stopped) {
+        dlPid_.store(-1);
+        const bool ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        if (dlStopped_.load()) {
             std::error_code rec;
             std::filesystem::remove(local, rec);  // no partial file left behind
-            dlStopped_.store(true);
-            dlOk_.store(false);
-            dlDone_.store(true);
-            dlActive_.store(false);
-            PIXELVR_LOG_INFO("Download stopped: %s", name.c_str());
-            return;
         }
-
-        dlLocalPath_ = local;
-        dlOk_.store(n >= 0 && got > 0);
+        dlOk_.store(ok);
         dlDone_.store(true);
         dlActive_.store(false);
-        PIXELVR_LOG_INFO("Download done: %s %lld bytes -> %s (ok=%d)", name.c_str(),
-                         got, local.c_str(), (n >= 0 && got > 0) ? 1 : 0);
+        PIXELVR_LOG_INFO("Download %s: ok=%d -> %s", name.c_str(), ok ? 1 : 0,
+                         local.c_str());
     });
 #else
     (void)uri;
     (void)local;
     status_ = "SMB support not built";
 #endif
+}
+
+// Forks a curl child that copies `uri` (smb://) to `local`; returns its pid.
+int Browser::spawnCurl(const std::string& uri, const std::string& local) {
+    const pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        execlp("curl", "curl", "-sS", "--fail", "-o", local.c_str(), uri.c_str(),
+               static_cast<char*>(nullptr));
+        _exit(127);
+    }
+    return static_cast<int>(pid);
 }
 
 void Browser::startDownloadFolder(const std::string& uri,
@@ -595,49 +565,31 @@ void Browser::startDownloadFolder(const std::string& uri,
         // the overlay can show progress as files complete.
         std::function<void(const std::string&, const std::string&)> copyDir;
         auto copyFile = [&](const std::string& src, const std::string& dst) {
-            int fd = -1;
-            {
-                std::lock_guard<std::mutex> smb(smbGlobalLock());
-                fd = smbc_open(src.c_str(), O_RDONLY, 0);
+            while (!dlAbort_.load() && dlPaused_.load()) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
-            if (fd < 0) {
+            if (dlAbort_.load()) {
                 ok = false;
                 return;
             }
-            FILE* out = std::fopen(dst.c_str(), "wb");
-            if (out == nullptr) {
-                std::lock_guard<std::mutex> smb(smbGlobalLock());
-                smbc_close(fd);
+            // Each file is copied by its own curl child (its own SMB connection).
+            const int pid = spawnCurl(src, dst);
+            if (pid <= 0) {
                 ok = false;
                 return;
             }
-            std::vector<char> buf(1 << 20);  // 1 MiB reads for SMB throughput
-            for (;;) {
-                if (dlAbort_.load()) {
-                    ok = false;
-                    break;
-                }
-                while (!dlAbort_.load() &&
-                       (scanning_.load() || dlPaused_.load() ||
-                        browseOpen_.load())) {
-                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-                }
-                ssize_t n = 0;
-                {
-                    std::lock_guard<std::mutex> smb(smbGlobalLock());
-                    n = smbc_read(fd, buf.data(), buf.size());
-                }
-                if (n <= 0) break;
-                std::fwrite(buf.data(), 1, static_cast<std::size_t>(n), out);
-                got += n;
-                dlBytes_.store(got);
-                std::this_thread::yield();
+            dlPid_.store(pid);
+            int status = 0;
+            while (waitpid(pid, &status, 0) < 0 && errno == EINTR) {
             }
-            std::fclose(out);
-            {
-                std::lock_guard<std::mutex> smb(smbGlobalLock());
-                smbc_close(fd);
+            dlPid_.store(-1);
+            if (!(WIFEXITED(status) && WEXITSTATUS(status) == 0)) {
+                ok = false;
+                return;
             }
+            std::error_code sec;
+            got += static_cast<long long>(std::filesystem::file_size(dst, sec));
+            dlBytes_.store(got);
             ++count;
         };
         copyDir = [&](const std::string& src, const std::string& dst) {
@@ -700,6 +652,20 @@ void Browser::startDownloadFolder(const std::string& uri,
     (void)destDir;
     status_ = "SMB support not built";
 #endif
+}
+
+void Browser::togglePause() {
+    const bool p = !dlPaused_.load();
+    dlPaused_.store(p);
+    const int pid = dlPid_.load();
+    if (pid > 0) kill(pid, p ? SIGSTOP : SIGCONT);
+}
+
+void Browser::stopDownload() {
+    dlAbort_.store(true);
+    dlStopped_.store(true);
+    const int pid = dlPid_.load();
+    if (pid > 0) kill(pid, SIGKILL);
 }
 
 void Browser::clearFinished() {
@@ -801,6 +767,14 @@ Browser::Result Browser::poll(std::string& playPath) {
         }
     }
     if (dlActive_.load()) {
+        // File copies run in a curl child; take progress from the destination.
+        if (!dlLocalPath_.empty()) {
+            std::error_code sec;
+            if (std::filesystem::is_regular_file(dlLocalPath_, sec)) {
+                const auto sz = std::filesystem::file_size(dlLocalPath_, sec);
+                if (!sec) dlBytes_.store(static_cast<long long>(sz));
+            }
+        }
         const long long b = dlBytes_.load();
         const long long t = dlTotal_.load();
         const auto now = std::chrono::steady_clock::now();
