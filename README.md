@@ -8,11 +8,37 @@ A native VR video player for the **Valve Steam Frame**, playing flat 2D, 180°, 
 - **Targets:** native Linux `x86_64` (for SteamVR-streamed desktop dev) and
   `aarch64` (on-device, run directly on the SteamOS host)
 
-> Status: **Playable core.** OpenXR + Vulkan per-eye rendering; hardware video
-> decode (`h264_v4l2m2m` / `hevc_v4l2m2m` → NV12) with GPU YUV→RGB conversion;
-> flat / 180° / 360° projection and mono / SBS / TB stereo, auto-detected from the
-> filename; PulseAudio/PipeWire audio on desktop. Transport UI and controller
-> input are next.
+> Status: **Feature-complete player.** OpenXR + Vulkan per-eye rendering with a
+> shared depth buffer; hardware video decode (`h264_v4l2m2m` / `hevc_v4l2m2m` →
+> NV12) with zero-copy dma-buf import; flat / 180° / 360° projection and mono /
+> SBS (including half-SBS) / TB stereo, auto-detected from the filename; spatial
+> audio with a master clock. In-headset UI: file browser (with file type and
+> size), transport bar, settings menu, and a downloads manager. Native Valve
+> Steam Frame controller support (`XR_VALVE_frame_controller_interaction`) using
+> the runtime's own render model, with per-button animation on the model and
+> press-to-bind remapping.
+
+## Install (prebuilt release)
+
+Download `pixelvr-linux-arm64.tar.gz` from the
+[Releases](../../releases) page and copy it to your Steam Frame, then:
+
+```bash
+tar -xzf pixelvr-linux-arm64.tar.gz -C ~
+chmod +x ~/PixelVRPlayer/run.sh
+~/PixelVRPlayer/run.sh                 # opens the in-headset file browser
+~/PixelVRPlayer/run.sh /path/clip.mp4  # …or auto-play a specific clip
+```
+
+To launch it from the headset library, add `~/PixelVRPlayer/run.sh` as a
+**Non-Steam Game** (Steam ▸ Add a Non-Steam Game). SteamVR must be running; the
+app logs to `~/pixelvr-run.log`.
+
+Requirements: the SteamVR OpenXR runtime (SteamOS), Vulkan, and FFmpeg with the
+V4L2 M2M decoders. For zero-copy dma-buf decoding, build the patched FFmpeg into
+`~/ffbuild` — `run.sh` picks it up automatically when present, otherwise it falls
+back to the system FFmpeg with CPU colour conversion.
+
 
 ## Repository layout
 
