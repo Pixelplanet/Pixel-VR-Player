@@ -8,6 +8,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <functional>
 #include <mutex>
 #include <set>
 
@@ -118,6 +119,18 @@ void Browser::move(int delta) {
     }
 }
 
+// Human-readable byte size, e.g. "1.4 GB".
+std::string format_size(long long bytes) {
+    if (bytes <= 0) return "";
+    char buf[32];
+    const double kb = 1024.0, mb = kb * 1024.0, gb = mb * 1024.0;
+    if (bytes >= gb) std::snprintf(buf, sizeof(buf), "%.2f GB", bytes / gb);
+    else if (bytes >= mb) std::snprintf(buf, sizeof(buf), "%.0f MB", bytes / mb);
+    else if (bytes >= kb) std::snprintf(buf, sizeof(buf), "%.0f KB", bytes / kb);
+    else std::snprintf(buf, sizeof(buf), "%lld B", bytes);
+    return buf;
+}
+
 void Browser::scanLocalInto(const std::string& dir, ScanResult& out) {
     out.inSmb = false;
     out.location = dir;
@@ -141,8 +154,11 @@ void Browser::scanLocalInto(const std::string& dir, ScanResult& out) {
         std::error_code dec;
         if (it->is_directory(dec)) {
             dirs.push_back({name + "/", p.string(), true, false, false, false});
-        } else if (is_video(name)) {
-            files.push_back({name, p.string(), false, true, false, false});
+        } else {
+            std::error_code sec;
+            const long long sz = static_cast<long long>(fs::file_size(p, sec));
+            files.push_back({name, p.string(), false, is_video(name), false, false,
+                             format_size(sec ? 0 : sz), sec ? 0 : sz});
         }
     }
     sort_and_append(out.entries, dirs, files);
@@ -185,11 +201,16 @@ void Browser::scanSmbInto(const std::string& uri, ScanResult& out) {
                     case SMBC_DIR:
                         dirs.push_back({name + "/", child, true, false, false, false});
                         break;
-                    case SMBC_FILE:
-                        if (is_video(name)) {
-                            files.push_back({name, child, false, true, false, false});
+                    case SMBC_FILE: {
+                        struct stat st{};
+                        long long sz = 0;
+                        if (smbc_stat(child.c_str(), &st) == 0) {
+                            sz = static_cast<long long>(st.st_size);
                         }
+                        files.push_back({name, child, false, is_video(name), false,
+                                         false, format_size(sz), sz});
                         break;
+                    }
                     default:
                         break;
                 }
@@ -318,15 +339,22 @@ bool Browser::downloadFocused() {
         return false;
     }
     const Entry e = entries_[static_cast<std::size_t>(selected_)];
-    if (!e.isVideo || !inSmb_) {
-        status_ = inSmb_ ? "Highlight a video file, then press A to download"
+    if (!inSmb_ || e.isBack || e.isNetwork || e.isDir || e.path.empty()) {
+        status_ = inSmb_ ? "Highlight a file to download (folders ask to confirm)"
                          : "Downloads are for network (SMB) files";
-        PIXELVR_LOG_WARN("Download: no SMB video focused (isVideo=%d inSmb=%d)",
-                         e.isVideo ? 1 : 0, inSmb_ ? 1 : 0);
-        return false;  // Only network videos can be downloaded to local storage.
+        PIXELVR_LOG_WARN("Download: nothing downloadable focused (dir=%d smb=%d)",
+                         e.isDir ? 1 : 0, inSmb_ ? 1 : 0);
+        return false;
     }
-    startDownload(e.path, e.label);  // async copy to ~/media, then Play via poll()
+    startDownload(e.path, e.label, false);
     return true;
+}
+
+const Browser::Entry* Browser::focused() const {
+    if (selected_ < 0 || selected_ >= static_cast<int>(entries_.size())) {
+        return nullptr;
+    }
+    return &entries_[static_cast<std::size_t>(selected_)];
 }
 
 Browser::~Browser() {
@@ -334,28 +362,42 @@ Browser::~Browser() {
     if (dlThread_.joinable()) dlThread_.join();
 }
 
-void Browser::startDownload(const std::string& uri, const std::string& name) {
+void Browser::startDownload(const std::string& uri, const std::string& nameIn,
+                            bool isDir) {
     if (dlActive_.load()) return;
+    std::string name = nameIn;
+    while (!name.empty() && name.back() == '/') name.pop_back();
+    const std::size_t slash = name.find_last_of('/');
+    if (slash != std::string::npos) name = name.substr(slash + 1);
+    if (name.empty()) return;
+    dlName_ = name;
+    const std::string destDir =
+        downloadDir_.empty() ? homeDir_ + "/media" : downloadDir_;
+    if (isDir) {
+        startDownloadFolder(uri, destDir + "/" + name);
+    } else {
+        startDownloadFile(uri, destDir + "/" + name);
+    }
+}
+
+void Browser::startDownloadFile(const std::string& uri, const std::string& local) {
 #ifdef PIXELVR_HAVE_SMB
     if (dlThread_.joinable()) dlThread_.join();
     dlDone_.store(false);
     dlOk_.store(false);
     dlBytes_.store(0);
     dlTotal_.store(0);
-    dlName_ = name;
     dlLocalPath_.clear();
     dlActive_.store(true);
-    status_ = "Downloading " + name + " ...";
-    const std::string home = homeDir_;
-    const std::string destDir = downloadDir_.empty() ? home + "/media" : downloadDir_;
-    PIXELVR_LOG_INFO("Download start: %s -> %s", uri.c_str(),
-                     (destDir + "/" + name).c_str());
-    dlRows_.push_back(name + "  0%");
+    status_ = "Downloading " + dlName_ + " ...";
+    PIXELVR_LOG_INFO("Download file: %s -> %s", uri.c_str(), local.c_str());
+    dlRows_.push_back(dlName_ + "  0%");
     if (dlRows_.size() > 8) dlRows_.erase(dlRows_.begin());
-    dlThread_ = std::thread([this, uri, name, destDir]() {
+    const std::string name = dlName_;
+    dlThread_ = std::thread([this, uri, local, name]() {
         std::error_code ec;
-        std::filesystem::create_directories(destDir, ec);
-        const std::string local = destDir + "/" + name;
+        std::filesystem::create_directories(
+            std::filesystem::path(local).parent_path(), ec);
 
         struct stat st{};
         long long total = 0;
@@ -426,7 +468,116 @@ void Browser::startDownload(const std::string& uri, const std::string& name) {
     });
 #else
     (void)uri;
-    (void)name;
+    (void)local;
+    status_ = "SMB support not built";
+#endif
+}
+
+void Browser::startDownloadFolder(const std::string& uri,
+                                  const std::string& destDir) {
+#ifdef PIXELVR_HAVE_SMB
+    if (dlThread_.joinable()) dlThread_.join();
+    dlDone_.store(false);
+    dlOk_.store(false);
+    dlBytes_.store(0);
+    dlTotal_.store(0);
+    dlLocalPath_ = destDir;
+    dlActive_.store(true);
+    status_ = "Downloading folder " + dlName_ + " ...";
+    PIXELVR_LOG_INFO("Download folder: %s -> %s", uri.c_str(), destDir.c_str());
+    dlRows_.push_back(dlName_ + "/ (folder)");
+    if (dlRows_.size() > 8) dlRows_.erase(dlRows_.begin());
+    dlThread_ = std::thread([this, uri, destDir]() {
+        std::error_code ec;
+        long long got = 0;
+        long long count = 0;
+        bool ok = true;
+        // Depth-first copy of an SMB folder. Recomputes a running byte total so
+        // the overlay can show progress as files complete.
+        std::function<void(const std::string&, const std::string&)> copyDir;
+        auto copyFile = [&](const std::string& src, const std::string& dst) {
+            int fd = -1;
+            {
+                std::lock_guard<std::mutex> smb(smbGlobalLock());
+                fd = smbc_open(src.c_str(), O_RDONLY, 0);
+            }
+            if (fd < 0) {
+                ok = false;
+                return;
+            }
+            FILE* out = std::fopen(dst.c_str(), "wb");
+            if (out == nullptr) {
+                std::lock_guard<std::mutex> smb(smbGlobalLock());
+                smbc_close(fd);
+                ok = false;
+                return;
+            }
+            std::vector<char> buf(1 << 20);
+            for (;;) {
+                ssize_t n = 0;
+                {
+                    std::lock_guard<std::mutex> smb(smbGlobalLock());
+                    n = smbc_read(fd, buf.data(), buf.size());
+                }
+                if (n <= 0) break;
+                std::fwrite(buf.data(), 1, static_cast<std::size_t>(n), out);
+                got += n;
+                dlBytes_.store(got);
+            }
+            std::fclose(out);
+            {
+                std::lock_guard<std::mutex> smb(smbGlobalLock());
+                smbc_close(fd);
+            }
+            ++count;
+        };
+        copyDir = [&](const std::string& src, const std::string& dst) {
+            std::filesystem::create_directories(dst, ec);
+            int d = -1;
+            {
+                std::lock_guard<std::mutex> smb(smbGlobalLock());
+                d = smbc_opendir(src.c_str());
+            }
+            if (d < 0) {
+                ok = false;
+                return;
+            }
+            for (;;) {
+                struct smbc_dirent* de = nullptr;
+                {
+                    std::lock_guard<std::mutex> smb(smbGlobalLock());
+                    de = smbc_readdir(d);
+                }
+                if (de == nullptr) break;
+                const std::string nm = de->name;
+                if (nm.empty() || nm == "." || nm == "..") continue;
+                std::string s = src;
+                if (!s.empty() && s.back() != '/') s += '/';
+                s += nm;
+                const std::string t = dst + "/" + nm;
+                const bool isDirEnt = (de->smbc_type == SMBC_DIR);
+                if (isDirEnt) {
+                    copyDir(s, t);
+                } else {
+                    copyFile(s, t);
+                }
+                if (!ok) break;
+            }
+            {
+                std::lock_guard<std::mutex> smb(smbGlobalLock());
+                smbc_closedir(d);
+            }
+        };
+        copyDir(uri, destDir);
+        dlOk_.store(ok);
+        dlDone_.store(true);
+        dlActive_.store(false);
+        PIXELVR_LOG_INFO("Download folder done: %lld files, %lld bytes (ok=%d)",
+                         count, got, ok ? 1 : 0);
+    });
+#else
+    (void)uri;
+    (void)destDir;
     status_ = "SMB support not built";
 #endif
 }

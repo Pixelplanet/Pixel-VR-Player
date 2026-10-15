@@ -20,6 +20,8 @@ public:
         bool isVideo = false;     // playable file
         bool isBack = false;      // ".." navigation
         bool isNetwork = false;   // "Network (SMB)" entry point
+        std::string detail;       // human-readable type/size for the row
+        long long size = 0;       // bytes (0 if unknown)
     };
     enum class Result { None, Navigated, Play };
 
@@ -49,6 +51,11 @@ public:
     // Starts an async download of the focused SMB video to local storage (the
     // explicit "Download" action). Streaming is the default via activate().
     bool downloadFocused();
+
+    // Starts an async recursive copy of an SMB file OR folder into the download
+    // directory (used after the caller confirms a folder download).
+    void startDownload(const std::string& uri, const std::string& name,
+                       bool isDir);
 
     // True while browsing an SMB share (as opposed to local storage).
     bool onNetwork() const { return inSmb_; }
@@ -87,7 +94,8 @@ private:
     void runScan(std::string location, bool isSmb);           // worker body
     void scanLocalInto(const std::string& dir, ScanResult& out);
     void scanSmbInto(const std::string& uri, ScanResult& out);
-    void startDownload(const std::string& uri, const std::string& name);
+    void startDownloadFile(const std::string& uri, const std::string& local);
+    void startDownloadFolder(const std::string& uri, const std::string& name);
 
     bool open_ = false;
     bool inSmb_ = false;

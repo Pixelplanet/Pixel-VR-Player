@@ -24,15 +24,16 @@ void main() {
     vec3 N = normalize(vNormal);
     vec3 V = normalize(vView);
     vec3 L = normalize(vec3(0.3, 0.9, 0.45));
-    // Keep the matte-black base dark; reveal form through lighting, not a lift.
-    vec3 base = tex.rgb * 0.85 + 0.05;
+    // Preserve the real near-black skin so the printed button labels stay bright
+    // and read as highlights on the black plastic.
+    vec3 base = tex.rgb * 0.95 + 0.015;
     float diff = max(dot(N, L), 0.0);
     float up = N.y * 0.5 + 0.5;
-    vec3 hemi = mix(vec3(0.10, 0.10, 0.13), vec3(0.42, 0.46, 0.55), up);
+    vec3 hemi = mix(vec3(0.12, 0.12, 0.16), vec3(0.55, 0.58, 0.66), up);
     vec3 H = normalize(L + V);
-    float spec = pow(max(dot(N, H), 0.0), 48.0) * 0.6;
-    float fres = pow(1.0 - max(dot(N, V), 0.0), 3.0) * 0.45;
-    vec3 col = base * (hemi + diff * 0.8) + vec3(spec) +
+    float spec = pow(max(dot(N, H), 0.0), 40.0) * 0.9;
+    float fres = pow(1.0 - max(dot(N, V), 0.0), 3.0) * 0.7;
+    vec3 col = base * (hemi + diff * 0.7) + vec3(spec) +
                vec3(0.5, 0.6, 0.8) * fres;
     outColor = vec4(col * pc.color.rgb, tex.a * pc.color.a);
 }

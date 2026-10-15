@@ -537,12 +537,33 @@ int App::run() {
             renderer_.setDownloads(!browser_.isOpen() && !settings_.isOpen() &&
                                        browser_.hasDownloads() && dlRecent,
                                    "Downloads", browser_.downloadRows(), dlLine);
+
+            // Folder-download confirmation overlay (overrides the downloads panel).
+            if (!pendingDl_.empty()) {
+                if (pendingDlFresh_) {
+                    pendingDlFresh_ = false;  // ignore the press that opened it
+                } else if (in.togglePlay) {
+                    browser_.startDownload(pendingDl_, pendingDlName_, true);
+                    pendingDl_.clear();
+                } else if (in.browserToggle) {
+                    pendingDl_.clear();
+                }
+                if (!pendingDl_.empty()) {
+                    std::vector<std::string> crows{
+                        "Folder: " + pendingDlName_,
+                        "Download this folder and everything in it?"};
+                    renderer_.setDownloads(true, "Confirm Download", crows,
+                                           "A: Download      B: Cancel");
+                }
+            }
             // Publish the browser panel first so the pointer can raycast it.
             if (browser_.isOpen()) {
                 std::vector<std::string> rows;
                 rows.reserve(browser_.entries().size());
                 for (const auto& e : browser_.entries()) {
-                    rows.push_back(e.label);
+                    rows.push_back(e.detail.empty()
+                                       ? e.label
+                                       : e.label + "   " + e.detail);
                 }
                 std::string status = browser_.status();
                 if (browser_.onNetwork() && !browser_.isBusy()) {
@@ -676,8 +697,10 @@ int App::run() {
                 const int hovered = renderer_.browserHovered();
                 if (hovered >= 0) {
                     renderer_.setBrowserSelected(hovered);
+                    // The pointer drives the selection, so A acts on the entry
+                    // actually being pointed at (not just the last trigger press).
+                    browser_.setSelected(hovered);
                     if (in.select) {
-                        browser_.setSelected(hovered);
                         std::string playPath;
                         if (browser_.activate(playPath) == Browser::Result::Play &&
                             !playPath.empty()) {
@@ -688,8 +711,17 @@ int App::run() {
                         }
                     }
                 }
-                if (in.togglePlay) {
-                    browser_.downloadFocused();
+                // A: download the focused entry; folders prompt for confirmation.
+                if (in.togglePlay && pendingDl_.empty()) {
+                    const Browser::Entry* fe = browser_.focused();
+                    if (fe != nullptr && fe->isDir && !fe->isBack &&
+                        browser_.onNetwork()) {
+                        pendingDl_ = fe->path;
+                        pendingDlName_ = fe->label;
+                        pendingDlFresh_ = true;
+                    } else {
+                        browser_.downloadFocused();
+                    }
                 }
             }
             if (browser_.isOpen() && in.recenter && in.headValid) {

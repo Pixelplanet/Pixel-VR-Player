@@ -68,6 +68,10 @@ private:
     // download finishes (so success/failure is visible with the browser closed).
     std::chrono::steady_clock::time_point downloadToast_{};
     std::string downloadToastText_;
+    // Pending folder-download confirmation (SMB): uri + display name.
+    std::string pendingDl_;
+    std::string pendingDlName_;
+    bool pendingDlFresh_ = false;  // suppress the same-frame A press
     // Low-pass smoothed model pose per hand (the raw hand pose jitters; the
     // system's own controller model is visibly smoothed).
     bool modelSmoothInit_[2] = {false, false};
