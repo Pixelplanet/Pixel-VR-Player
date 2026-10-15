@@ -1871,18 +1871,36 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 drawPart(modelWhite_.set, capsuleColor, 0, modelIndexCount_,
                          identityPos, identityQuat);
             } else {
-                for (const ModelSubmesh& sm : modelSubmeshes_) {
+                // Node states may carry names (from asset properties) or be bare.
+                // If named, match by name; otherwise fall back to the submesh
+                // ordinal, which lines up for the runtime's flat node list.
+                const bool haveNames =
+                    !modelNodeStates_.empty() && !modelNodeStates_[0].name.empty();
+                for (std::size_t si = 0; si < modelSubmeshes_.size(); ++si) {
+                    const ModelSubmesh& sm = modelSubmeshes_[si];
+                    if (sm.nodeName == "status") continue;  // full-atlas screen node
                     const float* np = identityPos;
                     const float* nq = identityQuat;
                     bool visible = true;
-                    for (const NodeStateVis& ns : modelNodeStates_) {
-                        if (ns.name == sm.nodeName) {
-                            np = ns.pos;
-                            nq = ns.quat;
-                            visible = ns.visible;
-                            break;
+                    bool matched = false;
+                    if (haveNames) {
+                        for (const NodeStateVis& ns : modelNodeStates_) {
+                            if (ns.name == sm.nodeName) {
+                                np = ns.pos;
+                                nq = ns.quat;
+                                visible = ns.visible;
+                                matched = true;
+                                break;
+                            }
                         }
+                    } else if (si < modelNodeStates_.size()) {
+                        const NodeStateVis& ns = modelNodeStates_[si];
+                        np = ns.pos;
+                        nq = ns.quat;
+                        visible = ns.visible;
+                        matched = true;
                     }
+                    (void)matched;
                     if (!visible) continue;  // node hidden by the runtime
                     drawPart(sm.set, sm.color, sm.firstIndex, sm.indexCount, np, nq);
                 }

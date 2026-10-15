@@ -319,6 +319,8 @@ bool Browser::downloadFocused() {
     }
     const Entry e = entries_[static_cast<std::size_t>(selected_)];
     if (!e.isVideo || !inSmb_) {
+        status_ = inSmb_ ? "Highlight a video file, then press A to download"
+                         : "Downloads are for network (SMB) files";
         PIXELVR_LOG_WARN("Download: no SMB video focused (isVideo=%d inSmb=%d)",
                          e.isVideo ? 1 : 0, inSmb_ ? 1 : 0);
         return false;  // Only network videos can be downloaded to local storage.

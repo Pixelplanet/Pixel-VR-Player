@@ -135,6 +135,8 @@ bool RenderModelSystem::fetchFirstModel() {
                     joined += ' ';
                 }
                 PIXELVR_LOG_INFO("Render model nodes: %s", joined.c_str());
+            } else {
+                PIXELVR_LOG_WARN("xrGetRenderModelAssetPropertiesEXT (data) failed");
             }
         }
     }
