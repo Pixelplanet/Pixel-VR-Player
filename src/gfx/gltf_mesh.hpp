@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace pixelvr {
@@ -18,6 +19,7 @@ struct GltfSubmesh {
     uint32_t indexCount = 0;
     int image = -1;  // index into GltfMesh::images, or -1 for untextured
     float baseColor[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    std::string nodeName;  // source glTF node, matched to render-model node state
 };
 
 // A mesh extracted from a glTF/GLB asset: positions + normals + UVs interleaved,

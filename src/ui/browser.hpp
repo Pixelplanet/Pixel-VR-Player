@@ -66,6 +66,18 @@ public:
     bool downloadActive() const { return dlActive_.load(); }
     std::string downloadText() const;
 
+    // Download jobs (most recent last): name, live progress and outcome, for a
+    // downloads list. Completed jobs stay until the list is trimmed.
+    struct DlJob {
+        std::string name;
+        std::string dir;
+        bool active = false;
+        bool ok = false;
+        long long bytes = 0;
+        long long total = 0;
+    };
+    const std::vector<DlJob>& downloads() const { return jobs_; }
+
     ~Browser();
     Browser(const Browser&) = delete;
     Browser& operator=(const Browser&) = delete;
@@ -113,6 +125,7 @@ private:
     std::string dlLocalPath_;
     std::string dlName_;
     std::string downloadDir_;  // "" => default ~/media
+    std::vector<DlJob> jobs_;
 };
 
 } // namespace pixelvr

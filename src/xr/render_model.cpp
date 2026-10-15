@@ -24,6 +24,7 @@ bool RenderModelSystem::init(XrInstance instance, XrSession session, bool enable
         load("xrGetRenderModelPropertiesEXT", pfnGetProps_) &&
         load("xrCreateRenderModelAssetEXT", pfnCreateAsset_) &&
         load("xrGetRenderModelAssetDataEXT", pfnGetAssetData_) &&
+        load("xrGetRenderModelAssetPropertiesEXT", pfnGetAssetProps_) &&
         load("xrCreateRenderModelSpaceEXT", pfnCreateSpace_) &&
         load("xrGetRenderModelStateEXT", pfnGetState_) &&
         load("xrDestroyRenderModelEXT", pfnDestroyModel_) &&
@@ -111,6 +112,33 @@ bool RenderModelSystem::fetchFirstModel() {
     sci.renderModel = model_;
     pfnCreateSpace_(session_, &sci, &modelSpace_);  // used by later stages
 
+    // Animatable node names, in the same order as xrGetRenderModelStateEXT node
+    // states, so an animated node can be mapped back to glTF geometry.
+    if (pfnGetAssetProps_ != nullptr) {
+        XrRenderModelAssetPropertiesGetInfoEXT agi{
+            XR_TYPE_RENDER_MODEL_ASSET_PROPERTIES_GET_INFO_EXT};
+        XrRenderModelAssetPropertiesEXT props{
+            XR_TYPE_RENDER_MODEL_ASSET_PROPERTIES_EXT};
+        if (XR_FAILED(pfnGetAssetProps_(asset_, &agi, &props))) {
+            PIXELVR_LOG_WARN("xrGetRenderModelAssetPropertiesEXT (size) failed");
+        } else {
+            std::vector<XrRenderModelAssetNodePropertiesEXT> names(
+                props.nodePropertyCount);
+            props.nodePropertyCount = static_cast<uint32_t>(names.size());
+            props.nodeProperties = names.data();
+            if (XR_SUCCEEDED(pfnGetAssetProps_(asset_, &agi, &props))) {
+                nodeNames_.reserve(names.size());
+                for (const auto& np : names) nodeNames_.emplace_back(np.uniqueName);
+                std::string joined;
+                for (const auto& n : nodeNames_) {
+                    joined += n;
+                    joined += ' ';
+                }
+                PIXELVR_LOG_INFO("Render model nodes: %s", joined.c_str());
+            }
+        }
+    }
+
     PIXELVR_LOG_INFO("Render model fetched: %u animatable nodes, glTF %zu bytes",
                      animatableNodeCount_, gltf_.size());
     if (FILE* f = std::fopen("/tmp/controller_model.glb", "wb")) {
@@ -136,6 +164,46 @@ bool RenderModelSystem::locate(XrSpace base, XrTime time, float outPos[3],
     outQuat[1] = loc.pose.orientation.y;
     outQuat[2] = loc.pose.orientation.z;
     outQuat[3] = loc.pose.orientation.w;
+    return true;
+}
+
+bool RenderModelSystem::nodeStates(XrTime time, std::vector<NodeState>& out) {
+    if (!available_ || model_ == XR_NULL_HANDLE || pfnGetState_ == nullptr ||
+        time == 0) {
+        return false;
+    }
+    if (nodeStateBuf_.size() < animatableNodeCount_) {
+        nodeStateBuf_.resize(animatableNodeCount_);
+    }
+    XrRenderModelStateGetInfoEXT gi{XR_TYPE_RENDER_MODEL_STATE_GET_INFO_EXT};
+    gi.displayTime = time;
+    XrRenderModelStateEXT st{XR_TYPE_RENDER_MODEL_STATE_EXT};
+    st.nodeStateCount = static_cast<uint32_t>(nodeStateBuf_.size());
+    st.nodeStates = nodeStateBuf_.data();
+    if (XR_FAILED(pfnGetState_(model_, &gi, &st))) {
+        return false;
+    }
+    if (st.nodeStateCount > nodeStateBuf_.size()) {  // grew; retry once
+        nodeStateBuf_.resize(st.nodeStateCount);
+        st.nodeStateCount = static_cast<uint32_t>(nodeStateBuf_.size());
+        st.nodeStates = nodeStateBuf_.data();
+        if (XR_FAILED(pfnGetState_(model_, &gi, &st))) {
+            return false;
+        }
+    }
+    out.resize(st.nodeStateCount);
+    for (uint32_t i = 0; i < st.nodeStateCount; ++i) {
+        const XrRenderModelNodeStateEXT& n = nodeStateBuf_[i];
+        NodeState& o = out[i];
+        o.pos[0] = n.nodePose.position.x;
+        o.pos[1] = n.nodePose.position.y;
+        o.pos[2] = n.nodePose.position.z;
+        o.quat[0] = n.nodePose.orientation.x;
+        o.quat[1] = n.nodePose.orientation.y;
+        o.quat[2] = n.nodePose.orientation.z;
+        o.quat[3] = n.nodePose.orientation.w;
+        o.visible = n.isVisible == XR_TRUE;
+    }
     return true;
 }
 

@@ -344,6 +344,9 @@ void Browser::startDownload(const std::string& uri, const std::string& name) {
     status_ = "Downloading " + name + " ...";
     const std::string home = homeDir_;
     const std::string destDir = downloadDir_.empty() ? home + "/media" : downloadDir_;
+    PIXELVR_LOG_INFO("Download start: %s -> %s", uri.c_str(), destDir.c_str());
+    jobs_.push_back(DlJob{name, destDir, true, false, 0, 0});
+    if (jobs_.size() > 8) jobs_.erase(jobs_.begin());
     dlThread_ = std::thread([this, uri, name, destDir]() {
         std::error_code ec;
         std::filesystem::create_directories(destDir, ec);
@@ -376,12 +379,14 @@ void Browser::startDownload(const std::string& uri, const std::string& name) {
             fd = smbc_open(uri.c_str(), O_RDONLY, 0);
         }
         if (fd < 0) {
+            PIXELVR_LOG_WARN("Download: cannot open %s", uri.c_str());
             dlDone_.store(true);
             dlActive_.store(false);
             return;
         }
         FILE* out = std::fopen(local.c_str(), "wb");
         if (out == nullptr) {
+            PIXELVR_LOG_WARN("Download: cannot write %s", local.c_str());
             smbc_close(fd);
             dlDone_.store(true);
             dlActive_.store(false);
@@ -408,6 +413,8 @@ void Browser::startDownload(const std::string& uri, const std::string& name) {
 
         dlLocalPath_ = local;
         dlOk_.store(n >= 0 && got > 0);
+        PIXELVR_LOG_INFO("Download finished: %s (%lld bytes) -> %s",
+                         name.c_str(), got, local.c_str());
         dlDone_.store(true);
         dlActive_.store(false);
     });
@@ -434,10 +441,20 @@ Browser::Result Browser::poll(std::string& playPath) {
     }
     if (dlActive_.load()) {
         status_ = downloadText();
+        if (!jobs_.empty()) {
+            jobs_.back().bytes = dlBytes_.load();
+            jobs_.back().total = dlTotal_.load();
+        }
         return Result::None;
     }
     if (dlDone_.exchange(false)) {
         if (dlThread_.joinable()) dlThread_.join();
+        if (!jobs_.empty()) {
+            jobs_.back().active = false;
+            jobs_.back().ok = dlOk_.load();
+            jobs_.back().bytes = dlBytes_.load();
+            jobs_.back().total = dlTotal_.load();
+        }
         if (dlOk_.load()) {
             playPath = dlLocalPath_;
             status_ = "Playing " + dlName_;

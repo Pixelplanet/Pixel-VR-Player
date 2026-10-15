@@ -83,6 +83,7 @@ GltfMesh loadGlb(const std::vector<uint8_t>& glb) {
                 out.vertices.push_back(t2[1]);
             }
             GltfSubmesh sm;
+            sm.nodeName = (node->name != nullptr) ? node->name : "";
             sm.firstIndex = static_cast<uint32_t>(out.indices.size());
             for (cgltf_size i = 0; i < prim->indices->count; ++i) {
                 out.indices.push_back(

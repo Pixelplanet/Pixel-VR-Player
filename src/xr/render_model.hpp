@@ -3,6 +3,7 @@
 #include "xr/openxr_headers.hpp"
 
 #include <cstdint>
+#include <string>
 #include <vector>
 
 namespace pixelvr {
@@ -32,6 +33,20 @@ public:
     // expects the glTF to be rendered at). False if not fetched or untracked.
     bool locate(XrSpace base, XrTime time, float outPos[3], float outQuat[4]) const;
 
+    // Names of the model's animatable nodes, in the same order as the node
+    // states returned by nodeStates() (maps a node state to glTF geometry).
+    const std::vector<std::string>& nodeNames() const { return nodeNames_; }
+
+    // Animated per-node transform the runtime wants applied this frame (drives
+    // button-press movement, trigger pull, thumbstick tilt, etc.).
+    struct NodeState {
+        float pos[3] = {0.0f, 0.0f, 0.0f};
+        float quat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        bool visible = true;
+    };
+    // Fills `out` (parallel to nodeNames()) for `time`. False if unavailable.
+    bool nodeStates(XrTime time, std::vector<NodeState>& out);
+
     void shutdown();
 
 private:
@@ -47,12 +62,15 @@ private:
     XrSpace modelSpace_ = XR_NULL_HANDLE;
     std::vector<uint8_t> gltf_;
     uint32_t animatableNodeCount_ = 0;
+    std::vector<std::string> nodeNames_;
+    std::vector<XrRenderModelNodeStateEXT> nodeStateBuf_;  // reused per frame
 
     PFN_xrEnumerateInteractionRenderModelIdsEXT pfnEnumerateIds_ = nullptr;
     PFN_xrCreateRenderModelEXT pfnCreateModel_ = nullptr;
     PFN_xrGetRenderModelPropertiesEXT pfnGetProps_ = nullptr;
     PFN_xrCreateRenderModelAssetEXT pfnCreateAsset_ = nullptr;
     PFN_xrGetRenderModelAssetDataEXT pfnGetAssetData_ = nullptr;
+    PFN_xrGetRenderModelAssetPropertiesEXT pfnGetAssetProps_ = nullptr;
     PFN_xrCreateRenderModelSpaceEXT pfnCreateSpace_ = nullptr;
     PFN_xrGetRenderModelStateEXT pfnGetState_ = nullptr;
     PFN_xrDestroyRenderModelEXT pfnDestroyModel_ = nullptr;

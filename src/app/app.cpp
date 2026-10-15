@@ -506,8 +506,21 @@ int App::run() {
                     browser_.setOpen(false);
                 }
             }
-            renderer_.setDownloadStatus(browser_.downloadActive() && !browser_.isOpen(),
-                                        browser_.downloadText());
+            {
+                std::vector<std::string> dl;
+                for (const auto& j : browser_.downloads()) {
+                    std::string s = "DL " + j.name;
+                    if (j.active) {
+                        s += (j.total > 0)
+                                 ? "  " + std::to_string(j.bytes * 100 / j.total) + "%"
+                                 : "  " + std::to_string(j.bytes / (1024 * 1024)) + " MB";
+                    } else {
+                        s += j.ok ? "  [done]" : "  [failed]";
+                    }
+                    dl.push_back(s);
+                }
+                renderer_.setDownloadStatus(!dl.empty(), dl);
+            }
             // Publish the browser panel first so the pointer can raycast it.
             if (browser_.isOpen()) {
                 std::vector<std::string> rows;
@@ -630,6 +643,25 @@ int App::run() {
                     }
                     return v;
                 };
+                // Per-node animated transforms (button presses, trigger, stick)
+                // from the runtime, matched to model parts by node name.
+                if (controllerModelLoaded_) {
+                    std::vector<RenderModelSystem::NodeState> ns;
+                    if (renderModels_.nodeStates(xr_.displayTime(), ns)) {
+                        const auto& names = renderModels_.nodeNames();
+                        std::vector<VulkanRenderer::NodeStateVis> vis;
+                        vis.reserve(ns.size());
+                        for (std::size_t i = 0; i < ns.size(); ++i) {
+                            VulkanRenderer::NodeStateVis v;
+                            if (i < names.size()) v.name = names[i];
+                            for (int k = 0; k < 3; ++k) v.pos[k] = ns[i].pos[k];
+                            for (int k = 0; k < 4; ++k) v.quat[k] = ns[i].quat[k];
+                            v.visible = ns[i].visible;
+                            vis.push_back(std::move(v));
+                        }
+                        renderer_.setControllerNodeStates(vis);
+                    }
+                }
                 renderer_.setControllers(build(0), build(1));
             }
 
@@ -643,6 +675,8 @@ int App::run() {
                 const int hovered = renderer_.browserHovered();
                 if (hovered >= 0) {
                     renderer_.setBrowserSelected(hovered);
+                    browser_.setSelected(hovered);  // follow the pointer so
+                                                    // Download targets it
                     if (in.select) {
                         browser_.setSelected(hovered);
                         std::string playPath;

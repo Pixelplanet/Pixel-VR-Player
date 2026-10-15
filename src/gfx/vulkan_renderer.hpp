@@ -84,11 +84,11 @@ public:
     // Debug statistics overlay (FPS, decode, system load). Drawn head-locked.
     void setStats(bool visible, const std::vector<std::string>& lines);
 
-    // Background download status line, drawn head-locked near the bottom edge so
-    // downloads are visible after the browser panel is closed.
-    void setDownloadStatus(bool visible, const std::string& text) {
+    // Background downloads list, drawn head-locked near the bottom edge so
+    // downloads stay visible after the browser panel is closed.
+    void setDownloadStatus(bool visible, const std::vector<std::string>& lines) {
         downloadStatusVisible_ = visible;
-        downloadStatusText_ = text;
+        downloadStatusLines_ = lines;
     }
 
     // Repositions the flat screen in front of the given head pose (headForward is
@@ -133,6 +133,16 @@ public:
     // Replaces the procedural controller geometry with the runtime-provided glTF
     // render model (parsed from the GLB bytes). Call once when the asset is ready.
     bool loadControllerModel(const std::vector<uint8_t>& glb);
+
+    // Per-node animated transforms from xrGetRenderModelStateEXT, matched to
+    // submeshes by node name (drives button-press motion on the model).
+    struct NodeStateVis {
+        std::string name;
+        float pos[3] = {0.0f, 0.0f, 0.0f};
+        float quat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        bool visible = true;
+    };
+    void setControllerNodeStates(const std::vector<NodeStateVis>& states);
 
     enum class UiShape : int {
         RoundedBox = 0,
@@ -252,7 +262,7 @@ private:
     bool statsVisible_ = false;
     std::vector<std::string> statsLines_;
     bool downloadStatusVisible_ = false;
-    std::string downloadStatusText_;
+    std::vector<std::string> downloadStatusLines_;
 
     // Flat-screen placement in the app reference space (updated by recenter and
     // thumbstick distance control).
@@ -438,6 +448,7 @@ private:
         uint32_t indexCount = 0;
         VkDescriptorSet set = VK_NULL_HANDLE;  // base-color texture descriptor
         float color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        std::string nodeName;  // matched to an animated render-model node state
     };
     VkDescriptorSetLayout modelSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool modelDescPool_ = VK_NULL_HANDLE;
@@ -445,6 +456,7 @@ private:
     ModelTexture modelWhite_;  // 1x1 white fallback for untextured submeshes
     std::vector<ModelTexture> modelTextures_;
     std::vector<ModelSubmesh> modelSubmeshes_;
+    std::vector<NodeStateVis> modelNodeStates_;
     bool createModelTexture(const uint8_t* rgba, int width, int height,
                             ModelTexture& out);
 };

@@ -1819,6 +1819,37 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         vkCmdBindVertexBuffers(commandBuffer_, 0, 1, &modelVertexBuffer_, &off);
         vkCmdBindIndexBuffer(commandBuffer_, modelIndexBuffer_, 0, modelIndexType_);
         const Mat4 vpWorld = multiply(proj, viewMat);
+        const Vec3 eye{view.pose.position.x, view.pose.position.y,
+                       view.pose.position.z};
+        auto qmul = [](const Quat& a, const Quat& b) {
+            return Quat{a.w * b.x + a.x * b.w + a.y * b.z - a.z * b.y,
+                        a.w * b.y - a.x * b.z + a.y * b.w + a.z * b.x,
+                        a.w * b.z + a.x * b.y - a.y * b.x + a.z * b.w,
+                        a.w * b.w - a.x * b.x - a.y * b.y - a.z * b.z};
+        };
+        float push[32];
+        push[24] = eye.x; push[25] = eye.y; push[26] = eye.z; push[27] = 0.0f;
+        const auto drawPart = [&](VkDescriptorSet set, const float col[4],
+                                  const Vec3& worldPos, const Quat& worldQ,
+                                  uint32_t first, uint32_t count) {
+            const Mat4 mvp = multiply(
+                vpWorld, multiply(translation(worldPos), fromQuat(worldQ)));
+            std::memcpy(push, mvp.m, sizeof(float) * 16);
+            push[16] = worldQ.x; push[17] = worldQ.y;
+            push[18] = worldQ.z; push[19] = worldQ.w;
+            push[20] = col[0]; push[21] = col[1];
+            push[22] = col[2]; push[23] = col[3];
+            push[28] = worldPos.x; push[29] = worldPos.y;
+            push[30] = worldPos.z; push[31] = 0.0f;
+            vkCmdBindDescriptorSets(commandBuffer_,
+                                    VK_PIPELINE_BIND_POINT_GRAPHICS, modelLayout_,
+                                    0, 1, &set, 0, nullptr);
+            vkCmdPushConstants(commandBuffer_, modelLayout_,
+                               VK_SHADER_STAGE_VERTEX_BIT |
+                                   VK_SHADER_STAGE_FRAGMENT_BIT,
+                               0, sizeof(float) * 32, push);
+            vkCmdDrawIndexed(commandBuffer_, count, 1, first, 0, 0);
+        };
         for (int h = 0; h < 2; ++h) {
             if (!controllers_[h].active) continue;
             // The render model is authored around the grip (controller body), so
@@ -1828,35 +1859,36 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                                       : controllers_[h].orientation;
             const float* op = useGrip ? controllers_[h].gripPosition
                                       : controllers_[h].position;
-            const Quat q{qp[0], qp[1], qp[2], qp[3]};
-            const Vec3 o{op[0], op[1], op[2]};
-            const Mat4 mvp = multiply(vpWorld, multiply(translation(o), fromQuat(q)));
-            float push[32];
-            std::memcpy(push, mvp.m, sizeof(float) * 16);
-            push[16] = q.x; push[17] = q.y; push[18] = q.z; push[19] = q.w;
-            push[24] = view.pose.position.x; push[25] = view.pose.position.y;
-            push[26] = view.pose.position.z; push[27] = 0.0f;
-            push[28] = o.x; push[29] = o.y; push[30] = o.z; push[31] = 0.0f;
-            const auto drawPart = [&](VkDescriptorSet set, const float col[4],
-                                      uint32_t first, uint32_t count) {
-                push[20] = col[0]; push[21] = col[1];
-                push[22] = col[2]; push[23] = col[3];
-                vkCmdBindDescriptorSets(commandBuffer_,
-                                        VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                        modelLayout_, 0, 1, &set, 0, nullptr);
-                vkCmdPushConstants(commandBuffer_, modelLayout_,
-                                   VK_SHADER_STAGE_VERTEX_BIT |
-                                       VK_SHADER_STAGE_FRAGMENT_BIT,
-                                   0, sizeof(float) * 32, push);
-                vkCmdDrawIndexed(commandBuffer_, count, 1, first, 0, 0);
-            };
+            const Quat qPlace{qp[0], qp[1], qp[2], qp[3]};
+            const Vec3 oPlace{op[0], op[1], op[2]};
             if (modelSubmeshes_.empty()) {
                 const float capsuleColor[4] = {0.13f, 0.13f, 0.16f, 1.0f};
-                drawPart(modelWhite_.set, capsuleColor, 0, modelIndexCount_);
-            } else {
-                for (const ModelSubmesh& sm : modelSubmeshes_) {
-                    drawPart(sm.set, sm.color, sm.firstIndex, sm.indexCount);
+                drawPart(modelWhite_.set, capsuleColor, oPlace, qPlace, 0,
+                         modelIndexCount_);
+                continue;
+            }
+            for (const ModelSubmesh& sm : modelSubmeshes_) {
+                // Apply the runtime's animated node transform (button press,
+                // trigger pull, stick tilt) if one matches this submesh.
+                Quat qNode{0.0f, 0.0f, 0.0f, 1.0f};
+                Vec3 pNode{0.0f, 0.0f, 0.0f};
+                bool visible = true;
+                if (!sm.nodeName.empty()) {
+                    for (const NodeStateVis& ns : modelNodeStates_) {
+                        if (ns.name == sm.nodeName) {
+                            qNode = Quat{ns.quat[0], ns.quat[1], ns.quat[2],
+                                         ns.quat[3]};
+                            pNode = Vec3{ns.pos[0], ns.pos[1], ns.pos[2]};
+                            visible = ns.visible;
+                            break;
+                        }
+                    }
                 }
+                if (!visible) continue;
+                const Vec3 worldPos = oPlace + rotate(qPlace, pNode);
+                const Quat worldQ = qmul(qPlace, qNode);
+                drawPart(sm.set, sm.color, worldPos, worldQ, sm.firstIndex,
+                         sm.indexCount);
             }
         }
     }
@@ -2011,40 +2043,44 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         }
     }
 
-    // Background download status: one head-locked line near the bottom edge, so
-    // an in-progress download stays visible after the browser panel is closed.
-    if (downloadStatusVisible_ && textReady_ && !downloadStatusText_.empty()) {
+    // Background downloads list: head-locked lines near the bottom edge, so an
+    // in-progress download stays visible after the browser panel is closed.
+    if (downloadStatusVisible_ && textReady_ && !downloadStatusLines_.empty()) {
         vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                           textPipeline_);
         vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
         const Mat4 mvp = multiply(proj, translation(Vec3{-0.28f, -0.30f, -1.0f}));
-        const float scale = 0.030f / fontAtlas_.lineHeight;
+        const float scale = 0.028f / fontAtlas_.lineHeight;
         const float col[4] = {0.55f, 0.85f, 1.0f, 1.0f};
-        float penX = 0.0f;
-        for (char rawc : downloadStatusText_) {
-            unsigned char c = static_cast<unsigned char>(rawc);
-            if (c < 32 || c > 126) c = '?';
-            const Glyph& g = fontAtlas_.glyphs[c];
-            if (g.width > 0.0f && g.height > 0.0f) {
-                TextPush push{};
-                std::memcpy(push.mvp, mvp.m, sizeof(push.mvp));
-                std::memcpy(push.color, col, sizeof(push.color));
-                push.rect[0] = penX + g.bearingX * scale;
-                push.rect[1] = -(g.height - g.bearingY) * scale;
-                push.rect[2] = g.width * scale;
-                push.rect[3] = g.height * scale;
-                push.uv[0] = g.u0;
-                push.uv[1] = g.v0;
-                push.uv[2] = g.u1;
-                push.uv[3] = g.v1;
-                vkCmdPushConstants(commandBuffer_, textPipelineLayout_,
-                                   VK_SHADER_STAGE_VERTEX_BIT |
-                                       VK_SHADER_STAGE_FRAGMENT_BIT,
-                                   0, sizeof(TextPush), &push);
-                vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
+        float lineY = 0.0f;
+        for (const std::string& line : downloadStatusLines_) {
+            float penX = 0.0f;
+            for (char rawc : line) {
+                unsigned char c = static_cast<unsigned char>(rawc);
+                if (c < 32 || c > 126) c = '?';
+                const Glyph& g = fontAtlas_.glyphs[c];
+                if (g.width > 0.0f && g.height > 0.0f) {
+                    TextPush push{};
+                    std::memcpy(push.mvp, mvp.m, sizeof(push.mvp));
+                    std::memcpy(push.color, col, sizeof(push.color));
+                    push.rect[0] = penX + g.bearingX * scale;
+                    push.rect[1] = lineY - (g.height - g.bearingY) * scale;
+                    push.rect[2] = g.width * scale;
+                    push.rect[3] = g.height * scale;
+                    push.uv[0] = g.u0;
+                    push.uv[1] = g.v0;
+                    push.uv[2] = g.u1;
+                    push.uv[3] = g.v1;
+                    vkCmdPushConstants(commandBuffer_, textPipelineLayout_,
+                                       VK_SHADER_STAGE_VERTEX_BIT |
+                                           VK_SHADER_STAGE_FRAGMENT_BIT,
+                                       0, sizeof(TextPush), &push);
+                    vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
+                }
+                penX += g.advance * scale;
             }
-            penX += g.advance * scale;
+            lineY -= fontAtlas_.lineHeight * scale * 1.3f;
         }
     }
 
@@ -3064,6 +3100,11 @@ bool VulkanRenderer::createModelTexture(const uint8_t* rgba, int width,
     return true;
 }
 
+void VulkanRenderer::setControllerNodeStates(
+    const std::vector<NodeStateVis>& states) {
+    modelNodeStates_ = states;
+}
+
 bool VulkanRenderer::loadControllerModel(const std::vector<uint8_t>& glb) {
     const GltfMesh mesh = loadGlb(glb);
     if (!mesh.ok || mesh.indices.empty()) {
@@ -3173,6 +3214,7 @@ bool VulkanRenderer::loadControllerModel(const std::vector<uint8_t>& glb) {
         ModelSubmesh ms;
         ms.firstIndex = s.firstIndex;
         ms.indexCount = s.indexCount;
+        ms.nodeName = s.nodeName;
         ms.set = (s.image >= 0 &&
                   static_cast<std::size_t>(s.image) < imageSets.size())
                      ? imageSets[s.image]
