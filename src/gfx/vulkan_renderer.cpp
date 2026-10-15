@@ -78,6 +78,15 @@ inline std::string format_time(double sec) {
     return std::to_string(m) + ":" + two(s);
 }
 
+// Screen/panel orientation: yaw to face the viewer, then pitch so the screen and
+// controls follow the head up/down (e.g. when reclining / looking up).
+math::Mat4 orientFromYawPitch(float yaw, float pitch) {
+    using namespace math;
+    const float hy = 0.5f * yaw, hp = 0.5f * pitch;
+    return multiply(fromQuat(Quat{0.0f, std::sin(hy), 0.0f, std::cos(hy)}),
+                    fromQuat(Quat{std::sin(hp), 0.0f, 0.0f, std::cos(hp)}));
+}
+
 #define PIXELVR_VK_CHECK(expr)                                        \
     do {                                                              \
         VkResult _res = (expr);                                       \
@@ -765,27 +774,35 @@ bool VulkanRenderer::createRenderResources(
 
 void VulkanRenderer::recenterScreen(const float headPos[3],
                                     const float headForward[3]) {
-    // Flatten the head forward onto the horizontal plane.
     float fx = headForward[0];
+    float fy = headForward[1];
     float fz = headForward[2];
-    float len = std::sqrt(fx * fx + fz * fz);
-    if (len < 1e-4f) {
+    const float flen = std::sqrt(fx * fx + fy * fy + fz * fz);
+    if (flen < 1e-4f) {
         fx = 0.0f;
+        fy = 0.0f;
         fz = -1.0f;
-        len = 1.0f;
+    } else {
+        fx /= flen;
+        fy /= flen;
+        fz /= flen;
     }
-    fx /= len;
-    fz /= len;
     screenPivot_[0] = headPos[0];
     screenPivot_[1] = headPos[1];
     screenPivot_[2] = headPos[2];
+    // Keep the FULL forward so the screen + controls follow the gaze up/down
+    // (reclining), not just the horizon.
     screenForward_[0] = fx;
-    screenForward_[1] = 0.0f;
+    screenForward_[1] = fy;
     screenForward_[2] = fz;
-    // The quad normal at yaw 0 is +Z; rotate it to face back toward the viewer.
-    screenYaw_ = std::atan2(-fx, -fz);
-    // Longitude offset so equirect 360/180 content re-centers to the head yaw.
-    sphereYaw_ = std::atan2(fx, -fz);
+    // Pitch (elevation) tilts the screen to face the viewer; yaw comes from the
+    // horizontal part and is kept stable when looking straight up/down.
+    recenterPitch_ = std::asin(std::clamp(fy, -1.0f, 1.0f));
+    const float hlen = std::sqrt(fx * fx + fz * fz);
+    if (hlen > 1e-3f) {
+        screenYaw_ = std::atan2(-fx, -fz);
+        sphereYaw_ = std::atan2(fx, -fz);
+    }
     screenDistance_ = 3.0f;
 }
 
@@ -862,9 +879,8 @@ void VulkanRenderer::updatePointer() {
         const Vec3 center{screenPivot_[0] + screenForward_[0] * screenDistance_,
                           screenPivot_[1] + screenForward_[1] * screenDistance_,
                           screenPivot_[2] + screenForward_[2] * screenDistance_};
-        const float hy = 0.5f * screenYaw_;
         panelBase = multiply(translation(center),
-                             fromQuat(Quat{0.0f, std::sin(hy), 0.0f, std::cos(hy)}));
+                             orientFromYawPitch(screenYaw_, recenterPitch_));
     } else {
         // Spherical video mode (360/180): anchor controls floating comfortably in front
         // at distance 1.6m, pitched slightly up towards the eye horizon.
@@ -872,10 +888,8 @@ void VulkanRenderer::updatePointer() {
         const Vec3 center{screenPivot_[0] + screenForward_[0] * kSphereDist,
                           screenPivot_[1] + screenForward_[1] * kSphereDist,
                           screenPivot_[2] + screenForward_[2] * kSphereDist};
-        const float hy = 0.5f * screenYaw_;
-        const Mat4 yawRot = fromQuat(Quat{0.0f, std::sin(hy), 0.0f, std::cos(hy)});
-        const Mat4 pitchRot = rotationX(-0.25f);
-        panelBase = multiply(translation(center), multiply(yawRot, pitchRot));
+        const Mat4 orient = orientFromYawPitch(screenYaw_, recenterPitch_);
+        panelBase = multiply(translation(center), multiply(orient, rotationX(-0.25f)));
     }
     const Mat4 inv = rigidInverse(panelBase);
 
@@ -1238,9 +1252,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 screenPivot_[0] + screenForward_[0] * screenDistance_,
                 screenPivot_[1] + screenForward_[1] * screenDistance_,
                 screenPivot_[2] + screenForward_[2] * screenDistance_};
-            const float hy = 0.5f * screenYaw_;
-            const Mat4 yawRot =
-                fromQuat(Quat{0.0f, std::sin(hy), 0.0f, std::cos(hy)});
+            const Mat4 yawRot = orientFromYawPitch(screenYaw_, recenterPitch_);
             // Each eye shows half the frame. Full-width SBS (~2x wide) is halved
             // back to a normal shape; half-SBS already has per-eye shape so it is
             // stretched (no change). Same idea vertically for full vs half OU.
@@ -1283,9 +1295,12 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             const Mat4 headRot = fromQuat(Quat{
                 view.pose.orientation.x, view.pose.orientation.y,
                 view.pose.orientation.z, view.pose.orientation.w});
+            // Recenter yaw + pitch (so 360/180 re-centers where you look, incl.
+            // reclined) folded with the user's viewpoint tilt.
+            const float spherePitchTotal = spherePitch_ - recenterPitch_;
             const Mat4 adjust = multiply(
-                fromQuat(Quat{std::sin(0.5f * spherePitch_), 0.0f, 0.0f,
-                              std::cos(0.5f * spherePitch_)}),
+                fromQuat(Quat{std::sin(0.5f * spherePitchTotal), 0.0f, 0.0f,
+                              std::cos(0.5f * spherePitchTotal)}),
                 fromQuat(Quat{0.0f, std::sin(0.5f * sphereYaw_), 0.0f,
                               std::cos(0.5f * sphereYaw_)}));
             const Mat4 rot = multiply(adjust, headRot);
@@ -1334,18 +1349,15 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         const Vec3 center{screenPivot_[0] + screenForward_[0] * screenDistance_,
                           screenPivot_[1] + screenForward_[1] * screenDistance_,
                           screenPivot_[2] + screenForward_[2] * screenDistance_};
-        const float hy = 0.5f * screenYaw_;
         panelBase = multiply(translation(center),
-                             fromQuat(Quat{0.0f, std::sin(hy), 0.0f, std::cos(hy)}));
+                             orientFromYawPitch(screenYaw_, recenterPitch_));
     } else {
         constexpr float kSphereDist = 1.6f;
         const Vec3 center{screenPivot_[0] + screenForward_[0] * kSphereDist,
                           screenPivot_[1] + screenForward_[1] * kSphereDist,
                           screenPivot_[2] + screenForward_[2] * kSphereDist};
-        const float hy = 0.5f * screenYaw_;
-        const Mat4 yawRot = fromQuat(Quat{0.0f, std::sin(hy), 0.0f, std::cos(hy)});
-        const Mat4 pitchRot = rotationX(-0.25f);
-        panelBase = multiply(translation(center), multiply(yawRot, pitchRot));
+        const Mat4 orient = orientFromYawPitch(screenYaw_, recenterPitch_);
+        panelBase = multiply(translation(center), multiply(orient, rotationX(-0.25f)));
     }
     const Mat4 vpPanel = multiply(multiply(proj, viewMat), panelBase);
 

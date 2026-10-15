@@ -239,6 +239,7 @@ private:
     float screenPivot_[3] = {0.0f, 0.0f, 0.0f};
     float screenForward_[3] = {0.0f, 0.0f, -1.0f};
     float screenYaw_ = 0.0f;
+    float recenterPitch_ = 0.0f;  // head pitch at recenter (screen/controls tilt)
     float sphereYaw_ = 0.0f;  // recenter longitude offset for 360/180 content
     float spherePitch_ = 0.0f;  // 360/180 viewpoint tilt (radians)
     float sphereZoom_ = 1.0f;   // 360/180 FOV scale (>1 pushes content farther)
