@@ -213,6 +213,7 @@ void App::updateStats() {
     const double fps = statsFrameAccum_ / elapsed;
     const uint64_t dec = media_.decodedFrames();
     const double decFps = static_cast<double>(dec - statsLastDecoded_) / elapsed;
+    decFpsEma_ = (decFpsEma_ > 0.0) ? decFpsEma_ * 0.6 + decFps * 0.4 : decFps;
     statsFrameAccum_ = 0;
     statsLastDecoded_ = dec;
     lastStatsUpdate_ = now;
@@ -272,7 +273,7 @@ void App::updateStats() {
         std::snprintf(buf, sizeof(buf), "Video %dx%d  %s", media_.width(),
                       media_.height(), media_.codecName().c_str());
         statsLines_.emplace_back(buf);
-        std::snprintf(buf, sizeof(buf), "Decode %.1f / %.2f fps", decFps,
+        std::snprintf(buf, sizeof(buf), "Decode %.1f / %.2f fps", decFpsEma_,
                       media_.frameRate());
         statsLines_.emplace_back(buf);
     }

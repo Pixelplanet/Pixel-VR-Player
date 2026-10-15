@@ -60,7 +60,7 @@ void smb_auth(SMBCCTX*, const char*, const char*, char*, int, char* un, int unle
 // Only the prefetch thread touches the SMB handle (read/lseek); the AVIO
 // callbacks only touch the ring and request seeks.
 struct SmbReadAhead {
-    static constexpr std::size_t kCapacity = 32u << 20;  // 32 MiB cushion
+    static constexpr std::size_t kCapacity = 64u << 20;  // 64 MiB cushion
     static constexpr std::size_t kChunk = 256u << 10;    // 256 KiB network reads
 
     SMBCCTX* ctx = nullptr;

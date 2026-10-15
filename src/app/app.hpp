@@ -63,6 +63,7 @@ private:
     std::chrono::steady_clock::time_point lastStatsUpdate_{};
     int statsFrameAccum_ = 0;
     uint64_t statsLastDecoded_ = 0;
+    double decFpsEma_ = 0.0;  // smoothed decode fps (the raw window is bursty)
     unsigned long long cpuPrevIdle_ = 0;
     unsigned long long cpuPrevTotal_ = 0;
     std::vector<std::string> statsLines_;
