@@ -31,7 +31,12 @@ public:
     // (Re)opens the browser at the start location (local home directory).
     void open();
     bool isOpen() const { return open_; }
-    void setOpen(bool o) { open_ = o; }
+    // The download worker yields the shared SMB connection while the browser is
+    // open, so directory listing stays responsive (downloads resume afterwards).
+    void setOpen(bool o) {
+        open_ = o;
+        browseOpen_.store(o);
+    }
 
     const std::string& title() const { return title_; }
     const std::string& status() const { return status_; }
@@ -162,6 +167,7 @@ private:
     std::atomic<bool> dlPaused_{false};
     std::atomic<bool> dlAbort_{false};
     std::atomic<bool> dlStopped_{false};
+    std::atomic<bool> browseOpen_{false};  // worker yields while the panel is open
     // Folder size probe (background).
     std::thread measureThread_;
     std::atomic<bool> measuring_{false};

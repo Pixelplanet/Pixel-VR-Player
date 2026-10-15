@@ -627,6 +627,10 @@ int App::run() {
                     renderer_.setDownloads(true, "Confirm Download", crows,
                                            "A: Download        B: Cancel", cbtns);
                     const int cbi = renderer_.downloadsButtonHovered();
+                    if (in.select) {
+                        PIXELVR_LOG_INFO("confirm click: btn=%d hovered=%d", cbi,
+                                         renderer_.downloadsHovered());
+                    }
                     if (in.select && cbi == 0) {
                         confirmNow = true;
                     } else if (in.select && cbi == 1) {

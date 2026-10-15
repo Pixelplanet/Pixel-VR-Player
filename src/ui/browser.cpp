@@ -94,6 +94,7 @@ Browser::Browser() {
 
 void Browser::open() {
     open_ = true;
+    browseOpen_.store(true);
     status_.clear();
     // Resume where the user last was this session (local folder or SMB share).
     if (lastInSmb_ && !lastLocation_.empty()) {
@@ -472,7 +473,7 @@ void Browser::startDownloadFile(const std::string& uri, const std::string& local
             // Give the browser's directory scan priority so navigation stays
             // responsive while a download runs, and honour pause.
             while (!dlAbort_.load() &&
-                   (scanning_.load() || dlPaused_.load())) {
+                   (scanning_.load() || dlPaused_.load() || browseOpen_.load())) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(10));
             }
             if (dlAbort_.load()) {
@@ -616,7 +617,9 @@ void Browser::startDownloadFolder(const std::string& uri,
                     ok = false;
                     break;
                 }
-                while (!dlAbort_.load() && (scanning_.load() || dlPaused_.load())) {
+                while (!dlAbort_.load() &&
+                       (scanning_.load() || dlPaused_.load() ||
+                        browseOpen_.load())) {
                     std::this_thread::sleep_for(std::chrono::milliseconds(10));
                 }
                 ssize_t n = 0;
