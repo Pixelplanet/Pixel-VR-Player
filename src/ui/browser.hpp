@@ -143,7 +143,8 @@ private:
     // Async directory scan (SMB discovery / large dirs) off the main thread.
     std::thread scanThread_;
     std::atomic<bool> scanning_{false};
-    std::atomic<bool> scanReady_{false};  // results waiting to publish    std::mutex scanMutex_;                 // guards scanResult_
+    std::atomic<bool> scanReady_{false};  // results waiting to publish
+    std::mutex scanMutex_;                // guards scanResult_
     ScanResult scanResult_;
 
     // Async SMB download.
