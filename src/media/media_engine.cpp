@@ -934,14 +934,16 @@ bool MediaEngine::open(const std::string& path) {
             const int64_t frameBytes = highBitDepth ? px * 3 : px * 3 / 2;  // P010/NV12
             constexpr int64_t kBudget = 320ll << 20;  // ~320 MiB capture pool
             impl_->captureBuffers = static_cast<int>(std::clamp<int64_t>(
-                kBudget / std::max<int64_t>(frameBytes, 1), 4, 16));
+                kBudget / std::max<int64_t>(frameBytes, 1), 4, 20));
             av_opt_set_int(impl_->codec->priv_data, "num_capture_buffers",
                            impl_->captureBuffers, 0);
             av_opt_set_int(impl_->codec->priv_data, "drm_prime", 1, 0);
             impl_->codec->apply_cropping = 0;
             // Leave buffers free for the decoder's DPB; the queue holds the rest.
+            // A deeper queue absorbs bursty decode output (B-frame reorder, SMB
+            // jitter) so low-framerate playback doesn't underrun and judder.
             impl_->maxQueue =
-                static_cast<std::size_t>(std::clamp(impl_->captureBuffers - 5, 1, 6));
+                static_cast<std::size_t>(std::clamp(impl_->captureBuffers - 5, 1, 14));
         }
         return avcodec_open2(impl_->codec, dec, nullptr) >= 0;
     };

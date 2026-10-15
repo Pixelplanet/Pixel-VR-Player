@@ -212,8 +212,13 @@ void App::updateStats() {
 
     const double fps = statsFrameAccum_ / elapsed;
     const uint64_t dec = media_.decodedFrames();
-    const double decFps = static_cast<double>(dec - statsLastDecoded_) / elapsed;
-    decFpsEma_ = (decFpsEma_ > 0.0) ? decFpsEma_ * 0.6 + decFps * 0.4 : decFps;
+    if (dec >= statsLastDecoded_) {
+        const double decFps =
+            static_cast<double>(dec - statsLastDecoded_) / elapsed;
+        decFpsEma_ = (decFpsEma_ > 0.0) ? decFpsEma_ * 0.6 + decFps * 0.4 : decFps;
+    } else {
+        decFpsEma_ = 0.0;  // decodedFrames reset on a new clip: restart the average
+    }
     statsFrameAccum_ = 0;
     statsLastDecoded_ = dec;
     lastStatsUpdate_ = now;
@@ -730,11 +735,13 @@ int App::run() {
                         std::chrono::duration<double>(now - perfLastLog_).count();
                     if (since >= 2.0) {
                         const uint64_t dec = media_.decodedFrames();
+                        const double decFps =
+                            (dec >= perfLastDecoded_)
+                                ? static_cast<double>(dec - perfLastDecoded_) / since
+                                : 0.0;
                         PIXELVR_LOG_INFO(
                             "PERF: render %.1f fps, decode %.1f/%.2f fps",
-                            perfFrames_ / since,
-                            static_cast<double>(dec - perfLastDecoded_) / since,
-                            media_.frameRate());
+                            perfFrames_ / since, decFps, media_.frameRate());
                         perfFrames_ = 0;
                         perfLastDecoded_ = dec;
                         perfLastLog_ = now;
