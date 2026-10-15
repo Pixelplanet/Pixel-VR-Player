@@ -72,6 +72,7 @@ private:
     std::string pendingDl_;
     std::string pendingDlName_;
     bool pendingDlFresh_ = false;  // suppress the same-frame A press
+    bool downloadsWindow_ = false;  // downloads list window toggled from the bar
     // Low-pass smoothed model pose per hand (the raw hand pose jitters; the
     // system's own controller model is visibly smoothed).
     bool modelSmoothInit_[2] = {false, false};

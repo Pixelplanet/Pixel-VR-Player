@@ -504,7 +504,9 @@ int App::run() {
 
 #ifdef PIXELVR_HAVE_FREETYPE
             if (in.browserToggle) {
-                if (settings_.isOpen()) {
+                if (downloadsWindow_) {
+                    downloadsWindow_ = false;
+                } else if (settings_.isOpen()) {
                     settings_.close();
                 } else if (browser_.isOpen()) {
                     browser_.setOpen(false);
@@ -534,9 +536,23 @@ int App::run() {
             const std::string dlLine =
                 browser_.downloadActive() ? downloadToastText_ : browser_.status();
             renderer_.setDownloadStatus(!browser_.isOpen() && dlRecent, dlLine);
-            renderer_.setDownloads(!browser_.isOpen() && !settings_.isOpen() &&
-                                       browser_.hasDownloads() && dlRecent,
-                                   "Downloads", browser_.downloadRows(), dlLine);
+            renderer_.setDownloadsBadge(browser_.downloadActive(),
+                                        !browser_.downloadActive() &&
+                                            browser_.hasDownloads() && dlRecent);
+            // The downloads window (opened from the control-bar button) shows the
+            // job list with progress, speed and ETA.
+            std::string dlWindowStatus;
+            if (browser_.downloadActive()) {
+                dlWindowStatus = browser_.downloadText();
+            } else if (browser_.hasDownloads()) {
+                dlWindowStatus = "All downloads complete";
+            } else {
+                dlWindowStatus = "No downloads yet";
+            }
+            renderer_.setDownloads(downloadsWindow_ && !browser_.isOpen() &&
+                                       !settings_.isOpen(),
+                                   "Downloads", browser_.downloadRows(),
+                                   dlWindowStatus);
 
             // Folder-download confirmation overlay (overrides the downloads panel).
             if (!pendingDl_.empty()) {
@@ -561,9 +577,14 @@ int App::run() {
                 std::vector<std::string> rows;
                 rows.reserve(browser_.entries().size());
                 for (const auto& e : browser_.entries()) {
-                    rows.push_back(e.detail.empty()
-                                       ? e.label
-                                       : e.label + "   " + e.detail);
+                    std::string name = e.label;
+                    if (name.size() > 32) name = name.substr(0, 31) + "~";
+                    std::string row = name;
+                    if (!e.detail.empty()) {
+                        while (row.size() < 36) row += ' ';
+                        row += e.detail;
+                    }
+                    rows.push_back(std::move(row));
                 }
                 std::string status = browser_.status();
                 if (browser_.onNetwork() && !browser_.isBusy()) {
@@ -790,10 +811,8 @@ int App::run() {
 #endif
                     } else if (cb == VulkanRenderer::CtrlButton::Settings) {
                         settings_.open();
-                    } else if (cb == VulkanRenderer::CtrlButton::Recenter) {
-                        if (in.headValid) {
-                            renderer_.recenterScreen(in.headPos, in.headForward);
-                        }
+                    } else if (cb == VulkanRenderer::CtrlButton::Downloads) {
+                        downloadsWindow_ = !downloadsWindow_;
                     }
 #ifdef PIXELVR_HAVE_FREETYPE
                     else if (cb == VulkanRenderer::CtrlButton::Files) {

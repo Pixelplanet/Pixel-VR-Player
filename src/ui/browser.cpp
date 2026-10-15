@@ -388,6 +388,9 @@ void Browser::startDownloadFile(const std::string& uri, const std::string& local
     dlBytes_.store(0);
     dlTotal_.store(0);
     dlLocalPath_.clear();
+    dlSpeed_ = 0.0;
+    speedBytes_ = 0;
+    speedTime_ = {};
     dlActive_.store(true);
     status_ = "Downloading " + dlName_ + " ...";
     PIXELVR_LOG_INFO("Download file: %s -> %s", uri.c_str(), local.c_str());
@@ -482,6 +485,9 @@ void Browser::startDownloadFolder(const std::string& uri,
     dlBytes_.store(0);
     dlTotal_.store(0);
     dlLocalPath_ = destDir;
+    dlSpeed_ = 0.0;
+    speedBytes_ = 0;
+    speedTime_ = {};
     dlActive_.store(true);
     status_ = "Downloading folder " + dlName_ + " ...";
     PIXELVR_LOG_INFO("Download folder: %s -> %s", uri.c_str(), destDir.c_str());
@@ -597,6 +603,19 @@ Browser::Result Browser::poll(std::string& playPath) {
         lastInSmb_ = inSmb_;
     }
     if (dlActive_.load()) {
+        const long long b = dlBytes_.load();
+        const auto now = std::chrono::steady_clock::now();
+        if (speedTime_.time_since_epoch().count() == 0) {
+            speedTime_ = now;
+            speedBytes_ = b;
+        }
+        const double dt = std::chrono::duration<double>(now - speedTime_).count();
+        if (dt > 0.25) {
+            const double inst = static_cast<double>(b - speedBytes_) / dt;
+            dlSpeed_ = (dlSpeed_ <= 0.0) ? inst : dlSpeed_ * 0.6 + inst * 0.4;
+            speedBytes_ = b;
+            speedTime_ = now;
+        }
         status_ = downloadText();
         if (!dlRows_.empty()) dlRows_.back() = status_;
         return Result::None;
@@ -618,16 +637,26 @@ Browser::Result Browser::poll(std::string& playPath) {
 std::string Browser::downloadText() const {
     const long long b = dlBytes_.load();
     const long long t = dlTotal_.load();
-    std::string s = "Downloading " + dlName_ + "  ";
+    std::string n = dlName_;
+    if (n.size() > 26) n = n.substr(0, 25) + "~";
+    std::string s = "Downloading " + n + "  ";
+    char buf[128];
     if (t > 0) {
-        s += std::to_string(b * 100 / t) + "%";
-        const double mb = static_cast<double>(b) / (1024.0 * 1024.0);
-        const double tot = static_cast<double>(t) / (1024.0 * 1024.0);
-        char buf[64];
-        std::snprintf(buf, sizeof(buf), "  (%.0f / %.0f MB)", mb, tot);
+        std::snprintf(buf, sizeof(buf), "%lld%%", b * 100 / t);
         s += buf;
-    } else {
-        s += std::to_string(b / (1024 * 1024)) + " MB";
+    }
+    if (dlSpeed_ > 1.0) {
+        std::snprintf(buf, sizeof(buf), "  %.1f MB/s",
+                      dlSpeed_ / (1024.0 * 1024.0));
+        s += buf;
+        if (t > 0) {
+            double eta = (t - b) / dlSpeed_;
+            if (eta < 0.0) eta = 0.0;
+            const int secs = static_cast<int>(eta);
+            std::snprintf(buf, sizeof(buf), "  ETA %d:%02d", secs / 60,
+                          secs % 60);
+            s += buf;
+        }
     }
     return s;
 }

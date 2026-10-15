@@ -168,6 +168,7 @@ public:
         Close = 9,
         Checkmark = 10,
         Stop = 11,
+        Download = 12,
     };
 
     // The browser row currently under the pointer, or -1 if none.
@@ -188,7 +189,7 @@ public:
         Stop = 3,
         Files = 4,
         Settings = 5,
-        Recenter = 6
+        Downloads = 6
     };
     void setControlBar(bool visible) { controlBarVisible_ = visible; }
 
@@ -198,6 +199,13 @@ public:
     // then the target position in [0,1].
     bool pointerOnTimeline() const { return pointerOnTimeline_; }
     float pointerScrub() const { return pointerScrub_; }
+
+    // Badge on the control-bar Downloads button: a count while downloading, or a
+    // green tick once all downloads are done (drives the on-button indicator).
+    void setDownloadsBadge(bool active, bool allDone) {
+        downloadsActive_ = active;
+        downloadsAllDone_ = allDone;
+    }
 
     // Settings overlay panel (re-uses panel & pointer interaction)
     void setSettings(bool visible, const std::string& title,
@@ -280,6 +288,8 @@ private:
     std::string downloadsTitle_;
     std::vector<std::string> downloadsRows_;
     std::string downloadsStatus_;
+    bool downloadsActive_ = false;
+    bool downloadsAllDone_ = false;
 
     // Flat-screen placement in the app reference space (updated by recenter and
     // thumbstick distance control).

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -75,6 +76,10 @@ public:
     // closed (downloads keep running while the panel is hidden).
     bool downloadActive() const { return dlActive_.load(); }
     std::string downloadText() const;
+    long long downloadBytes() const { return dlBytes_.load(); }
+    long long downloadTotal() const { return dlTotal_.load(); }
+    double downloadSpeed() const { return dlSpeed_; }  // bytes/sec
+    const std::string& downloadName() const { return dlName_; }
 
     // Recent download jobs ("name 42%", "Done: name", ...), oldest first.
     bool hasDownloads() const { return !dlRows_.empty(); }
@@ -129,6 +134,9 @@ private:
     std::string dlName_;
     std::string downloadDir_;  // "" => default ~/media
     std::vector<std::string> dlRows_;  // recent job lines for the overlay
+    double dlSpeed_ = 0.0;             // EMA bytes/sec for the status readout
+    long long speedBytes_ = 0;
+    std::chrono::steady_clock::time_point speedTime_{};
 };
 
 } // namespace pixelvr

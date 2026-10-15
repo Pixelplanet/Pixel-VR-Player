@@ -1564,12 +1564,33 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 case CtrlButton::Stop: iconShape = UiShape::Stop; break;
                 case CtrlButton::Files: iconShape = UiShape::Files; break;
                 case CtrlButton::Settings: iconShape = UiShape::Settings; break;
-                case CtrlButton::Recenter: iconShape = UiShape::Recenter; break;
+                case CtrlButton::Downloads: iconShape = UiShape::Download; break;
             }
             const float iconCol[4] = {0.96f, 0.96f, 0.98f, 1.0f};
             const float iconHalfW = kBtnHalfW * 0.48f;
             const float iconHalfH = kBtnHalfH * 0.48f;
             drawUiElement(vpPanel, bx, kBarY, iconHalfW, iconHalfH, iconShape, iconCol);
+
+            // Downloads button indicator: green tick when all done, or a pulsing
+            // blue dot while downloads are active.
+            if (static_cast<CtrlButton>(b) == CtrlButton::Downloads &&
+                (downloadsActive_ || downloadsAllDone_)) {
+                const float badgeX = bx + kBtnHalfW * 0.55f;
+                const float badgeY = kBarY + kBtnHalfH * 0.55f;
+                if (downloadsAllDone_) {
+                    const float tickBg[4] = {0.10f, 0.65f, 0.25f, 1.0f};
+                    drawUiElement(vpPanel, badgeX, badgeY, kBtnHalfH * 0.36f,
+                                  kBtnHalfH * 0.36f, UiShape::RoundedBox, tickBg,
+                                  0.50f, 0.0f, nullptr);
+                    drawUiElement(vpPanel, badgeX, badgeY, kBtnHalfH * 0.24f,
+                                  kBtnHalfH * 0.24f, UiShape::Checkmark,
+                                  iconCol);
+                } else {
+                    const float dotCol[4] = {0.30f, 0.75f, 1.0f, 1.0f};
+                    drawUiElement(vpPanel, badgeX, badgeY, kBtnHalfH * 0.22f,
+                                  kBtnHalfH * 0.22f, UiShape::Cursor, dotCol);
+                }
+            }
         }
 
         // Time readout above the track: elapsed (left) and total/remaining

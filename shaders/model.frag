@@ -24,16 +24,11 @@ void main() {
     vec3 N = normalize(vNormal);
     vec3 V = normalize(vView);
     vec3 L = normalize(vec3(0.3, 0.9, 0.45));
-    // Preserve the real near-black skin so the printed button labels stay bright
-    // and read as highlights on the black plastic.
-    vec3 base = tex.rgb * 0.95 + 0.015;
+    // The controller is matte black plastic: keep the real skin colour and shade
+    // with plain diffuse only (no specular/rim) so there is no shimmer, while the
+    // printed button labels still read.
     float diff = max(dot(N, L), 0.0);
-    float up = N.y * 0.5 + 0.5;
-    vec3 hemi = mix(vec3(0.12, 0.12, 0.16), vec3(0.55, 0.58, 0.66), up);
-    vec3 H = normalize(L + V);
-    float spec = pow(max(dot(N, H), 0.0), 40.0) * 0.9;
-    float fres = pow(1.0 - max(dot(N, V), 0.0), 3.0) * 0.7;
-    vec3 col = base * (hemi + diff * 0.7) + vec3(spec) +
-               vec3(0.5, 0.6, 0.8) * fres;
-    outColor = vec4(col * pc.color.rgb, tex.a * pc.color.a);
+    float amb = 0.18 + 0.12 * (N.y * 0.5 + 0.5);
+    outColor = vec4(tex.rgb * (amb + 0.75 * diff) * pc.color.rgb,
+                    tex.a * pc.color.a);
 }

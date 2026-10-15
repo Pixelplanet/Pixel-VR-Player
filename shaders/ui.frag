@@ -115,6 +115,13 @@ void main() {
     } else if (shape == 11) {
         // Shape 11: Stop icon (filled rounded square)
         d = sdRoundedBox(p, vec2(0.46), 0.10);
+    } else if (shape == 12) {
+        // Shape 12: Download (down arrow onto a base line)
+        float shaft = sdRoundedBox(p - vec2(0.0, 0.18), vec2(0.09, 0.42), 0.04);
+        float head = sdTriangle(p - vec2(0.0, -0.20), vec2(-0.36, 0.30),
+                                vec2(0.36, 0.30), vec2(0.0, -0.28)) - 0.03;
+        float base = sdRoundedBox(p - vec2(0.0, -0.62), vec2(0.52, 0.08), 0.03);
+        d = min(min(shaft, head), base);
     } else {
         d = sdRoundedBox(p, vec2(1.0), 0.0);
     }
