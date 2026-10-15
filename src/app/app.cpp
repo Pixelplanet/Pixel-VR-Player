@@ -689,8 +689,8 @@ int App::run() {
                     // Keep any message (e.g. a download hint) visible; just add
                     // the action hint rather than replacing it.
                     status = status.empty()
-                                 ? std::string("Point + Trigger: Stream      A: Download")
-                                 : status + "      [A: Download]";
+                                 ? std::string("A: open        Bar: download")
+                                 : status + "      [A: open]";
                 }
                 renderer_.setBrowser(true, browser_.title(), rows,
                                      browser_.selected(), status);
@@ -832,7 +832,10 @@ int App::run() {
                 // Trigger activates the selection whether it was made with the
                 // laser (hovered row) or moved with the thumbstick. Skipped when
                 // the pointer is on the control bar (that click is handled below).
-                if (in.select && renderer_.pointerButton() < 0) {
+                // A opens / activates the highlighted entry: folders navigate, video
+                // files play. Downloading has its own control-bar button, so the
+                // trigger stays free to click panels and the bar.
+                if (in.togglePlay && pendingDl_.empty()) {
                     std::string playPath;
                     if (browser_.activate(playPath) == Browser::Result::Play &&
                         !playPath.empty()) {
@@ -840,19 +843,6 @@ int App::run() {
                         loadMedia(playPath);
 #endif
                         browser_.setOpen(false);
-                    }
-                }
-                // A: download the focused entry; folders prompt for confirmation.
-                if (in.togglePlay && pendingDl_.empty()) {
-                    const Browser::Entry* fe = browser_.focused();
-                    if (fe != nullptr && fe->isDir && !fe->isBack &&
-                        browser_.onNetwork()) {
-                        pendingDl_ = fe->path;
-                        pendingDlName_ = fe->label;
-                        pendingDlFresh_ = true;
-                        browser_.measureFolder(fe->path);  // size for the dialog
-                    } else {
-                        browser_.downloadFocused();
                     }
                 }
             }
@@ -933,6 +923,21 @@ int App::run() {
 #ifdef PIXELVR_HAVE_FREETYPE
                     else if (cb == VulkanRenderer::CtrlButton::Files) {
                         browser_.open();
+                    } else if (cb == VulkanRenderer::CtrlButton::Download) {
+                        // Download the entry highlighted in the file browser;
+                        // folders ask for confirmation (with the size) first.
+                        if (browser_.isOpen() && pendingDl_.empty()) {
+                            const Browser::Entry* fe = browser_.focused();
+                            if (fe != nullptr && fe->isDir && !fe->isBack &&
+                                browser_.onNetwork()) {
+                                pendingDl_ = fe->path;
+                                pendingDlName_ = fe->label;
+                                pendingDlFresh_ = true;
+                                browser_.measureFolder(fe->path);
+                            } else {
+                                browser_.downloadFocused();
+                            }
+                        }
                     }
 #endif
 #ifdef PIXELVR_HAVE_MEDIA

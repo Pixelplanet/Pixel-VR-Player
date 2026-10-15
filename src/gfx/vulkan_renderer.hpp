@@ -176,6 +176,7 @@ public:
         Checkmark = 10,
         Stop = 11,
         Download = 12,
+        List = 13,
     };
 
     // The browser row currently under the pointer, or -1 if none.
@@ -196,7 +197,8 @@ public:
         Stop = 3,
         Files = 4,
         Settings = 5,
-        Downloads = 6
+        Downloads = 6,  // open the downloads window (list of jobs)
+        Download = 7    // download the focused file-browser entry
     };
     void setControlBar(bool visible) { controlBarVisible_ = visible; }
 

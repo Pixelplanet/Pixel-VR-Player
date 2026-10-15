@@ -65,7 +65,7 @@ constexpr float kBarY = -1.16f;
 constexpr float kBtnHalfW = 0.08f;
 constexpr float kBtnHalfH = 0.06f;
 constexpr float kBtnSpacing = 0.18f;
-constexpr int kBtnCount = 7;
+constexpr int kBtnCount = 8;
 inline float ctrl_button_x(int i) {
     return (static_cast<float>(i) - 0.5f * (kBtnCount - 1)) * kBtnSpacing;
 }
@@ -1039,12 +1039,12 @@ void VulkanRenderer::updatePointer() {
         const Vec3 world = origin + dir * t;
 
         // The downloads window / confirmation modal takes priority: it is shown
-        // over the browser, so test it before the browser panel.
-        if (downloadsVisible_) {
-            if (hx < -kPanelW * 1.4f || hx > kPanelW * 1.4f ||
-                hyy < -kPanelTop * 1.3f || hyy > kPanelTop * 1.3f) {
-                continue;
-            }
+        // over the browser, so test it before the browser panel. Note the bounds
+        // are tested as part of the condition (not an early `continue`) so that a
+        // ray aimed at the control bar below the panel still falls through to the
+        // control-bar hit test further down.
+        if (downloadsVisible_ && hx >= -kPanelW * 1.4f && hx <= kPanelW * 1.4f &&
+            hyy >= -kPanelTop * 1.3f && hyy <= kPanelTop * 1.3f) {
             pointerActive_ = true;
             pointerHand_ = h;
             pointerHit_[0] = world.x;
@@ -1074,10 +1074,8 @@ void VulkanRenderer::updatePointer() {
             break;
         }
 
-        if (browserVisible_) {
-            if (hx < -kPanelW || hx > kPanelW || hyy < -kPanelTop || hyy > kPanelTop) {
-                continue;
-            }
+        if (browserVisible_ && hx >= -kPanelW && hx <= kPanelW &&
+            hyy >= -kPanelTop && hyy <= kPanelTop) {
             pointerActive_ = true;
             pointerHand_ = h;
             pointerHit_[0] = world.x;
@@ -1098,10 +1096,8 @@ void VulkanRenderer::updatePointer() {
             break;
         }
 
-        if (settingsVisible_) {
-            if (hx < -kPanelW || hx > kPanelW || hyy < -kPanelTop || hyy > kPanelTop) {
-                continue;
-            }
+        if (settingsVisible_ && hx >= -kPanelW && hx <= kPanelW &&
+            hyy >= -kPanelTop && hyy <= kPanelTop) {
             pointerActive_ = true;
             pointerHand_ = h;
             pointerHit_[0] = world.x;
@@ -1607,7 +1603,8 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 case CtrlButton::Stop: iconShape = UiShape::Stop; break;
                 case CtrlButton::Files: iconShape = UiShape::Files; break;
                 case CtrlButton::Settings: iconShape = UiShape::Settings; break;
-                case CtrlButton::Downloads: iconShape = UiShape::Download; break;
+                case CtrlButton::Downloads: iconShape = UiShape::List; break;
+                case CtrlButton::Download: iconShape = UiShape::Download; break;
             }
             const float iconCol[4] = {0.96f, 0.96f, 0.98f, 1.0f};
             const float iconHalfW = kBtnHalfW * 0.48f;

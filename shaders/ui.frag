@@ -122,6 +122,16 @@ void main() {
                                 vec2(0.36, 0.30), vec2(0.0, -0.28)) - 0.03;
         float base = sdRoundedBox(p - vec2(0.0, -0.62), vec2(0.52, 0.08), 0.03);
         d = min(min(shaft, head), base);
+    } else if (shape == 13) {
+        // Shape 13: List / queue (three bars with leading dots) for the
+        // downloads window, so it is distinct from the plain download arrow.
+        float b1 = sdRoundedBox(p - vec2(0.10, 0.46), vec2(0.40, 0.07), 0.05);
+        float b2 = sdRoundedBox(p - vec2(0.10, 0.00), vec2(0.40, 0.07), 0.05);
+        float b3 = sdRoundedBox(p - vec2(0.10, -0.46), vec2(0.40, 0.07), 0.05);
+        float p1 = sdRoundedBox(p - vec2(-0.50, 0.46), vec2(0.10, 0.10), 0.05);
+        float p2 = sdRoundedBox(p - vec2(-0.50, 0.00), vec2(0.10, 0.10), 0.05);
+        float p3 = sdRoundedBox(p - vec2(-0.50, -0.46), vec2(0.10, 0.10), 0.05);
+        d = min(min(min(b1, b2), min(b3, p1)), min(p2, p3));
     } else {
         d = sdRoundedBox(p, vec2(1.0), 0.0);
     }
