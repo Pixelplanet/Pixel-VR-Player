@@ -57,6 +57,9 @@ public:
     void startDownload(const std::string& uri, const std::string& name,
                        bool isDir);
 
+    // The entry currently selected (drives download/confirm), or nullptr.
+    const Entry* focused() const;
+
     // True while browsing an SMB share (as opposed to local storage).
     bool onNetwork() const { return inSmb_; }
 
