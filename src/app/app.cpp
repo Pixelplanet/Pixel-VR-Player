@@ -156,6 +156,12 @@ bool App::init(const std::string& mediaPath) {
 #else
     (void)mediaPath;
 #endif
+    // No clip requested: open the file browser instead of a test video.
+    if (mediaPath.empty()) {
+#ifdef PIXELVR_HAVE_FREETYPE
+        browser_.open();
+#endif
+    }
 
     PIXELVR_LOG_INFO("Initialization complete");
     return true;
@@ -824,8 +830,9 @@ int App::run() {
                     browser_.setSelected(hovered);
                 }
                 // Trigger activates the selection whether it was made with the
-                // laser (hovered row) or moved with the thumbstick.
-                if (in.select) {
+                // laser (hovered row) or moved with the thumbstick. Skipped when
+                // the pointer is on the control bar (that click is handled below).
+                if (in.select && renderer_.pointerButton() < 0) {
                     std::string playPath;
                     if (browser_.activate(playPath) == Browser::Result::Play &&
                         !playPath.empty()) {
@@ -900,7 +907,11 @@ int App::run() {
                 }
             }
 
-            if (!browserOpen && !settingsOpen) {
+            // Control-bar buttons stay usable while the file browser is open (the
+            // bar sits below the panel); the video/viewpoint controls stay gated.
+            const bool barOk = !settingsOpen && !downloadsWindow_ &&
+                               pendingDl_.empty();
+            if (barOk) {
                 // Point-and-click the media control bar with the trigger.
                 const int btn = renderer_.pointerButton();
                 if (in.select && btn >= 0) {
@@ -942,6 +953,10 @@ int App::run() {
                     renderer_.toggleTimeDisplay();  // total <-> time remaining
                     interacted = true;
                 }
+            }
+            // Viewpoint / transport controls only when no panel is open (the
+            // thumbstick drives in-panel navigation otherwise).
+            if (barOk && !browserOpen) {
                 if (in.recenter && in.headValid) {
                     renderer_.recenterScreen(in.headPos, in.headForward);
                     interacted = true;
