@@ -274,7 +274,10 @@ void Browser::scanSmbInto(const std::string& uri, ScanResult& out) {
 // Starts a background scan so SMB discovery (NetBIOS + mDNS, seconds) and large
 // directories never freeze the render loop. poll() publishes the result.
 void Browser::beginScan(const std::string& location, bool isSmb) {
+    PIXELVR_LOG_INFO("beginScan '%s' smb=%d scanning=%d", location.c_str(),
+                     isSmb ? 1 : 0, scanning_.load() ? 1 : 0);
     if (scanning_.load() && scanThread_.joinable()) {
+        PIXELVR_LOG_INFO("beginScan DEFERRED (scan in progress)");
         // A scan is already running (possibly waiting on the SMB lock held by a
         // download). Defer this request rather than joining on the main thread,
         // which would freeze the UI until the download's read returns.
@@ -302,6 +305,8 @@ void Browser::runScan(std::string location, bool isSmb) {
     } else {
         scanLocalInto(location, r);
     }
+    PIXELVR_LOG_INFO("scan done '%s': %zu entries (status=%s)", location.c_str(),
+                     r.entries.size(), r.status.c_str());
     {
         std::lock_guard<std::mutex> lk(scanMutex_);
         scanResult_ = std::move(r);
