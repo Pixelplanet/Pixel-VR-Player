@@ -512,7 +512,6 @@ int App::run() {
             // Feed controller poses to the renderer (models, pointer ray, cursor);
             // it raycasts the pointer against UI panels and reports hit rows/buttons.
             {
-            {
                 // Align the model to the runtime render-model space (where the
                 // system draws the real controller). Locate it once per frame and
                 // derive a local grip-space correction applied to both hands.
