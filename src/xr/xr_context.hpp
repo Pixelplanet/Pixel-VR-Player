@@ -41,6 +41,11 @@ struct XrInputState {
         bool active = false;
         float position[3] = {0.0f, 0.0f, 0.0f};
         float orientation[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        // Grip pose (the controller body); used to place the 3D render model.
+        // The aim pose above drives the pointer ray.
+        bool gripActive = false;
+        float gripPosition[3] = {0.0f, 0.0f, 0.0f};
+        float gripOrientation[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     };
     ControllerPose controllers[2];
 };
@@ -136,8 +141,10 @@ private:
     XrAction thumbstickLeftAction_ = XR_NULL_HANDLE;
     XrAction thumbstickRightAction_ = XR_NULL_HANDLE;
     XrAction aimPoseAction_ = XR_NULL_HANDLE;
+    XrAction gripPoseAction_ = XR_NULL_HANDLE;
     XrPath handPaths_[2] = {XR_NULL_PATH, XR_NULL_PATH};
     XrSpace aimSpaces_[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
+    XrSpace gripSpaces_[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
     bool actionsReady_ = false;
     XrInputState input_;
 

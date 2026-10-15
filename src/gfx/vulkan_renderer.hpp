@@ -115,6 +115,11 @@ public:
         bool active = false;
         float position[3] = {0.0f, 0.0f, 0.0f};
         float orientation[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        // Grip pose (controller body) for the render model; the aim pose above
+        // drives the pointer ray and UI cursor.
+        bool gripActive = false;
+        float gripPosition[3] = {0.0f, 0.0f, 0.0f};
+        float gripOrientation[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     };
     void setControllers(const ControllerVis& left, const ControllerVis& right);
 
@@ -182,6 +187,7 @@ private:
     bool createRenderPass(VkFormat format);
     VkSampleCountFlagBits chooseSampleCount() const;
     bool createMsaaTarget(int32_t width, int32_t height);
+    bool createDepthTarget(int32_t width, int32_t height);
     bool initText();
     bool createSamplerAndDescriptors();
     bool createPipelines();
@@ -342,6 +348,13 @@ private:
     VkImage msaaImage_ = VK_NULL_HANDLE;
     VkDeviceMemory msaaMemory_ = VK_NULL_HANDLE;
     VkImageView msaaView_ = VK_NULL_HANDLE;
+
+    // Shared depth buffer, reused across eyes (they render sequentially). Gives
+    // the 3D controller models correct self-occlusion instead of showing through.
+    VkImage depthImage_ = VK_NULL_HANDLE;
+    VkDeviceMemory depthMemory_ = VK_NULL_HANDLE;
+    VkImageView depthView_ = VK_NULL_HANDLE;
+    VkFormat depthFormat_ = VK_FORMAT_D32_SFLOAT;
 
     float clearColor_[4] = {0.02f, 0.02f, 0.05f, 1.0f};
     bool dmabufCapable_ = false;

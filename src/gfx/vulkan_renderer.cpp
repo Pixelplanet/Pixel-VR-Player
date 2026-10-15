@@ -143,6 +143,12 @@ VulkanRenderer::~VulkanRenderer() {
             vkDestroyImage(device_, msaaImage_, nullptr);
         if (msaaMemory_ != VK_NULL_HANDLE)
             vkFreeMemory(device_, msaaMemory_, nullptr);
+        if (depthView_ != VK_NULL_HANDLE)
+            vkDestroyImageView(device_, depthView_, nullptr);
+        if (depthImage_ != VK_NULL_HANDLE)
+            vkDestroyImage(device_, depthImage_, nullptr);
+        if (depthMemory_ != VK_NULL_HANDLE)
+            vkFreeMemory(device_, depthMemory_, nullptr);
         destroyVideoResources();
         destroyYcbcr();
         if (sampler_ != VK_NULL_HANDLE) vkDestroySampler(device_, sampler_, nullptr);
@@ -365,8 +371,9 @@ int64_t VulkanRenderer::chooseColorFormat(
 
 bool VulkanRenderer::createRenderPass(VkFormat format) {
     const bool msaa = sampleCount_ != VK_SAMPLE_COUNT_1_BIT;
+    const uint32_t depthIndex = msaa ? 2u : 1u;
 
-    VkAttachmentDescription attachments[2]{};
+    VkAttachmentDescription attachments[3]{};
     // [0] Color attachment: the multisampled target when MSAA is on, otherwise
     // the swapchain image itself.
     attachments[0].format = format;
@@ -379,14 +386,26 @@ bool VulkanRenderer::createRenderPass(VkFormat format) {
     attachments[0].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
     attachments[0].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
     // [1] Resolve target (the swapchain image); only present when MSAA is on.
-    attachments[1].format = format;
-    attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
-    attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    attachments[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    attachments[1].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    if (msaa) {
+        attachments[1].format = format;
+        attachments[1].samples = VK_SAMPLE_COUNT_1_BIT;
+        attachments[1].loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        attachments[1].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        attachments[1].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        attachments[1].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        attachments[1].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        attachments[1].finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    }
+    // [depthIndex] Depth attachment (multisampled to match color; not stored).
+    attachments[depthIndex].format = depthFormat_;
+    attachments[depthIndex].samples = sampleCount_;
+    attachments[depthIndex].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    attachments[depthIndex].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachments[depthIndex].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachments[depthIndex].stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachments[depthIndex].initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    attachments[depthIndex].finalLayout =
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
     VkAttachmentReference colorRef{};
     colorRef.attachment = 0;
@@ -394,23 +413,30 @@ bool VulkanRenderer::createRenderPass(VkFormat format) {
     VkAttachmentReference resolveRef{};
     resolveRef.attachment = 1;
     resolveRef.layout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+    VkAttachmentReference depthRef{};
+    depthRef.attachment = depthIndex;
+    depthRef.layout = VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL;
 
     VkSubpassDescription subpass{};
     subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
     subpass.colorAttachmentCount = 1;
     subpass.pColorAttachments = &colorRef;
     subpass.pResolveAttachments = msaa ? &resolveRef : nullptr;
+    subpass.pDepthStencilAttachment = &depthRef;
 
     VkSubpassDependency dependency{};
     dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
     dependency.dstSubpass = 0;
-    dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                              VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+    dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
+                              VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
     dependency.srcAccessMask = 0;
-    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                               VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
     VkRenderPassCreateInfo info{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
-    info.attachmentCount = msaa ? 2 : 1;
+    info.attachmentCount = msaa ? 3u : 2u;
     info.pAttachments = attachments;
     info.subpassCount = 1;
     info.pSubpasses = &subpass;
@@ -485,6 +511,56 @@ bool VulkanRenderer::createMsaaTarget(int32_t width, int32_t height) {
     iv.subresourceRange.levelCount = 1;
     iv.subresourceRange.layerCount = 1;
     PIXELVR_VK_CHECK(vkCreateImageView(device_, &iv, nullptr, &msaaView_));
+    return true;
+}
+
+bool VulkanRenderer::createDepthTarget(int32_t width, int32_t height) {
+    VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    info.imageType = VK_IMAGE_TYPE_2D;
+    info.format = depthFormat_;
+    info.extent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
+    info.mipLevels = 1;
+    info.arrayLayers = 1;
+    info.samples = sampleCount_;
+    info.tiling = VK_IMAGE_TILING_OPTIMAL;
+    info.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+                 VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
+    info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    PIXELVR_VK_CHECK(vkCreateImage(device_, &info, nullptr, &depthImage_));
+
+    VkMemoryRequirements req{};
+    vkGetImageMemoryRequirements(device_, depthImage_, &req);
+    // Prefer lazily-allocated (tile) memory on Adreno; fall back to device-local.
+    uint32_t memType = UINT32_MAX;
+    VkPhysicalDeviceMemoryProperties mp{};
+    vkGetPhysicalDeviceMemoryProperties(physicalDevice_, &mp);
+    for (uint32_t i = 0; i < mp.memoryTypeCount; ++i) {
+        if ((req.memoryTypeBits & (1u << i)) &&
+            (mp.memoryTypes[i].propertyFlags &
+             VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT)) {
+            memType = i;
+            break;
+        }
+    }
+    if (memType == UINT32_MAX) {
+        memType =
+            findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    }
+    VkMemoryAllocateInfo alloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    alloc.allocationSize = req.size;
+    alloc.memoryTypeIndex = memType;
+    PIXELVR_VK_CHECK(vkAllocateMemory(device_, &alloc, nullptr, &depthMemory_));
+    PIXELVR_VK_CHECK(vkBindImageMemory(device_, depthImage_, depthMemory_, 0));
+
+    VkImageViewCreateInfo iv{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    iv.image = depthImage_;
+    iv.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    iv.format = depthFormat_;
+    iv.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
+    iv.subresourceRange.levelCount = 1;
+    iv.subresourceRange.layerCount = 1;
+    PIXELVR_VK_CHECK(vkCreateImageView(device_, &iv, nullptr, &depthView_));
     return true;
 }
 
@@ -594,6 +670,14 @@ bool VulkanRenderer::buildPipeline(const std::string& vertName,
     dynamic.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
     dynamic.pDynamicStates = dynamicStates.data();
 
+    // 2D content (video, UI, text) paints in submission order; it neither tests
+    // nor writes depth so the depth buffer is reserved for the 3D models.
+    VkPipelineDepthStencilStateCreateInfo depthStencil{
+        VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    depthStencil.depthTestEnable = VK_FALSE;
+    depthStencil.depthWriteEnable = VK_FALSE;
+    depthStencil.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+
     VkGraphicsPipelineCreateInfo pipelineInfo{
         VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
     pipelineInfo.stageCount = static_cast<uint32_t>(stages.size());
@@ -604,6 +688,7 @@ bool VulkanRenderer::buildPipeline(const std::string& vertName,
     pipelineInfo.pRasterizationState = &raster;
     pipelineInfo.pMultisampleState = &multisample;
     pipelineInfo.pColorBlendState = &colorBlend;
+    pipelineInfo.pDepthStencilState = &depthStencil;
     pipelineInfo.pDynamicState = &dynamic;
     pipelineInfo.layout = layout;
     pipelineInfo.renderPass = rp;
@@ -708,15 +793,18 @@ bool VulkanRenderer::createRenderResources(
 
     // Shared multisampled color target (sized to the largest eye), resolved into
     // each eye's swapchain image for anti-aliased edges.
+    int32_t maxW = 0, maxH = 0;
+    for (const auto& sc : swapchains) {
+        maxW = std::max(maxW, sc.width);
+        maxH = std::max(maxH, sc.height);
+    }
     if (sampleCount_ != VK_SAMPLE_COUNT_1_BIT) {
-        int32_t maxW = 0, maxH = 0;
-        for (const auto& sc : swapchains) {
-            maxW = std::max(maxW, sc.width);
-            maxH = std::max(maxH, sc.height);
-        }
         if (!createMsaaTarget(maxW, maxH)) {
             return false;
         }
+    }
+    if (!createDepthTarget(maxW, maxH)) {
+        return false;
     }
 
     // Image views + framebuffers per eye.
@@ -745,15 +833,19 @@ bool VulkanRenderer::createRenderResources(
                 vkCreateImageView(device_, &ivInfo, nullptr, &vt.imageViews[i]));
 
             const bool msaa = sampleCount_ != VK_SAMPLE_COUNT_1_BIT;
-            VkImageView fbAttachments[2] = {vt.imageViews[i], vt.imageViews[i]};
+            VkImageView fbAttachments[3];
             if (msaa) {
                 fbAttachments[0] = msaaView_;
                 fbAttachments[1] = vt.imageViews[i];
+                fbAttachments[2] = depthView_;
+            } else {
+                fbAttachments[0] = vt.imageViews[i];
+                fbAttachments[1] = depthView_;
             }
             VkFramebufferCreateInfo fbInfo{
                 VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
             fbInfo.renderPass = renderPass_;
-            fbInfo.attachmentCount = msaa ? 2 : 1;
+            fbInfo.attachmentCount = msaa ? 3 : 2;
             fbInfo.pAttachments = fbAttachments;
             fbInfo.width = static_cast<uint32_t>(sc.width);
             fbInfo.height = static_cast<uint32_t>(sc.height);
@@ -1199,9 +1291,15 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         return;
     }
 
-    VkClearValue clears[2]{};
+    const bool msaa = sampleCount_ != VK_SAMPLE_COUNT_1_BIT;
+    VkClearValue clears[3]{};
     clears[0].color = {{clearColor_[0], clearColor_[1], clearColor_[2], clearColor_[3]}};
-    clears[1].color = clears[0].color;
+    if (msaa) {
+        clears[1].color = clears[0].color;
+        clears[2].depthStencil = {1.0f, 0};
+    } else {
+        clears[1].depthStencil = {1.0f, 0};
+    }
 
     VkRenderPassBeginInfo rpBegin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     rpBegin.renderPass = renderPass_;
@@ -1209,8 +1307,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
     rpBegin.renderArea.offset = {0, 0};
     rpBegin.renderArea.extent = {static_cast<uint32_t>(vt.width),
                                  static_cast<uint32_t>(vt.height)};
-    rpBegin.clearValueCount =
-        (sampleCount_ != VK_SAMPLE_COUNT_1_BIT) ? 2u : 1u;
+    rpBegin.clearValueCount = msaa ? 3u : 2u;
     rpBegin.pClearValues = clears;
     vkCmdBeginRenderPass(commandBuffer_, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
 
@@ -1704,12 +1801,15 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         const Mat4 vpWorld = multiply(proj, viewMat);
         for (int h = 0; h < 2; ++h) {
             if (!controllers_[h].active) continue;
-            const Quat q{controllers_[h].orientation[0],
-                         controllers_[h].orientation[1],
-                         controllers_[h].orientation[2],
-                         controllers_[h].orientation[3]};
-            const Vec3 o{controllers_[h].position[0], controllers_[h].position[1],
-                         controllers_[h].position[2]};
+            // The render model is authored around the grip (controller body), so
+            // place it there; fall back to the aim pose if grip is unavailable.
+            const bool useGrip = controllers_[h].gripActive;
+            const float* qp = useGrip ? controllers_[h].gripOrientation
+                                      : controllers_[h].orientation;
+            const float* op = useGrip ? controllers_[h].gripPosition
+                                      : controllers_[h].position;
+            const Quat q{qp[0], qp[1], qp[2], qp[3]};
+            const Vec3 o{op[0], op[1], op[2]};
             const Mat4 mvp = multiply(vpWorld, multiply(translation(o), fromQuat(q)));
             float push[24];
             std::memcpy(push, mvp.m, sizeof(float) * 16);
@@ -2684,6 +2784,14 @@ bool VulkanRenderer::createModelPipeline() {
     dynState.dynamicStateCount = static_cast<uint32_t>(dyn.size());
     dynState.pDynamicStates = dyn.data();
 
+    // The 3D model tests + writes depth so near parts occlude far parts instead
+    // of showing through.
+    VkPipelineDepthStencilStateCreateInfo ds{
+        VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    ds.depthTestEnable = VK_TRUE;
+    ds.depthWriteEnable = VK_TRUE;
+    ds.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+
     VkGraphicsPipelineCreateInfo gp{
         VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
     gp.stageCount = 2;
@@ -2694,6 +2802,7 @@ bool VulkanRenderer::createModelPipeline() {
     gp.pRasterizationState = &raster;
     gp.pMultisampleState = &ms;
     gp.pColorBlendState = &cb;
+    gp.pDepthStencilState = &ds;
     gp.pDynamicState = &dynState;
     gp.layout = modelLayout_;
     gp.renderPass = renderPass_;

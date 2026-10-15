@@ -312,6 +312,18 @@ bool XrContext::createActions() {
             aimPoseAction_ = XR_NULL_HANDLE;
         }
     }
+    {
+        XrActionCreateInfo ai{XR_TYPE_ACTION_CREATE_INFO};
+        std::strcpy(ai.actionName, "grip_pose");
+        std::strcpy(ai.localizedActionName, "Grip Pose");
+        ai.actionType = XR_ACTION_TYPE_POSE_INPUT;
+        ai.countSubactionPaths = 2;
+        ai.subactionPaths = handPaths_;
+        if (XR_FAILED(xrCreateAction(actionSet_, &ai, &gripPoseAction_))) {
+            PIXELVR_LOG_WARN("Failed to create grip pose action");
+            gripPoseAction_ = XR_NULL_HANDLE;
+        }
+    }
 
     // Suggest bindings per interaction profile. Controls favour the face buttons
     // and trigger over thumbstick clicks: A/X play/pause, B/Y open the menu,
@@ -335,7 +347,9 @@ bool XrContext::createActions() {
              {browserAction_, path("/user/hand/left/input/menu/click")},
              {browserAction_, path("/user/hand/right/input/menu/click")},
              {aimPoseAction_, path("/user/hand/left/input/aim/pose")},
-             {aimPoseAction_, path("/user/hand/right/input/aim/pose")}});
+             {aimPoseAction_, path("/user/hand/right/input/aim/pose")},
+             {gripPoseAction_, path("/user/hand/left/input/grip/pose")},
+             {gripPoseAction_, path("/user/hand/right/input/grip/pose")}});
 
     suggest("/interaction_profiles/oculus/touch_controller",
             {{togglePlayAction_, path("/user/hand/right/input/a/click")},
@@ -351,7 +365,9 @@ bool XrContext::createActions() {
              {thumbstickLeftAction_, path("/user/hand/left/input/thumbstick")},
              {thumbstickRightAction_, path("/user/hand/right/input/thumbstick")},
              {aimPoseAction_, path("/user/hand/right/input/aim/pose")},
-             {aimPoseAction_, path("/user/hand/left/input/aim/pose")}});
+             {aimPoseAction_, path("/user/hand/left/input/aim/pose")},
+             {gripPoseAction_, path("/user/hand/right/input/grip/pose")},
+             {gripPoseAction_, path("/user/hand/left/input/grip/pose")}});
 
     suggest("/interaction_profiles/valve/index_controller",
             {{togglePlayAction_, path("/user/hand/right/input/a/click")},
@@ -367,7 +383,9 @@ bool XrContext::createActions() {
              {thumbstickLeftAction_, path("/user/hand/left/input/thumbstick")},
              {thumbstickRightAction_, path("/user/hand/right/input/thumbstick")},
              {aimPoseAction_, path("/user/hand/right/input/aim/pose")},
-             {aimPoseAction_, path("/user/hand/left/input/aim/pose")}});
+             {aimPoseAction_, path("/user/hand/left/input/aim/pose")},
+             {gripPoseAction_, path("/user/hand/right/input/grip/pose")},
+             {gripPoseAction_, path("/user/hand/left/input/grip/pose")}});
 
     XrSessionActionSetsAttachInfo attach{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
     attach.countActionSets = 1;
@@ -384,6 +402,18 @@ bool XrContext::createActions() {
             if (XR_FAILED(xrCreateActionSpace(session_, &si, &aimSpaces_[h]))) {
                 PIXELVR_LOG_WARN("Failed to create aim action space %d", h);
                 aimSpaces_[h] = XR_NULL_HANDLE;
+            }
+        }
+    }
+    if (gripPoseAction_ != XR_NULL_HANDLE) {
+        for (int h = 0; h < 2; ++h) {
+            XrActionSpaceCreateInfo si{XR_TYPE_ACTION_SPACE_CREATE_INFO};
+            si.action = gripPoseAction_;
+            si.subactionPath = handPaths_[h];
+            si.poseInActionSpace.orientation.w = 1.0f;
+            if (XR_FAILED(xrCreateActionSpace(session_, &si, &gripSpaces_[h]))) {
+                PIXELVR_LOG_WARN("Failed to create grip action space %d", h);
+                gripSpaces_[h] = XR_NULL_HANDLE;
             }
         }
     }
@@ -588,6 +618,34 @@ bool XrContext::renderFrame(const RenderViewFn& renderView) {
             c.orientation[1] = loc.pose.orientation.y;
             c.orientation[2] = loc.pose.orientation.z;
             c.orientation[3] = loc.pose.orientation.w;
+        }
+    }
+
+    // Locate each controller's grip pose (used to place the 3D controller model;
+    // the model is authored around the grip, not the forward-pointing aim).
+    for (int h = 0; h < 2; ++h) {
+        input_.controllers[h].gripActive = false;
+        if (gripSpaces_[h] == XR_NULL_HANDLE) {
+            continue;
+        }
+        XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
+        if (XR_FAILED(xrLocateSpace(gripSpaces_[h], appSpace_,
+                                    frameState.predictedDisplayTime, &loc))) {
+            continue;
+        }
+        constexpr XrSpaceLocationFlags need =
+            XR_SPACE_LOCATION_ORIENTATION_VALID_BIT |
+            XR_SPACE_LOCATION_POSITION_VALID_BIT;
+        if ((loc.locationFlags & need) == need) {
+            auto& c = input_.controllers[h];
+            c.gripActive = true;
+            c.gripPosition[0] = loc.pose.position.x;
+            c.gripPosition[1] = loc.pose.position.y;
+            c.gripPosition[2] = loc.pose.position.z;
+            c.gripOrientation[0] = loc.pose.orientation.x;
+            c.gripOrientation[1] = loc.pose.orientation.y;
+            c.gripOrientation[2] = loc.pose.orientation.z;
+            c.gripOrientation[3] = loc.pose.orientation.w;
         }
     }
 

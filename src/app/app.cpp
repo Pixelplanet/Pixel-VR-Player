@@ -490,6 +490,10 @@ int App::run() {
                     v.active = c.active;
                     for (int k = 0; k < 3; ++k) v.position[k] = c.position[k];
                     for (int k = 0; k < 4; ++k) v.orientation[k] = c.orientation[k];
+                    v.gripActive = c.gripActive;
+                    for (int k = 0; k < 3; ++k) v.gripPosition[k] = c.gripPosition[k];
+                    for (int k = 0; k < 4; ++k)
+                        v.gripOrientation[k] = c.gripOrientation[k];
                     return v;
                 };
                 const bool uiPanelActive = browserOpen || settingsOpen;
