@@ -427,6 +427,14 @@ int App::run() {
                 in.browserToggle = in.buttonDown[settings_.bindMenu()];
                 in.recenter = in.buttonDown[settings_.bindRecenter()];
             }
+            // X / Y are dedicated download buttons: they download the entry
+            // highlighted in the file browser. Keeping download on its own
+            // physical button means the trigger never has to double as a pointer
+            // click on the control bar. Suppressed while binding/opening settings.
+            const bool downloadPressed =
+                !settings_.isListening() && !settings_.isOpen() &&
+                (in.buttonDown[XrInputState::BtnX] ||
+                 in.buttonDown[XrInputState::BtnY]);
             bool interacted = false;
             bool browserOpen = false;
             bool settingsOpen = false;
@@ -589,8 +597,8 @@ int App::run() {
                     drows.push_back(buf);
                 }
             }
-            const bool dlWin = downloadsWindow_ && !browser_.isOpen() &&
-                               !settings_.isOpen() && pendingDl_.empty();
+            const bool dlWin = downloadsWindow_ && !settings_.isOpen() &&
+                               pendingDl_.empty();
             renderer_.setDownloadsModal(false);
             renderer_.setDownloads(
                 dlWin, "Downloads", drows,
@@ -688,9 +696,13 @@ int App::run() {
                 if (browser_.onNetwork() && !browser_.isBusy()) {
                     // Keep any message (e.g. a download hint) visible; just add
                     // the action hint rather than replacing it.
-                    status = status.empty()
-                                 ? std::string("A: open        Bar: download")
-                                 : status + "      [A: open]";
+                    if (status.empty()) {
+                        status = browser_.onNetwork()
+                                     ? std::string("A: open     X: download")
+                                     : std::string("A: open");
+                    } else {
+                        status += "      [A: open]";
+                    }
                 }
                 renderer_.setBrowser(true, browser_.title(), rows,
                                      browser_.selected(), status);
@@ -833,9 +845,11 @@ int App::run() {
                 // laser (hovered row) or moved with the thumbstick. Skipped when
                 // the pointer is on the control bar (that click is handled below).
                 // A opens / activates the highlighted entry: folders navigate, video
-                // files play. Downloading has its own control-bar button, so the
-                // trigger stays free to click panels and the bar.
-                if (in.togglePlay && pendingDl_.empty()) {
+                // files play. Downloading has its own button (X / Y), and when the
+                // laser is resting on a control-bar button that button takes the
+                // press instead (handled below).
+                if (in.togglePlay && renderer_.pointerButton() < 0 &&
+                    pendingDl_.empty()) {
                     std::string playPath;
                     if (browser_.activate(playPath) == Browser::Result::Play &&
                         !playPath.empty()) {
@@ -848,6 +862,21 @@ int App::run() {
             }
             if (browser_.isOpen() && in.recenter && in.headValid) {
                 renderer_.recenterScreen(in.headPos, in.headForward);
+            }
+            // X / Y: download the highlighted entry. Folders ask for confirmation
+            // (with the measured size) first; on a network share a plain file is
+            // copied, and locally there is nothing to download.
+            if (browser_.isOpen() && downloadPressed && pendingDl_.empty()) {
+                const Browser::Entry* fe = browser_.focused();
+                if (fe != nullptr && fe->isDir && !fe->isBack &&
+                    browser_.onNetwork()) {
+                    pendingDl_ = fe->path;
+                    pendingDlName_ = fe->label;
+                    pendingDlFresh_ = true;
+                    browser_.measureFolder(fe->path);
+                } else {
+                    browser_.downloadFocused();
+                }
             }
 #endif
 
@@ -904,7 +933,10 @@ int App::run() {
             if (barOk) {
                 // Point-and-click the media control bar with the trigger.
                 const int btn = renderer_.pointerButton();
-                if (in.select && btn >= 0) {
+                // The trigger clicks the bar; A does too (A is the reliable
+                // press -- the analog trigger does not always report a click).
+                if ((in.select || in.togglePlay) && btn >= 0) {
+                    PIXELVR_LOG_INFO("control bar click: button=%d", btn);
                     const auto cb = static_cast<VulkanRenderer::CtrlButton>(btn);
                     if (cb == VulkanRenderer::CtrlButton::Stop) {
 #ifdef PIXELVR_HAVE_MEDIA
