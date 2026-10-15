@@ -50,7 +50,7 @@ struct TextPush {
 
 // Shared UI panel layout (panel-local metres), used by both the browser render
 // and the pointer raycast so the cursor and highlight line up exactly.
-constexpr float kPanelW = 0.7f;
+constexpr float kPanelW = 1.0f;
 constexpr float kPanelTop = 0.8f;
 constexpr float kRowH = 0.09f;
 constexpr int kMaxRows = 13;
@@ -1738,11 +1738,11 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         for (int i = first; i < lastRow; ++i) {
             const float ry = panelTop - 0.2f - (i - first) * rowH;
             drawString(-panelW + 0.05f, ry, sc, white2,
-                       browserRows_[static_cast<std::size_t>(i)].substr(0, 46));
+                       browserRows_[static_cast<std::size_t>(i)].substr(0, 62));
         }
         if (!browserStatus_.empty()) {
             drawString(-panelW + 0.04f, -panelTop + 0.05f, sc * 0.85f, dim,
-                       browserStatus_.substr(0, 46));
+                       browserStatus_.substr(0, 70));
         }
     }
 
@@ -1822,11 +1822,11 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                             (i < static_cast<int>(settingsEnabled_.size()) &&
                              settingsEnabled_[i] != 0);
             drawString(-panelW + 0.05f, ry, sc, en ? white2 : disabledCol,
-                       settingsRows_[static_cast<std::size_t>(i)].substr(0, 46));
+                       settingsRows_[static_cast<std::size_t>(i)].substr(0, 62));
         }
         if (!settingsStatus_.empty()) {
             drawString(-panelW + 0.04f, -panelTop + 0.05f, sc * 0.82f, dim,
-                       settingsStatus_.substr(0, 52));
+                       settingsStatus_.substr(0, 70));
         }
     }
 
@@ -1879,11 +1879,11 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                    downloadsTitle_.substr(0, 42));
         for (std::size_t i = 0; i < downloadsRows_.size(); ++i) {
             const float ry = panelTop - 0.2f - static_cast<float>(i) * rowH;
-            drawString(-panelW + 0.05f, ry, sc, white2, downloadsRows_[i].substr(0, 46));
+            drawString(-panelW + 0.05f, ry, sc, white2, downloadsRows_[i].substr(0, 62));
         }
         if (!downloadsStatus_.empty()) {
             drawString(-panelW + 0.04f, -panelTop + 0.05f, sc * 0.82f, dim,
-                       downloadsStatus_.substr(0, 52));
+                       downloadsStatus_.substr(0, 70));
         }
     }
 
@@ -1956,7 +1956,6 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                     !modelNodeStates_.empty() && !modelNodeStates_[0].name.empty();
                 for (std::size_t si = 0; si < modelSubmeshes_.size(); ++si) {
                     const ModelSubmesh& sm = modelSubmeshes_[si];
-                    if (sm.nodeName == "status") continue;  // full-atlas screen node
                     const float* np = identityPos;
                     const float* nq = identityQuat;
                     if (haveNames) {

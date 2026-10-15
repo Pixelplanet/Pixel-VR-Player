@@ -443,7 +443,7 @@ void Browser::startDownloadFile(const std::string& uri, const std::string& local
             dlActive_.store(false);
             return;
         }
-        std::vector<char> buf(1 << 20);
+        std::vector<char> buf(1 << 18);  // small chunks so the SMB lock is freed
         ssize_t n = 0;
         long long got = 0;
         for (;;) {
@@ -455,6 +455,7 @@ void Browser::startDownloadFile(const std::string& uri, const std::string& local
             std::fwrite(buf.data(), 1, static_cast<std::size_t>(n), out);
             got += n;
             dlBytes_.store(got);
+            std::this_thread::yield();  // let the browser's scan take the lock
         }
         std::fclose(out);
         {
@@ -518,7 +519,7 @@ void Browser::startDownloadFolder(const std::string& uri,
                 ok = false;
                 return;
             }
-            std::vector<char> buf(1 << 20);
+            std::vector<char> buf(1 << 18);  // small chunks: yield the SMB lock
             for (;;) {
                 ssize_t n = 0;
                 {
@@ -529,6 +530,7 @@ void Browser::startDownloadFolder(const std::string& uri,
                 std::fwrite(buf.data(), 1, static_cast<std::size_t>(n), out);
                 got += n;
                 dlBytes_.store(got);
+                std::this_thread::yield();
             }
             std::fclose(out);
             {

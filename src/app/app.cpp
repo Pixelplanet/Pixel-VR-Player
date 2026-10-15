@@ -533,9 +533,10 @@ int App::run() {
                 downloadToast_ = nowT + std::chrono::seconds(10);
             }
             const bool dlRecent = browser_.downloadActive() || nowT < downloadToast_;
-            const std::string dlLine =
-                browser_.downloadActive() ? downloadToastText_ : browser_.status();
-            renderer_.setDownloadStatus(!browser_.isOpen() && dlRecent, dlLine);
+            // Head-locked line only while a download is actually running; the
+            // completion is shown by the Downloads window / green button badge.
+            renderer_.setDownloadStatus(!browser_.isOpen() && browser_.downloadActive(),
+                                        browser_.downloadText());
             renderer_.setDownloadsBadge(browser_.downloadActive(),
                                         !browser_.downloadActive() &&
                                             browser_.hasDownloads() && dlRecent);
@@ -578,10 +579,10 @@ int App::run() {
                 rows.reserve(browser_.entries().size());
                 for (const auto& e : browser_.entries()) {
                     std::string name = e.label;
-                    if (name.size() > 32) name = name.substr(0, 31) + "~";
+                    if (name.size() > 44) name = name.substr(0, 43) + "~";
                     std::string row = name;
                     if (!e.detail.empty()) {
-                        while (row.size() < 36) row += ' ';
+                        while (row.size() < 50) row += ' ';
                         row += e.detail;
                     }
                     rows.push_back(std::move(row));
