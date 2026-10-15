@@ -202,6 +202,16 @@ public:
     };
     void setControlBar(bool visible) { controlBarVisible_ = visible; }
 
+    // Per-hand laser pointer toggle (grip press). A hand with the laser off
+    // neither casts a beam nor takes part in the UI raycast, so the other hand
+    // can own the pointer while this one drives a panel with its stick/d-pad.
+    void setLaserOn(int hand, bool on) {
+        if (hand >= 0 && hand < 2) laserOn_[hand] = on;
+    }
+    bool laserOn(int hand) const {
+        return (hand >= 0 && hand < 2) ? laserOn_[hand] : false;
+    }
+
     // The control-bar button currently under the pointer, or -1 if none.
     int pointerButton() const { return pointerButton_; }
     // True when the pointer is over the draggable timeline; pointerScrub() is
@@ -365,6 +375,8 @@ private:
     bool pointerActive_ = false;
     int pointerRow_ = -1;
     int pointerHand_ = -1;
+    // Whether each hand's laser pointer is on (toggled with the grip button).
+    bool laserOn_[2] = {true, true};
     float pointerHit_[3] = {0.0f, 0.0f, 0.0f};
     bool controlBarVisible_ = false;
     int pointerButton_ = -1;

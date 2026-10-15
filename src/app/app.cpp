@@ -435,6 +435,20 @@ int App::run() {
                 !settings_.isListening() && !settings_.isOpen() &&
                 (in.buttonDown[XrInputState::BtnX] ||
                  in.buttonDown[XrInputState::BtnY]);
+            // Grip toggles that hand's laser pointer (SteamVR behaviour), so the
+            // stick / d-pad can drive a panel without the beam fighting it, and so
+            // the user picks which controller is the pointing hand.
+            if (!settings_.isListening()) {
+                for (int h = 0; h < 2; ++h) {
+                    if (in.gripDown[h]) {
+                        const bool on = !renderer_.laserOn(h);
+                        renderer_.setLaserOn(h, on);
+                        PIXELVR_LOG_INFO("laser [%s]: %s",
+                                         h == 0 ? "left" : "right",
+                                         on ? "on" : "off");
+                    }
+                }
+            }
             bool interacted = false;
             bool browserOpen = false;
             bool settingsOpen = false;
@@ -679,7 +693,9 @@ int App::run() {
                 renderer_.setDownloadsModal(false);
             }
             // Publish the browser panel first so the pointer can raycast it.
-            if (browser_.isOpen()) {
+            // The downloads window replaces the browser view instead of stacking
+            // on top of it, so nothing behind it can be selected by mistake.
+            if (browser_.isOpen() && !dlWin) {
                 std::vector<std::string> rows;
                 rows.reserve(browser_.entries().size());
                 for (const auto& e : browser_.entries()) {
@@ -827,8 +843,10 @@ int App::run() {
 #ifdef PIXELVR_HAVE_FREETYPE
             // Browsing stays interactive during downloads: they run in a separate
             // process now, so they no longer block directory access. (Only guard
-            // against an in-flight SMB directory scan.)
-            if (browser_.isOpen() && !browser_.isScanning()) {
+            // against an in-flight SMB directory scan.) Interaction is suspended
+            // while an overlay (downloads window / confirm dialog) owns the view.
+            if (browser_.isOpen() && !browser_.isScanning() && !downloadsWindow_ &&
+                pendingDl_.empty()) {
                 if (const int d = navStep(in.thumbstickY, nowT)) {
                     browser_.move(d);
                     renderer_.scrollBrowser(d);
@@ -837,19 +855,15 @@ int App::run() {
                 const int hovered = renderer_.browserHovered();
                 if (hovered >= 0) {
                     renderer_.setBrowserSelected(hovered);
-                    // The pointer drives the selection, so A acts on the entry
-                    // actually being pointed at (not just the last trigger press).
                     browser_.setSelected(hovered);
                 }
-                // Trigger activates the selection whether it was made with the
-                // laser (hovered row) or moved with the thumbstick. Skipped when
-                // the pointer is on the control bar (that click is handled below).
-                // A opens / activates the highlighted entry: folders navigate, video
-                // files play. Downloading has its own button (X / Y), and when the
-                // laser is resting on a control-bar button that button takes the
-                // press instead (handled below).
-                if (in.togglePlay && renderer_.pointerButton() < 0 &&
-                    pendingDl_.empty()) {
+                // Open the highlighted entry. The trigger does it whenever the
+                // laser is not resting on a control-bar button (that click belongs
+                // to the bar, handled below); A does it too, which is the natural
+                // choice when moving the highlight with the thumbstick / d-pad.
+                // Downloading has its own buttons (X / Y).
+                if ((in.togglePlay || in.select) &&
+                    renderer_.pointerButton() < 0) {
                     std::string playPath;
                     if (browser_.activate(playPath) == Browser::Result::Play &&
                         !playPath.empty()) {

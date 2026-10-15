@@ -343,7 +343,12 @@ void SettingsMenu::loadConfig() {
         else if (key == "distance") screenDistance_ = std::clamp(std::stof(val), 1.0f, 10.0f);
         else if (key == "bind_play_btn") bindPlayBtn_ = std::clamp(std::stoi(val), 0, kButtonCount - 1);
         else if (key == "bind_menu_btn") bindMenuBtn_ = std::clamp(std::stoi(val), 0, kButtonCount - 1);
-        else if (key == "bind_recenter_btn") bindRecenterBtn_ = std::clamp(std::stoi(val), 0, kButtonCount - 1);
+        else if (key == "bind_recenter_btn") {
+            const int b = std::clamp(std::stoi(val), 0, kButtonCount - 1);
+            // Grip used to default to recenter; it now toggles the laser pointer,
+            // so a saved grip binding is migrated to the new default (Bumper).
+            bindRecenterBtn_ = (b == 8) ? 6 : b;
+        }
         else if (key == "download_dir") downloadDirIdx_ = std::clamp(std::stoi(val), 0, kDownloadDirCount - 1);
         else if (key == "audio_lang") audioLangIdx_ = std::clamp(std::stoi(val), 0, kLangCount - 1);
     }

@@ -1015,9 +1015,10 @@ void VulkanRenderer::updatePointer() {
     }
     const Mat4 inv = rigidInverse(panelBase);
 
-    // Prefer the right hand; fall back to the left.
+    // Prefer the right hand; fall back to the left. A hand whose laser is off
+    // takes no part in the raycast.
     for (int h : {1, 0}) {
-        if (!controllers_[h].active) {
+        if (!controllers_[h].active || !laserOn_[h]) {
             continue;
         }
         const Quat q{controllers_[h].orientation[0], controllers_[h].orientation[1],
@@ -2151,7 +2152,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         const float rayCol[4] = {0.25f, 0.60f, 1.0f, 0.85f};
         const float cursorCol[4] = {1.0f, 1.0f, 1.0f, 0.95f};
         for (int h = 0; h < 2; ++h) {
-            if (!controllers_[h].active) {
+            if (!controllers_[h].active || !laserOn_[h]) {
                 continue;
             }
             const Quat q{controllers_[h].orientation[0],

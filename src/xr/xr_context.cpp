@@ -543,6 +543,8 @@ void XrContext::syncActions() {
     input_.thumbstickRX = 0.0f;
     input_.thumbstickRY = 0.0f;
     for (int i = 0; i < XrInputState::BtnCount; ++i) input_.buttonDown[i] = false;
+    input_.gripDown[0] = false;
+    input_.gripDown[1] = false;
     if (!actionsReady_) {
         return;
     }
@@ -626,6 +628,21 @@ void XrContext::syncActions() {
         if (XR_SUCCEEDED(xrGetActionStateBoolean(session_, &gi, &st))) {
             input_.buttonDown[i] =
                 st.isActive && st.currentState && st.changedSinceLastSync;
+        }
+    }
+
+    // Per-hand grip press: `buttonDown` above aggregates both hands, but the laser
+    // pointer is toggled per hand, so query the squeeze action for each subaction.
+    if (buttonActions_[XrInputState::BtnGrip] != XR_NULL_HANDLE) {
+        for (int h = 0; h < 2; ++h) {
+            XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO};
+            gi.action = buttonActions_[XrInputState::BtnGrip];
+            gi.subactionPath = handPaths_[h];
+            XrActionStateBoolean st{XR_TYPE_ACTION_STATE_BOOLEAN};
+            if (XR_SUCCEEDED(xrGetActionStateBoolean(session_, &gi, &st))) {
+                input_.gripDown[h] =
+                    st.isActive && st.currentState && st.changedSinceLastSync;
+            }
         }
     }
 }

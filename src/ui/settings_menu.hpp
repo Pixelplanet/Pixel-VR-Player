@@ -109,7 +109,7 @@ private:
     // Function -> physical button (XrInputState::Button index); press-to-bind.
     int bindPlayBtn_ = 0;      // default A
     int bindMenuBtn_ = 1;      // default B
-    int bindRecenterBtn_ = 8;  // default Grip
+    int bindRecenterBtn_ = 6;  // default Bumper (grip toggles the laser)
     int listeningFunc_ = -1;   // 0=play 1=menu 2=recenter while binding, else -1
     int downloadDirIdx_ = 0;   // index into the download-destination presets
 

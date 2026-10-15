@@ -56,6 +56,11 @@ struct XrInputState {
         BtnDpadUp, BtnDpadDown, BtnDpadLeft, BtnDpadRight, BtnCount
     };
     bool buttonDown[BtnCount] = {};
+
+    // Per-hand grip (squeeze) rising edge: toggles that hand's laser pointer, so
+    // one controller can drive a panel with the stick while the other points.
+    // Index 0 = left, 1 = right.
+    bool gripDown[2] = {false, false};
 };
 
 // Owns the OpenXR instance, system, session, reference space, and swapchains,

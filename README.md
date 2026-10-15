@@ -47,17 +47,19 @@ stays usable while a panel is open.
 
 | Input | Action |
 | --- | --- |
+| **Trigger** | Point and click: open the entry under the laser, or press a control-bar button |
+| **A** | Open the highlighted entry — folder navigates, video plays / streams. Outside the browser it is play / pause |
+| **X** / **Y** | Download the highlighted entry (folders confirm first, showing their size) |
+| **B** | Open or close the file browser; also closes a panel and cancels the download dialog |
+| **Grip** | Toggle **that hand's** laser pointer on/off. Turn one off to navigate with the thumbstick or d-pad without the beam interfering, and to choose which controller points |
 | Thumbstick | Move the highlight in a panel; left/right seeks while playing |
-| **A** | Open the highlighted browser entry — folder navigates, video plays / streams. Outside the browser it is play / pause |
-| **B** | Open or close the file browser; also closes the settings panel and cancels the download dialog |
-| **Trigger** | Laser pointer: click a panel row, or a control-bar button |
-| **Grip** | Recenter the view in front of you |
+| **Bumper** | Recenter the view in front of you |
 
-The control bar has a dedicated **Download** button (arrow) that downloads the
-entry highlighted in the browser — folders ask for confirmation and show their
-size first. The **Downloads** button (list icon) opens the downloads manager,
-where you can pause, resume, stop and clear jobs, then play a finished file or
-open a finished folder.
+The control bar has a **Download** button (arrow) that downloads the entry
+highlighted in the browser, and a **Downloads** button (list icon) that opens the
+downloads manager — where you can pause, resume, stop and clear jobs, then play a
+finished file or open a finished folder. Opening the downloads manager replaces
+the file browser rather than stacking on top of it.
 
 All button bindings can be changed in **Settings ▸ Controls** (press-to-bind).
 
