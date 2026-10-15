@@ -192,6 +192,10 @@ bool RenderModelSystem::nodeStates(XrTime time, std::vector<NodeState>& out) {
         }
     }
     out.resize(st.nodeStateCount);
+    if (!stateLogged_) {
+        stateLogged_ = true;
+        PIXELVR_LOG_INFO("Render model node states: %u nodes", st.nodeStateCount);
+    }
     for (uint32_t i = 0; i < st.nodeStateCount; ++i) {
         const XrRenderModelNodeStateEXT& n = nodeStateBuf_[i];
         NodeState& o = out[i];

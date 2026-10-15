@@ -318,10 +318,15 @@ bool Browser::downloadFocused() {
         return false;
     }
     const Entry e = entries_[static_cast<std::size_t>(selected_)];
-    if (!e.isVideo || !inSmb_) {
-        return false;  // Only network videos can be downloaded to local storage.
+    if (!e.isVideo) {
+        status_ = "Highlight a video file, then press download";
+        return false;
     }
-    startDownload(e.path, e.label);  // async copy to ~/media, then Play via poll()
+    if (!inSmb_) {
+        status_ = "Only network (SMB) videos can be downloaded";
+        return false;
+    }
+    startDownload(e.path, e.label);  // async copy to the download folder, then play
     return true;
 }
 

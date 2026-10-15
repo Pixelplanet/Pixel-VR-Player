@@ -64,6 +64,7 @@ private:
     uint32_t animatableNodeCount_ = 0;
     std::vector<std::string> nodeNames_;
     std::vector<XrRenderModelNodeStateEXT> nodeStateBuf_;  // reused per frame
+    bool stateLogged_ = false;                             // one-shot diagnostic
 
     PFN_xrEnumerateInteractionRenderModelIdsEXT pfnEnumerateIds_ = nullptr;
     PFN_xrCreateRenderModelEXT pfnCreateModel_ = nullptr;

@@ -1873,16 +1873,13 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 Quat qNode{0.0f, 0.0f, 0.0f, 1.0f};
                 Vec3 pNode{0.0f, 0.0f, 0.0f};
                 bool visible = true;
-                if (!sm.nodeName.empty()) {
-                    for (const NodeStateVis& ns : modelNodeStates_) {
-                        if (ns.name == sm.nodeName) {
-                            qNode = Quat{ns.quat[0], ns.quat[1], ns.quat[2],
-                                         ns.quat[3]};
-                            pNode = Vec3{ns.pos[0], ns.pos[1], ns.pos[2]};
-                            visible = ns.visible;
-                            break;
-                        }
-                    }
+                if (sm.nodeIndex >= 0 &&
+                    sm.nodeIndex < static_cast<int>(modelNodeStates_.size())) {
+                    const NodeStateVis& ns =
+                        modelNodeStates_[static_cast<std::size_t>(sm.nodeIndex)];
+                    qNode = Quat{ns.quat[0], ns.quat[1], ns.quat[2], ns.quat[3]};
+                    pNode = Vec3{ns.pos[0], ns.pos[1], ns.pos[2]};
+                    visible = ns.visible;
                 }
                 if (!visible) continue;
                 const Vec3 worldPos = oPlace + rotate(qPlace, pNode);
@@ -3211,10 +3208,14 @@ bool VulkanRenderer::loadControllerModel(const std::vector<uint8_t>& glb) {
     }
     modelSubmeshes_.reserve(mesh.submeshes.size());
     for (const GltfSubmesh& s : mesh.submeshes) {
+        // The 'status' node maps the whole texture atlas onto a small LCD panel,
+        // which reads as a stray textured square; skip it.
+        if (s.nodeName == "status") continue;
         ModelSubmesh ms;
         ms.firstIndex = s.firstIndex;
         ms.indexCount = s.indexCount;
         ms.nodeName = s.nodeName;
+        ms.nodeIndex = s.nodeIndex;
         ms.set = (s.image >= 0 &&
                   static_cast<std::size_t>(s.image) < imageSets.size())
                      ? imageSets[s.image]

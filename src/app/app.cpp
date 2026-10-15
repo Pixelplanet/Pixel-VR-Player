@@ -530,7 +530,7 @@ int App::run() {
                 }
                 std::string status = browser_.status();
                 if (browser_.onNetwork() && !browser_.isBusy()) {
-                    status = "Point + Trigger: Stream      A: Download";
+                    status = "Trigger: Open/Stream    Play button: Download";
                 }
                 renderer_.setBrowser(true, browser_.title(), rows,
                                      browser_.selected(), status);
@@ -689,9 +689,11 @@ int App::run() {
                         }
                     }
                 }
-                if (in.togglePlay) {
-                    browser_.downloadFocused();
-                }
+            }
+            // Download works even while the folder is still scanning; only an
+            // already-running download blocks a new one (checked internally).
+            if (browser_.isOpen() && in.togglePlay) {
+                browser_.downloadFocused();
             }
             if (browser_.isOpen() && in.recenter && in.headValid) {
                 renderer_.recenterScreen(in.headPos, in.headForward);

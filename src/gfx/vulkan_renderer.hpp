@@ -449,6 +449,7 @@ private:
         VkDescriptorSet set = VK_NULL_HANDLE;  // base-color texture descriptor
         float color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
         std::string nodeName;  // matched to an animated render-model node state
+        int nodeIndex = -1;    // glTF node index (node states are parallel to it)
     };
     VkDescriptorSetLayout modelSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool modelDescPool_ = VK_NULL_HANDLE;
