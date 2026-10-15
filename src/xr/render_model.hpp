@@ -28,6 +28,10 @@ public:
     const std::vector<uint8_t>& gltf() const { return gltf_; }
     uint32_t animatableNodeCount() const { return animatableNodeCount_; }
 
+    // Locates the render-model space in `base` at `time` (the pose the runtime
+    // expects the glTF to be rendered at). False if not fetched or untracked.
+    bool locate(XrSpace base, XrTime time, float outPos[3], float outQuat[4]) const;
+
     void shutdown();
 
 private:

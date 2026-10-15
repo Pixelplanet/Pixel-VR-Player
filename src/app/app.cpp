@@ -16,6 +16,33 @@ namespace pixelvr {
 
 namespace {
 
+// Quaternion/pose helpers (xyzw) for composing controller-model placement.
+void quatRotate(const float q[4], const float v[3], float o[3]) {
+    const float ux = q[0], uy = q[1], uz = q[2], w = q[3];
+    const float c1x = uy * v[2] - uz * v[1] + w * v[0];
+    const float c1y = uz * v[0] - ux * v[2] + w * v[1];
+    const float c1z = ux * v[1] - uy * v[0] + w * v[2];
+    o[0] = v[0] + 2.0f * (uy * c1z - uz * c1y);
+    o[1] = v[1] + 2.0f * (uz * c1x - ux * c1z);
+    o[2] = v[2] + 2.0f * (ux * c1y - uy * c1x);
+}
+void quatMul(const float a[4], const float b[4], float o[4]) {
+    o[0] = a[3] * b[0] + a[0] * b[3] + a[1] * b[2] - a[2] * b[1];
+    o[1] = a[3] * b[1] - a[0] * b[2] + a[1] * b[3] + a[2] * b[0];
+    o[2] = a[3] * b[2] + a[0] * b[1] - a[1] * b[0] + a[2] * b[3];
+    o[3] = a[3] * b[3] - a[0] * b[0] - a[1] * b[1] - a[2] * b[2];
+}
+// out = A ∘ B composed as q = qA*qB, t = qA*tB + tA.
+void composePose(const float pa[3], const float qa[4], const float pb[3],
+                 const float qb[4], float po[3], float qo[4]) {
+    quatMul(qa, qb, qo);
+    float r[3];
+    quatRotate(qa, pb, r);
+    po[0] = r[0] + pa[0];
+    po[1] = r[1] + pa[1];
+    po[2] = r[2] + pa[2];
+}
+
 std::string to_lower(std::string s) {
     for (char& c : s) {
         c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
@@ -485,15 +512,55 @@ int App::run() {
             // Feed controller poses to the renderer (models, pointer ray, cursor);
             // it raycasts the pointer against UI panels and reports hit rows/buttons.
             {
-                auto vis = [](const XrInputState::ControllerPose& c) {
+            {
+                // Align the model to the runtime render-model space (where the
+                // system draws the real controller). Locate it once per frame and
+                // derive a local grip-space correction applied to both hands.
+                {
+                    float mPos[3], mQuat[4];
+                    if (renderModels_.locate(xr_.appSpace(), xr_.displayTime(),
+                                             mPos, mQuat)) {
+                        int owner = -1;
+                        float best = 1e30f;
+                        for (int h = 0; h < 2; ++h) {
+                            if (!in.controllers[h].gripActive) continue;
+                            const float* g = in.controllers[h].gripPosition;
+                            const float dx = g[0] - mPos[0], dy = g[1] - mPos[1],
+                                        dz = g[2] - mPos[2];
+                            const float d = dx * dx + dy * dy + dz * dz;
+                            if (d < best) { best = d; owner = h; }
+                        }
+                        if (owner >= 0) {
+                            // correction = inverse(gripOwner) then modelPose.
+                            const float* gq = in.controllers[owner].gripOrientation;
+                            const float* gt = in.controllers[owner].gripPosition;
+                            const float giq[4] = {-gq[0], -gq[1], -gq[2], gq[3]};
+                            float git[3];
+                            quatRotate(giq, gt, git);
+                            git[0] = -git[0]; git[1] = -git[1]; git[2] = -git[2];
+                            composePose(git, giq, mPos, mQuat, modelCorrPos_,
+                                        modelCorrQuat_);
+                            modelCorrValid_ = true;
+                        }
+                    }
+                }
+                auto vis = [&](const XrInputState::ControllerPose& c) {
                     VulkanRenderer::ControllerVis v;
                     v.active = c.active;
                     for (int k = 0; k < 3; ++k) v.position[k] = c.position[k];
                     for (int k = 0; k < 4; ++k) v.orientation[k] = c.orientation[k];
                     v.gripActive = c.gripActive;
-                    for (int k = 0; k < 3; ++k) v.gripPosition[k] = c.gripPosition[k];
-                    for (int k = 0; k < 4; ++k)
-                        v.gripOrientation[k] = c.gripOrientation[k];
+                    if (c.gripActive && modelCorrValid_) {
+                        // renderPose = compose(grip, correction).
+                        composePose(c.gripPosition, c.gripOrientation,
+                                    modelCorrPos_, modelCorrQuat_, v.gripPosition,
+                                    v.gripOrientation);
+                    } else {
+                        for (int k = 0; k < 3; ++k)
+                            v.gripPosition[k] = c.gripPosition[k];
+                        for (int k = 0; k < 4; ++k)
+                            v.gripOrientation[k] = c.gripOrientation[k];
+                    }
                     return v;
                 };
                 const bool uiPanelActive = browserOpen || settingsOpen;

@@ -120,6 +120,25 @@ bool RenderModelSystem::fetchFirstModel() {
     return true;
 }
 
+bool RenderModelSystem::locate(XrSpace base, XrTime time, float outPos[3],
+                               float outQuat[4]) const {
+    if (modelSpace_ == XR_NULL_HANDLE || time == 0) return false;
+    XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
+    if (XR_FAILED(xrLocateSpace(modelSpace_, base, time, &loc))) return false;
+    constexpr XrSpaceLocationFlags need =
+        XR_SPACE_LOCATION_ORIENTATION_VALID_BIT |
+        XR_SPACE_LOCATION_POSITION_VALID_BIT;
+    if ((loc.locationFlags & need) != need) return false;
+    outPos[0] = loc.pose.position.x;
+    outPos[1] = loc.pose.position.y;
+    outPos[2] = loc.pose.position.z;
+    outQuat[0] = loc.pose.orientation.x;
+    outQuat[1] = loc.pose.orientation.y;
+    outQuat[2] = loc.pose.orientation.z;
+    outQuat[3] = loc.pose.orientation.w;
+    return true;
+}
+
 void RenderModelSystem::shutdown() {
     if (modelSpace_ != XR_NULL_HANDLE) {
         xrDestroySpace(modelSpace_);

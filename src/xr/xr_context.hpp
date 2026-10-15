@@ -100,6 +100,8 @@ public:
     // --- Accessors -------------------------------------------------------
     XrInstance instance() const { return instance_; }
     XrSession session() const { return session_; }
+    XrSpace appSpace() const { return appSpace_; }
+    XrTime displayTime() const { return lastDisplayTime_; }
     XrSystemId systemId() const { return systemId_; }
     bool renderModelEnabled() const { return renderModelEnabled_; }
     uint32_t viewCount() const { return static_cast<uint32_t>(configViews_.size()); }
@@ -122,6 +124,7 @@ private:
     XrSystemId systemId_ = XR_NULL_SYSTEM_ID;
     XrSession session_ = XR_NULL_HANDLE;
     XrSpace appSpace_ = XR_NULL_HANDLE;
+    XrTime lastDisplayTime_ = 0;
 
     XrSessionState sessionState_ = XR_SESSION_STATE_UNKNOWN;
     bool sessionRunning_ = false;

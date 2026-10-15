@@ -59,6 +59,11 @@ private:
     // Place the screen in front of the user on the first valid head pose.
     bool didInitialRecenter_ = false;
     bool controllerModelLoaded_ = false;  // real glTF model uploaded once
+    // Local grip->render-model-space correction so the model sits exactly where
+    // the runtime renders it (derived from the fetched model's owner hand).
+    bool modelCorrValid_ = false;
+    float modelCorrPos_[3] = {0.0f, 0.0f, 0.0f};
+    float modelCorrQuat_[4] = {0.0f, 0.0f, 0.0f, 1.0f};
 
     // Debug statistics (recomputed a few times per second).
     std::chrono::steady_clock::time_point lastStatsUpdate_{};

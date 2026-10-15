@@ -575,6 +575,7 @@ bool XrContext::renderFrame(const RenderViewFn& renderView) {
     std::vector<XrCompositionLayerProjectionView> projectionViews;
     XrCompositionLayerProjection layer{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
 
+    lastDisplayTime_ = frameState.predictedDisplayTime;
     bool viewsValid = false;
     if (frameState.shouldRender == XR_TRUE) {
         locateViews(frameState.predictedDisplayTime, views_, viewsValid);

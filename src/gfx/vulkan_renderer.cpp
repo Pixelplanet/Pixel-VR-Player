@@ -1936,13 +1936,21 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                          controllers_[h].orientation[1],
                          controllers_[h].orientation[2],
                          controllers_[h].orientation[3]};
-            const Vec3 o{controllers_[h].position[0], controllers_[h].position[1],
-                          controllers_[h].position[2]};
-            const Vec3 d = normalize(rotate(q, Vec3{0.0f, 0.0f, -1.0f}));
+            // Start the ray at the controller body (render-model origin) so it
+            // visually connects to the model, not the floating aim point.
+            const Vec3 o = controllers_[h].gripActive
+                               ? Vec3{controllers_[h].gripPosition[0],
+                                      controllers_[h].gripPosition[1],
+                                      controllers_[h].gripPosition[2]}
+                               : Vec3{controllers_[h].position[0],
+                                      controllers_[h].position[1],
+                                      controllers_[h].position[2]};
+            Vec3 d = normalize(rotate(q, Vec3{0.0f, 0.0f, -1.0f}));
             float rayLen = 2.5f;
             if (pointerActive_ && pointerHand_ == h) {
-                rayLen = length(
-                    Vec3{pointerHit_[0], pointerHit_[1], pointerHit_[2]} - o);
+                const Vec3 hit{pointerHit_[0], pointerHit_[1], pointerHit_[2]};
+                d = normalize(hit - o);  // aim the visible ray through the hit
+                rayLen = length(hit - o);
             }
             segment(o + d * 0.09f, o + d * rayLen, 0.005f, rayCol);
         }
