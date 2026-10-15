@@ -531,12 +531,11 @@ int App::run() {
             if (browser_.downloadActive()) {
                 downloadToastText_ = browser_.downloadText();
                 downloadToast_ = nowT + std::chrono::seconds(10);
-                // On the rising edge of a download, close the file browser and
-                // open the downloads window so progress is immediately visible.
+                // Show the downloads window on the rising edge only if the user
+                // is not already browsing; do not close the browser.
                 if (!dlWasActive_) {
                     dlWasActive_ = true;
-                    downloadsWindow_ = true;
-                    browser_.setOpen(false);
+                    if (!browser_.isOpen()) downloadsWindow_ = true;
                 }
             } else {
                 dlWasActive_ = false;
