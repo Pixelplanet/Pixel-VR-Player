@@ -1038,6 +1038,42 @@ void VulkanRenderer::updatePointer() {
         const float hyy = oL.y + t * dL.y;
         const Vec3 world = origin + dir * t;
 
+        // The downloads window / confirmation modal takes priority: it is shown
+        // over the browser, so test it before the browser panel.
+        if (downloadsVisible_) {
+            if (hx < -kPanelW * 1.4f || hx > kPanelW * 1.4f ||
+                hyy < -kPanelTop * 1.3f || hyy > kPanelTop * 1.3f) {
+                continue;
+            }
+            pointerActive_ = true;
+            pointerHand_ = h;
+            pointerHit_[0] = world.x;
+            pointerHit_[1] = world.y;
+            pointerHit_[2] = world.z;
+            const float dbtnCy = -kPanelTop + 0.18f;
+            if (!downloadsButtons_.empty() && hyy >= dbtnCy - kDlBtnH * 0.5f &&
+                hyy <= dbtnCy + kDlBtnH * 0.5f) {
+                std::vector<float> cx, halfW;
+                downloadsButtonLayout(cx, halfW);
+                for (std::size_t i = 0; i < cx.size(); ++i) {
+                    if (std::fabs(hx - cx[i]) <= halfW[i]) {
+                        downloadsBtnHovered_ = static_cast<int>(i);
+                        break;
+                    }
+                }
+            } else {
+                const int total = static_cast<int>(downloadsRows_.size());
+                if (total > 0) {
+                    const float relY = kFirstRowY + 0.5f * kRowH - hyy;
+                    const int idxFromTop = static_cast<int>(std::floor(relY / kRowH));
+                    if (idxFromTop >= 0 && idxFromTop < total) {
+                        downloadsHovered_ = idxFromTop;
+                    }
+                }
+            }
+            break;
+        }
+
         if (browserVisible_) {
             if (hx < -kPanelW || hx > kPanelW || hyy < -kPanelTop || hyy > kPanelTop) {
                 continue;
@@ -1078,40 +1114,6 @@ void VulkanRenderer::updatePointer() {
                 if (idxFromTop >= 0 && idxFromTop < total) {
                     settingsRow_ = idxFromTop;
                     settingsHovered_ = idxFromTop;
-                }
-            }
-            break;
-        }
-
-        if (downloadsVisible_) {
-            if (hx < -kPanelW * 1.4f || hx > kPanelW * 1.4f ||
-                hyy < -kPanelTop * 1.3f || hyy > kPanelTop * 1.3f) {
-                continue;
-            }
-            pointerActive_ = true;
-            pointerHand_ = h;
-            pointerHit_[0] = world.x;
-            pointerHit_[1] = world.y;
-            pointerHit_[2] = world.z;
-            const float btnCy = -kPanelTop + 0.18f;
-            if (!downloadsButtons_.empty() && hyy >= btnCy - kDlBtnH * 0.5f &&
-                hyy <= btnCy + kDlBtnH * 0.5f) {
-                std::vector<float> cx, halfW;
-                downloadsButtonLayout(cx, halfW);
-                for (std::size_t i = 0; i < cx.size(); ++i) {
-                    if (std::fabs(hx - cx[i]) <= halfW[i]) {
-                        downloadsBtnHovered_ = static_cast<int>(i);
-                        break;
-                    }
-                }
-            } else {
-                const int total = static_cast<int>(downloadsRows_.size());
-                if (total > 0) {
-                    const float relY = kFirstRowY + 0.5f * kRowH - hyy;
-                    const int idxFromTop = static_cast<int>(std::floor(relY / kRowH));
-                    if (idxFromTop >= 0 && idxFromTop < total) {
-                        downloadsHovered_ = idxFromTop;
-                    }
                 }
             }
             break;
