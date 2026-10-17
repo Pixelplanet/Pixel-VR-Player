@@ -10,6 +10,7 @@
 
 #ifdef PIXELVR_HAVE_FREETYPE
 #include "ui/browser.hpp"
+#include "ui/thumbnail_cache.hpp"
 #endif
 
 #include "ui/settings_menu.hpp"
@@ -50,6 +51,8 @@ private:
     bool seekStepArmed_ = true;  // right-stick +/-30s debounce
     bool navArmed_ = true;       // menu nav: armed for the next stick press
     std::chrono::steady_clock::time_point navNextRepeat_{};  // nav auto-repeat
+    bool navArmedX_ = true;      // horizontal grid nav
+    std::chrono::steady_clock::time_point navNextRepeatX_{};
     bool scrubbing_ = false;     // dragging the timeline / stick-scrubbing
     double scrubTarget_ = 0.0;   // pending scrub position (seconds)
     std::chrono::steady_clock::time_point perfLastLog_{};
@@ -92,9 +95,11 @@ private:
     void updateStats();
     // Menu nav stick auto-repeat: -1/+1 to step (initial press + hold), else 0.
     int navStep(float axisY, std::chrono::steady_clock::time_point now);
+    int navStepX(float axisX, std::chrono::steady_clock::time_point now);
 
 #ifdef PIXELVR_HAVE_FREETYPE
     Browser browser_;
+    ThumbnailCache thumbnailCache_;
 #endif
 
     SettingsMenu settings_;

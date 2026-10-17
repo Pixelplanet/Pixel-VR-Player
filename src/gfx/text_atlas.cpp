@@ -26,7 +26,7 @@ FontAtlas buildFontAtlas(const char* ttfPath, int pixelHeight) {
     FT_Set_Pixel_Sizes(face, 0, static_cast<FT_UInt>(pixelHeight));
 
     constexpr int kFirst = 32;
-    constexpr int kLast = 126;
+    constexpr int kLast = 127;
     constexpr int kCols = 16;
     const int count = kLast - kFirst + 1;
     const int rows = (count + kCols - 1) / kCols;
@@ -39,8 +39,13 @@ FontAtlas buildFontAtlas(const char* ttfPath, int pixelHeight) {
     atlas.ascent = face->size->metrics.ascender / 64.0f;
 
     for (int ch = kFirst; ch <= kLast; ++ch) {
-        if (FT_Load_Char(face, static_cast<FT_ULong>(ch), FT_LOAD_DEFAULT) != 0) {
-            continue;
+        FT_ULong codepoint = (ch == 127) ? 0x2022UL : static_cast<FT_ULong>(ch);
+        if (FT_Load_Char(face, codepoint, FT_LOAD_DEFAULT) != 0) {
+            if (ch == 127 && FT_Load_Char(face, 0x00B7UL, FT_LOAD_DEFAULT) != 0) {
+                continue;
+            } else if (ch != 127) {
+                continue;
+            }
         }
         const FT_GlyphSlot g = face->glyph;
         // Render a signed-distance field (crisp at any VR distance); fall back to

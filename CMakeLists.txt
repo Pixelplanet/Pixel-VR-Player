@@ -108,7 +108,8 @@ set(PIXELVR_SHADERS
     shaders/ui.vert
     shaders/ui.frag
     shaders/text.vert
-    shaders/text.frag)
+    shaders/text.frag
+    shaders/thumb.frag)
 pixelvr_compile_shaders(pixelvr_shaders
     OUTPUT_DIR "${CMAKE_BINARY_DIR}/shaders"
     SOURCES ${PIXELVR_SHADERS})
@@ -124,6 +125,7 @@ add_library(pixelvr_core STATIC
     src/gfx/vulkan_renderer.cpp
     src/gfx/gltf_mesh.cpp
     src/ui/settings_menu.cpp
+    src/ui/thumbnail_cache.cpp
     src/app/app.cpp)
 
 target_include_directories(pixelvr_core PUBLIC

@@ -48,26 +48,55 @@ struct TextPush {
     float uv[4];    // u0, v0, u1, v1
 };
 
-// Shared UI panel layout (panel-local metres), used by both the browser render
-// and the pointer raycast so the cursor and highlight line up exactly.
-constexpr float kPanelW = 1.0f;
-constexpr float kPanelTop = 0.8f;
+// Shared Unified Spatial Hub layout (panel-local metres), used by both render
+// and pointer raycast so the cursor and highlight line up exactly.
+constexpr float kPanelW = 0.90f;      // Total width 1.80m (-0.90 to +0.90)
+constexpr float kPanelTop = 0.56f;    // Total height 1.12m (-0.56 to +0.56)
+constexpr float kRailRight = -0.49f;  // Left nav rail spans [-0.90, -0.49] (0.41m)
+constexpr float kContentCx = 0.205f;  // Content area center ((-0.49 + 0.90) / 2)
 constexpr float kRowH = 0.105f;
 // Downloads-window action buttons (content-sized, along the bottom edge).
-constexpr float kDlBtnH = 0.11f;
-constexpr float kDlBtnGap = 0.05f;
-constexpr float kDlBtnPadX = 0.07f;
+constexpr float kDlBtnH = 0.072f;
+constexpr float kDlBtnGap = 0.035f;
+constexpr float kDlBtnPadX = 0.048f;
 constexpr int kMaxRows = 13;
-constexpr float kFirstRowY = kPanelTop - 0.2f;  // baseline of the first visible row
+constexpr float kFirstRowY = kPanelTop - 0.2f;
 
-// Media control bar (panel-local metres, sits just below the video).
-constexpr float kBarY = -1.16f;
-constexpr float kBtnHalfW = 0.08f;
-constexpr float kBtnHalfH = 0.06f;
-constexpr float kBtnSpacing = 0.18f;
-constexpr int kBtnCount = 8;
-inline float ctrl_button_x(int i) {
-    return (static_cast<float>(i) - 0.5f * (kBtnCount - 1)) * kBtnSpacing;
+// Media control dock (panel-local metres, floating below the video).
+struct CtrlButtonRect {
+    float cx = 0.0f;
+    float cy = 0.0f;
+    float hw = 0.0f;
+    float hh = 0.0f;
+};
+
+constexpr float kBarY = -0.86f;
+constexpr float kDockHalfW = 0.92f;
+constexpr float kDockHalfH = 0.23f;
+constexpr int kBtnCount = 12;
+
+inline CtrlButtonRect get_ctrl_button_rect(int b) {
+    using Btn = VulkanRenderer::CtrlButton;
+    switch (static_cast<Btn>(b)) {
+        // Center playback cluster: [Stop] [Seek -10] (Play/Pause Hero) [Seek +10]
+        case Btn::Stop:         return {-0.26f, kBarY - 0.045f, 0.046f, 0.046f};
+        case Btn::SeekBack:     return {-0.130f, kBarY - 0.045f, 0.050f, 0.050f};
+        case Btn::PlayPause:    return { 0.00f, kBarY - 0.045f, 0.076f, 0.076f}; // Hero button!
+        case Btn::SeekFwd:      return { 0.130f, kBarY - 0.045f, 0.050f, 0.050f};
+
+        // Left flank pills: HUB (top), RECENTER (bottom)
+        case Btn::Files:        return {-0.62f, kBarY - 0.005f, 0.185f, 0.040f};
+        case Btn::Downloads:    return {-0.62f, kBarY - 0.005f, 0.185f, 0.040f}; // alias to HUB
+        case Btn::Settings:     return {-0.62f, kBarY - 0.005f, 0.185f, 0.040f}; // alias to HUB
+        case Btn::Download:     return {-0.62f, kBarY - 0.005f, 0.185f, 0.040f}; // alias
+        case Btn::Recenter:     return {-0.62f, kBarY - 0.098f, 0.185f, 0.040f};
+
+        // Right flank pills: Projection/Format, Audio, Screen
+        case Btn::FormatToggle: return { 0.62f, kBarY + 0.040f, 0.210f, 0.036f};
+        case Btn::AudioToggle:  return { 0.62f, kBarY - 0.044f, 0.210f, 0.036f};
+        case Btn::ScreenToggle: return { 0.62f, kBarY - 0.128f, 0.210f, 0.036f};
+        default: return {0.0f, 0.0f, 0.0f, 0.0f};
+    }
 }
 
 // Seconds -> "M:SS" or "H:MM:SS" for the transport time readout.
@@ -203,6 +232,9 @@ VulkanRenderer::~VulkanRenderer() {
             vkDestroyDescriptorPool(device_, modelDescPool_, nullptr);
         if (modelSetLayout_ != VK_NULL_HANDLE)
             vkDestroyDescriptorSetLayout(device_, modelSetLayout_, nullptr);
+        clearCardThumbnails();
+        if (thumbPipeline_ != VK_NULL_HANDLE)
+            vkDestroyPipeline(device_, thumbPipeline_, nullptr);
         if (textPipeline_ != VK_NULL_HANDLE)
             vkDestroyPipeline(device_, textPipeline_, nullptr);
         if (textPipelineLayout_ != VK_NULL_HANDLE)
@@ -927,6 +959,34 @@ void VulkanRenderer::adjustScreenDistance(float delta) {
     screenDistance_ = std::clamp(screenDistance_ + delta, 1.0f, 10.0f);
 }
 
+void VulkanRenderer::setBrowserItems(bool visible, const std::string& title,
+                                     const std::vector<BrowserItem>& items, int selected,
+                                     const std::string& status) {
+    browserVisible_ = visible;
+    browserTitle_ = title;
+    browserItems_ = items;
+    browserSelected_ = selected;
+    browserStatus_ = status;
+
+    browserRows_.clear();
+    browserRows_.reserve(items.size());
+    for (const auto& it : items) {
+        browserRows_.push_back(it.name);
+    }
+
+    const int total = static_cast<int>(browserItems_.size());
+    constexpr int kCardsPerPage = 6;
+    const int maxFirst = std::max(0, ((total + 2) / 3 * 3) - kCardsPerPage);
+    if (browserFirst_ > maxFirst) {
+        browserFirst_ = maxFirst;
+    }
+    if (browserSelected_ < browserFirst_) {
+        browserFirst_ = (browserSelected_ / 3) * 3;
+    } else if (browserSelected_ >= browserFirst_ + kCardsPerPage) {
+        browserFirst_ = ((browserSelected_ - kCardsPerPage + 3) / 3) * 3;
+    }
+}
+
 void VulkanRenderer::setBrowser(bool visible, const std::string& title,
                                 const std::vector<std::string>& rows, int selected,
                                 const std::string& status) {
@@ -935,22 +995,209 @@ void VulkanRenderer::setBrowser(bool visible, const std::string& title,
     browserRows_ = rows;
     browserSelected_ = selected;
     browserStatus_ = status;
+
+    browserItems_.clear();
+    browserItems_.reserve(rows.size());
+    for (const auto& r : rows) {
+        BrowserItem item;
+        item.name = r;
+        if (r.find("..") != std::string::npos) {
+            item.isBack = true;
+            item.tag = "UP";
+        } else if (r.back() == '/') {
+            item.isDir = true;
+            item.tag = "DIR";
+        } else {
+            item.isVideo = true;
+            item.tag = "VIDEO";
+        }
+        browserItems_.push_back(std::move(item));
+    }
+
     const int total = static_cast<int>(browserRows_.size());
-    const int maxFirst = std::max(0, total - kMaxRows);
+    constexpr int kCardsPerPage = 6;
+    const int maxFirst = std::max(0, ((total + 2) / 3 * 3) - kCardsPerPage);
     if (browserFirst_ > maxFirst) {
         browserFirst_ = maxFirst;
     }
     if (browserSelected_ < browserFirst_) {
-        browserFirst_ = browserSelected_;
-    } else if (browserSelected_ >= browserFirst_ + kMaxRows) {
-        browserFirst_ = browserSelected_ - kMaxRows + 1;
+        browserFirst_ = (browserSelected_ / 3) * 3;
+    } else if (browserSelected_ >= browserFirst_ + kCardsPerPage) {
+        browserFirst_ = ((browserSelected_ - kCardsPerPage + 3) / 3) * 3;
     }
 }
 
 void VulkanRenderer::scrollBrowser(int deltaRows) {
-    const int total = static_cast<int>(browserRows_.size());
-    const int maxFirst = std::max(0, total - kMaxRows);
-    browserFirst_ = std::clamp(browserFirst_ + deltaRows, 0, maxFirst);
+    const int total = static_cast<int>(browserItems_.empty() ? browserRows_.size() : browserItems_.size());
+    constexpr int kCardsPerPage = 6;
+    const int maxFirst = std::max(0, ((total + 2) / 3 * 3) - kCardsPerPage);
+    browserFirst_ = std::clamp(browserFirst_ + deltaRows * 3, 0, maxFirst);
+}
+
+void VulkanRenderer::clearCardThumbnails() {
+    for (int i = 0; i < 6; ++i) {
+        if (cardThumbs_[i].view != VK_NULL_HANDLE) {
+            vkDestroyImageView(device_, cardThumbs_[i].view, nullptr);
+            cardThumbs_[i].view = VK_NULL_HANDLE;
+        }
+        if (cardThumbs_[i].image != VK_NULL_HANDLE) {
+            vkDestroyImage(device_, cardThumbs_[i].image, nullptr);
+            cardThumbs_[i].image = VK_NULL_HANDLE;
+        }
+        if (cardThumbs_[i].memory != VK_NULL_HANDLE) {
+            vkFreeMemory(device_, cardThumbs_[i].memory, nullptr);
+            cardThumbs_[i].memory = VK_NULL_HANDLE;
+        }
+        // Retain cardThumbs_[i].set allocated from pool so it can be reused without pool leaks
+        cardThumbs_[i].path.clear();
+        cardThumbs_[i].ready = false;
+    }
+}
+
+void VulkanRenderer::updateCardThumbnail(int slot, const std::string& path,
+                                         const uint8_t* rgba, int width, int height) {
+    if (slot < 0 || slot >= 6 || !rgba || width <= 0 || height <= 0 ||
+        textPool_ == VK_NULL_HANDLE || textSetLayout_ == VK_NULL_HANDLE) {
+        return;
+    }
+    if (cardThumbs_[slot].ready && cardThumbs_[slot].path == path) {
+        return; // Already uploaded
+    }
+
+    // Free existing slot resources
+    if (cardThumbs_[slot].view != VK_NULL_HANDLE) {
+        vkDestroyImageView(device_, cardThumbs_[slot].view, nullptr);
+        cardThumbs_[slot].view = VK_NULL_HANDLE;
+    }
+    if (cardThumbs_[slot].image != VK_NULL_HANDLE) {
+        vkDestroyImage(device_, cardThumbs_[slot].image, nullptr);
+        cardThumbs_[slot].image = VK_NULL_HANDLE;
+    }
+    if (cardThumbs_[slot].memory != VK_NULL_HANDLE) {
+        vkFreeMemory(device_, cardThumbs_[slot].memory, nullptr);
+        cardThumbs_[slot].memory = VK_NULL_HANDLE;
+    }
+    cardThumbs_[slot].ready = false;
+    cardThumbs_[slot].path = path;
+
+    const VkDeviceSize sz = static_cast<VkDeviceSize>(width) * height * 4;
+    VkBuffer staging = VK_NULL_HANDLE;
+    VkDeviceMemory stagingMem = VK_NULL_HANDLE;
+    VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bi.size = sz;
+    bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateBuffer(device_, &bi, nullptr, &staging) != VK_SUCCESS) return;
+    VkMemoryRequirements req{};
+    vkGetBufferMemoryRequirements(device_, staging, &req);
+    VkMemoryAllocateInfo alloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    alloc.allocationSize = req.size;
+    alloc.memoryTypeIndex = findMemoryType(req.memoryTypeBits,
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (vkAllocateMemory(device_, &alloc, nullptr, &stagingMem) != VK_SUCCESS) {
+        vkDestroyBuffer(device_, staging, nullptr);
+        return;
+    }
+    vkBindBufferMemory(device_, staging, stagingMem, 0);
+    void* p = nullptr;
+    vkMapMemory(device_, stagingMem, 0, sz, 0, &p);
+    std::memcpy(p, rgba, static_cast<std::size_t>(sz));
+    vkUnmapMemory(device_, stagingMem);
+
+    VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+    ii.imageType = VK_IMAGE_TYPE_2D;
+    ii.format = VK_FORMAT_R8G8B8A8_UNORM;
+    ii.extent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
+    ii.mipLevels = 1;
+    ii.arrayLayers = 1;
+    ii.samples = VK_SAMPLE_COUNT_1_BIT;
+    ii.tiling = VK_IMAGE_TILING_OPTIMAL;
+    ii.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+    ii.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    if (vkCreateImage(device_, &ii, nullptr, &cardThumbs_[slot].image) != VK_SUCCESS) {
+        vkDestroyBuffer(device_, staging, nullptr);
+        vkFreeMemory(device_, stagingMem, nullptr);
+        return;
+    }
+    vkGetImageMemoryRequirements(device_, cardThumbs_[slot].image, &req);
+    alloc.allocationSize = req.size;
+    alloc.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+    if (vkAllocateMemory(device_, &alloc, nullptr, &cardThumbs_[slot].memory) != VK_SUCCESS) {
+        vkDestroyImage(device_, cardThumbs_[slot].image, nullptr);
+        cardThumbs_[slot].image = VK_NULL_HANDLE;
+        vkDestroyBuffer(device_, staging, nullptr);
+        vkFreeMemory(device_, stagingMem, nullptr);
+        return;
+    }
+    vkBindImageMemory(device_, cardThumbs_[slot].image, cardThumbs_[slot].memory, 0);
+
+    vkResetCommandBuffer(uploadCmd_, 0);
+    VkCommandBufferBeginInfo cb{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    cb.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(uploadCmd_, &cb);
+    VkImageMemoryBarrier toDst{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    toDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    toDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toDst.image = cardThumbs_[slot].image;
+    toDst.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    toDst.srcAccessMask = 0;
+    toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(uploadCmd_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                         VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toDst);
+    VkBufferImageCopy region{};
+    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.imageExtent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
+    vkCmdCopyBufferToImage(uploadCmd_, staging, cardThumbs_[slot].image,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    VkImageMemoryBarrier toRead = toDst;
+    toRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toRead.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    toRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(uploadCmd_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &toRead);
+    vkEndCommandBuffer(uploadCmd_);
+    VkSubmitInfo su{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    su.commandBufferCount = 1;
+    su.pCommandBuffers = &uploadCmd_;
+    vkQueueSubmit(queue_, 1, &su, uploadFence_);
+    vkWaitForFences(device_, 1, &uploadFence_, VK_TRUE, UINT64_MAX);
+    vkResetFences(device_, 1, &uploadFence_);
+    vkDestroyBuffer(device_, staging, nullptr);
+    vkFreeMemory(device_, stagingMem, nullptr);
+
+    VkImageViewCreateInfo iv{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    iv.image = cardThumbs_[slot].image;
+    iv.viewType = VK_IMAGE_VIEW_TYPE_2D;
+    iv.format = VK_FORMAT_R8G8B8A8_UNORM;
+    iv.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    if (vkCreateImageView(device_, &iv, nullptr, &cardThumbs_[slot].view) != VK_SUCCESS) return;
+
+    if (cardThumbs_[slot].set == VK_NULL_HANDLE) {
+        VkDescriptorSetAllocateInfo da{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+        da.descriptorPool = textPool_;
+        da.descriptorSetCount = 1;
+        da.pSetLayouts = &textSetLayout_;
+        if (vkAllocateDescriptorSets(device_, &da, &cardThumbs_[slot].set) != VK_SUCCESS) return;
+    }
+
+    VkDescriptorImageInfo dii{};
+    dii.sampler = sampler_;
+    dii.imageView = cardThumbs_[slot].view;
+    dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet wr{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    wr.dstSet = cardThumbs_[slot].set;
+    wr.dstBinding = 0;
+    wr.descriptorCount = 1;
+    wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    wr.pImageInfo = &dii;
+    vkUpdateDescriptorSets(device_, 1, &wr, 0, nullptr);
+
+    cardThumbs_[slot].ready = true;
+    PIXELVR_LOG_INFO("VulkanRenderer: uploaded card thumbnail slot %d -> %s", slot, path.c_str());
 }
 
 void VulkanRenderer::setSettings(bool visible, const std::string& title,
@@ -984,34 +1231,39 @@ void VulkanRenderer::updatePointer() {
     pointerOnTimeToggle_ = false;
     pointerHand_ = -1;
     browserHovered_ = -1;
+    browserSidebarHovered_ = -1;
+    browserPageBtnHovered_ = -1;
     settingsHovered_ = -1;
     settingsRow_ = -1;
     downloadsHovered_ = -1;
     downloadsBtnHovered_ = -1;
 
-    const bool controlBar = controlBarVisible_ && !settingsVisible_ &&
-                            !downloadsVisible_;
-    if (!browserVisible_ && !settingsVisible_ && !downloadsVisible_ && !controlBar) {
+    const bool hubOpen = browserVisible_ || settingsVisible_ ||
+                         (downloadsVisible_ && !downloadsModal_);
+    const bool modalOpen = downloadsVisible_ && downloadsModal_;
+    const bool controlBar = controlBarVisible_ && !hubOpen && !modalOpen;
+    if (!hubOpen && !modalOpen && !controlBar) {
         return;  // No UI surface to point at.
     }
 
     using namespace math;
     Mat4 panelBase;
+    const float uiDist = std::clamp(uiDistance_, 1.2f, 3.5f);
     if (projectionMode_ == ProjectionMode::Flat) {
-        const Vec3 center{screenPivot_[0] + screenForward_[0] * screenDistance_,
-                          screenPivot_[1] + screenForward_[1] * screenDistance_,
-                          screenPivot_[2] + screenForward_[2] * screenDistance_};
+        const Vec3 center{screenPivot_[0] + screenForward_[0] * uiDist,
+                          screenPivot_[1] + screenForward_[1] * uiDist,
+                          screenPivot_[2] + screenForward_[2] * uiDist};
         panelBase = multiply(translation(center),
                              orientFromYawPitch(screenYaw_, recenterPitch_));
     } else {
         // Spherical video mode (360/180): anchor controls floating comfortably in front
-        // at distance 1.6m, pitched slightly up towards the eye horizon.
-        constexpr float kSphereDist = 1.6f;
-        const Vec3 center{screenPivot_[0] + screenForward_[0] * kSphereDist,
-                          screenPivot_[1] + screenForward_[1] * kSphereDist,
-                          screenPivot_[2] + screenForward_[2] * kSphereDist};
-        const Mat4 orient = orientFromYawPitch(screenYaw_, recenterPitch_);
-        panelBase = multiply(translation(center), multiply(orient, rotationX(-0.25f)));
+        const float sphereDist = std::min(uiDist, 2.0f);
+        const Vec3 center{screenPivot_[0] + screenForward_[0] * sphereDist,
+                          screenPivot_[1] + screenForward_[1] * sphereDist,
+                          screenPivot_[2] + screenForward_[2] * sphereDist};
+        const float followYaw = (projectionMode_ == ProjectionMode::Flat) ? screenYaw_ : (sphereFollowInit_ ? sphereFollowYaw_ : screenYaw_);
+        const Mat4 orient = orientFromYawPitch(followYaw, recenterPitch_);
+        panelBase = multiply(translation(center), multiply(orient, rotationX(-0.22f)));
     }
     const Mat4 inv = rigidInverse(panelBase);
 
@@ -1039,86 +1291,176 @@ void VulkanRenderer::updatePointer() {
         const float hyy = oL.y + t * dL.y;
         const Vec3 world = origin + dir * t;
 
-        // The downloads window / confirmation modal takes priority: it is shown
-        // over the browser, so test it before the browser panel. Note the bounds
-        // are tested as part of the condition (not an early `continue`) so that a
-        // ray aimed at the control bar below the panel still falls through to the
-        // control-bar hit test further down.
-        if (downloadsVisible_ && hx >= -kPanelW * 1.4f && hx <= kPanelW * 1.4f &&
-            hyy >= -kPanelTop * 1.3f && hyy <= kPanelTop * 1.3f) {
+        // 1. Folder Download Confirmation Modal takes top priority
+        if (modalOpen) {
+            if (hx >= -kPanelW && hx <= kPanelW && hyy >= -kPanelTop && hyy <= kPanelTop) {
+                pointerActive_ = true;
+                pointerHand_ = h;
+                pointerHit_[0] = world.x;
+                pointerHit_[1] = world.y;
+                pointerHit_[2] = world.z;
+                // Two action buttons at cy = -0.14f inside modal
+                if (std::fabs(hyy - (-0.14f)) <= 0.045f) {
+                    if (std::fabs(hx - (-0.14f)) <= 0.12f) downloadsBtnHovered_ = 0;
+                    else if (std::fabs(hx - 0.14f) <= 0.12f) downloadsBtnHovered_ = 1;
+                }
+                break;
+            }
+        }
+
+        // 2. Unified Spatial Hub (1.80m x 1.12m, hx in [-0.90, 0.90], hyy in [-0.56, 0.56])
+        if (hubOpen && hx >= -kPanelW && hx <= kPanelW &&
+            hyy >= -kPanelTop && hyy <= kPanelTop) {
             pointerActive_ = true;
             pointerHand_ = h;
             pointerHit_[0] = world.x;
             pointerHit_[1] = world.y;
             pointerHit_[2] = world.z;
-            const float dbtnCy = -kPanelTop + 0.18f;
-            if (!downloadsButtons_.empty() && hyy >= dbtnCy - kDlBtnH * 0.5f &&
-                hyy <= dbtnCy + kDlBtnH * 0.5f) {
-                std::vector<float> cx, halfW;
-                downloadsButtonLayout(cx, halfW);
-                for (std::size_t i = 0; i < cx.size(); ++i) {
-                    if (std::fabs(hx - cx[i]) <= halfW[i]) {
-                        downloadsBtnHovered_ = static_cast<int>(i);
+
+            // Left Navigation Rail: hx in [-0.90, -0.52]
+            if (hx >= -kPanelW && hx <= kRailRight) {
+                // Top 3 primary section tabs: Files (0), Downloads (1), Settings (2)
+                const float mainTabY[3] = {0.32f, 0.22f, 0.12f};
+                for (int s = 0; s < 3; ++s) {
+                    if (std::fabs(hyy - mainTabY[s]) <= 0.042f) {
+                        browserSidebarHovered_ = s;
                         break;
                     }
                 }
-            } else {
-                const int total = static_cast<int>(downloadsRows_.size());
+                // Sub-navigation items (indices 3..6)
+                if (browserSidebarHovered_ < 0) {
+                    const float subTabY[4] = {-0.05f, -0.14f, -0.23f, -0.32f};
+                    for (int sub = 0; sub < 4; ++sub) {
+                        if (std::fabs(hyy - subTabY[sub]) <= 0.038f) {
+                            browserSidebarHovered_ = 3 + sub;
+                            break;
+                        }
+                    }
+                }
+                break;
+            }
+
+            // Top Content Area: hx in [-0.49, +0.90]
+            if (browserVisible_) {
+                // Top header pagination buttons: [<] at cx=0.56, [>] at cx=0.83, cy=0.455
+                if (std::fabs(hyy - 0.455f) <= 0.036f) {
+                    if (std::fabs(hx - 0.56f) <= 0.045f) {
+                        browserPageBtnHovered_ = 0;
+                        break;
+                    } else if (std::fabs(hx - 0.83f) <= 0.045f) {
+                        browserPageBtnHovered_ = 1;
+                        break;
+                    }
+                }
+
+                // 3x2 Media Card Grid
+                const int total = static_cast<int>(browserItems_.empty() ? browserRows_.size() : browserItems_.size());
                 if (total > 0) {
-                    const float relY = kFirstRowY + 0.5f * kRowH - hyy;
-                    const int idxFromTop = static_cast<int>(std::floor(relY / kRowH));
-                    if (idxFromTop >= 0 && idxFromTop < total) {
-                        downloadsHovered_ = idxFromTop;
+                    const float colX[3] = {-0.25f, 0.20f, 0.65f};
+                    const float rowY[2] = {0.16f, -0.24f};
+                    int col = -1;
+                    for (int c = 0; c < 3; ++c) {
+                        if (std::fabs(hx - colX[c]) <= 0.21f) { col = c; break; }
+                    }
+                    int row = -1;
+                    for (int r = 0; r < 2; ++r) {
+                        if (std::fabs(hyy - rowY[r]) <= 0.185f) { row = r; break; }
+                    }
+                    if (col >= 0 && row >= 0) {
+                        const int idxInPage = row * 3 + col;
+                        const int targetIdx = browserFirst_ + idxInPage;
+                        if (targetIdx >= 0 && targetIdx < total) {
+                            pointerRow_ = targetIdx;
+                            browserHovered_ = targetIdx;
+                        }
+                    }
+                }
+            } else if (downloadsVisible_) {
+                // Bottom action buttons at cy = -0.44f
+                const float dbtnCy = -0.44f;
+                if (!downloadsButtons_.empty() && std::fabs(hyy - dbtnCy) <= 0.042f) {
+                    std::vector<float> cx, halfW;
+                    downloadsButtonLayout(cx, halfW);
+                    for (std::size_t i = 0; i < cx.size(); ++i) {
+                        if (std::fabs(hx - (kContentCx + cx[i])) <= halfW[i]) {
+                            downloadsBtnHovered_ = static_cast<int>(i);
+                            break;
+                        }
+                    }
+                } else {
+                    // Up to 4 wide job cards in content area
+                    const int total = static_cast<int>(downloadJobs_.empty() ? downloadsRows_.size() : downloadJobs_.size());
+                    int visIdx = 0;
+                    for (int i = 0; i < total && visIdx < 4; ++i) {
+                        if (!downloadJobs_.empty()) {
+                            const int st = downloadJobs_[i].state;
+                            if (downloadsFilter_ == 1 && st != 0 && st != 3) continue;
+                            if (downloadsFilter_ == 2 && st != 1) continue;
+                        }
+                        const float ry = 0.24f - static_cast<float>(visIdx) * 0.175f;
+                        if (std::fabs(hyy - ry) <= 0.075f && hx >= -0.46f && hx <= 0.86f) {
+                            downloadsHovered_ = i;
+                            break;
+                        }
+                        ++visIdx;
+                    }
+                }
+            } else if (settingsVisible_) {
+                // Settings cards in 2-column grid (or list when >6 items)
+                const int total = static_cast<int>(settingsRows_.size());
+                if (total > 0 && total <= 6) {
+                    const float sColX[2] = {-0.135f, 0.535f};
+                    const float sRowY[3] = {0.22f, -0.02f, -0.26f};
+                    for (int i = 0; i < total; ++i) {
+                        const int c = i % 2;
+                        const int r = i / 2;
+                        if (std::fabs(hx - sColX[c]) <= 0.315f &&
+                            std::fabs(hyy - sRowY[r]) <= 0.098f) {
+                            settingsRow_ = i;
+                            settingsHovered_ = i;
+                            break;
+                        }
+                    }
+                } else if (total > 6) {
+                    for (int i = 0; i < total && i < 8; ++i) {
+                        const int c = i % 2;
+                        const int r = i / 2;
+                        const float cx = (c == 0) ? -0.135f : 0.535f;
+                        const float ry = 0.25f - static_cast<float>(r) * 0.17f;
+                        if (std::fabs(hx - cx) <= 0.315f &&
+                            std::fabs(hyy - ry) <= 0.072f) {
+                            settingsRow_ = i;
+                            settingsHovered_ = i;
+                            break;
+                        }
                     }
                 }
             }
             break;
         }
 
-        if (browserVisible_ && hx >= -kPanelW && hx <= kPanelW &&
-            hyy >= -kPanelTop && hyy <= kPanelTop) {
-            pointerActive_ = true;
-            pointerHand_ = h;
-            pointerHit_[0] = world.x;
-            pointerHit_[1] = world.y;
-            pointerHit_[2] = world.z;
-            const int total = static_cast<int>(browserRows_.size());
-            if (total > 0) {
-                const float relY = kFirstRowY + 0.5f * kRowH - hyy;
-                const int idxFromTop = static_cast<int>(std::floor(relY / kRowH));
-                if (idxFromTop >= 0 && idxFromTop < kMaxRows) {
-                    const int row = browserFirst_ + idxFromTop;
-                    if (row >= 0 && row < total) {
-                        pointerRow_ = row;
-                        browserHovered_ = row;
-                    }
-                }
+        // 3. In-Playback Floating Cinema Transport Dock (only when Hub is closed)
+        if (!controlBar) continue;
+
+        // Draggable timeline track (top band of dock)
+        {
+            const float trackY = kBarY + 0.125f;
+            if (hyy >= trackY - 0.045f && hyy <= trackY + 0.045f &&
+                hx >= -0.58f && hx <= 0.58f) {
+                pointerActive_ = true;
+                pointerHand_ = h;
+                pointerOnTimeline_ = true;
+                pointerScrub_ = std::clamp((hx + 0.56f) / 1.12f, 0.0f, 1.0f);
+                pointerHit_[0] = world.x;
+                pointerHit_[1] = world.y;
+                pointerHit_[2] = world.z;
+                break;
             }
-            break;
         }
 
-        if (settingsVisible_ && hx >= -kPanelW && hx <= kPanelW &&
-            hyy >= -kPanelTop && hyy <= kPanelTop) {
-            pointerActive_ = true;
-            pointerHand_ = h;
-            pointerHit_[0] = world.x;
-            pointerHit_[1] = world.y;
-            pointerHit_[2] = world.z;
-            const int total = static_cast<int>(settingsRows_.size());
-            if (total > 0) {
-                const float relY = kFirstRowY + 0.5f * kRowH - hyy;
-                const int idxFromTop = static_cast<int>(std::floor(relY / kRowH));
-                if (idxFromTop >= 0 && idxFromTop < total) {
-                    settingsRow_ = idxFromTop;
-                    settingsHovered_ = idxFromTop;
-                }
-            }
-            break;
-        }
-
-        // Clickable total/remaining time readout (right end, above the track).
-        if (transportDuration_ > 0.0 && hx >= 0.30f && hx <= 0.56f &&
-            hyy >= kBarY + 0.16f && hyy <= kBarY + 0.24f) {
+        // Clickable total/remaining time readout (right of scrubber)
+        if (transportDuration_ > 0.0 && hx >= 0.58f && hx <= 0.82f &&
+            hyy >= kBarY + 0.080f && hyy <= kBarY + 0.170f) {
             pointerActive_ = true;
             pointerHand_ = h;
             pointerOnTimeToggle_ = true;
@@ -1128,29 +1470,15 @@ void VulkanRenderer::updatePointer() {
             break;
         }
 
-        // Draggable timeline track (sits just above the button row).
-        {
-            const float trackY = kBarY + 0.11f;
-            if (hyy >= trackY - 0.05f && hyy <= trackY + 0.05f && hx >= -0.56f &&
-                hx <= 0.56f) {
-                pointerActive_ = true;
-                pointerHand_ = h;
-                pointerOnTimeline_ = true;
-                pointerScrub_ = std::clamp((hx + 0.54f) / 1.08f, 0.0f, 1.0f);
-                pointerHit_[0] = world.x;
-                pointerHit_[1] = world.y;
-                pointerHit_[2] = world.z;
-                break;
-            }
-        }
-
-        // Control bar: find the button the ray lands on (if any).
-        if (hyy < kBarY - kBtnHalfH || hyy > kBarY + kBtnHalfH) {
-            continue;
-        }
+        // Control dock buttons: test all buttons.
         for (int b = 0; b < kBtnCount; ++b) {
-            const float cx = ctrl_button_x(b);
-            if (hx >= cx - kBtnHalfW && hx <= cx + kBtnHalfW) {
+            const auto cb = static_cast<CtrlButton>(b);
+            if (cb == CtrlButton::Downloads || cb == CtrlButton::Settings || cb == CtrlButton::Download) continue;
+            if (cb == CtrlButton::AudioToggle && !hudAudioEnabled_) continue;
+            if (cb == CtrlButton::FormatToggle && !hudFormatEnabled_) continue;
+            const CtrlButtonRect r = get_ctrl_button_rect(b);
+            if (hx >= r.cx - r.hw && hx <= r.cx + r.hw &&
+                hyy >= r.cy - r.hh && hyy <= r.cy + r.hh) {
                 pointerActive_ = true;
                 pointerHand_ = h;
                 pointerButton_ = b;
@@ -1163,11 +1491,26 @@ void VulkanRenderer::updatePointer() {
         if (pointerActive_) {
             break;
         }
+
+        // Catch laser ray on dock background plate so beam never shoots to infinity
+        if (hx >= -kDockHalfW && hx <= kDockHalfW &&
+            hyy >= kBarY - kDockHalfH && hyy <= kBarY + kDockHalfH) {
+            pointerActive_ = true;
+            pointerHand_ = h;
+            pointerButton_ = -1;
+            pointerHit_[0] = world.x;
+            pointerHit_[1] = world.y;
+            pointerHit_[2] = world.z;
+            break;
+        }
     }
 }
 
 bool VulkanRenderer::initText() {
     static const char* const kFonts[] = {
+        "/usr/share/fonts/noto/NotoSans-Medium.ttf",
+        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/gnu-free/FreeSans.otf",
         "/usr/share/fonts/TTF/Hack-Regular.ttf",
         "/usr/share/fonts/truetype/hack/Hack-Regular.ttf",
         "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
@@ -1294,9 +1637,10 @@ bool VulkanRenderer::initText() {
     dl.pBindings = &lb;
     PIXELVR_VK_CHECK(
         vkCreateDescriptorSetLayout(device_, &dl, nullptr, &textSetLayout_));
-    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1};
+    VkDescriptorPoolSize ps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 64};
     VkDescriptorPoolCreateInfo dp{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    dp.maxSets = 1;
+    dp.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    dp.maxSets = 64;
     dp.poolSizeCount = 1;
     dp.pPoolSizes = &ps;
     PIXELVR_VK_CHECK(vkCreateDescriptorPool(device_, &dp, nullptr, &textPool_));
@@ -1317,6 +1661,21 @@ bool VulkanRenderer::initText() {
     w.pImageInfo = &dii;
     vkUpdateDescriptorSets(device_, 1, &w, 0, nullptr);
 
+    // Pre-allocate descriptor sets for the 6 card thumbnail slots
+    for (int i = 0; i < 6; ++i) {
+        da.descriptorSetCount = 1;
+        da.pSetLayouts = &textSetLayout_;
+        if (vkAllocateDescriptorSets(device_, &da, &cardThumbs_[i].set) == VK_SUCCESS) {
+            VkWriteDescriptorSet wt{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            wt.dstSet = cardThumbs_[i].set;
+            wt.dstBinding = 0;
+            wt.descriptorCount = 1;
+            wt.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            wt.pImageInfo = &dii;
+            vkUpdateDescriptorSets(device_, 1, &wt, 0, nullptr);
+        }
+    }
+
     // Pipeline (samples the atlas, alpha blended).
     VkPushConstantRange pr{};
     pr.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
@@ -1332,6 +1691,11 @@ bool VulkanRenderer::initText() {
     if (!buildPipeline("text.vert.spv", "text.frag.spv", textPipelineLayout_,
                        textPipeline_, true)) {
         return false;
+    }
+    // Thumbnail pipeline with rounded corner SDF masking
+    if (!buildPipeline("text.vert.spv", "thumb.frag.spv", textPipelineLayout_,
+                       thumbPipeline_, true)) {
+        PIXELVR_LOG_WARN("Failed to build thumb pipeline");
     }
 
     textReady_ = true;
@@ -1433,6 +1797,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             push.stereo[0] = static_cast<float>(static_cast<int>(stereoMode_));
             push.stereo[1] = static_cast<float>(viewIndex);
             push.stereo[2] = swapEyes_ ? 1.0f : 0.0f;
+            push.stereo[3] = screenCurvature_;
             if (ycbcr) {  // reuse conversion.xy as the crop UV scale
                 push.conversion[0] = drmUvScaleX_;
                 push.conversion[1] = drmUvScaleY_;
@@ -1441,7 +1806,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                                VK_SHADER_STAGE_VERTEX_BIT |
                                    VK_SHADER_STAGE_FRAGMENT_BIT,
                                0, sizeof(PushConstants), &push);
-            vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
+            vkCmdDraw(commandBuffer_, 64 * 6, 1, 0, 0);
         } else {
             VkPipeline pipe = ycbcr ? ycbcrSpherePipeline_ : spherePipeline_;
             VkPipelineLayout layout =
@@ -1505,19 +1870,39 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         std::tan(view.fov.angleUp), std::tan(view.fov.angleDown), 0.05f, 100.0f);
 
     Mat4 panelBase;
+    const float uiDist = std::clamp(uiDistance_, 1.2f, 3.5f);
     if (projectionMode_ == ProjectionMode::Flat) {
-        const Vec3 center{screenPivot_[0] + screenForward_[0] * screenDistance_,
-                          screenPivot_[1] + screenForward_[1] * screenDistance_,
-                          screenPivot_[2] + screenForward_[2] * screenDistance_};
+        const Vec3 center{screenPivot_[0] + screenForward_[0] * uiDist,
+                          screenPivot_[1] + screenForward_[1] * uiDist,
+                          screenPivot_[2] + screenForward_[2] * uiDist};
         panelBase = multiply(translation(center),
                              orientFromYawPitch(screenYaw_, recenterPitch_));
     } else {
-        constexpr float kSphereDist = 1.6f;
-        const Vec3 center{screenPivot_[0] + screenForward_[0] * kSphereDist,
-                          screenPivot_[1] + screenForward_[1] * kSphereDist,
-                          screenPivot_[2] + screenForward_[2] * kSphereDist};
-        const Mat4 orient = orientFromYawPitch(screenYaw_, recenterPitch_);
-        panelBase = multiply(translation(center), multiply(orient, rotationX(-0.25f)));
+        // Spherical video mode (360/180): anchor controls with torso/yaw lazy-follow
+        const Quat hq{view.pose.orientation.x, view.pose.orientation.y,
+                      view.pose.orientation.z, view.pose.orientation.w};
+        const float headYaw = std::atan2(2.0f * (hq.w * hq.y + hq.x * hq.z),
+                                         1.0f - 2.0f * (hq.y * hq.y + hq.z * hq.z));
+        if (!sphereFollowInit_) {
+            sphereFollowYaw_ = headYaw;
+            sphereFollowInit_ = true;
+        }
+        float dyaw = headYaw - sphereFollowYaw_;
+        while (dyaw > 3.14159f) dyaw -= 6.28318f;
+        while (dyaw < -3.14159f) dyaw += 6.28318f;
+        constexpr float kDeadband = 0.35f; // ~20 degrees
+        if (dyaw > kDeadband) {
+            sphereFollowYaw_ += (dyaw - kDeadband) * 0.12f;
+        } else if (dyaw < -kDeadband) {
+            sphereFollowYaw_ += (dyaw + kDeadband) * 0.12f;
+        }
+
+        const float sphereDist = std::min(uiDist, 2.0f);
+        const Vec3 center{screenPivot_[0] + screenForward_[0] * sphereDist,
+                          screenPivot_[1] + screenForward_[1] * sphereDist,
+                          screenPivot_[2] + screenForward_[2] * sphereDist};
+        const Mat4 orient = orientFromYawPitch(sphereFollowYaw_, recenterPitch_);
+        panelBase = multiply(translation(center), multiply(orient, rotationX(-0.22f)));
     }
     const Mat4 vpPanel = multiply(multiply(proj, viewMat), panelBase);
 
@@ -1544,440 +1929,876 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
     };
 
-    // Transport HUD: progress bar with rounded capsule track, glowing fill, and thumb dot.
-    if (transportVisible_ && uiPipeline_ != VK_NULL_HANDLE) {
+    // Standardized typography helpers (never shrink font dynamically across buttons;
+    // truncate cleanly with ellipsis if text exceeds maxW).
+    auto mapChar = [](char rawc) -> unsigned char {
+        unsigned char c = static_cast<unsigned char>(rawc);
+        if (c == 0xB7) return 127;  // middle dot / bullet slot in atlas
+        if (c < 32 || c > 127) return '?';
+        return c;
+    };
+    auto drawString = [&](float x, float baseline, float scale, const float col[4],
+                          const std::string& s) {
+        float penX = x;
+        for (char rawc : s) {
+            unsigned char c = mapChar(rawc);
+            const Glyph& g = fontAtlas_.glyphs[c];
+            if (g.width > 0.0f && g.height > 0.0f) {
+                TextPush push{};
+                std::memcpy(push.mvp, vpPanel.m, sizeof(push.mvp));
+                std::memcpy(push.color, col, sizeof(push.color));
+                push.rect[0] = penX + g.bearingX * scale;
+                push.rect[1] = baseline - (g.height - g.bearingY) * scale;
+                push.rect[2] = g.width * scale;
+                push.rect[3] = g.height * scale;
+                push.uv[0] = g.u0;
+                push.uv[1] = g.v0;
+                push.uv[2] = g.u1;
+                push.uv[3] = g.v1;
+                vkCmdPushConstants(commandBuffer_, textPipelineLayout_,
+                                   VK_SHADER_STAGE_VERTEX_BIT |
+                                       VK_SHADER_STAGE_FRAGMENT_BIT,
+                                   0, sizeof(TextPush), &push);
+                vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
+            }
+            penX += g.advance * scale;
+        }
+    };
+    auto measureString = [&](float scale, const std::string& s) -> float {
+        float tw = 0.0f;
+        for (char rawc : s) {
+            unsigned char c = mapChar(rawc);
+            tw += fontAtlas_.glyphs[c].advance * scale;
+        }
+        return tw;
+    };
+    auto truncateString = [&](float scale, float maxW, const std::string& str) -> std::string {
+        if (str.empty() || maxW <= 0.0f) return "";
+        if (measureString(scale, str) <= maxW) return str;
+        std::string trunc = str;
+        while (trunc.size() > 1 && measureString(scale, trunc + "...") > maxW) {
+            trunc.pop_back();
+        }
+        return trunc + "...";
+    };
+    auto drawFit = [&](float x, float centerY, float maxW, float fixedScale,
+                       const float col[4], const std::string& str) {
+        if (str.empty()) return;
+        const std::string out = truncateString(fixedScale, maxW, str);
+        const float baseline = centerY - 0.35f * fontAtlas_.ascent * fixedScale;
+        drawString(x, baseline, fixedScale, col, out);
+    };
+    auto drawFitCentered = [&](float cx, float centerY, float maxW, float fixedScale,
+                               const float col[4], const std::string& str) {
+        if (str.empty()) return;
+        const std::string out = truncateString(fixedScale, maxW, str);
+        const float finalW = measureString(fixedScale, out);
+        const float baseline = centerY - 0.35f * fontAtlas_.ascent * fixedScale;
+        drawString(cx - finalW * 0.5f, baseline, fixedScale, col, out);
+    };
+
+    const bool hubOpen = browserVisible_ || settingsVisible_ ||
+                         (downloadsVisible_ && !downloadsModal_);
+    const bool modalOpen = downloadsVisible_ && downloadsModal_;
+
+    // Dynamic UI Typography Scale & Color Themes (configured in Settings > UI & Appearance)
+    const float tScale = std::clamp(uiTextScale_, 0.85f, 1.75f);
+
+    static const float kTextPalettes[5][4] = {
+        {0.97f, 0.98f, 1.00f, 1.0f}, // 0: Pure White
+        {0.82f, 0.95f, 1.00f, 1.0f}, // 1: Ice Cyan
+        {1.00f, 0.96f, 0.88f, 1.0f}, // 2: Warm Cream
+        {1.00f, 0.90f, 0.58f, 1.0f}, // 3: Soft Gold
+        {0.78f, 0.98f, 0.86f, 1.0f}, // 4: Mint Green
+    };
+    static const float kAccentPalettes[5][4] = {
+        {0.25f, 0.78f, 1.00f, 1.0f}, // 0: Cyber Cyan
+        {0.18f, 0.85f, 0.52f, 1.0f}, // 1: Emerald Green
+        {1.00f, 0.68f, 0.20f, 1.0f}, // 2: Amber Gold
+        {0.68f, 0.42f, 1.00f, 1.0f}, // 3: Royal Purple
+        {0.96f, 0.28f, 0.36f, 1.0f}, // 4: Crimson Red
+    };
+    const int tcIdx = std::clamp(uiTextColorIdx_, 0, 4);
+    const int acIdx = std::clamp(uiAccentColorIdx_, 0, 4);
+    const float* themeTextCol = kTextPalettes[tcIdx];
+    const float* themeAccentCol = kAccentPalettes[acIdx];
+
+    // =========================================================================
+    // 1. In-Playback Floating Cinema Transport Dock (Mockup #4)
+    // Shown only during playback / when Unified Spatial Hub is closed.
+    // =========================================================================
+    if (controlBarVisible_ && !hubOpen && !modalOpen && uiPipeline_ != VK_NULL_HANDLE) {
         vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipeline_);
-        const float trackHalfW = 0.54f;
-        const float trackHalfH = 0.012f;
-        const float barY = kBarY + 0.11f;
-        const float trackBg[4] = {0.04f, 0.05f, 0.07f, 0.85f};
-        const float trackBorder[4] = {0.20f, 0.25f, 0.38f, 0.60f};
-        const float fillCol[4] = {0.20f, 0.60f, 1.0f, 0.95f};
-        const float thumbCol[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        const float dockBg[4] = {0.024f, 0.035f, 0.058f, 0.94f};
+        const float dockBorder[4] = {0.20f, 0.32f, 0.50f, 0.75f};
+        drawUiElement(vpPanel, 0.0f, kBarY, kDockHalfW, kDockHalfH,
+                      UiShape::RoundedBox, dockBg, 0.14f, 0.012f, dockBorder);
 
-        // Track capsule
-        drawUiElement(vpPanel, 0.0f, barY, trackHalfW, trackHalfH,
-                      UiShape::RoundedBox, trackBg, 0.5f, 0.04f, trackBorder);
+        // Top scrubber groove capsule
+        const float grooveBg[4] = {0.014f, 0.020f, 0.034f, 0.92f};
+        const float grooveBorder[4] = {0.14f, 0.22f, 0.36f, 0.55f};
+        drawUiElement(vpPanel, 0.0f, kBarY + 0.125f, kDockHalfW - 0.045f, 0.052f,
+                      UiShape::RoundedBox, grooveBg, 0.35f, 0.015f, grooveBorder);
 
-        float p = std::clamp(transportProgress_, 0.0f, 1.0f);
-        if (p > 0.005f) {
+        // Center transport recessed island
+        drawUiElement(vpPanel, -0.05f, kBarY - 0.045f, 0.30f, 0.098f,
+                      UiShape::RoundedBox, grooveBg, 0.50f, 0.015f, grooveBorder);
+
+        const float btnBgHover[4] = {
+            themeAccentCol[0] * 0.45f, themeAccentCol[1] * 0.45f,
+            themeAccentCol[2] * 0.55f, 0.95f};
+        const float btnBgNormal[4] = {0.07f, 0.10f, 0.16f, 0.88f};
+        const float btnBorderHover[4] = {
+            themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 1.0f};
+        const float btnBorderNormal[4] = {0.22f, 0.32f, 0.48f, 0.60f};
+
+        for (int b = 0; b < kBtnCount; ++b) {
+            const auto cb = static_cast<CtrlButton>(b);
+            if (cb == CtrlButton::Downloads || cb == CtrlButton::Settings || cb == CtrlButton::Download) {
+                continue; // Consolidated into HUB button
+            }
+            const CtrlButtonRect r = get_ctrl_button_rect(b);
+            const bool hovered = (pointerButton_ == b);
+            const float* bg = hovered ? btnBgHover : btnBgNormal;
+            const float* border = hovered ? btnBorderHover : btnBorderNormal;
+
+            if (cb == CtrlButton::PlayPause) {
+                // Hero glowing circular Play/Pause button
+                const float heroBgNormal[4] = {
+                    themeAccentCol[0] * 0.72f, themeAccentCol[1] * 0.72f,
+                    themeAccentCol[2] * 0.85f, 0.96f};
+                const float heroBgHover[4] = {
+                    themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 1.0f};
+                drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh,
+                              UiShape::RoundedBox, hovered ? heroBgHover : heroBgNormal,
+                              1.0f, 0.04f, btnBorderHover);
+                const float glowRingCol[4] = {
+                    themeAccentCol[0], themeAccentCol[1], themeAccentCol[2],
+                    hovered ? 1.0f : 0.75f};
+                drawUiElement(vpPanel, r.cx, r.cy, r.hw * 1.18f, r.hh * 1.18f,
+                              UiShape::GlowRing, glowRingCol);
+                const UiShape iconShape = transportPaused_ ? UiShape::Play : UiShape::Pause;
+                const float darkIcon[4] = {0.04f, 0.07f, 0.12f, 0.98f};
+                drawUiElement(vpPanel, r.cx, r.cy, r.hw * 0.40f, r.hh * 0.40f,
+                              iconShape, darkIcon);
+            } else if (cb == CtrlButton::FormatToggle || cb == CtrlButton::AudioToggle || cb == CtrlButton::ScreenToggle) {
+                const bool enabled = (cb == CtrlButton::FormatToggle) ? hudFormatEnabled_ :
+                                     (cb == CtrlButton::AudioToggle)  ? hudAudioEnabled_ : true;
+                const float disabledBg[4] = {0.04f, 0.05f, 0.08f, 0.50f};
+                const float disabledBorder[4] = {0.12f, 0.16f, 0.22f, 0.40f};
+                drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh,
+                              UiShape::RoundedBox, enabled ? bg : disabledBg,
+                              0.50f, 0.03f, enabled ? border : disabledBorder);
+            } else if (cb == CtrlButton::Files || cb == CtrlButton::Recenter) {
+                drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh,
+                              UiShape::RoundedBox, bg, 0.50f, 0.03f, border);
+                UiShape iconShape = (cb == CtrlButton::Recenter) ? UiShape::Recenter : UiShape::Files;
+                drawUiElement(vpPanel, r.cx - r.hw + 0.034f, r.cy, 0.017f, 0.017f,
+                              iconShape, themeAccentCol);
+                if (cb == CtrlButton::Files && activeDownloadCount_ > 0) {
+                    const float badgeRed[4] = {0.92f, 0.24f, 0.28f, 0.98f};
+                    drawUiElement(vpPanel, r.cx + r.hw - 0.028f, r.cy, 0.018f, 0.018f,
+                                  UiShape::RoundedBox, badgeRed, 1.0f);
+                }
+            } else {
+                // Stop, Seek -10s, Seek +10s circular buttons
+                drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh,
+                              UiShape::RoundedBox, bg, 1.0f, 0.035f, border);
+                UiShape iconShape = UiShape::RoundedBox;
+                if (cb == CtrlButton::SeekBack) iconShape = UiShape::SeekBack;
+                else if (cb == CtrlButton::SeekFwd) iconShape = UiShape::SeekFwd;
+                else if (cb == CtrlButton::Stop) iconShape = UiShape::Stop;
+                drawUiElement(vpPanel, r.cx, r.cy, r.hw * 0.42f, r.hh * 0.42f,
+                              iconShape, themeTextCol);
+            }
+        }
+
+        // Scrubber bar track + tick marks + hover time tooltip
+        const float trackHalfW = 0.56f;
+        const float trackHalfH = 0.009f;
+        const float trackY = kBarY + 0.130f;
+        const float trackBg[4] = {0.06f, 0.09f, 0.14f, 0.95f};
+        const float thumbCol[4] = {0.95f, 0.97f, 1.0f, 1.0f};
+        const float tickCol[4] = {0.28f, 0.38f, 0.52f, 0.65f};
+
+        drawUiElement(vpPanel, 0.0f, trackY, trackHalfW, trackHalfH,
+                      UiShape::RoundedBox, trackBg, 0.5f);
+
+        // Subtle timeline ruler ticks below track
+        for (int t = 0; t <= 16; ++t) {
+            const float tx = -trackHalfW + (2.0f * trackHalfW * static_cast<float>(t)) / 16.0f;
+            const float th = (t % 4 == 0) ? 0.006f : 0.0035f;
+            drawUiElement(vpPanel, tx, trackY - 0.022f, 0.0015f, th,
+                          UiShape::RoundedBox, tickCol, 0.0f);
+        }
+
+        const float p = std::clamp(transportProgress_, 0.0f, 1.0f);
+        if (p > 0.002f) {
             const float fillW = trackHalfW * p;
             const float fillCx = -trackHalfW + fillW;
-            drawUiElement(vpPanel, fillCx, barY, fillW, trackHalfH * 0.8f,
-                          UiShape::RoundedBox, fillCol, 0.5f);
-            const float thumbX = -trackHalfW + 2.0f * trackHalfW * p;
-            drawUiElement(vpPanel, thumbX, barY, 0.016f, 0.016f,
-                          UiShape::RoundedBox, thumbCol, 1.0f);
+            drawUiElement(vpPanel, fillCx, trackY, fillW, trackHalfH,
+                          UiShape::RoundedBox, themeAccentCol, 0.5f);
+        }
+        const float thumbX = -trackHalfW + 2.0f * trackHalfW * p;
+        drawUiElement(vpPanel, thumbX, trackY, 0.011f, 0.024f,
+                      UiShape::RoundedBox, thumbCol, 0.45f, 0.03f, themeAccentCol);
+
+        // Floating scrub hover tooltip pill
+        if (pointerOnTimeline_ && transportDuration_ > 0.0) {
+            const float scrubX = -trackHalfW + 2.0f * trackHalfW * pointerScrub_;
+            const float tipBg[4] = {0.04f, 0.07f, 0.12f, 0.96f};
+            drawUiElement(vpPanel, scrubX, trackY + 0.058f, 0.076f, 0.028f,
+                          UiShape::RoundedBox, tipBg, 0.35f, 0.03f, themeAccentCol);
+        }
+
+        if (textReady_) {
+            vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline_);
+            vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
+            const float timeSc = (0.038f * tScale) / fontAtlas_.lineHeight;
+            const float pillSc = (0.029f * tScale) / fontAtlas_.lineHeight;
+            const float pillDisabledCol[4] = {0.42f, 0.48f, 0.58f, 0.60f};
+
+            if (transportDuration_ > 0.0) {
+                const std::string leftStr = format_time(transportElapsed_);
+                drawFit(-trackHalfW - 0.026f - measureString(timeSc, leftStr),
+                        trackY, 0.25f, timeSc, themeTextCol, leftStr);
+                const std::string rightStr = timeShowRemaining_
+                    ? "-" + format_time(transportDuration_ - transportElapsed_)
+                    : format_time(transportDuration_);
+                drawFit(trackHalfW + 0.026f, trackY, 0.25f, timeSc, themeAccentCol, rightStr);
+
+                if (pointerOnTimeline_) {
+                    const float scrubX = -trackHalfW + 2.0f * trackHalfW * pointerScrub_;
+                    const std::string tipStr = format_time(pointerScrub_ * transportDuration_);
+                    drawFitCentered(scrubX, trackY + 0.058f, 0.14f, pillSc, themeTextCol, tipStr);
+                }
+            }
+
+            // Left flank pills: HUB and RECENTER
+            const CtrlButtonRect rHub = get_ctrl_button_rect(static_cast<int>(CtrlButton::Files));
+            drawFitCentered(rHub.cx + 0.012f, rHub.cy, rHub.hw * 1.6f, pillSc, themeTextCol, "HUB");
+            const CtrlButtonRect rRec = get_ctrl_button_rect(static_cast<int>(CtrlButton::Recenter));
+            drawFitCentered(rRec.cx + 0.012f, rRec.cy, rRec.hw * 1.6f, pillSc, themeTextCol, "RECENTER");
+
+            // Right flank pills: PROJECTION, AUDIO, SCREEN
+            const CtrlButtonRect rF = get_ctrl_button_rect(static_cast<int>(CtrlButton::FormatToggle));
+            drawFitCentered(rF.cx, rF.cy, rF.hw * 1.88f, pillSc,
+                            hudFormatEnabled_ ? themeTextCol : pillDisabledCol,
+                            "PROJ: " + hudFormat_);
+
+            const CtrlButtonRect rA = get_ctrl_button_rect(static_cast<int>(CtrlButton::AudioToggle));
+            drawFitCentered(rA.cx, rA.cy, rA.hw * 1.88f, pillSc,
+                            hudAudioEnabled_ ? themeTextCol : pillDisabledCol,
+                            "AUDIO: " + hudAudio_);
+
+            const CtrlButtonRect rS = get_ctrl_button_rect(static_cast<int>(CtrlButton::ScreenToggle));
+            drawFitCentered(rS.cx, rS.cy, rS.hw * 1.88f, pillSc, themeTextCol, hudScreen_);
         }
     }
 
-    // Media control bar: point-and-click transport shown below the video
-    // (active in both Flat and 360/180 spherical modes).
-    if (controlBarVisible_ && !settingsVisible_ && uiPipeline_ != VK_NULL_HANDLE) {
+    // =========================================================================
+    // 2. Unified Spatial Hub Window (1.80m x 1.12m)
+    // Shared shell for Files (Mockup #1), Downloads (Mockup #2), Settings (Mockup #3)
+    // =========================================================================
+    if (hubOpen && textReady_ && uiPipeline_ != VK_NULL_HANDLE) {
         vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipeline_);
-        const float barBg[4] = {0.03f, 0.035f, 0.05f, 0.88f};
-        const float barBorder[4] = {0.20f, 0.25f, 0.38f, 0.70f};
-        const float stripHalfW = ctrl_button_x(kBtnCount - 1) + kBtnHalfW + 0.03f;
-        drawUiElement(vpPanel, 0.0f, kBarY, stripHalfW, kBtnHalfH + 0.02f,
-                      UiShape::RoundedBox, barBg, 0.25f, 0.02f, barBorder);
 
-        const float btnBgHover[4] = {0.18f, 0.42f, 0.82f, 0.95f};
-        const float btnBgNormal[4] = {0.08f, 0.10f, 0.15f, 0.90f};
-        const float btnBorderHover[4] = {0.45f, 0.75f, 1.0f, 0.95f};
-        const float btnBorderNormal[4] = {0.20f, 0.25f, 0.35f, 0.55f};
+        const float panelBg[4] = {0.024f, 0.035f, 0.059f, 0.95f};
+        const float panelBorder[4] = {
+            themeAccentCol[0] * 0.55f, themeAccentCol[1] * 0.55f,
+            themeAccentCol[2] * 0.65f, 0.80f};
+        drawUiElement(vpPanel, 0.0f, 0.0f, kPanelW, kPanelTop,
+                      UiShape::RoundedBox, panelBg, 0.045f, 0.014f, panelBorder);
 
-        for (int b = 0; b < kBtnCount; ++b) {
-            const bool hovered = (pointerButton_ == b);
-            const float* btnBg = hovered ? btnBgHover : btnBgNormal;
-            const float* btnBorder = hovered ? btnBorderHover : btnBorderNormal;
-            const float bx = ctrl_button_x(b);
-            drawUiElement(vpPanel, bx, kBarY, kBtnHalfW, kBtnHalfH,
-                          UiShape::RoundedBox, btnBg, 0.30f, 0.04f, btnBorder);
+        // Left navigation rail background & vertical separator
+        const float railBg[4] = {0.016f, 0.024f, 0.043f, 0.97f};
+        drawUiElement(vpPanel, -0.695f, 0.0f, 0.190f, kPanelTop - 0.02f,
+                      UiShape::RoundedBox, railBg, 0.038f);
+        const float divCol[4] = {0.22f, 0.32f, 0.46f, 0.65f};
+        drawUiElement(vpPanel, kRailRight, 0.0f, 0.002f, kPanelTop - 0.025f,
+                      UiShape::RoundedBox, divCol, 0.0f);
 
-            UiShape iconShape = UiShape::RoundedBox;
-            switch (static_cast<CtrlButton>(b)) {
-                case CtrlButton::SeekBack: iconShape = UiShape::SeekBack; break;
-                case CtrlButton::PlayPause:
-                    iconShape = transportPaused_ ? UiShape::Play : UiShape::Pause;
-                    break;
-                case CtrlButton::SeekFwd: iconShape = UiShape::SeekFwd; break;
-                case CtrlButton::Stop: iconShape = UiShape::Stop; break;
-                case CtrlButton::Files: iconShape = UiShape::Files; break;
-                case CtrlButton::Settings: iconShape = UiShape::Settings; break;
-                case CtrlButton::Downloads: iconShape = UiShape::List; break;
-                case CtrlButton::Download: iconShape = UiShape::Download; break;
-            }
-            const float iconCol[4] = {0.96f, 0.96f, 0.98f, 1.0f};
-            const float iconHalfW = kBtnHalfW * 0.48f;
-            const float iconHalfH = kBtnHalfH * 0.48f;
-            drawUiElement(vpPanel, bx, kBarY, iconHalfW, iconHalfH, iconShape, iconCol);
+        // Top header horizontal separator in content area
+        drawUiElement(vpPanel, kContentCx, 0.39f, 0.66f, 0.002f,
+                      UiShape::RoundedBox, divCol, 0.0f);
 
-            // Downloads button indicator: green tick when all done, or a pulsing
-            // blue dot while downloads are active.
-            if (static_cast<CtrlButton>(b) == CtrlButton::Downloads &&
-                (downloadsActive_ || downloadsAllDone_ || downloadsFailed_)) {
-                const float badgeX = bx + kBtnHalfW * 0.55f;
-                const float badgeY = kBarY + kBtnHalfH * 0.55f;
-                if (downloadsFailed_) {
-                    const float failBg[4] = {0.80f, 0.15f, 0.15f, 1.0f};
-                    drawUiElement(vpPanel, badgeX, badgeY, kBtnHalfH * 0.55f,
-                                  kBtnHalfH * 0.55f, UiShape::RoundedBox, failBg,
-                                  0.50f, 0.0f, nullptr);
-                    drawUiElement(vpPanel, badgeX, badgeY, kBtnHalfH * 0.34f,
-                                  kBtnHalfH * 0.34f, UiShape::Close, iconCol);
-                } else if (downloadsAllDone_) {
-                    const float tickBg[4] = {0.10f, 0.65f, 0.25f, 1.0f};
-                    drawUiElement(vpPanel, badgeX, badgeY, kBtnHalfH * 0.55f,
-                                  kBtnHalfH * 0.55f, UiShape::RoundedBox, tickBg,
-                                  0.50f, 0.0f, nullptr);
-                    drawUiElement(vpPanel, badgeX, badgeY, kBtnHalfH * 0.40f,
-                                  kBtnHalfH * 0.40f, UiShape::Checkmark,
-                                  iconCol);
-                } else {
-                    const float dotCol[4] = {0.30f, 0.75f, 1.0f, 1.0f};
-                    drawUiElement(vpPanel, badgeX, badgeY, kBtnHalfH * 0.62f,
-                                  kBtnHalfH * 0.62f, UiShape::Cursor, dotCol);
-                }
+        // Brand emblem in top-left of rail
+        drawUiElement(vpPanel, -0.835f, 0.455f, 0.024f, 0.024f, UiShape::Headset, themeAccentCol);
+
+        // Active primary section: 0=Files, 1=Downloads, 2=Settings
+        const int activeMainTab = settingsVisible_ ? 2 : (downloadsVisible_ ? 1 : 0);
+        const float mainTabY[3] = {0.32f, 0.22f, 0.12f};
+        const UiShape mainIcons[3] = {UiShape::Files, UiShape::Download, UiShape::Settings};
+
+        const float tabActiveBg[4] = {
+            themeAccentCol[0] * 0.48f, themeAccentCol[1] * 0.48f,
+            themeAccentCol[2] * 0.58f, 0.95f};
+        const float tabActiveBord[4] = {
+            themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 1.0f};
+        const float tabHovBg[4] = {
+            themeAccentCol[0] * 0.32f, themeAccentCol[1] * 0.32f,
+            themeAccentCol[2] * 0.42f, 0.90f};
+        const float tabHovBord[4] = {
+            themeAccentCol[0] * 0.9f, themeAccentCol[1] * 0.9f,
+            themeAccentCol[2] * 0.9f, 0.95f};
+        const float tabNormBg[4] = {0.05f, 0.08f, 0.14f, 0.70f};
+        const float tabNormBord[4] = {0.20f, 0.28f, 0.42f, 0.55f};
+
+        for (int s = 0; s < 3; ++s) {
+            const bool act = (s == activeMainTab);
+            const bool hov = (browserSidebarHovered_ == s);
+            const float* bg = act ? tabActiveBg : (hov ? tabHovBg : tabNormBg);
+            const float* bord = act ? tabActiveBord : (hov ? tabHovBord : tabNormBord);
+            drawUiElement(vpPanel, -0.695f, mainTabY[s], 0.172f, 0.038f,
+                          UiShape::RoundedBox, bg, 0.45f, (act || hov) ? 0.035f : 0.02f, bord);
+            drawUiElement(vpPanel, -0.825f, mainTabY[s], 0.017f, 0.017f, mainIcons[s], themeTextCol);
+
+            // Red notification badge on Downloads tab when downloads are active
+            if (s == 1 && activeDownloadCount_ > 0) {
+                const float redBadge[4] = {0.92f, 0.24f, 0.28f, 0.98f};
+                drawUiElement(vpPanel, -0.555f, mainTabY[s], 0.018f, 0.018f,
+                              UiShape::RoundedBox, redBadge, 1.0f);
             }
         }
 
-        // Time readout above the track: elapsed (left) and total/remaining
-        // (right, tinted + clickable to toggle between total and time-left).
-        if (textReady_ && transportDuration_ > 0.0) {
-            vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                              textPipeline_);
-            vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                    textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
-            const float sc = 0.055f / fontAtlas_.lineHeight;
-            const float timeY = kBarY + 0.20f;
-            const float elCol[4] = {0.90f, 0.93f, 0.98f, 1.0f};
-            const float tgCol[4] = {0.55f, 0.75f, 1.0f, 1.0f};
-            auto glyphRun = [&](float x, const float cc[4], const std::string& s) {
-                float penX = x;
-                for (char rawc : s) {
-                    unsigned char c = static_cast<unsigned char>(rawc);
-                    if (c < 32 || c > 126) c = '?';
-                    const Glyph& g = fontAtlas_.glyphs[c];
-                    if (g.width > 0.0f && g.height > 0.0f) {
+        // Sub-navigation items in rail (contextual to Files / Downloads / Settings)
+        const float subTabY[4] = {-0.05f, -0.14f, -0.23f, -0.32f};
+        const int subCount = (activeMainTab == 1) ? 3 : 4;
+        for (int sub = 0; sub < subCount; ++sub) {
+            const bool hov = (browserSidebarHovered_ == (3 + sub));
+            bool subAct = false;
+            if (activeMainTab == 1) {
+                subAct = (downloadsFilter_ == sub);
+            } else if (activeMainTab == 2) {
+                const int effSec = (settingsSection_ >= 10) ? 2 : settingsSection_;
+                subAct = (effSec == sub);
+            }
+            const float subActBg[4] = {
+                themeAccentCol[0] * 0.25f, themeAccentCol[1] * 0.25f,
+                themeAccentCol[2] * 0.35f, 0.90f};
+            if (subAct || hov) {
+                drawUiElement(vpPanel, -0.695f, subTabY[sub], 0.172f, 0.034f,
+                              UiShape::RoundedBox, hov ? tabHovBg : subActBg,
+                              0.40f, 0.025f, hov ? tabHovBord : tabActiveBord);
+            }
+            if (activeMainTab == 0) {
+                const UiShape qIcons[4] = {UiShape::Home, UiShape::CurvedDisplay, UiShape::List, UiShape::Download};
+                drawUiElement(vpPanel, -0.825f, subTabY[sub], 0.015f, 0.015f, qIcons[sub], themeAccentCol);
+            }
+        }
+
+        // Standardized, generously readable font scales across the entire Unified Spatial Hub
+        // Base sizes boosted ~35% and multiplied by user-configurable uiTextScale_!
+        const float scHeader = (0.038f * tScale) / fontAtlas_.lineHeight;
+        const float scStd    = (0.030f * tScale) / fontAtlas_.lineHeight;
+        const float scSub    = (0.026f * tScale) / fontAtlas_.lineHeight;
+        const float scDetail = (0.022f * tScale) / fontAtlas_.lineHeight;
+        const float scBadge  = (0.020f * tScale) / fontAtlas_.lineHeight;
+
+        const float slateCol[4] = {
+            themeTextCol[0] * 0.78f, themeTextCol[1] * 0.84f,
+            themeTextCol[2] * 0.94f, 0.95f};
+        const float dimCol[4] = {
+            themeTextCol[0] * 0.62f, themeTextCol[1] * 0.70f,
+            themeTextCol[2] * 0.82f, 0.90f};
+        const float emeraldCol[4] = {0.22f, 0.88f, 0.54f, 1.0f};
+
+        // ---------------------------------------------------------------------
+        // Page A: FILES (Spatial Media Browser - Mockup #1)
+        // ---------------------------------------------------------------------
+        if (browserVisible_) {
+            const int total = static_cast<int>(browserItems_.size());
+            const int first = browserFirst_;
+            const float colX[3] = {-0.25f, 0.20f, 0.65f};
+            const float rowY[2] = {0.16f, -0.24f};
+            const float cardHalfW = 0.205f;
+            const float cardHalfH = 0.180f;
+
+            // Top-right pagination buttons: [<] at 0.56, [>] at 0.83, cy=0.455
+            for (int pb = 0; pb < 2; ++pb) {
+                const float pbx = (pb == 0) ? 0.56f : 0.83f;
+                const bool phov = (browserPageBtnHovered_ == pb);
+                drawUiElement(vpPanel, pbx, 0.455f, 0.035f, 0.028f,
+                              UiShape::RoundedBox, phov ? tabHovBg : tabNormBg,
+                              0.40f, 0.03f, phov ? tabHovBord : tabNormBord);
+            }
+
+            const float normCardBg[4] = {0.035f, 0.048f, 0.078f, 0.90f};
+            const float normCardBorder[4] = {0.18f, 0.26f, 0.40f, 0.70f};
+            const float selCardBg[4] = {0.06f, 0.10f, 0.18f, 0.94f};
+            const float hovCardBg[4] = {0.08f, 0.14f, 0.24f, 0.97f};
+            const float glowCol[4] = {
+                themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.32f};
+            const float thumbBg[4] = {0.018f, 0.026f, 0.044f, 0.95f};
+            const float thumbBorder[4] = {0.16f, 0.22f, 0.34f, 0.75f};
+
+            for (int i = 0; i < 6; ++i) {
+                const int entryIdx = first + i;
+                if (entryIdx >= total) break;
+                const auto& item = browserItems_[static_cast<std::size_t>(entryIdx)];
+                const float cx = colX[i % 3];
+                const float cy = rowY[i / 3];
+                const bool hovered = (entryIdx == browserHovered_);
+                const bool selected = (entryIdx == browserSelected_);
+
+                if (hovered) {
+                    drawUiElement(vpPanel, cx, cy, cardHalfW * 1.035f, cardHalfH * 1.035f,
+                                  UiShape::RoundedBox, glowCol, 0.08f);
+                    drawUiElement(vpPanel, cx, cy, cardHalfW, cardHalfH,
+                                  UiShape::RoundedBox, hovCardBg, 0.06f, 0.032f, tabActiveBord);
+                } else if (selected) {
+                    drawUiElement(vpPanel, cx, cy, cardHalfW, cardHalfH,
+                                  UiShape::RoundedBox, selCardBg, 0.06f, 0.026f, tabActiveBord);
+                } else {
+                    drawUiElement(vpPanel, cx, cy, cardHalfW, cardHalfH,
+                                  UiShape::RoundedBox, normCardBg, 0.06f, 0.018f, normCardBorder);
+                }
+
+                // 16:9 Thumbnail preview box in upper 62% of card
+                const float thumbCy = cy + 0.056f;
+                const float thumbHalfW = cardHalfW - 0.015f; // 0.190m
+                const float thumbHalfH = 0.104f;
+                drawUiElement(vpPanel, cx, thumbCy, thumbHalfW, thumbHalfH,
+                              UiShape::RoundedBox, thumbBg, 0.05f, 0.018f, thumbBorder);
+
+                const std::string& thumbKey = !item.previewPath.empty() ? item.previewPath : item.path;
+                if (!cardThumbs_[i].ready || cardThumbs_[i].path != thumbKey) {
+                    UiShape iconShape = UiShape::Play;
+                    if (item.isBack) iconShape = UiShape::Chevron;
+                    else if (item.isDir) iconShape = UiShape::Files;
+                    else if (item.isVideo) iconShape = UiShape::Play;
+                    drawUiElement(vpPanel, cx, thumbCy, 0.032f, 0.032f, iconShape, themeAccentCol);
+                }
+            }
+
+            // Render actual video thumbnail textures for ready cards
+            if (thumbPipeline_ != VK_NULL_HANDLE) {
+                vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, thumbPipeline_);
+                for (int i = 0; i < 6; ++i) {
+                    const int entryIdx = first + i;
+                    if (entryIdx >= total) break;
+                    const auto& item = browserItems_[static_cast<std::size_t>(entryIdx)];
+                    const std::string& thumbKey = !item.previewPath.empty() ? item.previewPath : item.path;
+                    if (cardThumbs_[i].ready && cardThumbs_[i].path == thumbKey &&
+                        cardThumbs_[i].set != VK_NULL_HANDLE) {
+                        vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                                textPipelineLayout_, 0, 1, &cardThumbs_[i].set, 0, nullptr);
+                        const float cx = colX[i % 3];
+                        const float cy = rowY[i / 3];
+                        const float thumbCy = cy + 0.056f;
+                        const float thumbHalfW = cardHalfW - 0.015f;
+                        const float thumbHalfH = 0.104f;
+
                         TextPush push{};
                         std::memcpy(push.mvp, vpPanel.m, sizeof(push.mvp));
-                        std::memcpy(push.color, cc, sizeof(push.color));
-                        push.rect[0] = penX + g.bearingX * sc;
-                        push.rect[1] = timeY - (g.height - g.bearingY) * sc;
-                        push.rect[2] = g.width * sc;
-                        push.rect[3] = g.height * sc;
-                        push.uv[0] = g.u0;
-                        push.uv[1] = g.v0;
-                        push.uv[2] = g.u1;
-                        push.uv[3] = g.v1;
+                        const float white4[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+                        std::memcpy(push.color, white4, sizeof(push.color));
+                        push.rect[0] = cx - thumbHalfW;
+                        push.rect[1] = thumbCy - thumbHalfH;
+                        push.rect[2] = thumbHalfW * 2.0f;
+                        push.rect[3] = thumbHalfH * 2.0f;
+                        push.uv[0] = 0.0f;
+                        push.uv[1] = 0.0f;
+                        push.uv[2] = 1.0f;
+                        push.uv[3] = 1.0f;
                         vkCmdPushConstants(commandBuffer_, textPipelineLayout_,
-                                           VK_SHADER_STAGE_VERTEX_BIT |
-                                               VK_SHADER_STAGE_FRAGMENT_BIT,
+                                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                            0, sizeof(TextPush), &push);
                         vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
                     }
-                    penX += g.advance * sc;
                 }
-            };
-            auto measure = [&](const std::string& s) {
-                float w = 0.0f;
-                for (char rawc : s) {
-                    unsigned char c = static_cast<unsigned char>(rawc);
-                    if (c < 32 || c > 126) c = '?';
-                    w += fontAtlas_.glyphs[c].advance * sc;
+            }
+
+            // Draw overlaid format badge (top-left of thumb) and duration pill (bottom-right of thumb)
+            vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipeline_);
+            const float badgeBg[4] = {0.02f, 0.04f, 0.08f, 0.92f};
+            const float durBg[4] = {0.015f, 0.025f, 0.045f, 0.92f};
+            for (int i = 0; i < 6; ++i) {
+                const int entryIdx = first + i;
+                if (entryIdx >= total) break;
+                const auto& item = browserItems_[static_cast<std::size_t>(entryIdx)];
+                const float cx = colX[i % 3];
+                const float cy = rowY[i / 3];
+                const float thumbCy = cy + 0.056f;
+                const float thumbHalfW = cardHalfW - 0.015f;
+                const float thumbHalfH = 0.104f;
+
+                // Top-left format badge (sized nicely for larger badge text)
+                drawUiElement(vpPanel, cx - thumbHalfW + 0.062f, thumbCy + thumbHalfH - 0.024f,
+                              0.056f, 0.018f, UiShape::RoundedBox, badgeBg, 0.45f, 0.03f, tabActiveBord);
+                // Bottom-right duration badge (if available)
+                if (!item.durationTag.empty()) {
+                    drawUiElement(vpPanel, cx + thumbHalfW - 0.050f, thumbCy - thumbHalfH + 0.024f,
+                                  0.044f, 0.017f, UiShape::RoundedBox, durBg, 0.40f, 0.02f, normCardBorder);
                 }
-                return w;
-            };
-            glyphRun(-0.54f, elCol, format_time(transportElapsed_));
-            const std::string right =
-                timeShowRemaining_
-                    ? "-" + format_time(transportDuration_ - transportElapsed_)
-                    : format_time(transportDuration_);
-            glyphRun(0.54f - measure(right), tgCol, right);
+            }
+
+            // Text pass for Hub rail + Files content
+            vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline_);
+            vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
+
+            // Rail header & buttons
+            drawFit(-0.795f, 0.455f, 0.28f, scHeader, themeTextCol, "PIXEL VR");
+            const char* mainLabels[3] = {"Files", "Downloads", "Settings"};
+            for (int s = 0; s < 3; ++s) {
+                drawFit(-0.790f, mainTabY[s], 0.23f, scStd, themeTextCol, mainLabels[s]);
+                if (s == 1 && activeDownloadCount_ > 0) {
+                    drawFitCentered(-0.555f, mainTabY[s], 0.035f, scBadge, themeTextCol,
+                                    std::to_string(activeDownloadCount_));
+                }
+            }
+            drawFit(-0.855f, 0.02f, 0.34f, scBadge, dimCol, "QUICK FILTERS");
+            const char* qLabels[4] = {"Local Storage", "Videos", "SMB Shares", "Downloads"};
+            for (int sub = 0; sub < 4; ++sub) {
+                drawFit(-0.790f, subTabY[sub], 0.28f, scSub, slateCol, qLabels[sub]);
+            }
+
+            // Content header: Breadcrumb + Page switcher
+            std::string bread = browserTitle_.empty() ? "Local Storage" : browserTitle_;
+            drawFit(-0.45f, 0.455f, 0.94f, scHeader * 0.90f, themeTextCol, bread);
+
+            const int totalPages = std::max(1, (total + 5) / 6);
+            const int curPage = (first / 6) + 1;
+            char pageBuf[32];
+            std::snprintf(pageBuf, sizeof(pageBuf), "%d / %d", curPage, totalPages);
+            drawFitCentered(0.695f, 0.455f, 0.17f, scSub, slateCol, pageBuf);
+            drawFitCentered(0.56f, 0.455f, 0.06f, scStd, themeTextCol, "<");
+            drawFitCentered(0.83f, 0.455f, 0.06f, scStd, themeTextCol, ">");
+
+            // Card titles, details, and badges (all fixed standard font sizes!)
+            for (int i = 0; i < 6; ++i) {
+                const int entryIdx = first + i;
+                if (entryIdx >= total) break;
+                const auto& item = browserItems_[static_cast<std::size_t>(entryIdx)];
+                const float cx = colX[i % 3];
+                const float cy = rowY[i / 3];
+                const float thumbCy = cy + 0.056f;
+                const float thumbHalfW = cardHalfW - 0.015f;
+                const float thumbHalfH = 0.104f;
+                const float textLeft = cx - cardHalfW + 0.016f;
+                const float maxTextW = cardHalfW * 2.0f - 0.032f;
+
+                drawFit(textLeft, cy - 0.084f, maxTextW, scSub, themeTextCol, item.name);
+                const std::string cardDet = item.detail.empty() ? (item.isDir ? "Folder" : "Media") : item.detail;
+                drawFit(textLeft, cy - 0.136f, maxTextW, scDetail, slateCol, cardDet);
+
+                const std::string& bTag = item.tag.empty() ? (item.isVideo ? "VIDEO" : "FILE") : item.tag;
+                drawFitCentered(cx - thumbHalfW + 0.062f, thumbCy + thumbHalfH - 0.024f,
+                                0.104f, scBadge, themeAccentCol, bTag);
+                if (!item.durationTag.empty()) {
+                    drawFitCentered(cx + thumbHalfW - 0.050f, thumbCy - thumbHalfH + 0.024f,
+                                    0.080f, scBadge, themeTextCol, item.durationTag);
+                }
+            }
+
+            // Bottom status bar
+            if (!browserStatus_.empty()) {
+                drawFit(-0.45f, -0.490f, 0.62f, scDetail, themeAccentCol, browserStatus_);
+            }
+            drawFit(0.18f, -0.490f, 0.68f, scDetail, dimCol,
+                    "Stick: Scroll  |  Trigger: Play  |  X: Download");
         }
-    }
 
-    // File browser overlay (world-locked panel at the screen position).
-    if (browserVisible_ && textReady_) {
-        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipeline_);
-        const float panelW = kPanelW;
-        const float panelTop = kPanelTop;
-        const float rowH = kRowH;
-        const int maxRows = kMaxRows;
+        // ---------------------------------------------------------------------
+        // Page B: DOWNLOADS (Active Transfers & Queue Manager - Mockup #2)
+        // ---------------------------------------------------------------------
+        else if (downloadsVisible_) {
+            const int totalJobs = static_cast<int>(downloadJobs_.empty() ? downloadsRows_.size() : downloadJobs_.size());
+            const float cardHalfW = 0.65f;
+            const float cardHalfH = 0.075f;
+            const float cardBg[4] = {0.038f, 0.052f, 0.085f, 0.90f};
+            const float cardBorder[4] = {0.18f, 0.26f, 0.40f, 0.70f};
+            const float cardDoneBg[4] = {0.028f, 0.065f, 0.055f, 0.90f};
+            const float cardDoneBord[4] = {0.18f, 0.58f, 0.38f, 0.85f};
+            const float cardHovBg[4] = {0.075f, 0.130f, 0.220f, 0.96f};
+            const float trackBg[4] = {0.06f, 0.09f, 0.14f, 0.95f};
+            const float trackDone[4] = {0.16f, 0.78f, 0.45f, 1.0f};
 
-        const float panelBg[4] = {0.02f, 0.025f, 0.04f, 0.93f};
-        const float panelBorder[4] = {0.20f, 0.28f, 0.42f, 0.80f};
-        const float hlCol[4] = {0.18f, 0.45f, 0.85f, 0.85f};
-        const float selBorder[4] = {0.40f, 0.70f, 1.0f, 0.90f};
-        const float selBg[4] = {0.12f, 0.18f, 0.28f, 0.65f};
+            int visIdx = 0;
+            for (int i = 0; i < totalJobs && visIdx < 4; ++i) {
+                int state = 0;
+                float prog = 0.0f;
+                if (!downloadJobs_.empty()) {
+                    state = downloadJobs_[i].state;
+                    prog = std::clamp(downloadJobs_[i].progress, 0.0f, 1.0f);
+                    if (downloadsFilter_ == 1 && state != 0 && state != 3) continue;
+                    if (downloadsFilter_ == 2 && state != 1) continue;
+                }
+                const float ry = 0.24f - static_cast<float>(visIdx) * 0.175f;
+                const bool hov = (i == downloadsHovered_);
+                const float* cBg = hov ? cardHovBg : (state == 1 ? cardDoneBg : cardBg);
+                const float* cBord = hov ? tabActiveBord : (state == 1 ? cardDoneBord : cardBorder);
 
-        drawUiElement(vpPanel, 0.0f, 0.0f, panelW, panelTop,
-                      UiShape::RoundedBox, panelBg, 0.05f, 0.015f, panelBorder);
+                drawUiElement(vpPanel, kContentCx, ry, cardHalfW, cardHalfH,
+                              UiShape::RoundedBox, cBg, 0.12f, 0.022f, cBord);
 
-        const int total = static_cast<int>(browserRows_.size());
-        const int first = browserFirst_;
-        const int lastRow = std::min(total, first + maxRows);
-        for (int i = first; i < lastRow; ++i) {
-            const float ry = panelTop - 0.2f - (i - first) * rowH;
-            const bool hovered = (i == browserHovered_);
-            const bool selected = (i == browserSelected_);
-            if (hovered || selected) {
-                const float* rowBg = hovered ? hlCol : selBg;
-                const float* bCol = selected ? selBorder : nullptr;
-                drawUiElement(vpPanel, 0.0f, ry + rowH * 0.28f, panelW - 0.04f, rowH * 0.44f,
-                              UiShape::RoundedBox, rowBg, 0.20f, selected ? 0.03f : 0.0f, bCol);
+                // Left media icon box inside job card
+                const float iconBoxBg[4] = {0.02f, 0.03f, 0.05f, 0.92f};
+                drawUiElement(vpPanel, -0.36f, ry, 0.060f, 0.048f,
+                              UiShape::RoundedBox, iconBoxBg, 0.15f, 0.02f, cardBorder);
+                drawUiElement(vpPanel, -0.36f, ry, 0.020f, 0.020f,
+                              (state == 1) ? UiShape::Play : UiShape::Download,
+                              (state == 1) ? emeraldCol : themeAccentCol);
+
+                // Progress bar track
+                const float barLeft = -0.27f;
+                const float barRight = 0.54f;
+                const float barHalfW = 0.5f * (barRight - barLeft);
+                const float barCx = 0.5f * (barLeft + barRight);
+                const float barY = ry - 0.038f;
+                drawUiElement(vpPanel, barCx, barY, barHalfW, 0.008f,
+                              UiShape::RoundedBox, trackBg, 0.50f);
+
+                if (prog > 0.005f) {
+                    const float fillW = barHalfW * prog;
+                    drawUiElement(vpPanel, barLeft + fillW, barY, fillW, 0.008f,
+                                  UiShape::RoundedBox, (state == 1 ? trackDone : themeAccentCol), 0.50f);
+                }
+
+                // Right action pill inside completed card
+                if (state == 1) {
+                    const float playPillBg[4] = {0.14f, 0.72f, 0.42f, 0.95f};
+                    drawUiElement(vpPanel, 0.71f, ry, 0.105f, 0.034f,
+                                  UiShape::RoundedBox, playPillBg, 0.50f, 0.03f, emeraldCol);
+                }
+                ++visIdx;
+            }
+
+            // Bottom global action buttons centered in content area
+            const float dbtnCy = -0.44f;
+            std::vector<float> btnCx, btnHalfW;
+            downloadsButtonLayout(btnCx, btnHalfW);
+            for (std::size_t i = 0; i < btnCx.size(); ++i) {
+                const bool hov = (static_cast<int>(i) == downloadsBtnHovered_);
+                drawUiElement(vpPanel, kContentCx + btnCx[i], dbtnCy, btnHalfW[i], kDlBtnH * 0.5f,
+                              UiShape::RoundedBox, hov ? tabHovBg : tabNormBg, 0.45f, 0.03f,
+                              hov ? tabHovBord : tabNormBord);
+            }
+
+            // Text pass for Hub rail + Downloads content
+            vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline_);
+            vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
+
+            drawFit(-0.795f, 0.455f, 0.28f, scHeader, themeTextCol, "PIXEL VR");
+            const char* mainLabels[3] = {"Files", "Downloads", "Settings"};
+            for (int s = 0; s < 3; ++s) {
+                drawFit(-0.790f, mainTabY[s], 0.23f, scStd, themeTextCol, mainLabels[s]);
+                if (s == 1 && activeDownloadCount_ > 0) {
+                    drawFitCentered(-0.555f, mainTabY[s], 0.035f, scBadge, themeTextCol,
+                                    std::to_string(activeDownloadCount_));
+                }
+            }
+            const char* dlSubLabels[3] = {"All Tasks", "Active Transfers", "Completed"};
+            for (int sub = 0; sub < 3; ++sub) {
+                drawFit(-0.84f, subTabY[sub], 0.30f, scSub,
+                        (downloadsFilter_ == sub) ? themeTextCol : slateCol, dlSubLabels[sub]);
+            }
+
+            drawFit(-0.45f, 0.455f, 0.64f, scHeader * 0.90f, themeTextCol,
+                    "Downloads > Transfers");
+            drawFit(0.20f, 0.455f, 0.66f, scDetail, slateCol, downloadsStatus_);
+
+            if (visIdx == 0) {
+                drawFitCentered(kContentCx, 0.02f, 0.80f, scStd, slateCol,
+                                "No transfers in this view");
+            } else {
+                int vIdx = 0;
+                for (int i = 0; i < totalJobs && vIdx < 4; ++i) {
+                    std::string jName;
+                    std::string jDet;
+                    int state = 0;
+                    float prog = 0.0f;
+                    if (!downloadJobs_.empty()) {
+                        jName = downloadJobs_[i].label;
+                        jDet = downloadJobs_[i].detail;
+                        state = downloadJobs_[i].state;
+                        prog = std::clamp(downloadJobs_[i].progress, 0.0f, 1.0f);
+                        if (downloadsFilter_ == 1 && state != 0 && state != 3) continue;
+                        if (downloadsFilter_ == 2 && state != 1) continue;
+                    } else if (i < static_cast<int>(downloadsRows_.size())) {
+                        jName = downloadsRows_[i];
+                    }
+                    const float ry = 0.24f - static_cast<float>(vIdx) * 0.175f;
+                    drawFit(-0.27f, ry + 0.028f, 0.80f, scSub, themeTextCol, jName);
+                    drawFit(-0.27f, ry - 0.008f, 0.80f, scDetail,
+                            (state == 1) ? emeraldCol : slateCol, jDet);
+
+                    char pctBuf[16];
+                    std::snprintf(pctBuf, sizeof(pctBuf), "%d%%", static_cast<int>(prog * 100.0f + 0.5f));
+                    drawFit(0.56f, ry - 0.038f, 0.10f, scBadge, themeTextCol, pctBuf);
+
+                    if (state == 1) {
+                        drawFitCentered(0.71f, ry, 0.19f, scDetail, themeTextCol, "Play Now");
+                    }
+                    ++vIdx;
+                }
+            }
+
+            for (std::size_t i = 0; i < btnCx.size(); ++i) {
+                drawFitCentered(kContentCx + btnCx[i], dbtnCy, btnHalfW[i] * 1.85f,
+                                scSub, themeTextCol, downloadsButtons_[i]);
             }
         }
 
-        // Scrollbar
-        if (total > maxRows) {
-            const float sbX = panelW - 0.025f;
-            const float sbTop = panelTop - 0.2f + rowH * 0.4f;
-            const float sbBot = panelTop - 0.2f - (maxRows - 1) * rowH - rowH * 0.4f;
-            const float sbH = (sbTop - sbBot) * 0.5f;
-            const float sbMidY = (sbTop + sbBot) * 0.5f;
-            const float trackCol[4] = {0.08f, 0.10f, 0.15f, 0.70f};
-            drawUiElement(vpPanel, sbX, sbMidY, 0.008f, sbH, UiShape::RoundedBox, trackCol, 1.0f);
+        // ---------------------------------------------------------------------
+        // Page C: SETTINGS (Cinema & Playback Configuration - Mockup #3)
+        // ---------------------------------------------------------------------
+        else if (settingsVisible_) {
+            const int total = static_cast<int>(settingsRows_.size());
+            const float cardBg[4] = {0.035f, 0.048f, 0.078f, 0.90f};
+            const float cardBord[4] = {0.16f, 0.24f, 0.36f, 0.70f};
+            const float cardHovBg[4] = {0.075f, 0.130f, 0.220f, 0.96f};
 
-            const float thumbH = std::max(0.04f, sbH * (static_cast<float>(maxRows) / total));
-            const float maxTravel = (sbH - thumbH) * 2.0f;
-            const float scrollFrac = static_cast<float>(first) / (total - maxRows);
-            const float thumbY = (sbTop - thumbH) - scrollFrac * maxTravel;
-            const float thumbCol[4] = {0.35f, 0.60f, 0.95f, 0.90f};
-            drawUiElement(vpPanel, sbX, thumbY, 0.010f, thumbH, UiShape::RoundedBox, thumbCol, 1.0f);
+            // Version pill in top-right header
+            drawUiElement(vpPanel, 0.64f, 0.455f, 0.22f, 0.028f,
+                          UiShape::RoundedBox, tabNormBg, 0.45f, 0.02f, tabNormBord);
+
+            for (int i = 0; i < total && i < 8; ++i) {
+                const int c = i % 2;
+                const int r = i / 2;
+                const float cx = (c == 0) ? -0.135f : 0.535f;
+                const float ry = (total <= 6)
+                    ? (0.22f - static_cast<float>(r) * 0.24f)
+                    : (0.25f - static_cast<float>(r) * 0.17f);
+                const float cardHalfH = (total <= 6) ? 0.098f : 0.072f;
+                const bool en = settingsEnabled_.empty() ||
+                                (i < static_cast<int>(settingsEnabled_.size()) &&
+                                 settingsEnabled_[i] != 0);
+                const bool hov = (i == settingsHovered_) && en;
+                const bool sel = (i == settingsSelected_);
+
+                drawUiElement(vpPanel, cx, ry, 0.315f, cardHalfH,
+                              UiShape::RoundedBox, (hov || sel) ? cardHovBg : cardBg,
+                              0.10f, (hov || sel) ? 0.03f : 0.018f,
+                              (hov || sel) ? tabActiveBord : cardBord);
+
+                // Value pill inside card
+                if (total <= 6) {
+                    drawUiElement(vpPanel, cx, ry - 0.028f, 0.275f, 0.036f,
+                                  UiShape::RoundedBox, en ? tabActiveBg : tabNormBg,
+                                  0.45f, 0.03f, en ? tabActiveBord : tabNormBord);
+                }
+            }
+
+            // Text pass for Hub rail + Settings cards
+            vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline_);
+            vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
+
+            drawFit(-0.795f, 0.455f, 0.28f, scHeader, themeTextCol, "PIXEL VR");
+            const char* mainLabels[3] = {"Files", "Downloads", "Settings"};
+            for (int s = 0; s < 3; ++s) {
+                drawFit(-0.790f, mainTabY[s], 0.23f, scStd, themeTextCol, mainLabels[s]);
+                if (s == 1 && activeDownloadCount_ > 0) {
+                    drawFitCentered(-0.555f, mainTabY[s], 0.035f, scBadge, themeTextCol,
+                                    std::to_string(activeDownloadCount_));
+                }
+            }
+            const char* setSubLabels[4] = {"Display & Cinema", "UI & Appearance",
+                                           "Audio & Tracks", "Controls & Input"};
+            const int effSec = (settingsSection_ >= 10) ? 2 : settingsSection_;
+            for (int sub = 0; sub < 4; ++sub) {
+                drawFit(-0.84f, subTabY[sub], 0.30f, scSub,
+                        (effSec == sub) ? themeTextCol : slateCol, setSubLabels[sub]);
+            }
+
+            drawFit(-0.45f, 0.455f, 0.82f, scHeader * 0.90f, themeTextCol, settingsTitle_);
+            drawFitCentered(0.64f, 0.455f, 0.41f, scDetail, slateCol,
+                            "PixelVR v1.2 \xB7 Steam Frame");
+
+            for (int i = 0; i < total && i < 8; ++i) {
+                const int c = i % 2;
+                const int r = i / 2;
+                const float cx = (c == 0) ? -0.135f : 0.535f;
+                const float ry = (total <= 6)
+                    ? (0.22f - static_cast<float>(r) * 0.24f)
+                    : (0.25f - static_cast<float>(r) * 0.17f);
+                const bool en = settingsEnabled_.empty() ||
+                                (i < static_cast<int>(settingsEnabled_.size()) &&
+                                 settingsEnabled_[i] != 0);
+
+                const std::string& fullRow = settingsRows_[static_cast<std::size_t>(i)];
+                std::string label = fullRow;
+                std::string val;
+                const auto sep = fullRow.find(" : ");
+                if (sep != std::string::npos) {
+                    label = fullRow.substr(0, sep);
+                    val = fullRow.substr(sep + 3);
+                }
+
+                if (total <= 6) {
+                    drawFit(cx - 0.275f, ry + 0.044f, 0.55f, scSub,
+                            en ? themeTextCol : dimCol, label);
+                    drawFitCentered(cx, ry - 0.028f, 0.51f, scSub,
+                                    en ? themeTextCol : dimCol, val.empty() ? label : val);
+                } else {
+                    drawFit(cx - 0.275f, ry + 0.016f, 0.55f, scSub,
+                            en ? themeTextCol : dimCol, label);
+                    if (!val.empty()) {
+                        drawFit(cx - 0.275f, ry - 0.026f, 0.55f, scDetail, themeAccentCol, val);
+                    }
+                }
+            }
+
+            if (!settingsStatus_.empty()) {
+                drawFit(-0.45f, -0.490f, 1.30f, scDetail, slateCol, settingsStatus_);
+            }
         }
+    }
+
+    // =========================================================================
+    // 3. Folder Download Confirmation Modal (centered overlay)
+    // =========================================================================
+    if (modalOpen && textReady_ && uiPipeline_ != VK_NULL_HANDLE) {
+        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipeline_);
+        const float mHalfW = 0.44f;
+        const float mHalfH = 0.26f;
+        const float backdrop[4] = {0.0f, 0.0f, 0.0f, 0.76f};
+        drawUiElement(vpPanel, 0.0f, 0.0f, kPanelW, kPanelTop,
+                      UiShape::RoundedBox, backdrop, 0.045f);
+
+        const float modalBg[4] = {0.032f, 0.045f, 0.075f, 0.98f};
+        drawUiElement(vpPanel, 0.0f, 0.0f, mHalfW, mHalfH,
+                      UiShape::RoundedBox, modalBg, 0.07f, 0.02f, themeAccentCol);
+
+        const float innerBg[4] = {0.018f, 0.026f, 0.046f, 0.90f};
+        const float innerBorder[4] = {0.18f, 0.26f, 0.40f, 0.70f};
+        drawUiElement(vpPanel, 0.0f, 0.015f, mHalfW - 0.045f, 0.095f,
+                      UiShape::RoundedBox, innerBg, 0.05f, 0.02f, innerBorder);
+
+        const float btnCy = -0.15f;
+        const float btnHalfW = 0.130f;
+        const float btnHalfH = 0.046f;
+        const bool dlHov = (downloadsBtnHovered_ == 0);
+        const bool canHov = (downloadsBtnHovered_ == 1);
+
+        const float greenBg[4] = {0.12f, 0.58f, 0.34f, 0.95f};
+        const float greenBgHov[4] = {0.18f, 0.74f, 0.44f, 1.0f};
+        const float greenBorder[4] = {0.35f, 0.88f, 0.58f, 0.95f};
+        const float slateBg[4] = {0.10f, 0.14f, 0.22f, 0.92f};
+        const float slateBgHov[4] = {0.20f, 0.28f, 0.42f, 1.0f};
+        const float slateBorder[4] = {0.30f, 0.42f, 0.62f, 0.85f};
+
+        drawUiElement(vpPanel, -0.15f, btnCy, btnHalfW, btnHalfH,
+                      UiShape::RoundedBox, dlHov ? greenBgHov : greenBg, 0.42f, 0.03f, greenBorder);
+        drawUiElement(vpPanel, 0.15f, btnCy, btnHalfW, btnHalfH,
+                      UiShape::RoundedBox, canHov ? slateBgHov : slateBg, 0.42f, 0.03f, slateBorder);
 
         vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline_);
         vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
-        const float sc = (rowH * 0.62f) / fontAtlas_.lineHeight;
-        const float white2[4] = {0.96f, 0.96f, 0.96f, 1.0f};
-        const float dim[4] = {0.55f, 0.7f, 0.9f, 1.0f};
-        auto drawString = [&](float x, float baseline, float scale, const float col[4],
-                              const std::string& s) {
-            float penX = x;
-            for (char rawc : s) {
-                unsigned char c = static_cast<unsigned char>(rawc);
-                if (c < 32 || c > 126) c = '?';
-                const Glyph& g = fontAtlas_.glyphs[c];
-                if (g.width > 0.0f && g.height > 0.0f) {
-                    TextPush push{};
-                    std::memcpy(push.mvp, vpPanel.m, sizeof(push.mvp));
-                    std::memcpy(push.color, col, sizeof(push.color));
-                    push.rect[0] = penX + g.bearingX * scale;
-                    push.rect[1] = baseline - (g.height - g.bearingY) * scale;
-                    push.rect[2] = g.width * scale;
-                    push.rect[3] = g.height * scale;
-                    push.uv[0] = g.u0;
-                    push.uv[1] = g.v0;
-                    push.uv[2] = g.u1;
-                    push.uv[3] = g.v1;
-                    vkCmdPushConstants(commandBuffer_, textPipelineLayout_,
-                                       VK_SHADER_STAGE_VERTEX_BIT |
-                                           VK_SHADER_STAGE_FRAGMENT_BIT,
-                                       0, sizeof(TextPush), &push);
-                    vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
-                }
-                penX += g.advance * scale;
-            }
-        };
-        drawString(-panelW + 0.04f, panelTop - 0.1f, sc, dim,
-                   browserTitle_.substr(0, 42));
-        for (int i = first; i < lastRow; ++i) {
-            const float ry = panelTop - 0.2f - (i - first) * rowH;
-            drawString(-panelW + 0.05f, ry, sc, white2,
-                       browserRows_[static_cast<std::size_t>(i)].substr(0, 62));
-        }
-        if (!browserStatus_.empty()) {
-            drawString(-panelW + 0.04f, -panelTop + 0.05f, sc * 0.85f, dim,
-                       browserStatus_.substr(0, 70));
-        }
-    }
+        const float sc = (0.032f * tScale) / fontAtlas_.lineHeight;
 
-    // Settings panel overlay
-    if (settingsVisible_ && textReady_) {
-        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipeline_);
-        const float panelW = kPanelW;
-        const float panelTop = kPanelTop;
-        const float rowH = kRowH;
-
-        const float panelBg[4] = {0.02f, 0.025f, 0.045f, 0.95f};
-        const float panelBorder[4] = {0.25f, 0.35f, 0.55f, 0.85f};
-        const float hlCol[4] = {0.18f, 0.45f, 0.85f, 0.85f};
-        const float selBorder[4] = {0.40f, 0.70f, 1.0f, 0.90f};
-        const float selBg[4] = {0.12f, 0.18f, 0.28f, 0.65f};
-
-        drawUiElement(vpPanel, 0.0f, 0.0f, panelW, panelTop,
-                      UiShape::RoundedBox, panelBg, 0.05f, 0.015f, panelBorder);
-
-        const int total = static_cast<int>(settingsRows_.size());
-        for (int i = 0; i < total; ++i) {
-            const float ry = panelTop - 0.2f - i * rowH;
-            const bool en = settingsEnabled_.empty() ||
-                            (i < static_cast<int>(settingsEnabled_.size()) &&
-                             settingsEnabled_[i] != 0);
-            const bool hovered = (i == settingsHovered_) && en;
-            const bool selected = (i == settingsSelected_);
-            if (hovered || selected) {
-                const float* rowBg = hovered ? hlCol : selBg;
-                const float* bCol = selected ? selBorder : nullptr;
-                drawUiElement(vpPanel, 0.0f, ry + rowH * 0.28f, panelW - 0.04f, rowH * 0.44f,
-                              UiShape::RoundedBox, rowBg, 0.20f, selected ? 0.03f : 0.0f, bCol);
-            }
-        }
-
-        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline_);
-        vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
-        const float sc = (rowH * 0.62f) / fontAtlas_.lineHeight;
-        const float white2[4] = {0.96f, 0.96f, 0.96f, 1.0f};
-        const float dim[4] = {0.55f, 0.7f, 0.9f, 1.0f};
-        const float cyan[4] = {0.35f, 0.75f, 1.0f, 1.0f};
-        const float disabledCol[4] = {0.40f, 0.43f, 0.48f, 1.0f};
-        auto drawString = [&](float x, float baseline, float scale, const float col[4],
-                              const std::string& s) {
-            float penX = x;
-            for (char rawc : s) {
-                unsigned char c = static_cast<unsigned char>(rawc);
-                if (c < 32 || c > 126) c = '?';
-                const Glyph& g = fontAtlas_.glyphs[c];
-                if (g.width > 0.0f && g.height > 0.0f) {
-                    TextPush push{};
-                    std::memcpy(push.mvp, vpPanel.m, sizeof(push.mvp));
-                    std::memcpy(push.color, col, sizeof(push.color));
-                    push.rect[0] = penX + g.bearingX * scale;
-                    push.rect[1] = baseline - (g.height - g.bearingY) * scale;
-                    push.rect[2] = g.width * scale;
-                    push.rect[3] = g.height * scale;
-                    push.uv[0] = g.u0;
-                    push.uv[1] = g.v0;
-                    push.uv[2] = g.u1;
-                    push.uv[3] = g.v1;
-                    vkCmdPushConstants(commandBuffer_, textPipelineLayout_,
-                                       VK_SHADER_STAGE_VERTEX_BIT |
-                                           VK_SHADER_STAGE_FRAGMENT_BIT,
-                                       0, sizeof(TextPush), &push);
-                    vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
-                }
-                penX += g.advance * scale;
-            }
-        };
-        drawString(-panelW + 0.04f, panelTop - 0.1f, sc, cyan,
-                   settingsTitle_.substr(0, 42));
-        for (int i = 0; i < total; ++i) {
-            const float ry = panelTop - 0.2f - i * rowH;
-            const bool en = settingsEnabled_.empty() ||
-                            (i < static_cast<int>(settingsEnabled_.size()) &&
-                             settingsEnabled_[i] != 0);
-            drawString(-panelW + 0.05f, ry, sc, en ? white2 : disabledCol,
-                       settingsRows_[static_cast<std::size_t>(i)].substr(0, 62));
-        }
-        if (!settingsStatus_.empty()) {
-            drawString(-panelW + 0.04f, -panelTop + 0.05f, sc * 0.82f, dim,
-                       settingsStatus_.substr(0, 70));
-        }
-    }
-
-    // Downloads overlay: a compact list of download jobs with a status line.
-    if (downloadsVisible_ && textReady_) {
-        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipeline_);
-        const float panelW = kPanelW;
-        const float panelTop = kPanelTop;
-        const float rowH = kRowH;
-        const float panelBg[4] = {0.02f, 0.03f, 0.05f, 0.94f};
-        const float panelBorder[4] = {0.25f, 0.45f, 0.65f, 0.85f};
-        if (downloadsModal_) {  // dim backdrop so a confirmation reads as a modal
-            const float backdrop[4] = {0.0f, 0.0f, 0.0f, 0.55f};
-            drawUiElement(vpPanel, 0.0f, 0.0f, panelW * 1.35f, panelTop * 1.25f,
-                          UiShape::RoundedBox, backdrop, 0.06f, 0.0f, nullptr);
-        }
-        drawUiElement(vpPanel, 0.0f, 0.0f, panelW, panelTop, UiShape::RoundedBox,
-                      panelBg, 0.05f, 0.015f, panelBorder);
-        const float hlCol[4] = {0.18f, 0.45f, 0.85f, 0.85f};
-        const float btnBg[4] = {0.10f, 0.14f, 0.22f, 0.95f};
-        const float btnBgHover[4] = {0.18f, 0.42f, 0.82f, 0.95f};
-        const float btnBorder[4] = {0.30f, 0.45f, 0.65f, 0.80f};
-        const float primBg[4] = {0.12f, 0.50f, 0.22f, 0.95f};
-        const float btnCy = -panelTop + 0.18f;
-        std::vector<float> btnCx, btnHalfW;
-        downloadsButtonLayout(btnCx, btnHalfW);
-        // Row highlights only in the list area (above the button band).
-        int visibleRows = 0;
-        for (std::size_t i = 0; i < downloadsRows_.size(); ++i) {
-            const float ry = panelTop - 0.2f - static_cast<float>(i) * rowH;
-            if (ry < btnCy + kDlBtnH * 0.5f) break;
-            ++visibleRows;
-            if (static_cast<int>(i) == downloadsHovered_) {
-                drawUiElement(vpPanel, 0.0f, ry + rowH * 0.28f, panelW - 0.04f,
-                              rowH * 0.44f, UiShape::RoundedBox, hlCol, 0.20f, 0.0f,
-                              nullptr);
-            }
-        }
-        // Action buttons along the bottom, sized to their labels.
-        for (std::size_t i = 0; i < btnCx.size(); ++i) {
-            const bool hov = (static_cast<int>(i) == downloadsBtnHovered_);
-            const float* bg = hov ? btnBgHover : (i == 0 ? primBg : btnBg);
-            drawUiElement(vpPanel, btnCx[i], btnCy, btnHalfW[i], kDlBtnH * 0.5f,
-                          UiShape::RoundedBox, bg, 0.30f, 0.03f, btnBorder);
-        }
-        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline_);
-        vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
-        const float sc = (rowH * 0.62f) / fontAtlas_.lineHeight;
-        const float btnLabelScale = (kDlBtnH * 0.52f) / fontAtlas_.lineHeight;
-        const float white2[4] = {0.96f, 0.96f, 0.96f, 1.0f};
-        const float dim[4] = {0.55f, 0.7f, 0.9f, 1.0f};
-        const float cyan[4] = {0.35f, 0.75f, 1.0f, 1.0f};
-        auto drawString = [&](float x, float baseline, float scale, const float col[4],
-                              const std::string& s) {
-            float penX = x;
-            for (char rawc : s) {
-                unsigned char c = static_cast<unsigned char>(rawc);
-                if (c < 32 || c > 126) c = '?';
-                const Glyph& g = fontAtlas_.glyphs[c];
-                if (g.width > 0.0f && g.height > 0.0f) {
-                    TextPush push{};
-                    std::memcpy(push.mvp, vpPanel.m, sizeof(push.mvp));
-                    std::memcpy(push.color, col, sizeof(push.color));
-                    push.rect[0] = penX + g.bearingX * scale;
-                    push.rect[1] = baseline - (g.height - g.bearingY) * scale;
-                    push.rect[2] = g.width * scale;
-                    push.rect[3] = g.height * scale;
-                    push.uv[0] = g.u0;
-                    push.uv[1] = g.v0;
-                    push.uv[2] = g.u1;
-                    push.uv[3] = g.v1;
-                    vkCmdPushConstants(commandBuffer_, textPipelineLayout_,
-                                       VK_SHADER_STAGE_VERTEX_BIT |
-                                           VK_SHADER_STAGE_FRAGMENT_BIT,
-                                       0, sizeof(TextPush), &push);
-                    vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
-                }
-                penX += g.advance * scale;
-            }
-        };
-        drawString(-panelW + 0.04f, panelTop - 0.1f, sc, cyan,
-                   downloadsTitle_.substr(0, 42));
-        for (int i = 0; i < visibleRows; ++i) {
-            const float ry = panelTop - 0.2f - static_cast<float>(i) * rowH;
-            drawString(-panelW + 0.05f, ry, sc, white2,
-                       downloadsRows_[static_cast<std::size_t>(i)].substr(0, 62));
-        }
-        if (!downloadsStatus_.empty()) {
-            drawString(-panelW + 0.04f, btnCy + kDlBtnH * 0.5f + 0.06f, sc * 0.82f,
-                       dim, downloadsStatus_.substr(0, 70));
-        }
-        // Button labels, centred on each button.
-        for (std::size_t i = 0; i < btnCx.size(); ++i) {
-            float tw = 0.0f;
-            for (char rawc : downloadsButtons_[i]) {
-                unsigned char c = static_cast<unsigned char>(rawc);
-                if (c < 32 || c > 126) c = '?';
-                tw += fontAtlas_.glyphs[c].advance * btnLabelScale;
-            }
-            drawString(btnCx[i] - tw * 0.5f, btnCy - 0.5f * kDlBtnH * 0.30f,
-                       btnLabelScale, white2, downloadsButtons_[i]);
-        }
+        drawFitCentered(0.0f, 0.175f, mHalfW * 1.8f, sc * 1.12f, themeAccentCol, "Confirm Download");
+        const std::string fName = downloadsRows_.size() > 1 ? downloadsRows_[1] : "Folder";
+        const std::string sInfo = downloadsRows_.size() > 2 ? downloadsRows_[2] : "";
+        drawFitCentered(0.0f, 0.048f, (mHalfW - 0.06f) * 2.0f, sc, themeTextCol, fName);
+        drawFitCentered(0.0f, -0.025f, (mHalfW - 0.06f) * 2.0f, sc * 0.88f, themeAccentCol, sInfo);
+        drawFitCentered(-0.15f, btnCy, btnHalfW * 1.8f, sc, themeTextCol, "Download");
+        drawFitCentered(0.15f, btnCy, btnHalfW * 1.8f, sc, themeTextCol, "Cancel");
     }
 
     // Tracked controller 3D models (lit capsule), drawn before the laser/cursor.
@@ -2912,17 +3733,18 @@ void VulkanRenderer::downloadsButtonLayout(std::vector<float>& cx,
     cx.assign(downloadsButtons_.size(), 0.0f);
     halfW.assign(downloadsButtons_.size(), 0.0f);
     if (downloadsButtons_.empty() || fontAtlas_.lineHeight <= 0.0f) return;
-    const float labelScale = (kDlBtnH * 0.52f) / fontAtlas_.lineHeight;
+    const float tScale = std::clamp(uiTextScale_, 0.85f, 1.75f);
+    const float labelScale = (0.026f * tScale) / fontAtlas_.lineHeight;
     std::vector<float> w(downloadsButtons_.size(), 0.0f);
     float total = 0.0f;
     for (std::size_t i = 0; i < downloadsButtons_.size(); ++i) {
         float tw = 0.0f;
         for (char rawc : downloadsButtons_[i]) {
             unsigned char c = static_cast<unsigned char>(rawc);
-            if (c < 32 || c > 126) c = '?';
+            if (c < 32 || c > 127) c = '?';
             tw += fontAtlas_.glyphs[c].advance * labelScale;
         }
-        w[i] = std::min(tw + 2.0f * kDlBtnPadX, kPanelW * 1.2f);
+        w[i] = std::clamp(tw + 2.0f * kDlBtnPadX, 0.24f, 0.42f);
         total += w[i];
     }
     if (downloadsButtons_.size() > 1) {

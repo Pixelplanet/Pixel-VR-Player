@@ -6,11 +6,14 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <filesystem>
 #include <fstream>
 #include <string>
 #include <thread>
 #include <utility>
 #include <vector>
+
+namespace fs = std::filesystem;
 
 namespace pixelvr {
 
@@ -151,7 +154,14 @@ bool App::init(const std::string& mediaPath) {
 
 #ifdef PIXELVR_HAVE_MEDIA
     if (!mediaPath.empty()) {
-        loadMedia(mediaPath);
+        std::error_code ec;
+        if (std::filesystem::is_directory(mediaPath, ec)) {
+#ifdef PIXELVR_HAVE_FREETYPE
+            browser_.openPath(mediaPath);
+#endif
+        } else {
+            loadMedia(mediaPath);
+        }
     }
 #else
     (void)mediaPath;
@@ -349,20 +359,39 @@ void App::updateStats() {
 
 int App::navStep(float axisY, std::chrono::steady_clock::time_point now) {
     using namespace std::chrono_literals;
-    if (axisY > 0.6f || axisY < -0.6f) {
+    if (axisY > 0.38f || axisY < -0.38f) {
         const int dir = (axisY > 0.0f) ? -1 : 1;  // push up = toward the top row
         if (navArmed_) {  // first press: step now, then pause before repeating
             navArmed_ = false;
-            navNextRepeat_ = now + 400ms;
+            navNextRepeat_ = now + 350ms;
             return dir;
         }
         if (now >= navNextRepeat_) {  // held down: auto-repeat
-            navNextRepeat_ = now + 110ms;
+            navNextRepeat_ = now + 120ms;
             return dir;
         }
         return 0;
     }
-    if (axisY > -0.3f && axisY < 0.3f) navArmed_ = true;  // released: re-arm
+    if (axisY > -0.20f && axisY < 0.20f) navArmed_ = true;  // released: re-arm
+    return 0;
+}
+
+int App::navStepX(float axisX, std::chrono::steady_clock::time_point now) {
+    using namespace std::chrono_literals;
+    if (axisX > 0.38f || axisX < -0.38f) {
+        const int dir = (axisX > 0.0f) ? 1 : -1;  // push right = next col, push left = prev col
+        if (navArmedX_) {
+            navArmedX_ = false;
+            navNextRepeatX_ = now + 350ms;
+            return dir;
+        }
+        if (now >= navNextRepeatX_) {
+            navNextRepeatX_ = now + 140ms;
+            return dir;
+        }
+        return 0;
+    }
+    if (axisX > -0.20f && axisX < 0.20f) navArmedX_ = true;
     return 0;
 }
 
@@ -485,8 +514,13 @@ int App::run() {
             // Live settings + place the screen in front on first head tracking.
             renderer_.setSwapEyes(settings_.swapEyes());
             renderer_.setDrawModels(settings_.drawModels());
+            renderer_.setUiAppearance(settings_.uiTextScale(),
+                                      settings_.uiTextColorIdx(),
+                                      settings_.uiAccentColorIdx(),
+                                      settings_.uiDistance());
             if (!didInitialRecenter_ && in.headValid) {
                 renderer_.recenterScreen(in.headPos, in.headForward);
+                renderer_.setScreenCurvature(settings_.screenCurvature());
                 didInitialRecenter_ = true;
             }
 
@@ -580,37 +614,75 @@ int App::run() {
                                         !browser_.downloadActive() &&
                                             browser_.hasDownloads() && dlRecent,
                                         !browser_.downloadActive() && dlFailed);
-            // Downloads window: job list plus action buttons at the bottom.
+            //Downloads window: job list plus action buttons at the bottom.
             std::vector<std::string> drows;
             std::vector<std::string> dbtns;
             if (browser_.downloadActive()) {
-                dbtns.push_back(browser_.downloadPaused() ? "Resume" : "Pause");
-                dbtns.push_back("Stop");
+                dbtns.push_back(browser_.downloadPaused() ? "Resume All" : "Pause All");
+                dbtns.push_back("Cancel Active");
             }
-            dbtns.push_back("Clear finished");
+            dbtns.push_back("Clear Completed");
+            std::vector<VulkanRenderer::DownloadItem> djList;
+            int activeDlCount = 0;
             {
                 const auto& jobs = browser_.downloadJobs();
                 for (std::size_t i = 0; i < jobs.size(); ++i) {
                     const auto& j = jobs[i];
+                    if (j.state == 0) ++activeDlCount;
                     std::string nm = j.name;
                     if (nm.size() > 30) nm = nm.substr(0, 29) + "~";
                     char buf[192];
+                    VulkanRenderer::DownloadItem di;
+                    di.label = j.name;
+                    di.state = j.state;
+                    di.progress = (j.total > 0.0) ? static_cast<float>(static_cast<double>(j.bytes) / static_cast<double>(j.total)) : (j.state == 1 ? 1.0f : 0.0f);
                     if (j.state == 0) {
                         const int pct =
                             j.total > 0 ? static_cast<int>(j.bytes * 100 / j.total) : 0;
-                        std::snprintf(buf, sizeof(buf), "%s  %d%%  %.0f/%.0f MB",
-                                      nm.c_str(), pct, j.bytes / 1048576.0,
-                                      j.total / 1048576.0);
+                        const double speedMb = browser_.downloadSpeed() / (1024.0 * 1024.0);
+                        std::string etaStr = "";
+                        if (j.total > 0 && !browser_.downloadPaused() && browser_.downloadSpeed() >= 100.0 * 1024.0) {
+                            double eta = static_cast<double>(j.total - j.bytes) / browser_.downloadSpeed();
+                            if (eta < 0.0) eta = 0.0;
+                            const int secs = static_cast<int>(eta);
+                            char ebuf[32];
+                            std::snprintf(ebuf, sizeof(ebuf), " \xB7 ETA %02d:%02d", secs / 60, secs % 60);
+                            etaStr = ebuf;
+                        } else if (browser_.downloadPaused()) {
+                            etaStr = " \xB7 [PAUSED]";
+                        }
+                        char det[160];
+                        if (speedMb > 0.05) {
+                            std::snprintf(det, sizeof(det), "Downloading \xB7 %.1f / %.1f MB (%d%%) \xB7 %.1f MB/s%s",
+                                          j.bytes / 1048576.0, j.total / 1048576.0, pct, speedMb, etaStr.c_str());
+                        } else {
+                            std::snprintf(det, sizeof(det), "Downloading \xB7 %.1f / %.1f MB (%d%%)%s",
+                                          j.bytes / 1048576.0, j.total / 1048576.0, pct, etaStr.c_str());
+                        }
+                        di.detail = det;
+                        std::snprintf(buf, sizeof(buf), "%s  %s", nm.c_str(), det);
                     } else if (j.state == 1) {
                         std::snprintf(buf, sizeof(buf), "%s  done", nm.c_str());
+                        if (j.total > 0) {
+                            char cdet[96];
+                            std::snprintf(cdet, sizeof(cdet), "Completed \xB7 %.1f MB \xB7 Stored in %s",
+                                          j.total / 1048576.0, settings_.downloadDir().c_str());
+                            di.detail = cdet;
+                        } else {
+                            di.detail = "Completed \xB7 Stored locally";
+                        }
                     } else if (j.state == 3) {
                         std::snprintf(buf, sizeof(buf), "%s  stopped", nm.c_str());
+                        di.detail = "Paused / Stopped";
                     } else {
                         std::snprintf(buf, sizeof(buf), "%s  failed", nm.c_str());
+                        di.detail = "Transfer Failed";
                     }
                     drows.push_back(buf);
+                    djList.push_back(std::move(di));
                 }
             }
+            renderer_.setActiveDownloadCount(activeDlCount);
             const bool dlWin = downloadsWindow_ && !settings_.isOpen() &&
                                pendingDl_.empty();
             renderer_.setDownloadsModal(false);
@@ -618,40 +690,8 @@ int App::run() {
                 dlWin, "Downloads", drows,
                 browser_.downloadActive()
                     ? browser_.downloadText()
-                    : "Point + Trigger to select     B: close",
-                dbtns);
-            if (dlWin && in.select) {
-                const int bi = renderer_.downloadsButtonHovered();
-                if (bi >= 0) {
-                    if (browser_.downloadActive()) {
-                        if (bi == 0) browser_.togglePause();
-                        else if (bi == 1) browser_.stopDownload();
-                        else if (bi == 2) browser_.clearFinished();
-                    } else if (bi == 0) {
-                        browser_.clearFinished();
-                    }
-                    interacted = true;
-                } else {
-                    const int hov = renderer_.downloadsHovered();
-                    const auto& jobs = browser_.downloadJobs();
-                    if (hov >= 0 && hov < static_cast<int>(jobs.size()) &&
-                        jobs[static_cast<std::size_t>(hov)].state == 1 &&
-                        !jobs[static_cast<std::size_t>(hov)].localPath.empty()) {
-                        const auto& j = jobs[static_cast<std::size_t>(hov)];
-                        if (j.isDir) {
-                            // A finished folder opens in the file browser.
-                            browser_.openPath(j.localPath);
-                            downloadsWindow_ = false;
-                        } else {
-#ifdef PIXELVR_HAVE_MEDIA
-                            loadMedia(j.localPath);
-                            downloadsWindow_ = false;
-#endif
-                        }
-                        interacted = true;
-                    }
-                }
-            }
+                    : "Trigger: Play Completed  |  B: Close Hub",
+                dbtns, djList);
 
             // Folder-download confirmation: a modal with the size and two buttons.
             if (!pendingDl_.empty()) {
@@ -692,39 +732,147 @@ int App::run() {
             } else {
                 renderer_.setDownloadsModal(false);
             }
-            // Publish the browser panel first so the pointer can raycast it.
-            // The downloads window replaces the browser view instead of stacking
-            // on top of it, so nothing behind it can be selected by mistake.
-            if (browser_.isOpen() && !dlWin) {
-                std::vector<std::string> rows;
-                rows.reserve(browser_.entries().size());
+
+            // Publish the browser panel when Files tab is active in the Hub
+            if (browser_.isOpen() && !dlWin && !settings_.isOpen()) {
+                std::vector<VulkanRenderer::BrowserItem> items;
+                items.reserve(browser_.entries().size());
                 for (const auto& e : browser_.entries()) {
-                    std::string name = e.label;
-                    if (name.size() > 44) name = name.substr(0, 43) + "~";
-                    std::string row = name;
-                    if (!e.detail.empty()) {
-                        while (row.size() < 50) row += ' ';
-                        row += e.detail;
+                    VulkanRenderer::BrowserItem item;
+                    item.name = e.label;
+                    item.detail = e.detail;
+                    item.isDir = e.isDir;
+                    item.isVideo = e.isVideo;
+                    item.isBack = e.isBack;
+                    item.path = e.path;
+                    item.previewPath = e.previewPath;
+
+                    const std::string thumbTarget = !e.previewPath.empty()
+                        ? e.previewPath
+                        : (e.isVideo ? e.path : "");
+
+                    ThumbnailCache::MediaMeta meta{};
+                    bool hasMeta = false;
+                    if (!thumbTarget.empty() && thumbTarget.rfind("smb://", 0) != 0) {
+                        thumbnailCache_.request(thumbTarget);
+                        hasMeta = thumbnailCache_.getMeta(thumbTarget, meta);
                     }
-                    rows.push_back(std::move(row));
+
+                    auto classifyMediaBadge = [&](const std::string& pathOrName, int w, int h) -> std::string {
+                        const std::string lower = to_lower(pathOrName);
+                        const bool is180 = contains(lower, "vr180") || contains_num(lower, "180");
+                        const bool is360 = !is180 && (contains_num(lower, "360") || contains(lower, "equirect"));
+                        const bool isTb  = contains(lower, "_tb") || contains(lower, "-tb") ||
+                                           contains(lower, "_ou") || contains(lower, "overunder") ||
+                                           contains(lower, "htab");
+                        const bool isSbs = contains(lower, "sbs") || contains(lower, "_lr") ||
+                                           contains(lower, "sidebyside") || contains(lower, "3d");
+                        if (is180) return (isSbs || isTb) ? "VR180 3D" : "VR180";
+                        if (is360) return (isSbs || isTb) ? "VR360 3D" : "VR360";
+                        if (isTb)  return "3D TB";
+                        if (isSbs) return "3D SBS";
+
+                        if (w >= 7000 || h >= 3500 || contains(lower, "8k") || contains(lower, "4320p")) {
+                            return "FLAT 8K";
+                        }
+                        if (w >= 3600 || h >= 2000 || contains(lower, "4k") ||
+                            contains(lower, "2160p") || contains(lower, "uhd")) {
+                            return "FLAT 4K";
+                        }
+                        if (w >= 2500 || h >= 1400 || contains(lower, "1440p") || contains(lower, "2k")) {
+                            return "FLAT 1440P";
+                        }
+                        if (w >= 1800 || h >= 1000 || contains(lower, "1080p") || contains(lower, "fhd")) {
+                            return "FLAT 1080P";
+                        }
+                        if (w >= 1200 || h >= 700 || contains(lower, "720p")) {
+                            return "FLAT 720P";
+                        }
+                        return "FLAT 2D";
+                    };
+
+                    if (e.isBack) {
+                        item.tag = "UP";
+                    } else if (e.isNetwork) {
+                        item.tag = "SMB";
+                    } else if (e.isDir) {
+                        // Folders always show FOLDER in the badge; format of contained
+                        // video is added to the detail line below.
+                        item.tag = "FOLDER";
+                        if (!e.previewPath.empty()) {
+                            const std::string innerFmt = classifyMediaBadge(
+                                e.previewPath, hasMeta ? meta.width : 0, hasMeta ? meta.height : 0);
+                            if (!item.detail.empty()) {
+                                item.detail = innerFmt + " \xB7 " + item.detail;
+                            } else {
+                                item.detail = innerFmt;
+                            }
+                        }
+                    } else if (e.isVideo) {
+                        item.tag = classifyMediaBadge(
+                            e.path.empty() ? e.label : e.path,
+                            hasMeta ? meta.width : 0, hasMeta ? meta.height : 0);
+                    } else {
+                        item.tag = "FILE";
+                    }
+
+                    if (hasMeta) {
+                        if (meta.durationSec > 0.5) {
+                            const int tot = static_cast<int>(meta.durationSec + 0.5);
+                            const int h = tot / 3600, m = (tot % 3600) / 60, s = tot % 60;
+                            char dbuf[24];
+                            if (h > 0) std::snprintf(dbuf, sizeof(dbuf), "%d:%02d:%02d", h, m, s);
+                            else std::snprintf(dbuf, sizeof(dbuf), "%d:%02d", m, s);
+                            item.durationTag = dbuf;
+                        }
+                        if (meta.width > 0 && meta.height > 0) {
+                            char specBuf[96];
+                            if (meta.fps > 1.0) {
+                                std::snprintf(specBuf, sizeof(specBuf), "%dx%d \xB7 %.0f FPS",
+                                              meta.width, meta.height, meta.fps);
+                            } else {
+                                std::snprintf(specBuf, sizeof(specBuf), "%dx%d",
+                                              meta.width, meta.height);
+                            }
+                            if (!item.detail.empty()) {
+                                item.detail = std::string(specBuf) + " \xB7 " + item.detail;
+                            } else {
+                                item.detail = specBuf;
+                            }
+                        }
+                    }
+                    items.push_back(std::move(item));
                 }
+
                 std::string status = browser_.status();
                 if (browser_.onNetwork() && !browser_.isBusy()) {
-                    // Keep any message (e.g. a download hint) visible; just add
-                    // the action hint rather than replacing it.
                     if (status.empty()) {
-                        status = browser_.onNetwork()
-                                     ? std::string("A: open     X: download")
-                                     : std::string("A: open");
-                    } else {
-                        status += "      [A: open]";
+                        status = "A/Trigger: Stream  \xB7  X: Download to Local";
                     }
                 }
-                renderer_.setBrowser(true, browser_.title(), rows,
-                                     browser_.selected(), status);
+                renderer_.setBrowserItems(true, browser_.title(), items,
+                                         browser_.selected(), status);
+
+                // Feed ready thumbnails to the visible slots (6 cards)
+                const int curFirst = renderer_.browserFirst();
+                const int totalItems = static_cast<int>(items.size());
+                for (int slot = 0; slot < 6; ++slot) {
+                    const int idx = curFirst + slot;
+                    if (idx >= 0 && idx < totalItems) {
+                        const std::string thumbTarget = !items[idx].previewPath.empty()
+                            ? items[idx].previewPath
+                            : (items[idx].isVideo ? items[idx].path : "");
+                        if (!thumbTarget.empty()) {
+                            std::vector<uint8_t> rgba;
+                            if (thumbnailCache_.get(thumbTarget, rgba)) {
+                                renderer_.updateCardThumbnail(slot, thumbTarget, rgba.data(), 256, 144);
+                            }
+                        }
+                    }
+                }
                 browserOpen = true;
             } else {
-                renderer_.setBrowser(false, "", {}, 0, "");
+                renderer_.setBrowserItems(false, "", {}, 0, "");
             }
 #endif
 
@@ -739,6 +887,7 @@ int App::run() {
                                                     : (r.label + " : " + r.value));
                     sEnabled.push_back(r.enabled ? 1 : 0);
                 }
+                renderer_.setSettingsSection(settings_.section());
                 renderer_.setSettings(true, settings_.title(), sRows,
                                       settings_.selected(), settings_.status(),
                                       sEnabled);
@@ -783,10 +932,9 @@ int App::run() {
                 }
                 const bool uiPanelActive = browserOpen || settingsOpen ||
                                            downloadsWindow_ || !pendingDl_.empty();
-                // The control bar sits below the panels, so keep it available
-                // while the file browser is open (lets you jump straight to the
-                // Downloads window); only hide it for the modal states.
-                const bool barBlocked = settingsOpen || downloadsWindow_ ||
+                // The Transport HUD is only visible during playback when the
+                // Unified Spatial Hub and modals are closed.
+                const bool barBlocked = browserOpen || settingsOpen || downloadsWindow_ ||
                                         !pendingDl_.empty();
                 // Controls (buttons + timeline) show only while a controller is
                 // actively moving; they fade after a few seconds of stillness.
@@ -841,46 +989,130 @@ int App::run() {
             }
 
 #ifdef PIXELVR_HAVE_FREETYPE
-            // Browsing stays interactive during downloads: they run in a separate
-            // process now, so they no longer block directory access. (Only guard
-            // against an in-flight SMB directory scan.) Interaction is suspended
-            // while an overlay (downloads window / confirm dialog) owns the view.
-            if (browser_.isOpen() && !browser_.isScanning() && !downloadsWindow_ &&
-                pendingDl_.empty()) {
-                if (const int d = navStep(in.thumbstickY, nowT)) {
-                    browser_.move(d);
-                    renderer_.scrollBrowser(d);
+            // Unified Spatial Hub left navigation rail clicks (shared across Files, Downloads, Settings)
+            const bool hubActive = (browserOpen || settingsOpen || downloadsWindow_) && pendingDl_.empty();
+            const int sbHover = renderer_.browserSidebarHovered();
+            if (hubActive && (in.togglePlay || in.select) && sbHover >= 0) {
+                if (sbHover == 0) {
+                    // Main Tab: Files
+                    downloadsWindow_ = false;
+                    settings_.close();
+                    if (!browser_.isOpen()) browser_.open();
+                } else if (sbHover == 1) {
+                    // Main Tab: Downloads
+                    settings_.close();
+                    browser_.setOpen(true);
+                    downloadsWindow_ = true;
+                } else if (sbHover == 2) {
+                    // Main Tab: Settings
+                    downloadsWindow_ = false;
+                    settings_.open();
+                } else if (sbHover >= 3 && sbHover <= 6) {
+                    const int sub = sbHover - 3;
+                    if (settings_.isOpen()) {
+                        settings_.setSection(sub);
+                    } else if (downloadsWindow_) {
+                        if (sub <= 2) renderer_.setDownloadsFilter(sub);
+                    } else if (browser_.isOpen()) {
+                        if (sub == 0) browser_.openHome();
+                        else if (sub == 1) browser_.openVideos();
+                        else if (sub == 2) browser_.openNetwork();
+                        else if (sub == 3) browser_.openDownloads();
+                    }
                 }
+                interacted = true;
+            }
 
-                const int hovered = renderer_.browserHovered();
-                if (hovered >= 0) {
-                    renderer_.setBrowserSelected(hovered);
-                    browser_.setSelected(hovered);
-                }
-                // Open the highlighted entry. The trigger does it whenever the
-                // laser is not resting on a control-bar button (that click belongs
-                // to the bar, handled below); A does it too, which is the natural
-                // choice when moving the highlight with the thumbstick / d-pad.
-                // Downloading has its own buttons (X / Y).
-                if ((in.togglePlay || in.select) &&
-                    renderer_.pointerButton() < 0) {
-                    std::string playPath;
-                    if (browser_.activate(playPath) == Browser::Result::Play &&
-                        !playPath.empty()) {
+            // Downloads view interaction inside Unified Spatial Hub
+            if (dlWin && (in.select || in.togglePlay) && sbHover < 0) {
+                const int bi = renderer_.downloadsButtonHovered();
+                if (bi >= 0) {
+                    if (browser_.downloadActive()) {
+                        if (bi == 0) browser_.togglePause();
+                        else if (bi == 1) browser_.stopDownload();
+                        else if (bi == 2) browser_.clearFinished();
+                    } else if (bi == 0) {
+                        browser_.clearFinished();
+                    }
+                    interacted = true;
+                } else {
+                    const int hov = renderer_.downloadsHovered();
+                    const auto& jobs = browser_.downloadJobs();
+                    if (hov >= 0 && hov < static_cast<int>(jobs.size()) &&
+                        jobs[static_cast<std::size_t>(hov)].state == 1 &&
+                        !jobs[static_cast<std::size_t>(hov)].localPath.empty()) {
+                        const auto& j = jobs[static_cast<std::size_t>(hov)];
+                        if (j.isDir) {
+                            browser_.openPath(j.localPath);
+                            downloadsWindow_ = false;
+                        } else {
 #ifdef PIXELVR_HAVE_MEDIA
-                        loadMedia(playPath);
+                            loadMedia(j.localPath);
+                            downloadsWindow_ = false;
+                            browser_.setOpen(false);
 #endif
-                        browser_.setOpen(false);
+                        }
+                        interacted = true;
                     }
                 }
             }
-            if (browser_.isOpen() && in.recenter && in.headValid) {
+
+            // Files view interaction inside Unified Spatial Hub
+            if (browser_.isOpen() && !browser_.isScanning() && !downloadsWindow_ &&
+                !settings_.isOpen() && pendingDl_.empty()) {
+                // 2D grid thumbstick navigation: Y steps rows (3 cards), X steps columns (1 card)
+                const int dy = navStep(in.thumbstickY, nowT);
+                const int dx = navStepX(in.thumbstickX, nowT);
+                if (dy != 0 || dx != 0) {
+                    const int delta = dy * 3 + dx;
+                    browser_.move(delta);
+                    renderer_.scrollBrowser(0);
+                }
+
+                // Check header pagination buttons [<] and [>]
+                const int pbHover = renderer_.browserPageBtnHovered();
+                if ((in.togglePlay || in.select) && pbHover >= 0 && sbHover < 0) {
+                    renderer_.scrollBrowser(pbHover == 0 ? -2 : 2);
+                    browser_.setSelected(renderer_.browserFirst());
+                } else if (sbHover < 0) {
+                    const bool stickActive = (std::fabs(in.thumbstickY) > 0.25f || std::fabs(in.thumbstickX) > 0.25f);
+                    const int hovered = renderer_.browserHovered();
+                    if (!stickActive && hovered >= 0) {
+                        renderer_.setBrowserSelected(hovered);
+                        browser_.setSelected(hovered);
+                    }
+                    // Open the highlighted entry.
+                    if ((in.togglePlay || in.select) &&
+                        renderer_.pointerButton() < 0 && hovered >= 0) {
+                        std::string playPath;
+                        if (browser_.activate(playPath) == Browser::Result::Play &&
+                            !playPath.empty()) {
+#ifdef PIXELVR_HAVE_MEDIA
+                            loadMedia(playPath);
+#endif
+                            browser_.setOpen(false);
+                        }
+                    } else if ((in.togglePlay || in.select) &&
+                               renderer_.pointerButton() < 0 && stickActive) {
+                        std::string playPath;
+                        if (browser_.activate(playPath) == Browser::Result::Play &&
+                            !playPath.empty()) {
+#ifdef PIXELVR_HAVE_MEDIA
+                            loadMedia(playPath);
+#endif
+                            browser_.setOpen(false);
+                        }
+                    }
+                }
+            }
+            if ((browser_.isOpen() || downloadsWindow_) && in.recenter && in.headValid) {
                 renderer_.recenterScreen(in.headPos, in.headForward);
             }
             // X / Y: download the highlighted entry. Folders ask for confirmation
             // (with the measured size) first; on a network share a plain file is
             // copied, and locally there is nothing to download.
-            if (browser_.isOpen() && downloadPressed && pendingDl_.empty()) {
+            if (browser_.isOpen() && !downloadsWindow_ && !settings_.isOpen() &&
+                downloadPressed && pendingDl_.empty()) {
                 const Browser::Entry* fe = browser_.focused();
                 if (fe != nullptr && fe->isDir && !fe->isBack &&
                     browser_.onNetwork()) {
@@ -894,9 +1126,12 @@ int App::run() {
             }
 #endif
 
-            if (settings_.isOpen()) {
+            if (settings_.isOpen() && sbHover < 0) {
                 if (const int d = navStep(in.thumbstickY, nowT)) {
-                    settings_.move(d);
+                    settings_.move(d * 2);
+                }
+                if (const int dx = navStepX(in.thumbstickX, nowT)) {
+                    settings_.move(dx);
                 }
 
                 const int hovered = renderer_.settingsHovered();
@@ -905,7 +1140,7 @@ int App::run() {
                     settings_.setSelected(hovered);
                 }
                 // Trigger activates the selection made by the laser or the stick.
-                if (in.select) {
+                if (in.select && (hovered >= 0 || std::fabs(in.thumbstickY) > 0.25f)) {
                     auto act = settings_.activate();
                     if (act == SettingsMenu::Action::RecenterScreen) {
                         if (in.headValid) {
@@ -925,6 +1160,8 @@ int App::run() {
                                           VulkanRenderer::StereoMode::TopBottom);
                         } else if (act == SettingsMenu::Action::CycleDistance) {
                             renderer_.adjustScreenDistance(settings_.screenDistance() - 3.0f);
+                        } else if (act == SettingsMenu::Action::CycleCurvature) {
+                            renderer_.setScreenCurvature(settings_.screenCurvature());
                         }
 #ifdef PIXELVR_HAVE_MEDIA
                         else if (act == SettingsMenu::Action::PickVideoStream ||
@@ -940,9 +1177,8 @@ int App::run() {
                 }
             }
 
-            // Control-bar buttons stay usable while the file browser is open (the
-            // bar sits below the panel); the video/viewpoint controls stay gated.
-            const bool barOk = !settingsOpen && !downloadsWindow_ &&
+            // Cinema Transport Dock is only active when the Unified Spatial Hub is closed.
+            const bool barOk = !browserOpen && !settingsOpen && !downloadsWindow_ &&
                                pendingDl_.empty();
             if (barOk) {
                 // Point-and-click the media control bar with the trigger.
@@ -963,12 +1199,15 @@ int App::run() {
 #endif
                     } else if (cb == VulkanRenderer::CtrlButton::Settings) {
                         settings_.open();
-                    } else if (cb == VulkanRenderer::CtrlButton::Downloads) {
-                        downloadsWindow_ = !downloadsWindow_;
-                    }
+                    } else if (cb == VulkanRenderer::CtrlButton::Recenter) {
+                        if (in.headValid) {
+                            renderer_.recenterScreen(in.headPos, in.headForward);
+                        }
+                    } else if (cb == VulkanRenderer::CtrlButton::Downloads ||
+                               cb == VulkanRenderer::CtrlButton::Files) {
 #ifdef PIXELVR_HAVE_FREETYPE
-                    else if (cb == VulkanRenderer::CtrlButton::Files) {
                         browser_.open();
+#endif
                     } else if (cb == VulkanRenderer::CtrlButton::Download) {
                         // Download the entry highlighted in the file browser;
                         // folders ask for confirmation (with the size) first.
@@ -985,7 +1224,6 @@ int App::run() {
                             }
                         }
                     }
-#endif
 #ifdef PIXELVR_HAVE_MEDIA
                     else if (mediaOpen_ &&
                              cb == VulkanRenderer::CtrlButton::PlayPause) {
@@ -996,6 +1234,43 @@ int App::run() {
                     } else if (mediaOpen_ &&
                                cb == VulkanRenderer::CtrlButton::SeekFwd) {
                         media_.seekRelative(10.0);
+                    } else if (cb == VulkanRenderer::CtrlButton::FormatToggle) {
+                        int pm = settings_.projectionMode();
+                        int sm = settings_.stereoMode();
+                        if (pm == 0 && sm == 0) {
+                            settings_.setStereoMode(1);
+                            renderer_.setStereoMode(VulkanRenderer::StereoMode::SideBySide);
+                        } else if (pm == 0) {
+                            settings_.setProjectionMode(2);
+                            settings_.setStereoMode(1);
+                            renderer_.setProjectionMode(VulkanRenderer::ProjectionMode::Equirect180);
+                            renderer_.setStereoMode(VulkanRenderer::StereoMode::SideBySide);
+                        } else if (pm == 2 && sm == 1) {
+                            settings_.setStereoMode(2);
+                            renderer_.setStereoMode(VulkanRenderer::StereoMode::TopBottom);
+                        } else if (pm == 2) {
+                            settings_.setProjectionMode(1);
+                            settings_.setStereoMode(1);
+                            renderer_.setProjectionMode(VulkanRenderer::ProjectionMode::Equirect360);
+                            renderer_.setStereoMode(VulkanRenderer::StereoMode::SideBySide);
+                        } else {
+                            settings_.setProjectionMode(0);
+                            settings_.setStereoMode(0);
+                            renderer_.setProjectionMode(VulkanRenderer::ProjectionMode::Flat);
+                            renderer_.setStereoMode(VulkanRenderer::StereoMode::Mono);
+                        }
+                    } else if (cb == VulkanRenderer::CtrlButton::AudioToggle) {
+                        if (mediaOpen_ && media_.audioStreams().size() > 1) {
+                            switchTracks(false);
+                        }
+                    } else if (cb == VulkanRenderer::CtrlButton::ScreenToggle) {
+                        if (settings_.projectionMode() == 0) {
+                            settings_.setCurvatureIdx(settings_.curvatureIdx() + 1);
+                            renderer_.setScreenCurvature(settings_.screenCurvature());
+                        } else {
+                            renderer_.setSpherePitch(0.0f);
+                            renderer_.setSphereZoom(1.0f);
+                        }
                     }
 #endif
                     interacted = true;
@@ -1018,6 +1293,12 @@ int App::run() {
                 if (settings_.projectionMode() == 0) {
                     if (in.thumbstickY > 0.15f || in.thumbstickY < -0.15f) {
                         renderer_.adjustScreenDistance(in.thumbstickY * 0.04f);
+                        interacted = true;
+                    }
+                    // When pointing at the Screen Curve pill on the HUD, thumbstick X smoothly adjusts curvature!
+                    if (renderer_.pointerButton() == static_cast<int>(VulkanRenderer::CtrlButton::ScreenToggle) &&
+                        std::fabs(in.thumbstickX) > 0.15f && dt > 0.0f) {
+                        renderer_.adjustScreenCurvature(in.thumbstickX * dt * 0.65f);
                         interacted = true;
                     }
                 } else if (dt > 0.0f) {
@@ -1095,6 +1376,53 @@ int App::run() {
                     elapsed = scrubbing_ ? scrubTarget_ : media_.position();
                     progress = static_cast<float>(elapsed / total);
                 }
+                std::string fLabel = "2D FLAT";
+                if (settings_.projectionMode() == 0) {
+                    fLabel = (settings_.stereoMode() == 0) ? "2D FLAT" :
+                             (settings_.stereoMode() == 1) ? "3D SBS" : "3D TB";
+                } else if (settings_.projectionMode() == 2) {
+                    fLabel = (settings_.stereoMode() == 1) ? "VR 180 SBS" :
+                             (settings_.stereoMode() == 2) ? "VR 180 TB" : "180 MONO";
+                } else {
+                    fLabel = (settings_.stereoMode() == 1) ? "360 SBS" : "360 MONO";
+                }
+
+                std::string aLabel = "AUDIO";
+                bool aEnabled = false;
+                if (mediaOpen_) {
+                    const auto aStreams = media_.audioStreams();
+                    const int curA = media_.currentAudioStream();
+                    for (const auto& as : aStreams) {
+                        if (as.index == curA) {
+                            std::string l = as.language;
+                            for (char& c : l) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                            if (l.empty() || l == "und" || l == "undef" || l == "undefined") {
+                                aLabel = (as.label.empty() || as.label == "und" || as.label == "undef") ? "DEFAULT" : as.label;
+                            } else {
+                                aLabel = as.language;
+                            }
+                            for (char& c : aLabel) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                            if (aLabel.size() > 8) aLabel = aLabel.substr(0, 8);
+                            break;
+                        }
+                    }
+                    // Only enable audio cycling if there is more than 1 audio stream
+                    aEnabled = (aStreams.size() > 1);
+                }
+
+                std::string sLabel = "RESET HORIZON";
+                if (settings_.projectionMode() == 0) {
+                    const int cPct = static_cast<int>(renderer_.screenCurvature() * 100.0f + 0.5f);
+                    if (cPct <= 2) {
+                        sLabel = "SCREEN: FLAT";
+                    } else {
+                        char cbuf[32];
+                        std::snprintf(cbuf, sizeof(cbuf), "CURVED: %d%%", cPct);
+                        sLabel = cbuf;
+                    }
+                }
+
+                renderer_.setHudLabels(fLabel, aLabel, sLabel, true, aEnabled);
                 renderer_.setTransport(controlsUp, progress, paused, elapsed, total);
 #else
                 (void)interacted;

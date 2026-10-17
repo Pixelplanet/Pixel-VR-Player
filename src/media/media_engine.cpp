@@ -464,6 +464,11 @@ struct MediaEngine::Impl {
             return false;
         }
         codec->pkt_timebase = s->time_base;
+        codec->thread_count = 0;  // Multi-threaded SW decode across all CPU cores
+        codec->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+        if (std::strstr(videoDecoder->name, "v4l2m2m") != nullptr) {
+            av_opt_set_int(codec->priv_data, "num_output_buffers", 4, 0);
+        }
         if (decoderDrm) {
             av_opt_set_int(codec->priv_data, "num_capture_buffers", captureBuffers, 0);
             av_opt_set_int(codec->priv_data, "drm_prime", 1, 0);
@@ -922,7 +927,12 @@ bool MediaEngine::open(const std::string& path) {
             return false;
         }
         impl_->codec->pkt_timebase = stream->time_base;
+        impl_->codec->thread_count = 0;  // Auto-detect and utilize all CPU cores
+        impl_->codec->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
         impl_->videoDecoder = dec;  // retained so the decode thread can reopen on seek
+        if (std::strstr(dec->name, "v4l2m2m") != nullptr) {
+            av_opt_set_int(impl_->codec->priv_data, "num_output_buffers", 4, 0);
+        }
         impl_->decoderDrm = drmPrime && std::strstr(dec->name, "v4l2m2m") != nullptr;
         if (impl_->decoderDrm) {
             // Export decoder output as DMA-BUF (AV_PIX_FMT_DRM_PRIME) for zero-copy

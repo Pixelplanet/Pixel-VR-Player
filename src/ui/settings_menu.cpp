@@ -29,6 +29,30 @@ const char* kLangCodes[] = {"",    "eng", "deu", "fra", "spa",
                            "jpn", "ita", "rus", "chi", "kor"};
 constexpr int kLangCount = 10;
 
+const char* kCurvatureNames[] = {"Flat (0%)", "Gentle (25%)", "Cinema (50%)",
+                                 "Deep Curve (75%)", "IMAX Wrap (100%)"};
+const float kCurvatureValues[] = {0.0f, 0.25f, 0.50f, 0.75f, 1.00f};
+constexpr int kCurvatureCount = 5;
+
+const char* kUiTextScaleNames[] = {"Compact (90%)", "Standard (105%)",
+                                   "Large (120%)", "Extra Large (140%)",
+                                   "Huge (160%)"};
+const float kUiTextScaleValues[] = {0.90f, 1.05f, 1.20f, 1.40f, 1.60f};
+constexpr int kUiTextScaleCount = 5;
+
+const char* kUiTextColorNames[] = {"Pure White", "Ice Cyan", "Warm Cream",
+                                   "Soft Gold", "Mint Green"};
+constexpr int kUiTextColorCount = 5;
+
+const char* kUiAccentColorNames[] = {"Cyber Cyan", "Emerald Green", "Amber Gold",
+                                     "Royal Purple", "Crimson Red"};
+constexpr int kUiAccentColorCount = 5;
+
+const char* kUiDistanceNames[] = {"Near (1.5 m)", "Comfort (1.9 m)",
+                                  "Medium (2.3 m)", "Far (2.8 m)"};
+const float kUiDistanceValues[] = {1.5f, 1.9f, 2.3f, 2.8f};
+constexpr int kUiDistanceCount = 4;
+
 std::string getConfigPath() {
 #ifdef _WIN32
     const char* appData = std::getenv("APPDATA");
@@ -53,6 +77,7 @@ SettingsMenu::SettingsMenu() {
 
 void SettingsMenu::open() {
     open_ = true;
+    if (section_ < 0 || section_ > 3) section_ = 0;
     refresh();
 }
 
@@ -81,7 +106,7 @@ void SettingsMenu::refresh() {
     }
 
     if (section_ == 0) {
-        title_ = "Display & Projection";
+        title_ = "Settings > Display & Cinema";
         const char* projNames[] = {"Flat Screen", "360 Equirectangular",
                                    "180 Equirectangular"};
         const char* stereoNames[] = {"2D Mono", "Side-by-Side (SBS)",
@@ -94,28 +119,35 @@ void SettingsMenu::refresh() {
                          Action::CycleProjection});
         rows_.push_back({"Stereo 3D Format", stereoNames[stereoMode_ % 3],
                          Action::CycleStereo});
-        rows_.push_back({"Swap Left/Right Eye", swapEyes_ ? "On" : "Off",
-                         Action::ToggleSwapEyes});
+        rows_.push_back({"Cinema Screen Curve", kCurvatureNames[curvatureIdx_ % kCurvatureCount],
+                         Action::CycleCurvature});
         rows_.push_back({"Screen Distance", distStream.str(),
                          Action::CycleDistance});
+        rows_.push_back({"Swap Left/Right Eye", swapEyes_ ? "On" : "Off",
+                         Action::ToggleSwapEyes});
+        rows_.push_back({"Recenter Screen View", "Recenter Now",
+                         Action::RecenterScreen});
     } else if (section_ == 1) {
-        title_ = "Controls & Bindings";
-        auto btnLabel = [&](int func, int btn) -> std::string {
-            return listeningFunc_ == func
-                       ? std::string("[ press a button ]")
-                       : std::string(kButtonNames[btn % kButtonCount]);
-        };
-        rows_.push_back({"Play / Pause", btnLabel(0, bindPlayBtn_),
-                         Action::ListenPlay});
-        rows_.push_back({"Open Menu / Browser", btnLabel(1, bindMenuBtn_),
-                         Action::ListenMenu});
-        rows_.push_back({"Recenter View", btnLabel(2, bindRecenterBtn_),
-                         Action::ListenRecenter});
-        rows_.push_back({"Select / Click", "Trigger", Action::None});
-        rows_.push_back({"Controller Models", drawModels_ ? "On" : "Off",
-                         Action::ToggleModels});
+        title_ = "Settings > UI & Appearance";
+        rows_.push_back({"UI Text Size",
+                         kUiTextScaleNames[uiTextScaleIdx_ % kUiTextScaleCount],
+                         Action::CycleUiTextScale});
+        rows_.push_back({"UI Text Color",
+                         kUiTextColorNames[uiTextColorIdx_ % kUiTextColorCount],
+                         Action::CycleUiTextColor});
+        rows_.push_back({"UI Accent Theme",
+                         kUiAccentColorNames[uiAccentColorIdx_ % kUiAccentColorCount],
+                         Action::CycleUiAccentColor});
+        rows_.push_back({"UI Panel Distance",
+                         kUiDistanceNames[uiDistanceIdx_ % kUiDistanceCount],
+                         Action::CycleUiDistance});
+        rows_.push_back({"Download Folder",
+                         kDownloadDirs[downloadDirIdx_ % kDownloadDirCount],
+                         Action::CycleDownloadDir});
+        rows_.push_back({"Debug Statistics", showStats_ ? "On" : "Off",
+                         Action::ToggleStats});
     } else if (section_ == 2) {
-        title_ = "Audio / Video Tracks";
+        title_ = "Settings > Audio & Video Tracks";
         Row v{"Video Track",
               videoStreams_.empty()
                   ? "(none)"
@@ -138,40 +170,51 @@ void SettingsMenu::refresh() {
                          kLangNames[audioLangIdx_ % kLangCount],
                          Action::EnterLangList});
     } else if (section_ == 3) {
-        title_ = "System & Debug";
-        rows_.push_back({"Debug Statistics", showStats_ ? "On" : "Off",
-                         Action::ToggleStats});
-        rows_.push_back({"Download Folder",
-                         kDownloadDirs[downloadDirIdx_ % kDownloadDirCount],
-                         Action::CycleDownloadDir});
+        title_ = "Settings > Controls & Bindings";
+        auto btnLabel = [&](int func, int btn) -> std::string {
+            return listeningFunc_ == func
+                       ? std::string("[ press a button ]")
+                       : std::string(kButtonNames[btn % kButtonCount]);
+        };
+        rows_.push_back({"Play / Pause", btnLabel(0, bindPlayBtn_),
+                         Action::ListenPlay});
+        rows_.push_back({"Open Menu / Browser", btnLabel(1, bindMenuBtn_),
+                         Action::ListenMenu});
+        rows_.push_back({"Recenter View", btnLabel(2, bindRecenterBtn_),
+                         Action::ListenRecenter});
+        rows_.push_back({"Select / Click", "Trigger", Action::None});
+        rows_.push_back({"Controller Models", drawModels_ ? "On" : "Off",
+                         Action::ToggleModels});
     } else if (section_ == 10) {
-        title_ = "Select Video Track";
+        title_ = "Settings > Select Video Track";
         for (std::size_t i = 0; i < videoStreams_.size(); ++i) {
             Row r{videoStreams_[i].second,
-                  static_cast<int>(i) == videoSel_ ? "<" : "",
+                  static_cast<int>(i) == videoSel_ ? "ACTIVE" : "Select",
                   Action::PickVideoStream};
             r.data = static_cast<int>(i);
             rows_.push_back(r);
         }
+        rows_.push_back({"< Back to Tracks", "", Action::Back});
     } else if (section_ == 11) {
-        title_ = "Select Audio Track";
+        title_ = "Settings > Select Audio Track";
         for (std::size_t i = 0; i < audioStreams_.size(); ++i) {
             Row r{audioStreams_[i].second,
-                  static_cast<int>(i) == audioSel_ ? "<" : "",
+                  static_cast<int>(i) == audioSel_ ? "ACTIVE" : "Select",
                   Action::PickAudioStream};
             r.data = static_cast<int>(i);
             rows_.push_back(r);
         }
+        rows_.push_back({"< Back to Tracks", "", Action::Back});
     } else {  // section_ == 12: preferred-language list
-        title_ = "Preferred Audio Language";
+        title_ = "Settings > Preferred Audio Language";
         for (int i = 0; i < kLangCount; ++i) {
-            Row r{kLangNames[i], i == audioLangIdx_ ? "<" : "",
+            Row r{kLangNames[i], i == audioLangIdx_ ? "ACTIVE" : "Select",
                   Action::PickLanguage};
             r.data = i;
             rows_.push_back(r);
         }
+        rows_.push_back({"< Back to Tracks", "", Action::Back});
     }
-    rows_.push_back({"< Back", "", Action::Back});
 }
 
 SettingsMenu::Action SettingsMenu::activate() {
@@ -188,7 +231,7 @@ SettingsMenu::Action SettingsMenu::activate() {
         case Action::EnterAudioList: section_ = 11; selected_ = 0; refresh(); break;
         case Action::EnterLangList:  section_ = 12; selected_ = 0; refresh(); break;
         case Action::Back:
-            section_ = (section_ >= 10) ? 2 : -1;  // list -> Tracks; else -> root
+            section_ = (section_ >= 10) ? 2 : 0;  // list -> Tracks; else -> Display
             selected_ = 0;
             refresh();
             break;
@@ -240,6 +283,31 @@ SettingsMenu::Action SettingsMenu::activate() {
         case Action::CycleDistance:
             screenDistance_ += 0.5f;
             if (screenDistance_ > 5.0f) screenDistance_ = 1.5f;
+            saveConfig();
+            refresh();
+            break;
+        case Action::CycleCurvature:
+            curvatureIdx_ = (curvatureIdx_ + 1) % kCurvatureCount;
+            saveConfig();
+            refresh();
+            break;
+        case Action::CycleUiTextScale:
+            uiTextScaleIdx_ = (uiTextScaleIdx_ + 1) % kUiTextScaleCount;
+            saveConfig();
+            refresh();
+            break;
+        case Action::CycleUiTextColor:
+            uiTextColorIdx_ = (uiTextColorIdx_ + 1) % kUiTextColorCount;
+            saveConfig();
+            refresh();
+            break;
+        case Action::CycleUiAccentColor:
+            uiAccentColorIdx_ = (uiAccentColorIdx_ + 1) % kUiAccentColorCount;
+            saveConfig();
+            refresh();
+            break;
+        case Action::CycleUiDistance:
+            uiDistanceIdx_ = (uiDistanceIdx_ + 1) % kUiDistanceCount;
             saveConfig();
             refresh();
             break;
@@ -323,6 +391,24 @@ std::string SettingsMenu::downloadDir() const {
     return d[0] == '~' ? base + (d + 1) : std::string(d);
 }
 
+float SettingsMenu::screenCurvature() const {
+    return kCurvatureValues[curvatureIdx_ % kCurvatureCount];
+}
+
+void SettingsMenu::setCurvatureIdx(int idx) {
+    curvatureIdx_ = ((idx % kCurvatureCount) + kCurvatureCount) % kCurvatureCount;
+    saveConfig();
+    refresh();
+}
+
+float SettingsMenu::uiTextScale() const {
+    return kUiTextScaleValues[uiTextScaleIdx_ % kUiTextScaleCount];
+}
+
+float SettingsMenu::uiDistance() const {
+    return kUiDistanceValues[uiDistanceIdx_ % kUiDistanceCount];
+}
+
 void SettingsMenu::loadConfig() {
     const std::string path = getConfigPath();
     std::ifstream file(path);
@@ -351,6 +437,11 @@ void SettingsMenu::loadConfig() {
         }
         else if (key == "download_dir") downloadDirIdx_ = std::clamp(std::stoi(val), 0, kDownloadDirCount - 1);
         else if (key == "audio_lang") audioLangIdx_ = std::clamp(std::stoi(val), 0, kLangCount - 1);
+        else if (key == "curvature") curvatureIdx_ = std::clamp(std::stoi(val), 0, kCurvatureCount - 1);
+        else if (key == "ui_text_scale") uiTextScaleIdx_ = std::clamp(std::stoi(val), 0, kUiTextScaleCount - 1);
+        else if (key == "ui_text_color") uiTextColorIdx_ = std::clamp(std::stoi(val), 0, kUiTextColorCount - 1);
+        else if (key == "ui_accent_color") uiAccentColorIdx_ = std::clamp(std::stoi(val), 0, kUiAccentColorCount - 1);
+        else if (key == "ui_distance") uiDistanceIdx_ = std::clamp(std::stoi(val), 0, kUiDistanceCount - 1);
     }
     PIXELVR_LOG_INFO("Loaded settings from %s", path.c_str());
 }
@@ -375,6 +466,11 @@ void SettingsMenu::saveConfig() const {
             file << "bind_recenter_btn=" << bindRecenterBtn_ << "\n";
             file << "download_dir=" << downloadDirIdx_ << "\n";
             file << "audio_lang=" << audioLangIdx_ << "\n";
+            file << "curvature=" << curvatureIdx_ << "\n";
+            file << "ui_text_scale=" << uiTextScaleIdx_ << "\n";
+            file << "ui_text_color=" << uiTextColorIdx_ << "\n";
+            file << "ui_accent_color=" << uiAccentColorIdx_ << "\n";
+            file << "ui_distance=" << uiDistanceIdx_ << "\n";
         }
     } catch (const std::exception& e) {
         PIXELVR_LOG_WARN("Could not save settings: %s", e.what());

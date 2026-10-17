@@ -1,0 +1,71 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing v* tag to publish (leave empty for a build-only run)"
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build Steam Frame ARM64 release
+    # Native aarch64 runner: no cross-toolchain or device sysroot needed.
+    # Debian 13 (trixie) ships FFmpeg 7, matching the SONAMEs present on the
+    # Steam Frame (libavcodec.so.61, libavutil.so.59, ...).
+    runs-on: ubuntu-24.04-arm
+    container: debian:trixie
+    steps:
+      - name: Install build dependencies
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+            build-essential cmake ninja-build git ca-certificates pkg-config file \
+            glslang-tools libvulkan-dev \
+            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev \
+            libpulse-dev libfreetype-dev libsmbclient-dev \
+            libx11-dev libxrandr-dev libxxf86vm-dev libgl-dev
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          fetch-depth: 1
+
+      - name: Build
+        run: bash tools/build.sh
+
+      - name: Package
+        run: |
+          set -eux
+          tag="${{ inputs.tag || github.ref_name }}"
+          bash tools/package-release.sh build pixelvr-linux-arm64.tar.gz
+          cp pixelvr-linux-arm64.tar.gz "pixelvr-linux-arm64-${tag}.tar.gz"
+
+      - name: Verify artifact
+        run: |
+          file build/bin/pixelvr
+          file build/bin/pixelvr | grep -q 'ARM aarch64'
+          tar -tzf pixelvr-linux-arm64.tar.gz | grep -q '^PixelVRPlayer/run.sh$'
+          tar -tzf pixelvr-linux-arm64.tar.gz | grep -q '/shaders/thumb.frag.spv$'
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pixelvr-linux-arm64
+          path: pixelvr-linux-arm64-*.tar.gz
+
+      - name: Publish GitHub release
+        if: startsWith(github.ref, 'refs/tags/v') || inputs.tag != ''
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          generate_release_notes: true
+          files: |
+            pixelvr-linux-arm64.tar.gz
+            pixelvr-linux-arm64-v*.tar.gz

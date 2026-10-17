@@ -96,6 +96,13 @@ public:
     void recenterScreen(const float headPos[3], const float headForward[3]);
     // Moves the flat screen farther (positive) or nearer (negative), clamped.
     void adjustScreenDistance(float delta);
+    // Parametric curvature for cinema screen: 0.0 = flat plane, 1.0 = full cylinder wrap.
+    void setScreenCurvature(float c) { screenCurvature_ = c < 0.0f ? 0.0f : (c > 1.0f ? 1.0f : c); }
+    float screenCurvature() const { return screenCurvature_; }
+    void adjustScreenCurvature(float delta) {
+        setScreenCurvature(screenCurvature_ + delta);
+    }
+
 
     // Transport HUD: progress in [0,1]. Drawn head-locked when visible.
     void setTransport(bool visible, float progress, bool paused,
@@ -110,22 +117,61 @@ public:
     bool pointerOnTimeToggle() const { return pointerOnTimeToggle_; }
     void toggleTimeDisplay() { timeShowRemaining_ = !timeShowRemaining_; }
 
-    // File browser overlay: a title, list rows, selected index and a status line.
+    struct BrowserItem {
+        std::string name;
+        std::string path;
+        std::string detail;
+        std::string tag;
+        std::string durationTag;
+        std::string previewPath;
+        bool isDir = false;
+        bool isVideo = false;
+        bool isBack = false;
+    };
+
+    struct DownloadItem {
+        std::string label;
+        int state = 0;          // 0=active, 1=done, 2=failed, 3=stopped
+        float progress = 0.0f;  // 0.0 to 1.0
+        std::string detail;
+    };
+
+    // File browser overlay: rich spatial card grid + sidebar navigation
+    void setBrowserItems(bool visible, const std::string& title,
+                         const std::vector<BrowserItem>& items, int selected,
+                         const std::string& status);
     void setBrowser(bool visible, const std::string& title,
                     const std::vector<std::string>& rows, int selected,
                     const std::string& status);
+    void updateCardThumbnail(int slot, const std::string& path, const uint8_t* rgba, int width, int height);
+    void clearCardThumbnails();
+    int browserFirst() const { return browserFirst_; }
+    int browserSidebarHovered() const { return browserSidebarHovered_; }
+    int browserPageBtnHovered() const { return browserPageBtnHovered_; }
+    void setDownloadsFilter(int f) { downloadsFilter_ = f; }
+    int downloadsFilter() const { return downloadsFilter_; }
+    void setActiveDownloadCount(int c) { activeDownloadCount_ = c; }
+    void setSettingsSection(int s) { settingsSection_ = s; }
+    void setUiAppearance(float textScale, int textColorIdx, int accentColorIdx,
+                         float uiDistance) {
+        uiTextScale_ = textScale;
+        uiTextColorIdx_ = textColorIdx;
+        uiAccentColorIdx_ = accentColorIdx;
+        uiDistance_ = uiDistance;
+    }
 
-    // Downloads overlay: a simple list of download jobs plus a status line,
-    // shown while downloads run (and briefly after) with the browser closed.
+    // Downloads overlay: modern glassmorphic window with job cards
     void setDownloads(bool visible, const std::string& title,
                       const std::vector<std::string>& rows,
                       const std::string& status,
-                      const std::vector<std::string>& buttons = {}) {
+                      const std::vector<std::string>& buttons = {},
+                      const std::vector<DownloadItem>& jobs = {}) {
         downloadsVisible_ = visible;
         downloadsTitle_ = title;
         downloadsRows_ = rows;
         downloadsStatus_ = status;
         downloadsButtons_ = buttons;  // content-sized buttons along the bottom
+        downloadJobs_ = jobs;
     }
     // Draws a stronger modal backdrop behind the panel (for confirmations).
     void setDownloadsModal(bool modal) { downloadsModal_ = modal; }
@@ -177,19 +223,22 @@ public:
         Stop = 11,
         Download = 12,
         List = 13,
+        GlowRing = 14,
+        Speaker = 15,
+        Headset = 16,
+        CurvedDisplay = 17,
+        Chevron = 18,
+        Home = 19,
     };
 
     // The browser row currently under the pointer, or -1 if none.
     int pointerRow() const { return pointerRow_; }
     int browserHovered() const { return browserHovered_; }
-    int browserFirst() const { return browserFirst_; }
     void scrollBrowser(int deltaRows);
 
     // Updates just the highlighted browser row (used by the pointer each frame).
     void setBrowserSelected(int index) { browserSelected_ = index; }
 
-    // Media control bar shown below the video (point-and-click transport). The
-    // buttons are: seek back, play/pause, seek forward, open files, settings, recenter.
     enum class CtrlButton {
         SeekBack = 0,
         PlayPause = 1,
@@ -198,9 +247,22 @@ public:
         Files = 4,
         Settings = 5,
         Downloads = 6,  // open the downloads window (list of jobs)
-        Download = 7    // download the focused file-browser entry
+        Download = 7,   // download the focused file-browser entry
+        FormatToggle = 8,
+        AudioToggle = 9,
+        ScreenToggle = 10,
+        Recenter = 11   // recenter screen/view from HUD
     };
     void setControlBar(bool visible) { controlBarVisible_ = visible; }
+    void setHudLabels(const std::string& format, const std::string& audio,
+                      const std::string& screen, bool formatEnabled = true,
+                      bool audioEnabled = true) {
+        hudFormat_ = format;
+        hudAudio_ = audio;
+        hudScreen_ = screen;
+        hudFormatEnabled_ = formatEnabled;
+        hudAudioEnabled_ = audioEnabled;
+    }
 
     // Per-hand laser pointer toggle (grip press). A hand with the laser off
     // neither casts a beam nor takes part in the UI raycast, so the other hand
@@ -317,6 +379,7 @@ private:
     bool downloadsFailed_ = false;
     bool downloadsModal_ = false;
     std::vector<std::string> downloadsButtons_;
+    std::vector<DownloadItem> downloadJobs_;
     int downloadsBtnHovered_ = -1;
     int downloadsHovered_ = -1;
 
@@ -330,6 +393,7 @@ private:
     float spherePitch_ = 0.0f;  // 360/180 viewpoint tilt (radians)
     float sphereZoom_ = 1.0f;   // 360/180 FOV scale (>1 pushes content farther)
     float screenDistance_ = 3.0f;
+    float screenCurvature_ = 0.0f;  // 0.0 = flat plane (default), 1.0 = deep cinema curve
 
     // Transport HUD state.
     bool transportVisible_ = false;
@@ -339,6 +403,25 @@ private:
     double transportDuration_ = 0.0;  // seconds total
     bool timeShowRemaining_ = false;  // right readout shows time-left vs. total
     bool pointerOnTimeToggle_ = false;
+    std::string hudFormat_ = "2D FLAT";
+    std::string hudAudio_ = "AUDIO";
+    std::string hudScreen_ = "CURVED";
+    bool hudFormatEnabled_ = true;
+    bool hudAudioEnabled_ = true;
+    float sphereFollowYaw_ = 0.0f;
+    bool sphereFollowInit_ = false;
+
+    struct CardThumbnail {
+        VkImage image = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        VkImageView view = VK_NULL_HANDLE;
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        std::string path;
+        bool ready = false;
+    };
+    CardThumbnail cardThumbs_[6];
+    VkPipeline thumbPipeline_ = VK_NULL_HANDLE;
+    VkDescriptorPool thumbPool_ = VK_NULL_HANDLE;
 
     // Text rendering (FreeType glyph atlas) + file browser overlay.
     FontAtlas fontAtlas_;
@@ -359,6 +442,16 @@ private:
     int browserSelected_ = 0;
     int browserHovered_ = -1;  // pointer hover target (independent of scroll)
     int browserFirst_ = 0;     // scroll offset for visible window
+    std::vector<BrowserItem> browserItems_;
+    int browserSidebarHovered_ = -1;
+    int browserPageBtnHovered_ = -1;
+    int downloadsFilter_ = 0;  // 0=All, 1=Active, 2=Completed
+    int activeDownloadCount_ = 0;
+    int settingsSection_ = 0;
+    float uiTextScale_ = 1.20f;
+    int uiTextColorIdx_ = 0;
+    int uiAccentColorIdx_ = 0;
+    float uiDistance_ = 1.9f;
 
     // Settings panel overlay
     bool settingsVisible_ = false;

@@ -12,10 +12,19 @@ layout(push_constant) uniform Push {
 layout(location = 0) in vec2 vUV;
 layout(location = 0) out vec4 outColor;
 
+vec3 toLinear(vec3 srgb) {
+    return pow(max(srgb, vec3(0.0)), vec3(2.2));
+}
+
 void main() {
-    // Signed-distance text: a crisp ~1px edge in screen space so it stays sharp
-    // at any size (a coverage-bitmap fallback also reads acceptably here).
+    // Signed-distance text: use Euclidean screen-space gradient with a 0.9px
+    // half-width (~1.8px total ramp) and a slight bold bias (0.465) so thin
+    // stems never shimmer or drop out across head micro-movements in VR.
     float d = texture(fontAtlas, vUV).r;
-    float a = clamp((d - 0.5) / max(fwidth(d), 0.0001) + 0.5, 0.0, 1.0);
-    outColor = vec4(pc.color.rgb, pc.color.a * a);
+    float w = max(length(vec2(dFdx(d), dFdy(d))) * 0.92, 0.025);
+    float a = smoothstep(0.465 - w, 0.465 + w, d);
+    if (a <= 0.002) {
+        discard;
+    }
+    outColor = vec4(toLinear(pc.color.rgb), pc.color.a * a);
 }

@@ -25,6 +25,11 @@ public:
         ToggleModels,
         ToggleStats,
         CycleDistance,
+        CycleCurvature,
+        CycleUiTextScale,
+        CycleUiTextColor,
+        CycleUiAccentColor,
+        CycleUiDistance,
         EnterVideoList,
         EnterAudioList,
         EnterLangList,
@@ -77,6 +82,20 @@ public:
     std::string downloadDir() const;
     float screenDistance() const { return screenDistance_; }
     void setScreenDistance(float d) { screenDistance_ = d; refresh(); }
+    float screenCurvature() const;
+    void setCurvatureIdx(int idx);
+    int curvatureIdx() const { return curvatureIdx_; }
+    float uiTextScale() const;
+    int uiTextColorIdx() const { return uiTextColorIdx_; }
+    int uiAccentColorIdx() const { return uiAccentColorIdx_; }
+    float uiDistance() const;
+
+    int section() const { return section_; }
+    void setSection(int s) {
+        section_ = s;
+        selected_ = 0;
+        refresh();
+    }
 
     // Track lists (container index + label) for the current media, pushed by the
     // app on load. selected*Stream() return the chosen container index (-1 none).
@@ -112,8 +131,13 @@ private:
     int bindRecenterBtn_ = 6;  // default Bumper (grip toggles the laser)
     int listeningFunc_ = -1;   // 0=play 1=menu 2=recenter while binding, else -1
     int downloadDirIdx_ = 0;   // index into the download-destination presets
+    int curvatureIdx_ = 0;     // 0=Flat (0%), 1=Gentle (25%), 2=Cinema (50%), 3=Deep (75%), 4=IMAX (100%)
+    int uiTextScaleIdx_ = 2;   // 0=90%, 1=105%, 2=120% (default), 3=140%, 4=160%
+    int uiTextColorIdx_ = 0;   // 0=Pure White, 1=Ice Cyan, 2=Warm Cream, 3=Soft Gold, 4=Mint Green
+    int uiAccentColorIdx_ = 0; // 0=Cyber Cyan, 1=Emerald, 2=Amber Gold, 3=Royal Purple, 4=Crimson
+    int uiDistanceIdx_ = 1;    // 0=Near (1.5m), 1=Comfort (1.9m), 2=Mid (2.3m), 3=Far (2.8m)
 
-    int section_ = -1;  // -1 = top-level section list; 0..3 = a section's rows
+    int section_ = 0;   // 0=Display, 1=Controls, 2=Streams, 3=System; 10..12=sub-lists
     std::vector<std::pair<int, std::string>> videoStreams_;  // (index, label)
     std::vector<std::pair<int, std::string>> audioStreams_;
     int videoSel_ = 0;      // position within videoStreams_

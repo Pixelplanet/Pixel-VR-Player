@@ -132,24 +132,62 @@ void main() {
         float p2 = sdRoundedBox(p - vec2(-0.50, 0.00), vec2(0.10, 0.10), 0.05);
         float p3 = sdRoundedBox(p - vec2(-0.50, -0.46), vec2(0.10, 0.10), 0.05);
         d = min(min(min(b1, b2), min(b3, p1)), min(p2, p3));
+    } else if (shape == 14) {
+        // Shape 14: Hero Glow Ring (circular outline for primary buttons)
+        float r = length(p);
+        d = abs(r - 0.72) - 0.08;
+    } else if (shape == 15) {
+        // Shape 15: Audio Speaker icon (cone + sound wave)
+        float box = sdRoundedBox(p - vec2(-0.32, 0.0), vec2(0.12, 0.18), 0.03);
+        float cone = sdTriangle(p, vec2(-0.20, 0.18), vec2(0.16, 0.45), vec2(-0.20, -0.18)) - 0.02;
+        float cone2 = sdTriangle(p, vec2(-0.20, -0.18), vec2(0.16, -0.45), vec2(0.16, 0.45)) - 0.02;
+        float rArc = length(p - vec2(-0.05, 0.0));
+        float arc1 = max(abs(rArc - 0.46) - 0.06, -p.x + 0.10);
+        float arc2 = max(abs(rArc - 0.68) - 0.06, -p.x + 0.22);
+        d = min(min(box, min(cone, cone2)), min(arc1, arc2));
+    } else if (shape == 16) {
+        // Shape 16: VR Headset / Display goggles
+        float gBody = sdRoundedBox(p, vec2(0.55, 0.30), 0.14);
+        float nose = sdTriangle(p - vec2(0.0, -0.30), vec2(-0.16, -0.08), vec2(0.16, -0.08), vec2(0.0, 0.12)) - 0.04;
+        float strapL = sdRoundedBox(p - vec2(-0.62, 0.0), vec2(0.08, 0.10), 0.03);
+        float strapR = sdRoundedBox(p - vec2(0.62, 0.0), vec2(0.08, 0.10), 0.03);
+        d = max(min(gBody, min(strapL, strapR)), -nose);
+    } else if (shape == 17) {
+        // Shape 17: Curved Cinema Display icon
+        float rScreen = length(p - vec2(0.0, 1.3));
+        float arcDisp = abs(rScreen - 1.62) - 0.10;
+        float cutX = abs(p.x) - 0.58;
+        float cutY = abs(p.y) - 0.32;
+        d = max(arcDisp, max(cutX, cutY));
+    } else if (shape == 18) {
+        // Shape 18: Chevron (>) for breadcrumbs & pagination
+        float c1 = sdSegment(p, vec2(-0.22, 0.40), vec2(0.24, 0.0)) - 0.08;
+        float c2 = sdSegment(p, vec2(0.24, 0.0), vec2(-0.22, -0.40)) - 0.08;
+        d = min(c1, c2);
+    } else if (shape == 19) {
+        // Shape 19: Home / Library icon
+        float roof = sdTriangle(p - vec2(0.0, 0.12), vec2(-0.52, 0.0), vec2(0.52, 0.0), vec2(0.0, 0.42)) - 0.04;
+        float baseH = sdRoundedBox(p - vec2(0.0, -0.20), vec2(0.35, 0.26), 0.04);
+        d = min(roof, baseH);
     } else {
         d = sdRoundedBox(p, vec2(1.0), 0.0);
     }
 
-    float aa = fwidth(d);
-    if (aa < 1e-4) aa = 0.015;
-    float fillAlpha = 1.0 - smoothstep(-aa * 0.5, aa * 0.5, d);
+    float aa = max(length(vec2(dFdx(d), dFdy(d))) * 1.15, 0.003);
+    float fillAlpha = 1.0 - smoothstep(-aa, aa, d);
 
-    if (fillAlpha <= 0.0) {
+    if (fillAlpha <= 0.002) {
         discard;
     }
 
-    vec4 finalColor = pc.color;
+    vec4 fillLin = vec4(pow(max(pc.color.rgb, vec3(0.0)), vec3(2.2)), pc.color.a);
+    vec4 finalColor = fillLin;
     if (hasBorder) {
-        float borderWidth = pc.params.z;
+        float borderWidth = max(pc.params.z, aa * 1.6);
         float innerD = d + borderWidth;
-        float borderAlpha = 1.0 - smoothstep(-aa * 0.5, aa * 0.5, innerD);
-        finalColor = mix(pc.borderColor, pc.color, borderAlpha);
+        float borderAlpha = 1.0 - smoothstep(-aa, aa, innerD);
+        vec4 bordLin = vec4(pow(max(pc.borderColor.rgb, vec3(0.0)), vec3(2.2)), pc.borderColor.a);
+        finalColor = mix(bordLin, fillLin, borderAlpha);
     }
 
     finalColor.a *= fillAlpha;

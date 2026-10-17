@@ -1,0 +1,42 @@
+#!/usr/bin/env bash
+# Assemble the Steam Frame release tarball for a finished ARM64 build.
+#
+# Contents (extracted to ~/PixelVRPlayer):
+#   PixelVRPlayer/pixelvr          self-contained binary (static OpenXR loader)
+#   PixelVRPlayer/run.sh           launcher (logs to ~/pixelvr-run.log)
+#   PixelVRPlayer/shaders/*.spv    SPIR-V shaders
+#
+#   ./tools/package-release.sh [build-dir] [out-tar]
+#
+# Defaults: build -> pixelvr-linux-arm64.tar.gz
+set -euo pipefail
+
+cd "$(dirname "$0")/.."
+
+BUILD_DIR="${1:-build}"
+OUT_TAR="${2:-pixelvr-linux-arm64.tar.gz}"
+
+bin="${BUILD_DIR}/bin/pixelvr"
+if [[ ! -f "${bin}" ]]; then
+    echo "error: ${bin} not found. Build first: ./tools/build.sh" >&2
+    exit 1
+fi
+if [[ -z "$(find "${BUILD_DIR}/shaders" -maxdepth 1 -name '*.spv' -print -quit)" ]]; then
+    echo "error: no shaders in ${BUILD_DIR}/shaders" >&2
+    exit 1
+fi
+
+stage="$(mktemp -d)"
+trap 'rm -rf "${stage}"' EXIT
+
+mkdir -p "${stage}/PixelVRPlayer/shaders"
+cp "${bin}" "${stage}/PixelVRPlayer/pixelvr"
+cp "${BUILD_DIR}/shaders/"*.spv "${stage}/PixelVRPlayer/shaders/"
+cp tools/run.sh "${stage}/PixelVRPlayer/run.sh"
+chmod +x "${stage}/PixelVRPlayer/pixelvr" "${stage}/PixelVRPlayer/run.sh"
+
+rm -f "${OUT_TAR}"
+tar -C "${stage}" -czf "${OUT_TAR}" PixelVRPlayer
+
+echo "Packaged ${OUT_TAR} ($(du -h "${OUT_TAR}" | cut -f1)):"
+tar -tzf "${OUT_TAR}"

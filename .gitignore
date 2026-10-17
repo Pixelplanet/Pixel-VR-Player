@@ -5,6 +5,8 @@
 /install/
 /dist/
 /sysroot/
+# Release artifacts are attached to GitHub releases, not committed
+/*.tar.gz
 *.o
 *.obj
 *.a

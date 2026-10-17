@@ -147,6 +147,15 @@ aarch64 cross (for the Steam Frame):
 ./tools/build.sh --aarch64  # configures + builds build-aarch64/
 ```
 
+Release builds are automated: `.github/workflows/release.yml` builds natively on
+an ARM64 runner in a Debian 13 container (FFmpeg 7, matching the headset's
+SONAMEs) and attaches `pixelvr-linux-arm64.tar.gz` to each `v*` tag's release.
+To package a local build by hand:
+
+```bash
+./tools/package-release.sh build-aarch64 pixelvr-linux-arm64.tar.gz
+```
+
 ## Deploy to Steam Frame
 
 See the full walkthrough in

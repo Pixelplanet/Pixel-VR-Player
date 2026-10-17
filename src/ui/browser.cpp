@@ -81,11 +81,14 @@ std::string smb_parent(const std::string& uri) {
 void sort_and_append(std::vector<Browser::Entry>& out,
                      std::vector<Browser::Entry>& dirs,
                      std::vector<Browser::Entry>& files) {
-    auto by_label = [](const Browser::Entry& a, const Browser::Entry& b) {
+    auto by_media_then_label = [](const Browser::Entry& a, const Browser::Entry& b) {
+        const bool aHasMedia = a.isVideo || !a.previewPath.empty();
+        const bool bHasMedia = b.isVideo || !b.previewPath.empty();
+        if (aHasMedia != bHasMedia) return aHasMedia > bHasMedia;
         return a.label < b.label;
     };
-    std::sort(dirs.begin(), dirs.end(), by_label);
-    std::sort(files.begin(), files.end(), by_label);
+    std::sort(dirs.begin(), dirs.end(), by_media_then_label);
+    std::sort(files.begin(), files.end(), by_media_then_label);
     out.insert(out.end(), dirs.begin(), dirs.end());
     out.insert(out.end(), files.begin(), files.end());
 }
@@ -160,12 +163,65 @@ void Browser::scanLocalInto(const std::string& dir, ScanResult& out) {
         if (name.empty() || name[0] == '.') continue;  // skip hidden
         std::error_code dec;
         if (it->is_directory(dec)) {
-            dirs.push_back({name + "/", p.string(), true, false, false, false});
+            if (dir == homeDir_) {
+                if (name == "devkit-game" || name == "devkit-utils" ||
+                    name == "ffbuild" || name == "pixelvr-src" ||
+                    name == "steamvr" || name == "work" ||
+                    name == "Desktop" || name == "Templates" ||
+                    name == "Public" || name == "Documents" || name == "Music") {
+                    continue;
+                }
+            }
+            std::string preview;
+            long long bestPreviewSize = -1;
+            int videoCount = 0;
+            std::error_code sec;
+            for (fs::directory_iterator subIt(p, sec), subEnd; !sec && subIt != subEnd; subIt.increment(sec)) {
+                const std::string subName = subIt->path().filename().string();
+                if (subName.empty() || subName[0] == '.') continue;
+                std::error_code sdec;
+                if (!subIt->is_directory(sdec) && is_video(subName)) {
+                    std::error_code fsec;
+                    const long long vsz = static_cast<long long>(fs::file_size(subIt->path(), fsec));
+                    const long long score = (!fsec ? vsz : 1);
+                    if (score > bestPreviewSize) {
+                        bestPreviewSize = score;
+                        preview = subIt->path().string();
+                    }
+                    ++videoCount;
+                } else if (subIt->is_directory(sdec)) {
+                    // Check one level deeper (e.g. ~/Videos/MovieFolder/movie.mp4)
+                    std::error_code ssec2;
+                    for (fs::directory_iterator subIt2(subIt->path(), ssec2), subEnd2;
+                         !ssec2 && subIt2 != subEnd2; subIt2.increment(ssec2)) {
+                        const std::string subName2 = subIt2->path().filename().string();
+                        if (subName2.empty() || subName2[0] == '.') continue;
+                        if (!subIt2->is_directory(ssec2) && is_video(subName2)) {
+                            std::error_code fsec2;
+                            const long long vsz2 = static_cast<long long>(fs::file_size(subIt2->path(), fsec2));
+                            const long long score2 = (!fsec2 ? vsz2 : 1);
+                            if (score2 > bestPreviewSize) {
+                                bestPreviewSize = score2;
+                                preview = subIt2->path().string();
+                            }
+                            ++videoCount;
+                        }
+                    }
+                }
+            }
+            std::string detail = (videoCount > 0)
+                ? (std::to_string(videoCount) + (videoCount == 1 ? " video" : " videos") +
+                   (bestPreviewSize > 0 ? "  \xB7  " + format_size(bestPreviewSize) : ""))
+                : "Folder";
+            dirs.push_back({name + "/", p.string(), true, false, false, false, detail,
+                            bestPreviewSize > 0 ? bestPreviewSize : 0, preview});
         } else {
+            const bool isVid = is_video(name);
+            if (dir == homeDir_ && !isVid) continue;  // hide log/tarball files in home root
             std::error_code sec;
             const long long sz = static_cast<long long>(fs::file_size(p, sec));
-            files.push_back({name, p.string(), false, is_video(name), false, false,
-                             format_size(sec ? 0 : sz), sec ? 0 : sz});
+            files.push_back({name, p.string(), false, isVid, false, false,
+                             format_size(sec ? 0 : sz), sec ? 0 : sz, isVid ? p.string() : ""});
         }
     }
     sort_and_append(out.entries, dirs, files);
@@ -303,6 +359,45 @@ void Browser::openPath(const std::string& localDir) {
     browseOpen_.store(true);
     status_.clear();
     beginScan(localDir, false);
+}
+
+void Browser::openNetwork() {
+    open_ = true;
+    browseOpen_.store(true);
+    status_.clear();
+    beginScan("smb://", true);
+}
+
+void Browser::openHome() {
+    openPath(homeDir_);
+}
+
+void Browser::openVideos() {
+    const std::string v = homeDir_ + "/Videos";
+    std::error_code ec;
+    if (fs::is_directory(v, ec)) {
+        openPath(v);
+    } else {
+        openPath(homeDir_);
+    }
+}
+
+void Browser::openDownloads() {
+    std::error_code ec;
+    if (!fs::is_directory(downloadDir_, ec)) {
+        fs::create_directories(downloadDir_, ec);
+    }
+    openPath(downloadDir_);
+}
+
+void Browser::openDrives() {
+    const std::string d = "/run/media";
+    std::error_code ec;
+    if (fs::is_directory(d, ec)) {
+        openPath(d);
+    } else {
+        openPath("/");
+    }
 }
 
 void Browser::runScan(std::string location, bool isSmb) {

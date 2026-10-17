@@ -23,6 +23,7 @@ public:
         bool isNetwork = false;   // "Network (SMB)" entry point
         std::string detail;       // human-readable type/size for the row
         long long size = 0;       // bytes (0 if unknown)
+        std::string previewPath;  // video file inside folder or self (for thumbnail)
     };
     enum class Result { None, Navigated, Play };
 
@@ -33,6 +34,12 @@ public:
     // Opens the browser directly at a local directory (used when a finished
     // folder download is selected).
     void openPath(const std::string& localDir);
+    // Direct shortcut navigation (for spatial browser sidebar rail)
+    void openNetwork();
+    void openHome();
+    void openVideos();
+    void openDownloads();
+    void openDrives();
     bool isOpen() const { return open_; }
     // The download worker yields the shared SMB connection while the browser is
     // open, so directory listing stays responsive (downloads resume afterwards).
