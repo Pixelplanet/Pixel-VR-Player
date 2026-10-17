@@ -37,12 +37,18 @@ cp "${bin}" "${stage}/PixelVRPlayer/pixelvr"
 cp "${BUILD_DIR}/shaders/"*.spv "${stage}/PixelVRPlayer/shaders/"
 cp tools/run.sh "${stage}/PixelVRPlayer/run.sh"
 cp tools/install.sh "${stage}/PixelVRPlayer/install.sh"
+if [[ -f "tools/Install Pixel VR Player.desktop" ]]; then
+    cp "tools/Install Pixel VR Player.desktop" "${stage}/PixelVRPlayer/Install Pixel VR Player.desktop"
+fi
 if [[ -n "${VERSION}" ]]; then
     printf '%s\n' "${VERSION}" > "${stage}/PixelVRPlayer/VERSION"
 fi
 chmod +x "${stage}/PixelVRPlayer/pixelvr" \
          "${stage}/PixelVRPlayer/run.sh" \
          "${stage}/PixelVRPlayer/install.sh"
+if [[ -f "${stage}/PixelVRPlayer/Install Pixel VR Player.desktop" ]]; then
+    chmod +x "${stage}/PixelVRPlayer/Install Pixel VR Player.desktop"
+fi
 
 rm -f "${OUT_TAR}"
 tar -C "${stage}" -czf "${OUT_TAR}" PixelVRPlayer

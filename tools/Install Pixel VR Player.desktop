@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Install Pixel VR Player
+Comment=Install Pixel VR Player for Valve Steam Frame
+Exec=bash -c 'SCRIPT_DIR="$(dirname "%k")"; if [ -f "$SCRIPT_DIR/install.sh" ]; then cd "$SCRIPT_DIR" && bash install.sh; else curl -fsSL https://raw.githubusercontent.com/Pixelplanet/Pixel-VR-Player/main/tools/install.sh | bash; fi; if [ $? -eq 0 ]; then command -v kdialog >/dev/null && kdialog --title "Pixel VR Player" --msgbox "Installation complete!\n\nPixel VR Player has been added to your Steam Library.\nYou can now return to Gaming Mode."; else command -v kdialog >/dev/null && kdialog --title "Pixel VR Player" --error "Installation encountered an issue.\nCheck ~/pixelvr-install.log or terminal output."; fi; read -p "Press Enter to close..." dummy'
+Icon=steam
+Terminal=true
+Type=Application
+Categories=AudioVideo;Player;VR;
