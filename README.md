@@ -37,7 +37,7 @@ Choose whichever method fits your setup:
 
 The simplest method for standard users without touching the terminal:
 
-1. Download `pixelvr-linux-arm64.tar.gz` from the [Releases](../../releases) page onto a USB flash drive or MicroSD card.
+1. Download `pixelvr-linux-arm64.tar.gz` from the [Releases](https://github.com/Pixelplanet/Pixel-VR-Player/releases) page onto a USB flash drive or MicroSD card.
 2. Plug it into your Steam Frame and switch to **Desktop Mode**.
 3. Open the USB drive in Dolphin and double-click **`Install Pixel VR Player.desktop`**.
 4. A confirmation dialog will appear when finished. Return to Gaming Mode and launch it directly from your Steam Library!
@@ -78,11 +78,12 @@ Installer options:
 | `--restart-steam` | close Steam first, then reopen it so the entry appears at once |
 | `--uninstall` | remove the app and its Steam shortcut |
 
-Re-run the same command to upgrade. Settings (`~/.config/pixelvr`) and cached
-thumbnails (`~/.cache/pixelvr`) live outside the install directory and are kept.
+Re-run the same command to upgrade. Settings (`~/.config/pixelvr`), cached
+thumbnails (`~/.cache/pixelvr`), and hidden vault media (`~/.pixelvr_vault`) live
+outside the install directory and are kept intact.
 
 **Offline install:** download `pixelvr-linux-arm64.tar.gz` from the
-[Releases](../../releases) page, copy it to the headset, extract it and run
+[Releases](https://github.com/Pixelplanet/Pixel-VR-Player/releases) page, copy it to the headset, extract it and run
 `./install.sh` from the extracted folder — or use `run.sh` directly. The app logs
 to `~/pixelvr-run.log`.
 
@@ -114,6 +115,39 @@ finished file or open a finished folder. Opening the downloads manager replaces
 the file browser rather than stacking on top of it.
 
 All button bindings can be changed in **Settings ▸ Controls** (press-to-bind).
+
+
+## Discreet Media Vault
+
+Pixel VR Player includes a private, zero-trace local storage vault (`~/.pixelvr_vault`) hidden from the standard file browser and startup directory scans.
+
+<details>
+<summary>🔒 <b>Accessing the Hidden Vault</b> (click to expand)</summary>
+
+To open or re-lock the vault in VR without bringing up an on-screen keyboard or visible PIN dialog:
+
+1. Fully squeeze either controller's **grip** (hold down the mechanical **Full Press** click).
+2. While holding the grip clicked, enter the 6-key factory combination:
+
+> 🎵 *The Swedish pop sensation that won Eurovision in 1974 with "Waterloo"...*  
+> 📐 *...followed by the two classic axes of the 2D Cartesian plane.*
+
+<details>
+<summary>👉 <i>Need the direct button sequence? Click here to reveal</i></summary>
+
+Hold **Full Grip Click** and press:
+> **`A` → `B` → `B` → `A` → `X` → `Y`**  
+*(Within 2.5 seconds per step. Haptic feedback confirms each input).*
+
+</details>
+
+- **Instant Auto-Lock:** Re-locks automatically and immediately purges in-memory textures when the headset proximity sensor detects removal, or when clicking **[ 🔒 Lock Vault ]** in the sidebar.
+- **Custom Combinations:** You can record your own custom button sequence anytime in **Settings ▸ Vault & Privacy**.
+- **Move to Vault:** While unlocked, local videos can be moved directly into the vault from the browser.
+- **Safe Persistence:** Media inside `~/.pixelvr_vault` is never deleted when updating or uninstalling the app.
+
+For full architecture and security details, see the [Hidden Vault Technical Specification](docs/HIDDEN_VAULT_SPEC.md).
+</details>
 
 
 ## Repository layout

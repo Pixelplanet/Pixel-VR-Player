@@ -12,17 +12,20 @@ libraries.
 
 ## Just installing a release (no devkit, no build)
 
-End users do not need any of the steps below. From a terminal on the headset
-(Desktop Mode or over SSH):
+End users do not need to build anything or use devkits. Choose whichever option fits your setup:
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/Pixelplanet/Pixel-VR-Player/main/tools/install.sh | sh
-```
+1. **USB Drive / MicroSD Card (No typing & No Dev Mode needed):**  
+   Download `pixelvr-linux-arm64.tar.gz` from GitHub Releases onto a USB flash drive or MicroSD card, plug it into the headset, switch to **Desktop Mode**, and double-click **`Install Pixel VR Player.desktop`**.
+2. **From your PC over Wi-Fi (Requires SSH or Dev Mode):**  
+   Run [`tools/install-from-pc.bat`](../tools/install-from-pc.bat) (Windows) or [`tools/install-from-pc.sh`](../tools/install-from-pc.sh) (Mac/Linux) and enter the headset's IP address.
+3. **One command in terminal (Desktop Mode / SSH):**  
+   ```bash
+   curl -fsSL https://raw.githubusercontent.com/Pixelplanet/Pixel-VR-Player/main/tools/install.sh | sh
+   ```
 
-That verifies the checksum, installs to `~/PixelVRPlayer`, and registers
-**Pixel VR Player** as a Non-Steam Game. Relaunch Steam if it was running. Rerun
-the same command to upgrade; `--uninstall` removes it. The rest of this document
-covers building and iterating as a developer.
+The installer verifies checksums, installs to `~/PixelVRPlayer`, and registers **Pixel VR Player** as a Non-Steam Game in your library. Re-running upgrades in-place while keeping all settings, thumbnails, and hidden vault files (`~/.pixelvr_vault`).
+
+The rest of this document covers building and deploying as a developer.
 
 ---
 
@@ -38,8 +41,11 @@ covers building and iterating as a developer.
 # 2b. Or stage a clean folder for the GUI Devkit Client:
 ./tools/stage.sh          # -> dist/PixelVRPlayer/
 
-# 2c. Or build the release tarball end users install from:
-./tools/package-release.sh build-aarch64 pixelvr-linux-arm64.tar.gz v1.3.0
+# 2c. Or assemble release tarball with desktop installer:
+./tools/package-release.sh build-aarch64 pixelvr-linux-arm64.tar.gz v1.4.2
+
+# 2d. Capture in-headset screenshots over OpenVR / SteamVR compositor:
+python tools/take_headset_screenshot.py --delay 5
 ```
 
 ---
@@ -80,7 +86,7 @@ All three methods below share the same setup. Do this once.
 | Method | Per-deploy effort | Best for |
 |--------|-------------------|----------|
 | **A. Devkit Client (GUI)** | click Upload → Start | first run; the official, guided path |
-| **B. `tools/deploy.py` (CLI)** | one command | fast iteration during development |
+| **B. `tools/deploy.sh` (CLI)** | one command | fast iteration during development |
 | **C. Manual SSH + scp** | a few commands | debugging, capturing logs live |
 | ~~ADB / Android~~ | — | APKs only — **not** this app |
 
@@ -121,7 +127,7 @@ The official, no-scripting path.
 
 ---
 
-## Option B — One command (`tools/deploy.py`)
+## Option B — One command (`tools/deploy.sh`)
 
 Best for the edit-build-run loop. Copies the binary, shaders and `launch.sh` into
 `~/devkit-game/PixelVRPlayer/`, registers the Non-Steam shortcut, and (optionally)
@@ -174,7 +180,7 @@ differ in which system libraries it sees:
   environment. This is what Valve's docs recommend and what the **GUI (Option A)**
   selects. Good default.
 - **Directly on the host** — uses SteamOS's own FFmpeg/SteamVR libraries. This is
-  what **`deploy.py` (Option B)** registers, matching how a shipping native OpenXR
+  what **`deploy.sh` (Option B)** registers, matching how a shipping native OpenXR
   player runs.
 
 Both expose the SteamVR OpenXR runtime, so both can work. If the app fails to load
@@ -222,6 +228,25 @@ Requirements:
   supported by the hardware decoder path.
 - `PIXELVR_FORCE_SW=1` forces software decode (debugging).
 - `PIXELVR_LOG=debug` raises log verbosity.
+
+---
+
+## Taking in-headset screenshots
+
+To capture real in-headset screenshots directly from the SteamVR compositor while the app is running:
+
+```bash
+# Capture with a 5-second countdown to put the headset on:
+python tools/take_headset_screenshot.py --delay 5
+
+# Point to a specific headset IP:
+python tools/take_headset_screenshot.py --host steamos@192.168.178.61 --delay 3
+
+# Continuous series (e.g. 5 captures spaced 2 seconds apart):
+python tools/take_headset_screenshot.py --interval 2 --count 5
+```
+
+The script connects over SSH, triggers SteamVR's compositor screenshot API, fetches the resulting PNGs, and places them into `docs/screenshots/` with both the raw stereo composite (`_stereo.png`) and a cropped single-eye preview (`_preview.png`).
 
 ---
 
