@@ -204,22 +204,17 @@ VulkanRenderer::~VulkanRenderer() {
             vkDestroyPipeline(device_, modelPipeline_, nullptr);
         if (modelLayout_ != VK_NULL_HANDLE)
             vkDestroyPipelineLayout(device_, modelLayout_, nullptr);
-        if (modelVertexBuffer_ != VK_NULL_HANDLE)
-            vkDestroyBuffer(device_, modelVertexBuffer_, nullptr);
-        if (modelVertexMemory_ != VK_NULL_HANDLE)
-            vkFreeMemory(device_, modelVertexMemory_, nullptr);
-        if (modelIndexBuffer_ != VK_NULL_HANDLE)
-            vkDestroyBuffer(device_, modelIndexBuffer_, nullptr);
-        if (modelIndexMemory_ != VK_NULL_HANDLE)
-            vkFreeMemory(device_, modelIndexMemory_, nullptr);
-        for (auto& t : modelTextures_) {
-            if (t.view != VK_NULL_HANDLE)
-                vkDestroyImageView(device_, t.view, nullptr);
-            if (t.image != VK_NULL_HANDLE)
-                vkDestroyImage(device_, t.image, nullptr);
-            if (t.memory != VK_NULL_HANDLE)
-                vkFreeMemory(device_, t.memory, nullptr);
+        for (int h = 0; h < 2; ++h) {
+            destroyHandModel(handModels_[h]);
         }
+        if (capsuleVertexBuffer_ != VK_NULL_HANDLE)
+            vkDestroyBuffer(device_, capsuleVertexBuffer_, nullptr);
+        if (capsuleVertexMemory_ != VK_NULL_HANDLE)
+            vkFreeMemory(device_, capsuleVertexMemory_, nullptr);
+        if (capsuleIndexBuffer_ != VK_NULL_HANDLE)
+            vkDestroyBuffer(device_, capsuleIndexBuffer_, nullptr);
+        if (capsuleIndexMemory_ != VK_NULL_HANDLE)
+            vkFreeMemory(device_, capsuleIndexMemory_, nullptr);
         if (modelWhite_.view != VK_NULL_HANDLE)
             vkDestroyImageView(device_, modelWhite_.view, nullptr);
         if (modelWhite_.image != VK_NULL_HANDLE)
@@ -245,6 +240,8 @@ VulkanRenderer::~VulkanRenderer() {
             vkDestroyDescriptorSetLayout(device_, textSetLayout_, nullptr);
         if (fontView_ != VK_NULL_HANDLE)
             vkDestroyImageView(device_, fontView_, nullptr);
+        if (fontSampler_ != VK_NULL_HANDLE)
+            vkDestroySampler(device_, fontSampler_, nullptr);
         if (fontImage_ != VK_NULL_HANDLE)
             vkDestroyImage(device_, fontImage_, nullptr);
         if (fontMemory_ != VK_NULL_HANDLE)
@@ -1237,12 +1234,15 @@ void VulkanRenderer::updatePointer() {
     settingsRow_ = -1;
     downloadsHovered_ = -1;
     downloadsBtnHovered_ = -1;
+    actionMenuBtnHovered_ = -1;
+    actionMenuKeyHovered_ = -1;
 
-    const bool hubOpen = browserVisible_ || settingsVisible_ ||
-                         (downloadsVisible_ && !downloadsModal_);
-    const bool modalOpen = downloadsVisible_ && downloadsModal_;
-    const bool controlBar = controlBarVisible_ && !hubOpen && !modalOpen;
-    if (!hubOpen && !modalOpen && !controlBar) {
+    const bool actionMenuOpen = actionMenu_.visible;
+    const bool hubOpen = (browserVisible_ || settingsVisible_ ||
+                         (downloadsVisible_ && !downloadsModal_)) && !actionMenuOpen;
+    const bool modalOpen = (downloadsVisible_ && downloadsModal_) && !actionMenuOpen;
+    const bool controlBar = controlBarVisible_ && !hubOpen && !modalOpen && !actionMenuOpen;
+    if (!hubOpen && !modalOpen && !controlBar && !actionMenuOpen) {
         return;  // No UI surface to point at.
     }
 
@@ -1291,6 +1291,72 @@ void VulkanRenderer::updatePointer() {
         const float hyy = oL.y + t * dL.y;
         const Vec3 world = origin + dir * t;
 
+        // 0. File Action Submenu Modal takes highest priority
+        if (actionMenuOpen) {
+            if (hx >= -kPanelW && hx <= kPanelW && hyy >= -kPanelTop && hyy <= kPanelTop) {
+                pointerActive_ = true;
+                pointerHand_ = h;
+                pointerHit_[0] = world.x;
+                pointerHit_[1] = world.y;
+                pointerHit_[2] = world.z;
+
+                if (actionMenu_.page == 0 || actionMenu_.page == 1) {
+                    const int optCount = static_cast<int>(actionMenu_.options.size());
+                    const float startY = (optCount > 4) ? 0.12f : 0.08f;
+                    const float btnHalfW = 0.38f;
+                    const float btnHalfH = 0.030f;
+                    for (int i = 0; i < optCount; ++i) {
+                        const float cy = startY - static_cast<float>(i) * 0.072f;
+                        if (std::fabs(hx) <= btnHalfW && std::fabs(hyy - cy) <= btnHalfH) {
+                            actionMenuBtnHovered_ = i;
+                            break;
+                        }
+                    }
+                } else if (actionMenu_.page == 2) {
+                    // Delete confirmation: Confirm (0) vs Cancel (1)
+                    const float cy = -0.12f;
+                    const float btnHalfW = 0.13f;
+                    const float btnHalfH = 0.042f;
+                    if (std::fabs(hyy - cy) <= btnHalfH) {
+                        if (std::fabs(hx - (-0.15f)) <= btnHalfW) actionMenuBtnHovered_ = 0;
+                        else if (std::fabs(hx - 0.15f) <= btnHalfW) actionMenuBtnHovered_ = 1;
+                    }
+                } else if (actionMenu_.page == 3) {
+                    // Rename page: Top action buttons at cy = 0.08f
+                    if (std::fabs(hyy - 0.08f) <= 0.028f) {
+                        if (std::fabs(hx - (-0.27f)) <= 0.07f) actionMenuBtnHovered_ = 0; // Clear
+                        else if (std::fabs(hx - (-0.09f)) <= 0.09f) actionMenuBtnHovered_ = 1; // Backspace
+                        else if (std::fabs(hx - 0.11f) <= 0.09f) actionMenuBtnHovered_ = 2; // Save
+                        else if (std::fabs(hx - 0.28f) <= 0.07f) actionMenuBtnHovered_ = 3; // Cancel
+                    }
+                    // On-screen keyboard keys: 4 rows
+                    static const char* kRow0 = "1234567890-_";
+                    static const char* kRow1 = "QWERTYUIOP";
+                    static const char* kRow2 = "ASDFGHJKL";
+                    static const char* kRow3 = "ZXCVBNM. ";
+                    auto checkRow = [&](const char* rowKeys, float rowY, int keyOffset, float keyW, float keySpacing) {
+                        const int count = static_cast<int>(std::strlen(rowKeys));
+                        const float totalW = count * keyW + (count - 1) * keySpacing;
+                        const float startX = -0.5f * totalW + 0.5f * keyW;
+                        if (std::fabs(hyy - rowY) <= 0.026f) {
+                            for (int k = 0; k < count; ++k) {
+                                const float kx = startX + k * (keyW + keySpacing);
+                                if (std::fabs(hx - kx) <= keyW * 0.5f) {
+                                    actionMenuKeyHovered_ = keyOffset + k;
+                                    break;
+                                }
+                            }
+                        }
+                    };
+                    checkRow(kRow0, 0.005f, 0, 0.055f, 0.010f);
+                    checkRow(kRow1, -0.055f, 12, 0.065f, 0.012f);
+                    checkRow(kRow2, -0.115f, 22, 0.070f, 0.012f);
+                    checkRow(kRow3, -0.175f, 31, 0.070f, 0.012f);
+                }
+                break;
+            }
+        }
+
         // 1. Folder Download Confirmation Modal takes top priority
         if (modalOpen) {
             if (hx >= -kPanelW && hx <= kPanelW && hyy >= -kPanelTop && hyy <= kPanelTop) {
@@ -1327,13 +1393,20 @@ void VulkanRenderer::updatePointer() {
                         break;
                     }
                 }
-                // Sub-navigation items (indices 3..6)
+                // Sub-navigation items (indices 3..6, and 7/8 if vaultUnlocked_)
                 if (browserSidebarHovered_ < 0) {
-                    const float subTabY[4] = {-0.05f, -0.14f, -0.23f, -0.32f};
-                    for (int sub = 0; sub < 4; ++sub) {
+                    const int activeMainTab = settingsVisible_ ? 2 : (downloadsVisible_ ? 1 : 0);
+                    const float subTabY[5] = {-0.05f, -0.14f, -0.23f, -0.32f, -0.41f};
+                    const int numSubTabs = (activeMainTab == 1) ? 3 : (vaultUnlocked_ ? 5 : 4);
+                    for (int sub = 0; sub < numSubTabs; ++sub) {
                         if (std::fabs(hyy - subTabY[sub]) <= 0.038f) {
                             browserSidebarHovered_ = 3 + sub;
                             break;
+                        }
+                    }
+                    if (browserSidebarHovered_ < 0 && vaultUnlocked_) {
+                        if (std::fabs(hyy - (-0.485f)) <= 0.035f) {
+                            browserSidebarHovered_ = 8; // Lock Vault button
                         }
                     }
                 }
@@ -1394,7 +1467,7 @@ void VulkanRenderer::updatePointer() {
                     for (int i = 0; i < total && visIdx < 4; ++i) {
                         if (!downloadJobs_.empty()) {
                             const int st = downloadJobs_[i].state;
-                            if (downloadsFilter_ == 1 && st != 0 && st != 3) continue;
+                            if (downloadsFilter_ == 1 && st != 0 && st != 3 && st != 4) continue;
                             if (downloadsFilter_ == 2 && st != 1) continue;
                         }
                         const float ry = 0.24f - static_cast<float>(visIdx) * 0.175f;
@@ -1644,13 +1717,32 @@ bool VulkanRenderer::initText() {
     dp.poolSizeCount = 1;
     dp.pPoolSizes = &ps;
     PIXELVR_VK_CHECK(vkCreateDescriptorPool(device_, &dp, nullptr, &textPool_));
+
+    // Create a dedicated sampler for the SDF font atlas: pure bilinear filtering
+    // with NO anisotropic sampling. Anisotropic filtering averages Euclidean distances
+    // across non-square footprints at oblique angles, distorting the distance field
+    // and causing shimmering artifacts.
+    VkSamplerCreateInfo fsi{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
+    fsi.magFilter = VK_FILTER_LINEAR;
+    fsi.minFilter = VK_FILTER_LINEAR;
+    fsi.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    fsi.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    fsi.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    fsi.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    fsi.minLod = 0.0f;
+    fsi.maxLod = 0.0f;
+    fsi.anisotropyEnable = VK_FALSE;
+    fsi.maxAnisotropy = 1.0f;
+    fsi.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
+    PIXELVR_VK_CHECK(vkCreateSampler(device_, &fsi, nullptr, &fontSampler_));
+
     VkDescriptorSetAllocateInfo da{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
     da.descriptorPool = textPool_;
     da.descriptorSetCount = 1;
     da.pSetLayouts = &textSetLayout_;
     PIXELVR_VK_CHECK(vkAllocateDescriptorSets(device_, &da, &textSet_));
     VkDescriptorImageInfo dii{};
-    dii.sampler = sampler_;
+    dii.sampler = fontSampler_;
     dii.imageView = fontView_;
     dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
@@ -2263,8 +2355,8 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         }
 
         // Sub-navigation items in rail (contextual to Files / Downloads / Settings)
-        const float subTabY[4] = {-0.05f, -0.14f, -0.23f, -0.32f};
-        const int subCount = (activeMainTab == 1) ? 3 : 4;
+        const float subTabY[5] = {-0.05f, -0.14f, -0.23f, -0.32f, -0.41f};
+        const int subCount = (activeMainTab == 1) ? 3 : (vaultUnlocked_ ? 5 : 4);
         for (int sub = 0; sub < subCount; ++sub) {
             const bool hov = (browserSidebarHovered_ == (3 + sub));
             bool subAct = false;
@@ -2273,6 +2365,8 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             } else if (activeMainTab == 2) {
                 const int effSec = (settingsSection_ >= 10) ? 2 : settingsSection_;
                 subAct = (effSec == sub);
+            } else if (activeMainTab == 0 && sub == 4) {
+                subAct = (browserTitle_.find("Vault") != std::string::npos);
             }
             const float subActBg[4] = {
                 themeAccentCol[0] * 0.25f, themeAccentCol[1] * 0.25f,
@@ -2283,9 +2377,17 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                               0.40f, 0.025f, hov ? tabHovBord : tabActiveBord);
             }
             if (activeMainTab == 0) {
-                const UiShape qIcons[4] = {UiShape::Home, UiShape::CurvedDisplay, UiShape::List, UiShape::Download};
+                const UiShape qIcons[5] = {UiShape::Home, UiShape::CurvedDisplay, UiShape::List, UiShape::Download, UiShape::RoundedBox};
                 drawUiElement(vpPanel, -0.825f, subTabY[sub], 0.015f, 0.015f, qIcons[sub], themeAccentCol);
             }
+        }
+
+        if (vaultUnlocked_) {
+            const bool lockHov = (browserSidebarHovered_ == 8);
+            const float lockBg[4] = {0.45f, 0.08f, 0.12f, lockHov ? 0.95f : 0.70f};
+            const float lockBord[4] = {0.85f, 0.22f, 0.28f, lockHov ? 1.0f : 0.75f};
+            drawUiElement(vpPanel, -0.695f, -0.485f, 0.172f, 0.030f,
+                          UiShape::RoundedBox, lockBg, 0.35f, 0.02f, lockBord);
         }
 
         // Standardized, generously readable font scales across the entire Unified Spatial Hub
@@ -2450,9 +2552,15 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 }
             }
             drawFit(-0.855f, 0.02f, 0.34f, scBadge, dimCol, "QUICK FILTERS");
-            const char* qLabels[4] = {"Local Storage", "Videos", "SMB Shares", "Downloads"};
-            for (int sub = 0; sub < 4; ++sub) {
-                drawFit(-0.790f, subTabY[sub], 0.28f, scSub, slateCol, qLabels[sub]);
+            const char* qLabels[5] = {"Local Storage", "Videos", "SMB Shares", "Downloads", "Vault (Private)"};
+            const int qCount = vaultUnlocked_ ? 5 : 4;
+            for (int sub = 0; sub < qCount; ++sub) {
+                const float* col = (sub == 4) ? themeAccentCol : slateCol;
+                drawFit(-0.790f, subTabY[sub], 0.28f, scSub, col, qLabels[sub]);
+            }
+            if (vaultUnlocked_) {
+                const float lockTextCol[4] = {1.0f, 0.50f, 0.50f, 1.0f};
+                drawFitCentered(-0.695f, -0.485f, 0.28f, scSub, lockTextCol, "Lock Vault");
             }
 
             // Content header: Breadcrumb + Page switcher
@@ -2497,8 +2605,10 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             if (!browserStatus_.empty()) {
                 drawFit(-0.45f, -0.490f, 0.62f, scDetail, themeAccentCol, browserStatus_);
             }
-            drawFit(0.18f, -0.490f, 0.68f, scDetail, dimCol,
-                    "Stick: Scroll  |  Trigger: Play  |  X: Download");
+            const std::string hintText = browserOnNetwork_
+                ? "Stick: Scroll  |  Trigger: Stream  |  X: Download"
+                : "Stick: Scroll  |  Trigger: Play  |  Y: Actions";
+            drawFit(0.18f, -0.490f, 0.68f, scDetail, dimCol, hintText);
         }
 
         // ---------------------------------------------------------------------
@@ -2523,7 +2633,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 if (!downloadJobs_.empty()) {
                     state = downloadJobs_[i].state;
                     prog = std::clamp(downloadJobs_[i].progress, 0.0f, 1.0f);
-                    if (downloadsFilter_ == 1 && state != 0 && state != 3) continue;
+                    if (downloadsFilter_ == 1 && state != 0 && state != 3 && state != 4) continue;
                     if (downloadsFilter_ == 2 && state != 1) continue;
                 }
                 const float ry = 0.24f - static_cast<float>(visIdx) * 0.175f;
@@ -2596,6 +2706,10 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 drawFit(-0.84f, subTabY[sub], 0.30f, scSub,
                         (downloadsFilter_ == sub) ? themeTextCol : slateCol, dlSubLabels[sub]);
             }
+            if (vaultUnlocked_) {
+                const float lockTextCol[4] = {1.0f, 0.50f, 0.50f, 1.0f};
+                drawFitCentered(-0.695f, -0.485f, 0.28f, scSub, lockTextCol, "Lock Vault");
+            }
 
             drawFit(-0.45f, 0.455f, 0.64f, scHeader * 0.90f, themeTextCol,
                     "Downloads > Transfers");
@@ -2616,7 +2730,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                         jDet = downloadJobs_[i].detail;
                         state = downloadJobs_[i].state;
                         prog = std::clamp(downloadJobs_[i].progress, 0.0f, 1.0f);
-                        if (downloadsFilter_ == 1 && state != 0 && state != 3) continue;
+                        if (downloadsFilter_ == 1 && state != 0 && state != 3 && state != 4) continue;
                         if (downloadsFilter_ == 2 && state != 1) continue;
                     } else if (i < static_cast<int>(downloadsRows_.size())) {
                         jName = downloadsRows_[i];
@@ -2697,12 +2811,17 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                                     std::to_string(activeDownloadCount_));
                 }
             }
-            const char* setSubLabels[4] = {"Display & Cinema", "UI & Appearance",
-                                           "Audio & Tracks", "Controls & Input"};
+            const char* setSubLabels[5] = {"Display & Cinema", "UI & Appearance",
+                                           "Audio & Tracks", "Controls & Input", "Vault & Privacy"};
             const int effSec = (settingsSection_ >= 10) ? 2 : settingsSection_;
-            for (int sub = 0; sub < 4; ++sub) {
+            const int sCount = vaultUnlocked_ ? 5 : 4;
+            for (int sub = 0; sub < sCount; ++sub) {
                 drawFit(-0.84f, subTabY[sub], 0.30f, scSub,
                         (effSec == sub) ? themeTextCol : slateCol, setSubLabels[sub]);
+            }
+            if (vaultUnlocked_) {
+                const float lockTextCol[4] = {1.0f, 0.50f, 0.50f, 1.0f};
+                drawFitCentered(-0.695f, -0.485f, 0.28f, scSub, lockTextCol, "Lock Vault");
             }
 
             drawFit(-0.45f, 0.455f, 0.82f, scHeader * 0.90f, themeTextCol, settingsTitle_);
@@ -2801,18 +2920,203 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         drawFitCentered(0.15f, btnCy, btnHalfW * 1.8f, sc, themeTextCol, "Cancel");
     }
 
+    // =========================================================================
+    // 4. File Action Submenu Modal (overlay)
+    // =========================================================================
+    if (actionMenu_.visible && textReady_ && uiPipeline_ != VK_NULL_HANDLE) {
+        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipeline_);
+        const float backdrop[4] = {0.0f, 0.0f, 0.0f, 0.82f};
+        drawUiElement(vpPanel, 0.0f, 0.0f, kPanelW, kPanelTop,
+                      UiShape::RoundedBox, backdrop, 0.045f);
+
+        const float mHalfW = (actionMenu_.page == 3) ? 0.48f : 0.44f;
+        const float mHalfH = (actionMenu_.page == 3) ? 0.32f : 0.28f;
+        const float modalBg[4] = {0.032f, 0.045f, 0.075f, 0.98f};
+        drawUiElement(vpPanel, 0.0f, 0.0f, mHalfW, mHalfH,
+                      UiShape::RoundedBox, modalBg, 0.07f, 0.02f, themeAccentCol);
+
+        // Danger red palette for delete
+        const float redBg[4] = {0.58f, 0.12f, 0.18f, 0.95f};
+        const float redBgHov[4] = {0.78f, 0.18f, 0.24f, 1.0f};
+        const float redBorder[4] = {0.95f, 0.35f, 0.42f, 0.95f};
+
+        // Slate button palette
+        const float slateBg[4] = {0.10f, 0.14f, 0.22f, 0.92f};
+        const float slateBgHov[4] = {0.20f, 0.28f, 0.42f, 1.0f};
+        const float slateBorder[4] = {0.30f, 0.42f, 0.62f, 0.85f};
+
+        // Green button palette
+        const float greenBg[4] = {0.12f, 0.58f, 0.34f, 0.95f};
+        const float greenBgHov[4] = {0.18f, 0.74f, 0.44f, 1.0f};
+        const float greenBorder[4] = {0.35f, 0.88f, 0.58f, 0.95f};
+
+        // Vault gold/cyan palette
+        const float goldBg[4] = {0.28f, 0.22f, 0.08f, 0.95f};
+        const float goldBgHov[4] = {0.45f, 0.36f, 0.12f, 1.0f};
+        const float goldBorder[4] = {0.95f, 0.82f, 0.35f, 0.95f};
+
+        // Standard option pills and text colors
+        const float tabNormBg[4] = {0.06f, 0.09f, 0.15f, 0.90f};
+        const float tabHovBg[4] = {
+            themeAccentCol[0] * 0.35f, themeAccentCol[1] * 0.35f,
+            themeAccentCol[2] * 0.45f, 0.95f};
+        const float tabNormBord[4] = {0.18f, 0.28f, 0.44f, 0.65f};
+        const float tabActiveBord[4] = {
+            themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 1.0f};
+        const float slateCol[4] = {0.60f, 0.70f, 0.84f, 1.0f};
+
+        if (actionMenu_.page == 0 || actionMenu_.page == 1) {
+            const int optCount = static_cast<int>(actionMenu_.options.size());
+            const float startY = (optCount > 4) ? 0.12f : 0.08f;
+            const float btnHalfW = 0.38f;
+            const float btnHalfH = 0.028f;
+            for (int i = 0; i < optCount; ++i) {
+                const float cy = startY - static_cast<float>(i) * 0.072f;
+                const bool hov = (actionMenuBtnHovered_ == i) || (actionMenu_.selectedOption == i);
+                const std::string& optStr = actionMenu_.options[i];
+                const bool isDelete = (optStr.find("Delete") != std::string::npos);
+                const bool isVault = (optStr.find("Vault") != std::string::npos);
+
+                const float* bg = hov ? (isDelete ? redBgHov : (isVault ? goldBgHov : tabHovBg))
+                                      : (isDelete ? redBg : (isVault ? goldBg : tabNormBg));
+                const float* bord = hov ? (isDelete ? redBorder : (isVault ? goldBorder : tabActiveBord))
+                                        : (isDelete ? redBorder : (isVault ? goldBorder : tabNormBord));
+                drawUiElement(vpPanel, 0.0f, cy, btnHalfW, btnHalfH,
+                              UiShape::RoundedBox, bg, 0.35f, 0.02f, bord);
+            }
+        } else if (actionMenu_.page == 2) {
+            // Delete confirmation
+            const float cy = -0.12f;
+            const float btnHalfW = 0.13f;
+            const float btnHalfH = 0.042f;
+            const bool delHov = (actionMenuBtnHovered_ == 0) || (actionMenu_.selectedOption == 0);
+            const bool canHov = (actionMenuBtnHovered_ == 1) || (actionMenu_.selectedOption == 1);
+            drawUiElement(vpPanel, -0.15f, cy, btnHalfW, btnHalfH,
+                          UiShape::RoundedBox, delHov ? redBgHov : redBg, 0.42f, 0.03f, redBorder);
+            drawUiElement(vpPanel, 0.15f, cy, btnHalfW, btnHalfH,
+                          UiShape::RoundedBox, canHov ? slateBgHov : slateBg, 0.42f, 0.03f, slateBorder);
+        } else if (actionMenu_.page == 3) {
+            // Rename: text input box
+            const float innerBg[4] = {0.018f, 0.026f, 0.046f, 0.90f};
+            drawUiElement(vpPanel, 0.0f, 0.16f, mHalfW - 0.04f, 0.035f,
+                          UiShape::RoundedBox, innerBg, 0.25f, 0.02f, themeAccentCol);
+
+            // 4 action buttons
+            const float btnY = 0.08f;
+            const float btnH = 0.025f;
+            auto drawBtn = [&](float cx, float hw, int idx, const float* bg, const float* bgHov, const float* bord) {
+                const bool hov = (actionMenuBtnHovered_ == idx);
+                drawUiElement(vpPanel, cx, btnY, hw, btnH,
+                              UiShape::RoundedBox, hov ? bgHov : bg, 0.35f, 0.02f, bord);
+            };
+            drawBtn(-0.27f, 0.07f, 0, slateBg, slateBgHov, slateBorder);
+            drawBtn(-0.09f, 0.09f, 1, slateBg, slateBgHov, slateBorder);
+            drawBtn(0.11f, 0.09f, 2, greenBg, greenBgHov, greenBorder);
+            drawBtn(0.28f, 0.07f, 3, slateBg, slateBgHov, slateBorder);
+
+            // On-screen keyboard keys
+            static const char* kRow0 = "1234567890-_";
+            static const char* kRow1 = "QWERTYUIOP";
+            static const char* kRow2 = "ASDFGHJKL";
+            static const char* kRow3 = "ZXCVBNM. ";
+            auto drawRowKeys = [&](const char* rowKeys, float rowY, int keyOffset, float keyW, float keySpacing) {
+                const int count = static_cast<int>(std::strlen(rowKeys));
+                const float totalW = count * keyW + (count - 1) * keySpacing;
+                const float startX = -0.5f * totalW + 0.5f * keyW;
+                for (int k = 0; k < count; ++k) {
+                    const float kx = startX + k * (keyW + keySpacing);
+                    const bool hov = (actionMenuKeyHovered_ == keyOffset + k);
+                    drawUiElement(vpPanel, kx, rowY, keyW * 0.5f, 0.022f,
+                                  UiShape::RoundedBox, hov ? slateBgHov : slateBg, 0.35f, 0.015f,
+                                  hov ? tabActiveBord : slateBorder);
+                }
+            };
+            drawRowKeys(kRow0, 0.005f, 0, 0.055f, 0.010f);
+            drawRowKeys(kRow1, -0.055f, 12, 0.065f, 0.012f);
+            drawRowKeys(kRow2, -0.115f, 22, 0.070f, 0.012f);
+            drawRowKeys(kRow3, -0.175f, 31, 0.070f, 0.012f);
+        }
+
+        // Text pass for Action Menu
+        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline_);
+        vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
+        const float sc = (0.032f * tScale) / fontAtlas_.lineHeight;
+
+        drawFitCentered(0.0f, mHalfH - 0.045f, mHalfW * 1.8f, sc * 1.15f, themeAccentCol, actionMenu_.title);
+        if (!actionMenu_.subtitle.empty() && actionMenu_.page != 2) {
+            drawFitCentered(0.0f, mHalfH - 0.090f, mHalfW * 1.8f, sc * 0.85f, slateCol, actionMenu_.subtitle);
+        }
+
+        if (actionMenu_.page == 0 || actionMenu_.page == 1) {
+            const int optCount = static_cast<int>(actionMenu_.options.size());
+            const float startY = (optCount > 4) ? 0.12f : 0.08f;
+            for (int i = 0; i < optCount; ++i) {
+                const float cy = startY - static_cast<float>(i) * 0.072f;
+                const bool hov = (actionMenuBtnHovered_ == i) || (actionMenu_.selectedOption == i);
+                drawFitCentered(0.0f, cy, 0.38f * 1.85f, sc, hov ? themeTextCol : slateCol, actionMenu_.options[i]);
+            }
+        } else if (actionMenu_.page == 2) {
+            drawFitCentered(0.0f, 0.035f, (mHalfW - 0.06f) * 2.0f, sc, themeTextCol, actionMenu_.subtitle);
+            drawFitCentered(-0.15f, -0.12f, 0.13f * 1.8f, sc, themeTextCol, "Delete");
+            drawFitCentered(0.15f, -0.12f, 0.13f * 1.8f, sc, themeTextCol, "Cancel");
+        } else if (actionMenu_.page == 3) {
+            std::string disp = actionMenu_.renameBuffer.empty() ? "|" : (actionMenu_.renameBuffer + "|");
+            drawFitCentered(0.0f, 0.16f, (mHalfW - 0.06f) * 1.85f, sc, themeTextCol, disp);
+
+            const float btnY = 0.08f;
+            drawFitCentered(-0.27f, btnY, 0.12f, sc * 0.90f, themeTextCol, "Clear");
+            drawFitCentered(-0.09f, btnY, 0.16f, sc * 0.90f, themeTextCol, "Backspace");
+            drawFitCentered(0.11f, btnY, 0.16f, sc * 0.90f, themeTextCol, "Save");
+            drawFitCentered(0.28f, btnY, 0.12f, sc * 0.90f, themeTextCol, "Cancel");
+
+            static const char* kRow0 = "1234567890-_";
+            static const char* kRow1 = "QWERTYUIOP";
+            static const char* kRow2 = "ASDFGHJKL";
+            static const char* kRow3 = "ZXCVBNM. ";
+            auto drawRowText = [&](const char* rowKeys, float rowY, int keyOffset, float keyW, float keySpacing) {
+                const int count = static_cast<int>(std::strlen(rowKeys));
+                const float totalW = count * keyW + (count - 1) * keySpacing;
+                const float startX = -0.5f * totalW + 0.5f * keyW;
+                for (int k = 0; k < count; ++k) {
+                    const float kx = startX + k * (keyW + keySpacing);
+                    char label[8];
+                    if (rowKeys[k] == ' ') std::snprintf(label, sizeof(label), "Space");
+                    else std::snprintf(label, sizeof(label), "%c", rowKeys[k]);
+                    drawFitCentered(kx, rowY, keyW * 0.85f, sc * 0.85f, themeTextCol, label);
+                }
+            };
+            drawRowText(kRow0, 0.005f, 0, 0.055f, 0.010f);
+            drawRowText(kRow1, -0.055f, 12, 0.065f, 0.012f);
+            drawRowText(kRow2, -0.115f, 22, 0.070f, 0.012f);
+            drawRowText(kRow3, -0.175f, 31, 0.070f, 0.012f);
+        }
+    }
+
     // Tracked controller 3D models (lit capsule), drawn before the laser/cursor.
     if (drawModels_ &&
         (controllers_[0].active || controllers_[1].active) &&
         modelPipeline_ != VK_NULL_HANDLE) {
         vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                           modelPipeline_);
-        VkDeviceSize off = 0;
-        vkCmdBindVertexBuffers(commandBuffer_, 0, 1, &modelVertexBuffer_, &off);
-        vkCmdBindIndexBuffer(commandBuffer_, modelIndexBuffer_, 0, modelIndexType_);
         const Mat4 vpWorld = multiply(proj, viewMat);
         for (int h = 0; h < 2; ++h) {
             if (!controllers_[h].active) continue;
+
+            const HandModel& hm = handModels_[h];
+            const bool haveGltf = hm.ready && hm.vertexBuffer != VK_NULL_HANDLE;
+
+            VkDeviceSize off = 0;
+            if (haveGltf) {
+                vkCmdBindVertexBuffers(commandBuffer_, 0, 1, &hm.vertexBuffer, &off);
+                vkCmdBindIndexBuffer(commandBuffer_, hm.indexBuffer, 0, hm.indexType);
+            } else if (capsuleVertexBuffer_ != VK_NULL_HANDLE) {
+                vkCmdBindVertexBuffers(commandBuffer_, 0, 1, &capsuleVertexBuffer_, &off);
+                vkCmdBindIndexBuffer(commandBuffer_, capsuleIndexBuffer_, 0, VK_INDEX_TYPE_UINT16);
+            } else {
+                continue;
+            }
+
             // The render model is authored around the grip (controller body), so
             // place it there; fall back to the aim pose if grip is unavailable.
             const bool useGrip = controllers_[h].gripActive;
@@ -2858,18 +3162,18 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             };
             const float identityPos[3] = {0.0f, 0.0f, 0.0f};
             const float identityQuat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-            if (modelSubmeshes_.empty()) {
+            if (!haveGltf || hm.submeshes.empty()) {
                 const float capsuleColor[4] = {0.13f, 0.13f, 0.16f, 1.0f};
-                drawPart(modelWhite_.set, capsuleColor, 0, modelIndexCount_,
+                drawPart(modelWhite_.set, capsuleColor, 0, capsuleIndexCount_,
                          identityPos, identityQuat);
             } else {
                 // Node states may carry names (from asset properties) or be bare.
                 // If named, match by name; otherwise fall back to the submesh
                 // ordinal, which lines up for the runtime's flat node list.
                 const bool haveNames =
-                    !modelNodeStates_.empty() && !modelNodeStates_[0].name.empty();
-                for (std::size_t si = 0; si < modelSubmeshes_.size(); ++si) {
-                    const ModelSubmesh& sm = modelSubmeshes_[si];
+                    !hm.nodeStates.empty() && !hm.nodeStates[0].name.empty();
+                for (std::size_t si = 0; si < hm.submeshes.size(); ++si) {
+                    const ModelSubmesh& sm = hm.submeshes[si];
                     // The 'status' display node maps the whole atlas to a tiny
                     // quad (the runtime normally textures it); skip it so it does
                     // not render as a tiny sheet of labels on the body.
@@ -2877,16 +3181,16 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                     const float* np = identityPos;
                     const float* nq = identityQuat;
                     if (haveNames) {
-                        for (const NodeStateVis& ns : modelNodeStates_) {
+                        for (const NodeStateVis& ns : hm.nodeStates) {
                             if (ns.name == sm.nodeName) {
                                 np = ns.pos;
                                 nq = ns.quat;
                                 break;
                             }
                         }
-                    } else if (si < modelNodeStates_.size()) {
-                        np = modelNodeStates_[si].pos;
-                        nq = modelNodeStates_[si].quat;
+                    } else if (si < hm.nodeStates.size()) {
+                        np = hm.nodeStates[si].pos;
+                        nq = hm.nodeStates[si].quat;
                     }
                     // Guard against an unpopulated/degenerate pose (a zero
                     // quaternion would collapse the part and hide the model).
@@ -3805,7 +4109,7 @@ bool VulkanRenderer::createModelPipeline() {
             idx.push_back(v01);
         }
     }
-    modelIndexCount_ = static_cast<uint32_t>(idx.size());
+    capsuleIndexCount_ = static_cast<uint32_t>(idx.size());
 
     auto makeBuffer = [&](const void* data, VkDeviceSize size,
                           VkBufferUsageFlags usage, VkBuffer& buf,
@@ -3863,14 +4167,15 @@ bool VulkanRenderer::createModelPipeline() {
         return true;
     };
     if (!makeBuffer(verts.data(), verts.size() * sizeof(V),
-                    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, modelVertexBuffer_,
-                    modelVertexMemory_) ||
+                    VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, capsuleVertexBuffer_,
+                    capsuleVertexMemory_) ||
         !makeBuffer(idx.data(), idx.size() * sizeof(uint16_t),
-                    VK_BUFFER_USAGE_INDEX_BUFFER_BIT, modelIndexBuffer_,
-                    modelIndexMemory_)) {
-        PIXELVR_LOG_WARN("Controller model buffers failed");
+                    VK_BUFFER_USAGE_INDEX_BUFFER_BIT, capsuleIndexBuffer_,
+                    capsuleIndexMemory_)) {
+        PIXELVR_LOG_WARN("Controller capsule model buffers failed");
         return false;
     }
+    capsuleIndexCount_ = static_cast<uint32_t>(idx.size());
 
     // Descriptor set 0, binding 0: the submesh base-color texture (fragment).
     VkDescriptorSetLayoutBinding texBind{};
@@ -3896,10 +4201,10 @@ bool VulkanRenderer::createModelPipeline() {
     PIXELVR_VK_CHECK(vkCreateSampler(device_, &smp, nullptr, &modelSampler_));
 
     // One descriptor set per part texture plus the white fallback, with headroom
-    // for a model reload.
-    VkDescriptorPoolSize dps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32};
+    // for multiple controller models (left + right).
+    VkDescriptorPoolSize dps{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 128};
     VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    dpi.maxSets = 32;
+    dpi.maxSets = 128;
     dpi.poolSizeCount = 1;
     dpi.pPoolSizes = &dps;
     PIXELVR_VK_CHECK(
@@ -4135,21 +4440,68 @@ bool VulkanRenderer::createModelTexture(const uint8_t* rgba, int width,
     return true;
 }
 
-void VulkanRenderer::setControllerNodeStates(
-    const std::vector<NodeStateVis>& states) {
-    modelNodeStates_ = states;
+void VulkanRenderer::destroyHandModel(HandModel& hm) {
+    if (hm.vertexBuffer != VK_NULL_HANDLE) {
+        vkDestroyBuffer(device_, hm.vertexBuffer, nullptr);
+        hm.vertexBuffer = VK_NULL_HANDLE;
+    }
+    if (hm.vertexMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(device_, hm.vertexMemory, nullptr);
+        hm.vertexMemory = VK_NULL_HANDLE;
+    }
+    if (hm.indexBuffer != VK_NULL_HANDLE) {
+        vkDestroyBuffer(device_, hm.indexBuffer, nullptr);
+        hm.indexBuffer = VK_NULL_HANDLE;
+    }
+    if (hm.indexMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(device_, hm.indexMemory, nullptr);
+        hm.indexMemory = VK_NULL_HANDLE;
+    }
+    for (auto& t : hm.textures) {
+        if (t.view != VK_NULL_HANDLE) vkDestroyImageView(device_, t.view, nullptr);
+        if (t.image != VK_NULL_HANDLE) vkDestroyImage(device_, t.image, nullptr);
+        if (t.memory != VK_NULL_HANDLE) vkFreeMemory(device_, t.memory, nullptr);
+    }
+    hm.textures.clear();
+    hm.submeshes.clear();
+    hm.nodeStates.clear();
+    hm.indexCount = 0;
+    hm.ready = false;
 }
 
-bool VulkanRenderer::loadControllerModel(const std::vector<uint8_t>& glb) {
-    const GltfMesh mesh = loadGlb(glb);
-    if (!mesh.ok || mesh.indices.empty()) {
-        PIXELVR_LOG_WARN("Controller model: no usable geometry in glTF");
-        return false;
+void VulkanRenderer::setControllerNodeStates(int hand,
+    const std::vector<NodeStateVis>& states) {
+    if (hand >= 0 && hand < 2) {
+        handModels_[hand].nodeStates = states;
     }
-    vkDeviceWaitIdle(device_);  // the old (capsule) buffers may be in flight
+}
 
-    auto upload = [&](const void* data, VkDeviceSize size, VkBufferUsageFlags usage,
-                      VkBuffer& buf, VkDeviceMemory& mem) -> bool {
+namespace {
+
+GltfMesh mirrorGltfMesh(const GltfMesh& inMesh) {
+    GltfMesh outMesh = inMesh;
+    // Interleaved layout: px, py, pz, nx, ny, nz, u, v
+    for (std::size_t i = 0; i + 7 < outMesh.vertices.size(); i += 8) {
+        outMesh.vertices[i + 0] = -outMesh.vertices[i + 0]; // negate X position
+        outMesh.vertices[i + 3] = -outMesh.vertices[i + 3]; // negate X normal
+    }
+    // Flip winding order of each triangle
+    for (std::size_t i = 0; i + 2 < outMesh.indices.size(); i += 3) {
+        std::swap(outMesh.indices[i + 1], outMesh.indices[i + 2]);
+    }
+    return outMesh;
+}
+
+} // namespace
+
+bool VulkanRenderer::uploadHandMesh(int hand, const GltfMesh& mesh) {
+    if (hand < 0 || hand >= 2) return false;
+    if (!mesh.ok || mesh.indices.empty()) return false;
+
+    vkDeviceWaitIdle(device_);
+
+    auto upload = [this](const void* data, VkDeviceSize size, VkBufferUsageFlags usage,
+                         VkBuffer& buf, VkDeviceMemory& mem) -> bool {
         VkBuffer staging = VK_NULL_HANDLE;
         VkDeviceMemory stagingMem = VK_NULL_HANDLE;
         VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
@@ -4200,39 +4552,19 @@ bool VulkanRenderer::loadControllerModel(const std::vector<uint8_t>& glb) {
         vkFreeMemory(device_, stagingMem, nullptr);
         return true;
     };
-    auto destroy = [&](VkBuffer& b, VkDeviceMemory& m) {
-        if (b != VK_NULL_HANDLE) {
-            vkDestroyBuffer(device_, b, nullptr);
-            b = VK_NULL_HANDLE;
-        }
-        if (m != VK_NULL_HANDLE) {
-            vkFreeMemory(device_, m, nullptr);
-            m = VK_NULL_HANDLE;
-        }
-    };
-    destroy(modelVertexBuffer_, modelVertexMemory_);
-    destroy(modelIndexBuffer_, modelIndexMemory_);
-    modelIndexCount_ = 0;
+
+    HandModel& hm = handModels_[hand];
+    destroyHandModel(hm);
+
     if (!upload(mesh.vertices.data(), mesh.vertices.size() * sizeof(float),
-                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, modelVertexBuffer_,
-                modelVertexMemory_) ||
+                VK_BUFFER_USAGE_VERTEX_BUFFER_BIT, hm.vertexBuffer, hm.vertexMemory) ||
         !upload(mesh.indices.data(), mesh.indices.size() * sizeof(uint32_t),
-                VK_BUFFER_USAGE_INDEX_BUFFER_BIT, modelIndexBuffer_,
-                modelIndexMemory_)) {
+                VK_BUFFER_USAGE_INDEX_BUFFER_BIT, hm.indexBuffer, hm.indexMemory)) {
+        destroyHandModel(hm);
         return false;
     }
-    modelIndexCount_ = static_cast<uint32_t>(mesh.indices.size());
-    modelIndexType_ = VK_INDEX_TYPE_UINT32;
-
-    // Free any textures from a previous model, then upload this model's base-
-    // color textures (one per part) and build the submesh draw list.
-    for (auto& t : modelTextures_) {
-        if (t.view != VK_NULL_HANDLE) vkDestroyImageView(device_, t.view, nullptr);
-        if (t.image != VK_NULL_HANDLE) vkDestroyImage(device_, t.image, nullptr);
-        if (t.memory != VK_NULL_HANDLE) vkFreeMemory(device_, t.memory, nullptr);
-    }
-    modelTextures_.clear();
-    modelSubmeshes_.clear();
+    hm.indexCount = static_cast<uint32_t>(mesh.indices.size());
+    hm.indexType = VK_INDEX_TYPE_UINT32;
 
     std::vector<VkDescriptorSet> imageSets(mesh.images.size(), modelWhite_.set);
     for (std::size_t i = 0; i < mesh.images.size(); ++i) {
@@ -4241,10 +4573,11 @@ bool VulkanRenderer::loadControllerModel(const std::vector<uint8_t>& glb) {
         ModelTexture t;
         if (createModelTexture(img.rgba.data(), img.width, img.height, t)) {
             imageSets[i] = t.set;
-            modelTextures_.push_back(t);
+            hm.textures.push_back(t);
         }
     }
-    modelSubmeshes_.reserve(mesh.submeshes.size());
+
+    hm.submeshes.reserve(mesh.submeshes.size());
     for (const GltfSubmesh& s : mesh.submeshes) {
         ModelSubmesh ms;
         ms.firstIndex = s.firstIndex;
@@ -4255,12 +4588,36 @@ bool VulkanRenderer::loadControllerModel(const std::vector<uint8_t>& glb) {
                      ? imageSets[s.image]
                      : modelWhite_.set;
         for (int k = 0; k < 4; ++k) ms.color[k] = s.baseColor[k];
-        modelSubmeshes_.push_back(ms);
+        hm.submeshes.push_back(ms);
     }
+    hm.ready = true;
+
     PIXELVR_LOG_INFO(
-        "Controller model loaded: %u indices, %zu submeshes, %zu textures",
-        modelIndexCount_, modelSubmeshes_.size(), modelTextures_.size());
+        "Controller model loaded for %s hand: %u indices, %zu submeshes, %zu textures",
+        hand == 0 ? "left" : "right",
+        hm.indexCount, hm.submeshes.size(), hm.textures.size());
     return true;
+}
+
+bool VulkanRenderer::loadControllerModel(int hand, const std::vector<uint8_t>& glb) {
+    if (hand < 0 || hand >= 2) return false;
+    const GltfMesh mesh = loadGlb(glb);
+    if (!mesh.ok || mesh.indices.empty()) {
+        PIXELVR_LOG_WARN("Controller model for hand %d: no usable geometry in glTF", hand);
+        return false;
+    }
+    bool ok = uploadHandMesh(hand, mesh);
+    if (ok) {
+        const int other = 1 - hand;
+        if (!handModels_[other].ready) {
+            PIXELVR_LOG_INFO("Mirroring %s model to %s hand as initial geometry",
+                             hand == 0 ? "left" : "right",
+                             other == 0 ? "left" : "right");
+            GltfMesh mirrored = mirrorGltfMesh(mesh);
+            uploadHandMesh(other, mirrored);
+        }
+    }
+    return ok;
 }
 
 bool VulkanRenderer::importDmabufImage(const DrmVideoFrame& frame, VkImage& image,

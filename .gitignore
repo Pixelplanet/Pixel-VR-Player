@@ -42,3 +42,6 @@ Thumbs.db
 # Local secrets / device config
 /local.env
 /secrets/
+/scratch/
+/test_vault
+/*-plan.md

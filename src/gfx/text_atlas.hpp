@@ -22,6 +22,7 @@ struct FontAtlas {
     float lineHeight = 0.0f;
     float ascent = 0.0f;
     bool sdf = false;             // true = signed-distance field (crisp at scale)
+    float spread = 8.0f;          // SDF spread distance in font pixels (contour zero-crossing at 128)
     bool ok = false;
 };
 

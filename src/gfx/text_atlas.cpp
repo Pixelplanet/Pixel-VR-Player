@@ -5,6 +5,7 @@
 #ifdef PIXELVR_HAVE_FREETYPE
 #include <ft2build.h>
 #include FT_FREETYPE_H
+#include FT_MODULE_H
 #endif
 
 namespace pixelvr {
@@ -17,6 +18,15 @@ FontAtlas buildFontAtlas(const char* ttfPath, int pixelHeight) {
         PIXELVR_LOG_ERROR("FreeType: init failed");
         return atlas;
     }
+    // Expand the distance field ramp from FreeType's default 2px to 8px.
+    // At typical VR UI viewing distances, 8 font pixels produces a smooth,
+    // noise-free gradient spanning multiple screen pixels, completely eliminating
+    // edge shimmering during head movement.
+    constexpr FT_UInt kSpread = 8;
+    FT_Property_Set(lib, "sdf", "spread", &kSpread);
+    FT_Property_Set(lib, "bsdf", "spread", &kSpread);
+    atlas.spread = static_cast<float>(kSpread);
+
     FT_Face face = nullptr;
     if (FT_New_Face(lib, ttfPath, 0, &face) != 0) {
         PIXELVR_LOG_ERROR("FreeType: cannot open %s", ttfPath);

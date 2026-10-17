@@ -126,6 +126,7 @@ add_library(pixelvr_core STATIC
     src/gfx/gltf_mesh.cpp
     src/ui/settings_menu.cpp
     src/ui/thumbnail_cache.cpp
+    src/app/vault_manager.cpp
     src/app/app.cpp)
 
 target_include_directories(pixelvr_core PUBLIC

@@ -1,4 +1,5 @@
 #include "app/app.hpp"
+#include "app/vault_manager.hpp"
 
 #include "util/logging.hpp"
 
@@ -6,6 +7,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -71,17 +73,118 @@ bool contains(const std::string& s, const char* token) {
     return s.find(token) != std::string::npos;
 }
 
-// True if `needle` appears not immediately followed by a digit, so a marker like
+// True if `needle` appears not immediately preceded or followed by a digit, so a marker like
 // "360" matches but a resolution like "3600" (or "3600p") does not.
 bool contains_num(const std::string& s, const char* needle) {
     const std::string n = needle;
     std::size_t pos = 0;
     while ((pos = s.find(n, pos)) != std::string::npos) {
+        const bool prevDigit = (pos > 0 && s[pos - 1] >= '0' && s[pos - 1] <= '9');
         const std::size_t after = pos + n.size();
-        if (after >= s.size() || s[after] < '0' || s[after] > '9') return true;
-        pos = after;
+        const bool nextDigit = (after < s.size() && s[after] >= '0' && s[after] <= '9');
+        if (!prevDigit && !nextDigit) return true;
+        pos = (after > pos ? after : pos + 1);
     }
     return false;
+}
+
+// Returns true if filename or path patterns indicate VR180 projection
+bool is_vr180_text(const std::string& lower) {
+    if (contains(lower, "vr180") || contains(lower, "180vr") ||
+        contains(lower, "180x180") || contains(lower, "fisheye") ||
+        contains_num(lower, "180")) {
+        return true;
+    }
+
+    // VR resolution tokens commonly used for VR180 dual fisheye (vertical resolution or full frame)
+    const bool hasVrRes = contains_num(lower, "3600") || contains(lower, "3600p") ||
+                          contains(lower, "-3600") || contains(lower, "_3600") || contains(lower, ".3600") ||
+                          contains_num(lower, "2880") || contains(lower, "2880p") ||
+                          contains(lower, "-2880") || contains(lower, "_2880") || contains(lower, ".2880") ||
+                          contains_num(lower, "2700") || contains(lower, "2700p") ||
+                          contains(lower, "-2700") || contains(lower, "_2700") || contains(lower, ".2700") ||
+                          contains_num(lower, "3000") || contains(lower, "3000p") ||
+                          contains_num(lower, "5400") || contains(lower, "5400p") ||
+                          contains_num(lower, "5760") || contains(lower, "5760p") ||
+                          contains(lower, "7200x3600") || contains(lower, "5760x2880") ||
+                          contains(lower, "5400x2700") || contains(lower, "6000x3000");
+
+    // Well-known VR video studios / naming patterns
+    const bool hasVrStudio = contains(lower, "wvr") || contains(lower, "wankz") ||
+                             contains(lower, "czechvr") || contains(lower, "vrhush") ||
+                             contains(lower, "vrbangers") || contains(lower, "realjamvr") ||
+                             contains(lower, "badoinkvr") || contains(lower, "badoink") ||
+                             contains(lower, "milfvr") || contains(lower, "povr") ||
+                             contains(lower, "vrcosplay") || contains(lower, "vrsmash") ||
+                             contains(lower, "vrconk") || contains(lower, "slr_") ||
+                             contains(lower, "slr-") || contains(lower, "_slr_") ||
+                             contains(lower, "-slr-") || contains(lower, ".slr.") ||
+                             contains(lower, "swallowvr") || contains(lower, "stripzvr") ||
+                             contains(lower, "twistysvr") || contains(lower, "vrphoria") ||
+                             contains(lower, "kinkvr") || contains(lower, "lustreality") ||
+                             contains(lower, "joymiivr") || contains(lower, "naughtyamericavr");
+
+    const bool hasGenericVr = contains(lower, "_vr_") || contains(lower, "-vr-") ||
+                              contains(lower, ".vr.") || contains(lower, " vr ");
+
+    // Check if filename explicitly says 360 (which overrides VR studio / VR generic marker)
+    const bool isExplicit360 = contains_num(lower, "360") || contains(lower, "equirect") ||
+                               contains(lower, "vr360") || contains(lower, "360vr") ||
+                               contains(lower, "360x180");
+
+    if (!isExplicit360 && (hasVrRes || hasVrStudio || (hasGenericVr && (hasVrRes || contains(lower, "3d") || contains(lower, "sbs"))))) {
+        return true;
+    }
+
+    return false;
+}
+
+bool is_vr360_text(const std::string& lower) {
+    if (contains(lower, "vr180") || contains(lower, "180vr") ||
+        contains(lower, "180x180") || contains(lower, "fisheye") ||
+        contains_num(lower, "180")) {
+        return false;
+    }
+    if (contains_num(lower, "360") || contains(lower, "equirect") ||
+        contains(lower, "vr360") || contains(lower, "360vr") ||
+        contains(lower, "360x180") || contains(lower, "sphere")) {
+        return true;
+    }
+    return false;
+}
+
+bool is_vr180_media(const std::string& pathOrName, int w, int h) {
+    const std::string lower = to_lower(pathOrName);
+    if (is_vr180_text(lower)) return true;
+
+    // Check dimensions if probed (dual fisheye SBS aspect ~2.0:1)
+    if (w > 0 && h > 0) {
+        const float ar = static_cast<float>(w) / static_cast<float>(h);
+        const bool is360 = is_vr360_text(lower);
+        if (!is360) {
+            // Exact signature VR180 dual fisheye resolutions
+            if ((w == 7200 && h == 3600) || (w == 5760 && h == 2880) ||
+                (w == 5400 && h == 2700) || (w == 6000 && h == 3000) ||
+                (w == 4800 && h == 2400) || (w == 7680 && h == 3840 && (contains(lower, "vr") || contains(lower, "180")))) {
+                return true;
+            }
+            // General 2:1 dual fisheye with vertical resolution >= 2600 (not standard flat)
+            if (h >= 2600 && ar >= 1.90f && ar <= 2.10f) {
+                return true;
+            }
+            // If name has any vr marker or 3d and ar is ~2.0
+            if ((contains(lower, "vr") || contains(lower, "3d")) && ar >= 1.85f && ar <= 2.15f) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
+bool is_vr360_media(const std::string& pathOrName, int w, int h) {
+    const std::string lower = to_lower(pathOrName);
+    if (is_vr180_media(pathOrName, w, h)) return false;
+    return is_vr360_text(lower);
 }
 
 // Infers projection and stereo layout from common filename conventions, e.g.
@@ -92,11 +195,9 @@ void detect_format(const std::string& path, VulkanRenderer::ProjectionMode& proj
                    VulkanRenderer::StereoMode& stereo, bool& stereoFromName) {
     const std::string p = to_lower(path);
 
-    // Check 180 before 360 and ignore digit runs so "vr180.3600p" is 180, not 360
-    // (the resolution "3600" must not match the "360" marker).
-    if (contains(p, "vr180") || contains_num(p, "180")) {
+    if (is_vr180_text(p)) {
         proj = VulkanRenderer::ProjectionMode::Equirect180;
-    } else if (contains_num(p, "360") || contains(p, "equirect")) {
+    } else if (is_vr360_text(p)) {
         proj = VulkanRenderer::ProjectionMode::Equirect360;
     } else {
         proj = VulkanRenderer::ProjectionMode::Flat;
@@ -108,11 +209,16 @@ void detect_format(const std::string& path, VulkanRenderer::ProjectionMode& proj
         contains(p, "htab") || contains(p, "h-tab")) {
         stereo = VulkanRenderer::StereoMode::TopBottom;
     } else if (contains(p, "sbs") || contains(p, "_lr") ||
-               contains(p, "sidebyside") || contains(p, "side-by-side")) {
+               contains(p, "sidebyside") || contains(p, "side-by-side") ||
+               contains(p, "hsbs") || contains(p, "half-sbs")) {
         stereo = VulkanRenderer::StereoMode::SideBySide;  // incl. HSBS / half-SBS
     } else if (contains(p, "3d")) {
         // Bare "3D" with no explicit layout: half-SBS dominates movie rips.
         stereo = VulkanRenderer::StereoMode::SideBySide;
+    } else if (proj == VulkanRenderer::ProjectionMode::Equirect180) {
+        // VR180 almost universally defaults to SideBySide 3D
+        stereo = VulkanRenderer::StereoMode::SideBySide;
+        stereoFromName = false;  // allow refining from aspect ratio once frame is opened
     } else {
         stereo = VulkanRenderer::StereoMode::Mono;
         stereoFromName = false;  // no explicit layout; refine from aspect ratio
@@ -208,6 +314,17 @@ void App::loadMedia(const std::string& path) {
     // (360 mono 2:1, SBS 4:1, OU 1:1; 180 mono 1:1, SBS 2:1, OU 1:2).
     const int w = media_.width();
     const int h = media_.height();
+
+    // If filename did not indicate VR, check if probed dimensions reveal VR180
+    if (proj == VulkanRenderer::ProjectionMode::Flat && h > 0) {
+        if (is_vr180_media(path, w, h)) {
+            proj = VulkanRenderer::ProjectionMode::Equirect180;
+            if (!stereoFromName) {
+                stereo = VulkanRenderer::StereoMode::SideBySide;
+            }
+        }
+    }
+
     if (!stereoFromName && h > 0) {
         const float ar = static_cast<float>(w) / static_cast<float>(h);
         if (proj == VulkanRenderer::ProjectionMode::Equirect360) {
@@ -395,6 +512,62 @@ int App::navStepX(float axisX, std::chrono::steady_clock::time_point now) {
     return 0;
 }
 
+void App::performVaultLock() {
+    VaultManager::instance().lock();
+    renderer_.setVaultUnlocked(false);
+    actionMenu_.visible = false;
+    renderer_.setActionMenu({});
+
+#ifdef PIXELVR_HAVE_MEDIA
+    if (mediaOpen_ && VaultManager::instance().isVaultPath(currentMediaPath_)) {
+        media_.close();
+        mediaOpen_ = false;
+        renderer_.clearVideo();
+    }
+#endif
+
+#ifdef PIXELVR_HAVE_FREETYPE
+    if (browser_.inVault()) {
+        browser_.openHome();
+    }
+    browser_.clearFinished();
+    downloadToast_ = {};
+    downloadToastText_.clear();
+    renderer_.clearCardThumbnails();
+    thumbnailCache_.clearVaultThumbs(VaultManager::instance().vaultDir());
+#endif
+
+    if (settings_.section() == 4) {
+        settings_.setSection(0);
+    }
+    settings_.refresh();
+
+    PIXELVR_LOG_INFO("Vault locked and sanitized");
+}
+
+void App::openActionMenu() {
+#ifdef PIXELVR_HAVE_FREETYPE
+    const Browser::Entry* fe = browser_.focused();
+    if (fe == nullptr || fe->isBack || browser_.onNetwork()) return;
+
+    actionMenu_.visible = true;
+    actionMenu_.page = 0;
+    actionMenu_.selectedOption = 0;
+    actionMenu_.title = fe->isDir ? "Folder Actions" : "File Actions";
+    actionMenu_.subtitle = fe->label;
+    actionMenu_.options.clear();
+
+    if (VaultManager::instance().isUnlocked() && !browser_.inVault()) {
+        actionMenu_.options.push_back("Move to Vault");
+    }
+    actionMenu_.options.push_back("Move To...");
+    actionMenu_.options.push_back("Rename");
+    actionMenu_.options.push_back("Delete");
+    actionMenu_.options.push_back("Cancel");
+    actionMenu_.renameBuffer.clear();
+#endif
+}
+
 int App::run() {
     using namespace std::chrono_literals;
 
@@ -437,11 +610,29 @@ int App::run() {
             });
 
             // Apply controller input that renderFrame synced this frame.
+            const auto nowT = std::chrono::steady_clock::now();
             XrInputState in = xr_.input();
-            // Route the remappable functions from the user's chosen physical
-            // buttons (press-to-bind). While the settings menu is listening, the
-            // next button press is captured as the binding, not a function.
-            if (settings_.isListening()) {
+
+            // Custom combo recording listener (active while recording new 6-button combo in Vault & Privacy)
+            if (VaultManager::instance().isRecordingCombo()) {
+                for (int b : {XrInputState::BtnA, XrInputState::BtnB, XrInputState::BtnX, XrInputState::BtnY}) {
+                    if (in.buttonDown[b]) {
+                        const bool finished = VaultManager::instance().feedRecordButton(b);
+                        if (finished) {
+                            xr_.triggerHaptic(0, 0.050f, 0.0f, 0.8f);
+                            xr_.triggerHaptic(1, 0.050f, 0.0f, 0.8f);
+                        } else {
+                            xr_.triggerHaptic(0, 0.020f, 0.0f, 0.4f);
+                            xr_.triggerHaptic(1, 0.020f, 0.0f, 0.4f);
+                        }
+                        settings_.refresh();
+                        break;
+                    }
+                }
+                in.togglePlay = false;
+                in.browserToggle = false;
+                in.recenter = false;
+            } else if (settings_.isListening()) {
                 for (int b = 0; b < XrInputState::BtnCount; ++b) {
                     if (in.buttonDown[b]) {
                         settings_.assignListening(b);
@@ -456,25 +647,84 @@ int App::run() {
                 in.browserToggle = in.buttonDown[settings_.bindMenu()];
                 in.recenter = in.buttonDown[settings_.bindRecenter()];
             }
-            // X / Y are dedicated download buttons: they download the entry
-            // highlighted in the file browser. Keeping download on its own
-            // physical button means the trigger never has to double as a pointer
-            // click on the control bar. Suppressed while binding/opening settings.
+
+            // Discrete grip full-press cheat code detection:
+            // Holding full press of either grip button (bottomed out) and entering the button sequence.
+            const bool gripFullHeld = in.gripFullPressHeld[0] || in.gripFullPressHeld[1];
+            static bool sPrevGripFullHeld = false;
+            if (gripFullHeld != sPrevGripFullHeld) {
+                sPrevGripFullHeld = gripFullHeld;
+                PIXELVR_LOG_INFO("Grip full press state changed: %s (L val: %.2f, R val: %.2f)",
+                                 gripFullHeld ? "HELD" : "RELEASED",
+                                 in.gripValue[0], in.gripValue[1]);
+            }
+
+            if (gripFullHeld && !settings_.isListening() && !VaultManager::instance().isRecordingCombo()) {
+                const int h = in.gripFullPressHeld[1] ? 1 : 0;
+                for (int b : {XrInputState::BtnA, XrInputState::BtnB, XrInputState::BtnX, XrInputState::BtnY}) {
+                    if (in.buttonDown[b]) {
+                        PIXELVR_LOG_INFO("Combo input button press: %s (hand %s)",
+                                         (b == XrInputState::BtnA) ? "A" :
+                                         (b == XrInputState::BtnB) ? "B" :
+                                         (b == XrInputState::BtnX) ? "X" : "Y",
+                                         h == 0 ? "left" : "right");
+                        auto res = VaultManager::instance().feedInput(b, true, nowT);
+                        if (res == VaultManager::ComboResult::StepMatched) {
+                            PIXELVR_LOG_INFO("Vault combo step matched");
+                            xr_.triggerHaptic(h, 0.015f, 0.0f, 0.4f);
+                        } else if (res == VaultManager::ComboResult::Unlocked) {
+                            PIXELVR_LOG_INFO("Vault combo SUCCESS: UNLOCKED");
+                            xr_.triggerHaptic(h, 0.060f, 0.0f, 0.9f);
+                            renderer_.setVaultUnlocked(true);
+                            if (settings_.isOpen()) {
+                                settings_.refresh();
+                            } else {
+                                downloadsWindow_ = false;
+                                settings_.close();
+                                browser_.openVault();
+                            }
+                        } else if (res == VaultManager::ComboResult::Locked) {
+                            PIXELVR_LOG_INFO("Vault combo: RELOCKED");
+                            xr_.triggerHaptic(h, 0.060f, 0.0f, 0.7f);
+                            performVaultLock();
+                        } else {
+                            PIXELVR_LOG_INFO("Vault combo reset / mismatch");
+                        }
+                        break;
+                    }
+                }
+                // Suppress normal button functions while grip is bottomed out
+                in.togglePlay = false;
+                in.browserToggle = false;
+                in.recenter = false;
+            }
+
+            // X is the dedicated download button: it downloads the highlighted SMB entry.
+            // Y (or configured move button) is the dedicated File Actions Submenu button.
             const bool downloadPressed =
-                !settings_.isListening() && !settings_.isOpen() &&
-                (in.buttonDown[XrInputState::BtnX] ||
-                 in.buttonDown[XrInputState::BtnY]);
-            // Grip toggles that hand's laser pointer (SteamVR behaviour), so the
-            // stick / d-pad can drive a panel without the beam fighting it, and so
-            // the user picks which controller is the pointing hand.
-            if (!settings_.isListening()) {
+                !settings_.isListening() && !settings_.isOpen() && !gripFullHeld &&
+                !VaultManager::instance().isRecordingCombo() &&
+                in.buttonDown[XrInputState::BtnX];
+
+            const int configuredMoveBtn = VaultManager::instance().moveButton();
+            const bool actionBtnPressed =
+                !settings_.isListening() && !settings_.isOpen() && !gripFullHeld &&
+                !VaultManager::instance().isRecordingCombo() &&
+                (in.buttonDown[XrInputState::BtnY] ||
+                 (configuredMoveBtn >= 0 && configuredMoveBtn < XrInputState::BtnCount &&
+                  in.buttonDown[configuredMoveBtn]));
+
+            // Grip full-press click: activate laser pointer on this hand.
+            // Exactly one controller has an active laser pointer at any time.
+            if (!settings_.isListening() && !VaultManager::instance().isRecordingCombo()) {
                 for (int h = 0; h < 2; ++h) {
-                    if (in.gripDown[h]) {
-                        const bool on = !renderer_.laserOn(h);
-                        renderer_.setLaserOn(h, on);
-                        PIXELVR_LOG_INFO("laser [%s]: %s",
-                                         h == 0 ? "left" : "right",
-                                         on ? "on" : "off");
+                    if (in.gripFullPressDown[h]) {
+                        if (!renderer_.laserOn(h)) {
+                            renderer_.setLaserOn(h, true);
+                            xr_.triggerHaptic(h, 0.035f, 0.0f, 0.6f);
+                            PIXELVR_LOG_INFO("Laser switched to %s controller",
+                                             h == 0 ? "left" : "right");
+                        }
                     }
                 }
             }
@@ -482,32 +732,37 @@ int App::run() {
             bool browserOpen = false;
             bool settingsOpen = false;
 
-            // Fetch the runtime-provided controller model once a controller is
-            // tracked (one-shot; subsequent calls return immediately).
+            // Fetch the runtime-provided controller models once a controller is
+            // tracked (for left 0 and right 1 hands).
             if (in.controllers[0].active || in.controllers[1].active) {
-                if (renderModels_.poll() && !controllerModelLoaded_) {
-                    controllerModelLoaded_ =
-                        renderer_.loadControllerModel(renderModels_.gltf());
+                renderModels_.poll();
+                for (int h = 0; h < 2; ++h) {
+                    if (!controllerModelLoaded_[h] && renderModels_.assetReady(h)) {
+                        controllerModelLoaded_[h] =
+                            renderer_.loadControllerModel(h, renderModels_.gltf(h));
+                    }
                 }
             }
 
-            // Drive the model's per-node animation (button presses, trigger pull,
+            // Drive each model's per-node animation (button presses, trigger pull,
             // thumbstick tilt) from the runtime's render-model state.
-            if (controllerModelLoaded_) {
-                std::vector<RenderModelSystem::NodeState> ns;
-                if (renderModels_.nodeStates(xr_.displayTime(), ns)) {
-                    const auto& names = renderModels_.nodeNames();
-                    std::vector<VulkanRenderer::NodeStateVis> vis;
-                    vis.reserve(ns.size());
-                    for (std::size_t i = 0; i < ns.size(); ++i) {
-                        VulkanRenderer::NodeStateVis v;
-                        v.name = (i < names.size()) ? names[i] : std::string();
-                        for (int k = 0; k < 3; ++k) v.pos[k] = ns[i].pos[k];
-                        for (int k = 0; k < 4; ++k) v.quat[k] = ns[i].quat[k];
-                        v.visible = ns[i].visible;
-                        vis.push_back(v);
+            for (int h = 0; h < 2; ++h) {
+                if (controllerModelLoaded_[h]) {
+                    std::vector<RenderModelSystem::NodeState> ns;
+                    if (renderModels_.nodeStates(h, xr_.displayTime(), ns)) {
+                        const auto& names = renderModels_.nodeNames(h);
+                        std::vector<VulkanRenderer::NodeStateVis> vis;
+                        vis.reserve(ns.size());
+                        for (std::size_t i = 0; i < ns.size(); ++i) {
+                            VulkanRenderer::NodeStateVis v;
+                            v.name = (i < names.size()) ? names[i] : std::string();
+                            for (int k = 0; k < 3; ++k) v.pos[k] = ns[i].pos[k];
+                            for (int k = 0; k < 4; ++k) v.quat[k] = ns[i].quat[k];
+                            v.visible = ns[i].visible;
+                            vis.push_back(v);
+                        }
+                        renderer_.setControllerNodeStates(h, vis);
                     }
-                    renderer_.setControllerNodeStates(vis);
                 }
             }
 
@@ -527,7 +782,6 @@ int App::run() {
             // Controller activity: moving a controller past a small threshold (or
             // any button/stick input) keeps the laser, models and controls shown;
             // after a few seconds of stillness they fade away.
-            const auto nowT = std::chrono::steady_clock::now();
             bool activity = false;
             for (int h = 0; h < 2; ++h) {
                 const auto& c = in.controllers[h];
@@ -560,13 +814,21 @@ int App::run() {
                 std::fabs(in.thumbstickRX) > 0.15f) {
                 activity = true;
             }
-            if (activity) lastControllerActivity_ = nowT;
+            if (activity) {
+                lastControllerActivity_ = nowT;
+                VaultManager::instance().recordActivity(nowT);
+            }
+            if (VaultManager::instance().tick(nowT, in.headValid && xr_.sessionFocused())) {
+                performVaultLock();
+            }
             const bool controllersEngaged =
                 (nowT - lastControllerActivity_) < std::chrono::milliseconds(3000);
 
 #ifdef PIXELVR_HAVE_FREETYPE
             if (in.browserToggle) {
-                if (downloadsWindow_) {
+                if (actionMenu_.visible) {
+                    actionMenu_.visible = false;
+                } else if (downloadsWindow_) {
                     downloadsWindow_ = false;
                 } else if (settings_.isOpen()) {
                     settings_.close();
@@ -602,22 +864,23 @@ int App::run() {
             } else {
                 dlWasActive_ = false;
             }
-            const bool dlRecent = browser_.downloadActive() || nowT < downloadToast_;
+            const bool dlRecent = browser_.downloadActive() || browser_.hasQueuedDownloads() || nowT < downloadToast_;
             bool dlFailed = false;
             for (const auto& j : browser_.downloadJobs()) {
                 if (j.state == 2) dlFailed = true;
             }
             // No head-locked download text (it followed the view); progress lives
             // in the Downloads window and the control-bar badge.
+            const bool dlAnyActive = browser_.downloadActive() || browser_.hasQueuedDownloads();
             renderer_.setDownloadStatus(false, "");
-            renderer_.setDownloadsBadge(browser_.downloadActive(),
-                                        !browser_.downloadActive() &&
+            renderer_.setDownloadsBadge(dlAnyActive,
+                                        !dlAnyActive &&
                                             browser_.hasDownloads() && dlRecent,
-                                        !browser_.downloadActive() && dlFailed);
-            //Downloads window: job list plus action buttons at the bottom.
+                                        !dlAnyActive && dlFailed);
+            // Downloads window: job list plus action buttons at the bottom.
             std::vector<std::string> drows;
             std::vector<std::string> dbtns;
-            if (browser_.downloadActive()) {
+            if (browser_.downloadActive() || browser_.hasQueuedDownloads()) {
                 dbtns.push_back(browser_.downloadPaused() ? "Resume All" : "Pause All");
                 dbtns.push_back("Cancel Active");
             }
@@ -628,7 +891,7 @@ int App::run() {
                 const auto& jobs = browser_.downloadJobs();
                 for (std::size_t i = 0; i < jobs.size(); ++i) {
                     const auto& j = jobs[i];
-                    if (j.state == 0) ++activeDlCount;
+                    if (j.state == 0 || j.state == 4) ++activeDlCount;
                     std::string nm = j.name;
                     if (nm.size() > 30) nm = nm.substr(0, 29) + "~";
                     char buf[192];
@@ -674,6 +937,9 @@ int App::run() {
                     } else if (j.state == 3) {
                         std::snprintf(buf, sizeof(buf), "%s  stopped", nm.c_str());
                         di.detail = "Paused / Stopped";
+                    } else if (j.state == 4) {
+                        std::snprintf(buf, sizeof(buf), "%s  queued", nm.c_str());
+                        di.detail = "Queued in download queue (click to cancel)";
                     } else {
                         std::snprintf(buf, sizeof(buf), "%s  failed", nm.c_str());
                         di.detail = "Transfer Failed";
@@ -760,15 +1026,41 @@ int App::run() {
 
                     auto classifyMediaBadge = [&](const std::string& pathOrName, int w, int h) -> std::string {
                         const std::string lower = to_lower(pathOrName);
-                        const bool is180 = contains(lower, "vr180") || contains_num(lower, "180");
-                        const bool is360 = !is180 && (contains_num(lower, "360") || contains(lower, "equirect"));
+                        const bool is180 = is_vr180_media(pathOrName, w, h);
+                        const bool is360 = !is180 && is_vr360_media(pathOrName, w, h);
                         const bool isTb  = contains(lower, "_tb") || contains(lower, "-tb") ||
                                            contains(lower, "_ou") || contains(lower, "overunder") ||
                                            contains(lower, "htab");
                         const bool isSbs = contains(lower, "sbs") || contains(lower, "_lr") ||
                                            contains(lower, "sidebyside") || contains(lower, "3d");
-                        if (is180) return (isSbs || isTb) ? "VR180 3D" : "VR180";
-                        if (is360) return (isSbs || isTb) ? "VR360 3D" : "VR360";
+
+                        if (is180) {
+                            if (w >= 7000 || h >= 3500 || contains(lower, "8k") || contains(lower, "3600") || contains(lower, "4320")) {
+                                return "VR180 8K";
+                            }
+                            if (w >= 5000 || h >= 2500 || contains(lower, "6k") || contains(lower, "5k") ||
+                                contains(lower, "2880") || contains(lower, "2700") || contains(lower, "5400") || contains(lower, "5760")) {
+                                return "VR180 6K";
+                            }
+                            if (w >= 3600 || h >= 1800 || contains(lower, "4k") || contains(lower, "2160") || contains(lower, "1920")) {
+                                return "VR180 4K";
+                            }
+                            return (isSbs || isTb) ? "VR180 3D" : "VR180";
+                        }
+
+                        if (is360) {
+                            if (w >= 7000 || h >= 3500 || contains(lower, "8k")) {
+                                return "VR360 8K";
+                            }
+                            if (w >= 5000 || h >= 2500 || contains(lower, "6k")) {
+                                return "VR360 6K";
+                            }
+                            if (w >= 3600 || h >= 1800 || contains(lower, "4k")) {
+                                return "VR360 4K";
+                            }
+                            return (isSbs || isTb) ? "VR360 3D" : "VR360";
+                        }
+
                         if (isTb)  return "3D TB";
                         if (isSbs) return "3D SBS";
 
@@ -844,10 +1136,15 @@ int App::run() {
                     items.push_back(std::move(item));
                 }
 
+                renderer_.setBrowserNetwork(browser_.onNetwork());
                 std::string status = browser_.status();
                 if (browser_.onNetwork() && !browser_.isBusy()) {
                     if (status.empty()) {
                         status = "A/Trigger: Stream  \xB7  X: Download to Local";
+                    }
+                } else if (!browser_.onNetwork() && !browser_.isBusy()) {
+                    if (status.empty()) {
+                        status = "A/Trigger: Play  \xB7  Y: Actions";
                     }
                 }
                 renderer_.setBrowserItems(true, browser_.title(), items,
@@ -874,6 +1171,7 @@ int App::run() {
             } else {
                 renderer_.setBrowserItems(false, "", {}, 0, "");
             }
+            renderer_.setActionMenu(actionMenu_);
 #endif
 
             // Settings panel overlay
@@ -899,43 +1197,28 @@ int App::run() {
             // Feed controller poses to the renderer (models, pointer ray, cursor);
             // it raycasts the pointer against UI panels and reports hit rows/buttons.
             {
-                // Align the model to the runtime render-model space (where the
-                // system draws the real controller). Locate it once per frame and
-                // derive a local grip-space correction applied to both hands.
-                {
+                // Align each controller model to its runtime render-model space
+                // (where the system draws the real controller).
+                for (int h = 0; h < 2; ++h) {
+                    if (!in.controllers[h].gripActive) continue;
                     float mPos[3], mQuat[4];
-                    if (renderModels_.locate(xr_.appSpace(), xr_.displayTime(),
-                                             mPos, mQuat)) {
-                        int owner = -1;
-                        float best = 1e30f;
-                        for (int h = 0; h < 2; ++h) {
-                            if (!in.controllers[h].gripActive) continue;
-                            const float* g = in.controllers[h].gripPosition;
-                            const float dx = g[0] - mPos[0], dy = g[1] - mPos[1],
-                                        dz = g[2] - mPos[2];
-                            const float d = dx * dx + dy * dy + dz * dz;
-                            if (d < best) { best = d; owner = h; }
-                        }
-                        if (owner >= 0) {
-                            // correction = inverse(gripOwner) then modelPose.
-                            const float* gq = in.controllers[owner].gripOrientation;
-                            const float* gt = in.controllers[owner].gripPosition;
-                            const float giq[4] = {-gq[0], -gq[1], -gq[2], gq[3]};
-                            float git[3];
-                            quatRotate(giq, gt, git);
-                            git[0] = -git[0]; git[1] = -git[1]; git[2] = -git[2];
-                            composePose(git, giq, mPos, mQuat, modelCorrPos_,
-                                        modelCorrQuat_);
-                            modelCorrValid_ = true;
-                        }
+                    if (renderModels_.locate(h, xr_.appSpace(), xr_.displayTime(), mPos, mQuat)) {
+                        const float* gq = in.controllers[h].gripOrientation;
+                        const float* gt = in.controllers[h].gripPosition;
+                        const float giq[4] = {-gq[0], -gq[1], -gq[2], gq[3]};
+                        float git[3];
+                        quatRotate(giq, gt, git);
+                        git[0] = -git[0]; git[1] = -git[1]; git[2] = -git[2];
+                        composePose(git, giq, mPos, mQuat, modelCorrPos_[h], modelCorrQuat_[h]);
+                        modelCorrValid_[h] = true;
                     }
                 }
                 const bool uiPanelActive = browserOpen || settingsOpen ||
-                                           downloadsWindow_ || !pendingDl_.empty();
+                                           downloadsWindow_ || !pendingDl_.empty() || actionMenu_.visible;
                 // The Transport HUD is only visible during playback when the
                 // Unified Spatial Hub and modals are closed.
                 const bool barBlocked = browserOpen || settingsOpen || downloadsWindow_ ||
-                                        !pendingDl_.empty();
+                                        !pendingDl_.empty() || actionMenu_.visible;
                 // Controls (buttons + timeline) show only while a controller is
                 // actively moving; they fade after a few seconds of stillness.
                 renderer_.setControlBar(!barBlocked && controllersEngaged &&
@@ -955,9 +1238,9 @@ int App::run() {
                     for (int k = 0; k < 4; ++k) v.orientation[k] = c.orientation[k];
                     v.gripActive = c.gripActive;
                     float gp[3], gq[4];
-                    if (c.gripActive && modelCorrValid_) {
+                    if (c.gripActive && modelCorrValid_[h]) {
                         composePose(c.gripPosition, c.gripOrientation,
-                                    modelCorrPos_, modelCorrQuat_, gp, gq);
+                                    modelCorrPos_[h], modelCorrQuat_[h], gp, gq);
                     } else {
                         for (int k = 0; k < 3; ++k) gp[k] = c.gripPosition[k];
                         for (int k = 0; k < 4; ++k) gq[k] = c.gripOrientation[k];
@@ -990,7 +1273,8 @@ int App::run() {
 
 #ifdef PIXELVR_HAVE_FREETYPE
             // Unified Spatial Hub left navigation rail clicks (shared across Files, Downloads, Settings)
-            const bool hubActive = (browserOpen || settingsOpen || downloadsWindow_) && pendingDl_.empty();
+            const bool hubActive = (browserOpen || settingsOpen || downloadsWindow_) &&
+                                   pendingDl_.empty() && !actionMenu_.visible;
             const int sbHover = renderer_.browserSidebarHovered();
             if (hubActive && (in.togglePlay || in.select) && sbHover >= 0) {
                 if (sbHover == 0) {
@@ -1019,6 +1303,22 @@ int App::run() {
                         else if (sub == 2) browser_.openNetwork();
                         else if (sub == 3) browser_.openDownloads();
                     }
+                } else if (sbHover == 7) {
+                    // Subtab 5: Vault (Private) in Files or Vault & Privacy in Settings
+                    if (VaultManager::instance().isUnlocked()) {
+                        if (settings_.isOpen()) {
+                            settings_.setSection(4);
+                        } else if (browser_.isOpen()) {
+                            browser_.openVault();
+                        }
+                    }
+                } else if (sbHover == 8) {
+                    // Lock Vault button
+                    if (VaultManager::instance().isUnlocked()) {
+                        xr_.triggerHaptic(0, 0.050f, 0.0f, 0.7f);
+                        xr_.triggerHaptic(1, 0.050f, 0.0f, 0.7f);
+                        performVaultLock();
+                    }
                 }
                 interacted = true;
             }
@@ -1027,7 +1327,7 @@ int App::run() {
             if (dlWin && (in.select || in.togglePlay) && sbHover < 0) {
                 const int bi = renderer_.downloadsButtonHovered();
                 if (bi >= 0) {
-                    if (browser_.downloadActive()) {
+                    if (browser_.downloadActive() || browser_.hasQueuedDownloads()) {
                         if (bi == 0) browser_.togglePause();
                         else if (bi == 1) browser_.stopDownload();
                         else if (bi == 2) browser_.clearFinished();
@@ -1038,28 +1338,183 @@ int App::run() {
                 } else {
                     const int hov = renderer_.downloadsHovered();
                     const auto& jobs = browser_.downloadJobs();
-                    if (hov >= 0 && hov < static_cast<int>(jobs.size()) &&
-                        jobs[static_cast<std::size_t>(hov)].state == 1 &&
-                        !jobs[static_cast<std::size_t>(hov)].localPath.empty()) {
+                    if (hov >= 0 && hov < static_cast<int>(jobs.size())) {
                         const auto& j = jobs[static_cast<std::size_t>(hov)];
-                        if (j.isDir) {
-                            browser_.openPath(j.localPath);
-                            downloadsWindow_ = false;
-                        } else {
+                        if (j.state == 1 && !j.localPath.empty()) {
+                            if (j.isDir) {
+                                browser_.openPath(j.localPath);
+                                downloadsWindow_ = false;
+                            } else {
 #ifdef PIXELVR_HAVE_MEDIA
-                            loadMedia(j.localPath);
-                            downloadsWindow_ = false;
-                            browser_.setOpen(false);
+                                loadMedia(j.localPath);
+                                downloadsWindow_ = false;
+                                browser_.setOpen(false);
 #endif
+                            }
+                            interacted = true;
+                        } else if (j.state == 4) {
+                            browser_.cancelQueued(j.uri);
+                            xr_.triggerHaptic(0, 0.020f, 0.0f, 0.4f);
+                            xr_.triggerHaptic(1, 0.020f, 0.0f, 0.4f);
+                            interacted = true;
                         }
-                        interacted = true;
                     }
                 }
             }
 
-            // Files view interaction inside Unified Spatial Hub
-            if (browser_.isOpen() && !browser_.isScanning() && !downloadsWindow_ &&
-                !settings_.isOpen() && pendingDl_.empty()) {
+            // File Action Submenu or Files view interaction inside Unified Spatial Hub
+            if (actionMenu_.visible) {
+                if (!browser_.isOpen() || downloadsWindow_ || settings_.isOpen() || !pendingDl_.empty()) {
+                    actionMenu_.visible = false;
+                } else {
+                    const Browser::Entry* fe = browser_.focused();
+
+                    // Button Y (or configured move button) toggles/cancels
+                    if (actionBtnPressed) {
+                        actionMenu_.visible = false;
+                    } else if (actionMenu_.page == 0 || actionMenu_.page == 1) {
+                        const int dy = navStep(in.thumbstickY, nowT);
+                        if (dy != 0) {
+                            actionMenu_.selectedOption += dy;
+                            const int maxOpt = static_cast<int>(actionMenu_.options.size()) - 1;
+                            if (actionMenu_.selectedOption < 0) actionMenu_.selectedOption = 0;
+                            if (actionMenu_.selectedOption > maxOpt) actionMenu_.selectedOption = maxOpt;
+                        }
+                        const int hov = renderer_.actionMenuBtnHovered();
+                        if (hov >= 0) actionMenu_.selectedOption = hov;
+
+                        if (in.select || in.togglePlay) {
+                            int chosen = (hov >= 0) ? hov : actionMenu_.selectedOption;
+                            if (chosen >= 0 && chosen < static_cast<int>(actionMenu_.options.size())) {
+                                const std::string opt = actionMenu_.options[chosen];
+                                if (actionMenu_.page == 0) {
+                                    if (opt == "Move to Vault") {
+                                        std::string newPath;
+                                        if (browser_.moveFocusedToVault(newPath)) {
+                                            xr_.triggerHaptic(0, 0.050f, 0.0f, 0.7f);
+                                            xr_.triggerHaptic(1, 0.050f, 0.0f, 0.7f);
+                                        }
+                                        actionMenu_.visible = false;
+                                    } else if (opt == "Move To...") {
+                                        actionMenu_.page = 1;
+                                        actionMenu_.title = "Move Destination";
+                                        actionMenu_.subtitle = fe ? fe->label : "";
+                                        actionMenu_.options.clear();
+                                        actionMenu_.options.push_back("Videos (~/Videos)");
+                                        actionMenu_.options.push_back("Downloads (~/Downloads)");
+                                        actionMenu_.options.push_back("Home (~/)");
+                                        if (!browser_.parentDir().empty()) {
+                                            actionMenu_.options.push_back("Parent Folder (..)");
+                                        }
+                                        actionMenu_.options.push_back("Cancel");
+                                        actionMenu_.selectedOption = 0;
+                                    } else if (opt == "Rename") {
+                                        actionMenu_.page = 3;
+                                        actionMenu_.title = (fe && fe->isDir) ? "Rename Folder" : "Rename File";
+                                        actionMenu_.subtitle = fe ? fe->label : "";
+                                        actionMenu_.renameBuffer = fe ? fe->label : "";
+                                        actionMenu_.selectedOption = -1;
+                                    } else if (opt == "Delete") {
+                                        actionMenu_.page = 2;
+                                        actionMenu_.title = (fe && fe->isDir) ? "Delete Folder?" : "Delete File?";
+                                        actionMenu_.subtitle = "Permanently delete \"" + (fe ? fe->label : "") + "\"" +
+                                                               ((fe && fe->isDir) ? " and all contents?" : "?");
+                                        actionMenu_.options.clear();
+                                        actionMenu_.options.push_back("Yes, Delete");
+                                        actionMenu_.options.push_back("Cancel");
+                                        actionMenu_.selectedOption = 1; // Default to Cancel for safety
+                                    } else if (opt == "Cancel") {
+                                        actionMenu_.visible = false;
+                                    }
+                                } else if (actionMenu_.page == 1) {
+                                    if (opt == "Cancel") {
+                                        actionMenu_.visible = false;
+                                    } else {
+                                        std::string targetDir;
+                                        if (opt == "Videos (~/Videos)") targetDir = browser_.videosDir();
+                                        else if (opt == "Downloads (~/Downloads)") targetDir = browser_.downloadsDir();
+                                        else if (opt == "Home (~/)") targetDir = browser_.homeDir();
+                                        else if (opt == "Parent Folder (..)") targetDir = browser_.parentDir();
+
+                                        if (!targetDir.empty()) {
+                                            std::string newPath;
+                                            if (browser_.moveFocusedTo(targetDir, newPath)) {
+                                                xr_.triggerHaptic(0, 0.050f, 0.0f, 0.7f);
+                                                xr_.triggerHaptic(1, 0.050f, 0.0f, 0.7f);
+                                            }
+                                        }
+                                        actionMenu_.visible = false;
+                                    }
+                                }
+                            }
+                            interacted = true;
+                        }
+                    } else if (actionMenu_.page == 2) {
+                        const int dx = navStepX(in.thumbstickX, nowT);
+                        const int dy = navStep(in.thumbstickY, nowT);
+                        if (dx != 0 || dy != 0) {
+                            actionMenu_.selectedOption = (actionMenu_.selectedOption == 0) ? 1 : 0;
+                        }
+                        const int hov = renderer_.actionMenuBtnHovered();
+                        if (hov >= 0) actionMenu_.selectedOption = hov;
+
+                        if (in.select || in.togglePlay) {
+                            int chosen = (hov >= 0) ? hov : actionMenu_.selectedOption;
+                            if (chosen == 0) {
+                                std::string delName;
+                                if (browser_.deleteFocused(delName)) {
+                                    xr_.triggerHaptic(0, 0.050f, 0.0f, 0.7f);
+                                    xr_.triggerHaptic(1, 0.050f, 0.0f, 0.7f);
+                                }
+                                actionMenu_.visible = false;
+                            } else {
+                                actionMenu_.visible = false;
+                            }
+                            interacted = true;
+                        }
+                    } else if (actionMenu_.page == 3) {
+                        const int btnHov = renderer_.actionMenuBtnHovered();
+                        const int keyHov = renderer_.actionMenuKeyHovered();
+
+                        if (in.select || in.togglePlay) {
+                            if (btnHov == 0) {
+                                actionMenu_.renameBuffer.clear();
+                                xr_.triggerHaptic(0, 0.020f, 0.0f, 0.5f);
+                                xr_.triggerHaptic(1, 0.020f, 0.0f, 0.5f);
+                            } else if (btnHov == 1) {
+                                if (!actionMenu_.renameBuffer.empty()) {
+                                    actionMenu_.renameBuffer.pop_back();
+                                    xr_.triggerHaptic(0, 0.020f, 0.0f, 0.5f);
+                                    xr_.triggerHaptic(1, 0.020f, 0.0f, 0.5f);
+                                }
+                            } else if (btnHov == 2) {
+                                if (!actionMenu_.renameBuffer.empty()) {
+                                    if (browser_.renameFocused(actionMenu_.renameBuffer)) {
+                                        xr_.triggerHaptic(0, 0.050f, 0.0f, 0.7f);
+                                        xr_.triggerHaptic(1, 0.050f, 0.0f, 0.7f);
+                                    }
+                                    actionMenu_.visible = false;
+                                }
+                            } else if (btnHov == 3) {
+                                actionMenu_.visible = false;
+                            } else if (keyHov >= 0) {
+                                static const char* kKeys = "1234567890-_QWERTYUIOPASDFGHJKLZXCVBNM. ";
+                                if (keyHov < static_cast<int>(std::strlen(kKeys))) {
+                                    actionMenu_.renameBuffer.push_back(kKeys[keyHov]);
+                                    xr_.triggerHaptic(0, 0.015f, 0.0f, 0.4f);
+                                    xr_.triggerHaptic(1, 0.015f, 0.0f, 0.4f);
+                                }
+                            }
+                            interacted = true;
+                        }
+                    }
+                }
+            } else if (actionBtnPressed && browser_.isOpen() && !downloadsWindow_ &&
+                       !settings_.isOpen() && pendingDl_.empty() && !browser_.onNetwork()) {
+                openActionMenu();
+                interacted = true;
+            } else if (browser_.isOpen() && !browser_.isScanning() && !downloadsWindow_ &&
+                       !settings_.isOpen() && pendingDl_.empty()) {
                 // 2D grid thumbstick navigation: Y steps rows (3 cards), X steps columns (1 card)
                 const int dy = navStep(in.thumbstickY, nowT);
                 const int dx = navStepX(in.thumbstickX, nowT);
@@ -1108,14 +1563,13 @@ int App::run() {
             if ((browser_.isOpen() || downloadsWindow_) && in.recenter && in.headValid) {
                 renderer_.recenterScreen(in.headPos, in.headForward);
             }
-            // X / Y: download the highlighted entry. Folders ask for confirmation
-            // (with the measured size) first; on a network share a plain file is
-            // copied, and locally there is nothing to download.
-            if (browser_.isOpen() && !downloadsWindow_ && !settings_.isOpen() &&
-                downloadPressed && pendingDl_.empty()) {
+
+            // X: download the highlighted entry when browsing SMB shares. Folders ask for
+            // confirmation (with the measured size) first; plain files download immediately.
+            if (downloadPressed && browser_.isOpen() && !downloadsWindow_ && !settings_.isOpen() &&
+                pendingDl_.empty() && !actionMenu_.visible && browser_.onNetwork()) {
                 const Browser::Entry* fe = browser_.focused();
-                if (fe != nullptr && fe->isDir && !fe->isBack &&
-                    browser_.onNetwork()) {
+                if (fe != nullptr && fe->isDir && !fe->isBack) {
                     pendingDl_ = fe->path;
                     pendingDlName_ = fe->label;
                     pendingDlFresh_ = true;
@@ -1142,7 +1596,11 @@ int App::run() {
                 // Trigger activates the selection made by the laser or the stick.
                 if (in.select && (hovered >= 0 || std::fabs(in.thumbstickY) > 0.25f)) {
                     auto act = settings_.activate();
-                    if (act == SettingsMenu::Action::RecenterScreen) {
+                    if (act == SettingsMenu::Action::LockVaultAction) {
+                        xr_.triggerHaptic(0, 0.050f, 0.0f, 0.7f);
+                        xr_.triggerHaptic(1, 0.050f, 0.0f, 0.7f);
+                        performVaultLock();
+                    } else if (act == SettingsMenu::Action::RecenterScreen) {
                         if (in.headValid) {
                             renderer_.recenterScreen(in.headPos, in.headForward);
                         }

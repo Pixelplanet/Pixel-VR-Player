@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <deque>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -40,6 +41,17 @@ public:
     void openVideos();
     void openDownloads();
     void openDrives();
+    void openVault();
+    bool inVault() const;
+    bool moveFocusedToVault(std::string& outNewPath);
+    bool moveFocusedTo(const std::string& destDir, std::string& outNewPath);
+    bool deleteFocused(std::string& deletedName);
+    bool renameFocused(const std::string& newName);
+    const std::string& currentLocation() const { return location_; }
+    std::string parentDir() const;
+    std::string homeDir() const;
+    std::string videosDir() const;
+    std::string downloadsDir() const;
     bool isOpen() const { return open_; }
     // The download worker yields the shared SMB connection while the browser is
     // open, so directory listing stays responsive (downloads resume afterwards).
@@ -104,13 +116,21 @@ public:
         std::string name;
         std::string localPath;
         std::string uri;
-        int state = 0;  // 0 downloading, 1 done, 2 failed, 3 stopped
+        int state = 0;  // 0 downloading, 1 done, 2 failed, 3 stopped, 4 queued
         long long bytes = 0;
         long long total = 0;
         bool isDir = false;
     };
+    struct DownloadQueueItem {
+        std::string uri;
+        std::string name;
+        std::string destDir;
+        bool isDir = false;
+    };
     const std::vector<DownloadJob>& downloadJobs() const { return dlJobs_; }
     bool hasDownloads() const { return !dlJobs_.empty(); }
+    bool hasQueuedDownloads() const { return !dlQueue_.empty(); }
+    void cancelQueued(const std::string& uri);
     bool downloadPaused() const { return dlPaused_.load(); }
     void togglePause();   // SIGSTOP/SIGCONT the curl child
     void stopDownload();  // SIGKILL the child and drop the partial file
@@ -146,6 +166,7 @@ private:
     void scanSmbInto(const std::string& uri, ScanResult& out);
     void startDownloadFile(const std::string& uri, const std::string& local);
     void startDownloadFolder(const std::string& uri, const std::string& name);
+    void startNextQueued();
 
     bool open_ = false;
     bool inSmb_ = false;
@@ -176,6 +197,7 @@ private:
     std::string dlName_;
     std::string downloadDir_;  // "" => default ~/media
     std::vector<DownloadJob> dlJobs_;
+    std::deque<DownloadQueueItem> dlQueue_;
     int dlActiveJob_ = -1;             // index of the job in flight, or -1
     std::atomic<bool> dlPaused_{false};
     std::atomic<bool> dlAbort_{false};

@@ -1,4 +1,5 @@
 #include "ui/thumbnail_cache.hpp"
+#include "app/vault_manager.hpp"
 #include "util/logging.hpp"
 
 #include <algorithm>
@@ -94,6 +95,32 @@ bool ThumbnailCache::getMeta(const std::string& videoPath, MediaMeta& outMeta) {
         return true;
     }
     return false;
+}
+
+void ThumbnailCache::clearVaultThumbs(const std::string& vaultDir) {
+    if (vaultDir.empty()) return;
+    std::lock_guard<std::mutex> lk(mutex_);
+    for (auto it = cache_.begin(); it != cache_.end(); ) {
+        if (it->first.rfind(vaultDir, 0) == 0) {
+            it = cache_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (auto it = metaCache_.begin(); it != metaCache_.end(); ) {
+        if (it->first.rfind(vaultDir, 0) == 0) {
+            it = metaCache_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (auto it = queuedPaths_.begin(); it != queuedPaths_.end(); ) {
+        if (it->first.rfind(vaultDir, 0) == 0) {
+            it = queuedPaths_.erase(it);
+        } else {
+            ++it;
+        }
+    }
 }
 
 bool ThumbnailCache::extractThumbnailAndMeta(const std::string& videoPath,
@@ -255,9 +282,11 @@ void ThumbnailCache::workerLoop() {
             continue;
         }
 
+        const bool inVault = VaultManager::instance().isVaultPath(path);
+        const std::string targetCacheDir = inVault ? VaultManager::instance().thumbsDir() : cacheDir_;
         const std::string baseHash = std::to_string(fnv1a64(path));
-        const std::string cacheFile = cacheDir_ + "/" + baseHash + ".rgba";
-        const std::string metaFile = cacheDir_ + "/" + baseHash + ".meta";
+        const std::string cacheFile = targetCacheDir + "/" + baseHash + ".rgba";
+        const std::string metaFile = targetCacheDir + "/" + baseHash + ".meta";
 
         std::error_code ec;
         if (fs::is_regular_file(cacheFile, ec) && fs::file_size(cacheFile, ec) == kThumbBytes) {

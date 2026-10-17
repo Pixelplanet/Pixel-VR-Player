@@ -34,6 +34,9 @@ public:
     // Returns true and populates MediaMeta if probed.
     bool getMeta(const std::string& videoPath, MediaMeta& outMeta);
 
+    // Clears cached thumbnails and metadata whose paths start with vaultDir.
+    void clearVaultThumbs(const std::string& vaultDir);
+
 private:
     void workerLoop();
     bool extractThumbnailAndMeta(const std::string& videoPath,

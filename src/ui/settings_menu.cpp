@@ -1,4 +1,5 @@
 #include "ui/settings_menu.hpp"
+#include "app/vault_manager.hpp"
 
 #include "util/logging.hpp"
 
@@ -185,6 +186,40 @@ void SettingsMenu::refresh() {
         rows_.push_back({"Select / Click", "Trigger", Action::None});
         rows_.push_back({"Controller Models", drawModels_ ? "On" : "Off",
                          Action::ToggleModels});
+    } else if (section_ == 4) {
+        title_ = "Settings > Vault & Privacy";
+        rows_.push_back({"Auto-Lock on Headset Removal",
+                         VaultManager::instance().autoLockHeadsetOff() ? "Enabled" : "Disabled",
+                         Action::CycleVaultAutoLockHeadset});
+
+        int toSec = VaultManager::instance().autoLockTimeoutSec();
+        std::string toStr = "Disabled";
+        if (toSec == 120) toStr = "2 Minutes";
+        else if (toSec == 300) toStr = "5 Minutes";
+        else if (toSec == 600) toStr = "10 Minutes";
+        rows_.push_back({"Inactivity Auto-Lock Timeout", toStr,
+                         Action::CycleVaultTimeout});
+
+        auto moveBtnLabel = [&]() -> std::string {
+            if (listeningFunc_ == 3) return "[ press a button ]";
+            int mb = VaultManager::instance().moveButton();
+            if (mb < 0 || mb >= kButtonCount) return "Disabled";
+            return kButtonNames[mb % kButtonCount];
+        };
+        rows_.push_back({"File Actions Button", moveBtnLabel(),
+                         Action::ListenVaultMoveBtn});
+
+        std::string comboLabel;
+        if (VaultManager::instance().isRecordingCombo()) {
+            comboLabel = "[ Recording: " + std::to_string(VaultManager::instance().recordedCount()) + "/6 ]";
+        } else {
+            comboLabel = VaultManager::instance().comboString();
+        }
+        rows_.push_back({"Unlock Combo Sequence", comboLabel,
+                         Action::RecordVaultCombo});
+
+        rows_.push_back({"Lock Vault Now", "[ Lock & Return Home ]",
+                         Action::LockVaultAction});
     } else if (section_ == 10) {
         title_ = "Settings > Select Video Track";
         for (std::size_t i = 0; i < videoStreams_.size(); ++i) {
@@ -330,6 +365,40 @@ SettingsMenu::Action SettingsMenu::activate() {
             selected_ = 0;
             refresh();
             break;
+        case Action::CycleVaultAutoLockHeadset:
+            VaultManager::instance().setAutoLockHeadsetOff(!VaultManager::instance().autoLockHeadsetOff());
+            refresh();
+            break;
+        case Action::CycleVaultTimeout: {
+            int to = VaultManager::instance().autoLockTimeoutSec();
+            if (to == 0) to = 120;
+            else if (to == 120) to = 300;
+            else if (to == 300) to = 600;
+            else to = 0;
+            VaultManager::instance().setAutoLockTimeoutSec(to);
+            refresh();
+            break;
+        }
+        case Action::ListenVaultMoveBtn:
+            listeningFunc_ = 3;
+            status_ = "Press a controller button for Move-to-Vault";
+            refresh();
+            break;
+        case Action::RecordVaultCombo:
+            if (VaultManager::instance().isRecordingCombo()) {
+                VaultManager::instance().cancelRecordingCombo();
+                status_ = "Combo recording cancelled";
+            } else {
+                VaultManager::instance().startRecordingCombo();
+                status_ = "Press 6 face buttons (A, B, X, Y) to record new combo";
+            }
+            refresh();
+            break;
+        case Action::LockVaultAction:
+            VaultManager::instance().lock();
+            section_ = 0;
+            refresh();
+            break;
         case Action::RecenterScreen:
             break;
         case Action::Close:
@@ -378,6 +447,7 @@ void SettingsMenu::assignListening(int button) {
     if (listeningFunc_ == 0) bindPlayBtn_ = b;
     else if (listeningFunc_ == 1) bindMenuBtn_ = b;
     else if (listeningFunc_ == 2) bindRecenterBtn_ = b;
+    else if (listeningFunc_ == 3) VaultManager::instance().setMoveButton(b);
     listeningFunc_ = -1;
     status_ = "Bound to " + std::string(kButtonNames[b]);
     saveConfig();

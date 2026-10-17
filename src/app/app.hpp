@@ -61,12 +61,12 @@ private:
 
     // Place the screen in front of the user on the first valid head pose.
     bool didInitialRecenter_ = false;
-    bool controllerModelLoaded_ = false;  // real glTF model uploaded once
-    // Local grip->render-model-space correction so the model sits exactly where
-    // the runtime renders it (derived from the fetched model's owner hand).
-    bool modelCorrValid_ = false;
-    float modelCorrPos_[3] = {0.0f, 0.0f, 0.0f};
-    float modelCorrQuat_[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    bool controllerModelLoaded_[2] = {false, false};  // glTF model uploaded per hand
+    // Local grip->render-model-space correction per hand so each model sits
+    // exactly where the runtime renders it.
+    bool modelCorrValid_[2] = {false, false};
+    float modelCorrPos_[2][3] = {{0.0f, 0.0f, 0.0f}, {0.0f, 0.0f, 0.0f}};
+    float modelCorrQuat_[2][4] = {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f, 1.0f}};
     // Background download status line: shown while active and briefly after a
     // download finishes (so success/failure is visible with the browser closed).
     std::chrono::steady_clock::time_point downloadToast_{};
@@ -96,6 +96,9 @@ private:
     // Menu nav stick auto-repeat: -1/+1 to step (initial press + hold), else 0.
     int navStep(float axisY, std::chrono::steady_clock::time_point now);
     int navStepX(float axisX, std::chrono::steady_clock::time_point now);
+    void performVaultLock();
+    VulkanRenderer::ActionMenuData actionMenu_{};
+    void openActionMenu();
 
 #ifdef PIXELVR_HAVE_FREETYPE
     Browser browser_;

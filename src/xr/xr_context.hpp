@@ -61,6 +61,12 @@ struct XrInputState {
     // one controller can drive a panel with the stick while the other points.
     // Index 0 = left, 1 = right.
     bool gripDown[2] = {false, false};
+
+    // Discrete full-press click per hand (Index / Frame / Touch squeeze click).
+    // Distinct from soft/resting squeeze. Index 0 = left, 1 = right.
+    bool gripFullPressHeld[2] = {false, false};
+    bool gripFullPressDown[2] = {false, false};
+    float gripValue[2] = {0.0f, 0.0f};  // analog soft squeeze value (0.0 to 1.0)
 };
 
 // Owns the OpenXR instance, system, session, reference space, and swapchains,
@@ -94,12 +100,14 @@ public:
     // Controller input (OpenXR actions). Call createActions after createSession.
     bool createActions();
     const XrInputState& input() const { return input_; }
+    void triggerHaptic(int hand, float durationSec = 0.015f, float frequencyHz = 0.0f, float amplitude = 0.5f);
 
     // --- Runtime ---------------------------------------------------------
     // Pumps the event queue and advances the session state machine.
     // Sets exitRequested when the runtime asks the app to quit.
     bool pollEvents(bool& exitRequested);
     bool sessionRunning() const { return sessionRunning_; }
+    bool sessionFocused() const { return sessionState_ == XR_SESSION_STATE_FOCUSED; }
 
     // Callback invoked once per view when the frame should be rendered.
     using RenderViewFn = std::function<void(uint32_t viewIndex, uint32_t imageIndex,
@@ -161,6 +169,9 @@ private:
     XrAction aimPoseAction_ = XR_NULL_HANDLE;
     XrAction gripPoseAction_ = XR_NULL_HANDLE;
     XrAction buttonActions_[XrInputState::BtnCount] = {};
+    XrAction gripFullPressAction_ = XR_NULL_HANDLE;
+    XrAction squeezeValueAction_ = XR_NULL_HANDLE;
+    XrAction hapticAction_ = XR_NULL_HANDLE;
     XrPath handPaths_[2] = {XR_NULL_PATH, XR_NULL_PATH};
     XrSpace aimSpaces_[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
     XrSpace gripSpaces_[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};

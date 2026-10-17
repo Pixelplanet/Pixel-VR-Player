@@ -1,4 +1,5 @@
 #include "ui/browser.hpp"
+#include "app/vault_manager.hpp"
 
 #include "util/logging.hpp"
 #include "util/smb_lock.hpp"
@@ -144,7 +145,11 @@ std::string format_size(long long bytes) {
 void Browser::scanLocalInto(const std::string& dir, ScanResult& out) {
     out.inSmb = false;
     out.location = dir;
-    out.title = dir;
+    if (VaultManager::instance().isVaultPath(dir)) {
+        out.title = "Vault (Private)";
+    } else {
+        out.title = dir;
+    }
     out.entries.clear();
 
     if (dir == homeDir_) {
@@ -400,6 +405,142 @@ void Browser::openDrives() {
     }
 }
 
+void Browser::openVault() {
+    if (!VaultManager::instance().isUnlocked()) return;
+    VaultManager::instance().ensureDirectories();
+    openPath(VaultManager::instance().vaultDir());
+}
+
+bool Browser::inVault() const {
+    return VaultManager::instance().isVaultPath(location_);
+}
+
+bool Browser::moveFocusedToVault(std::string& outNewPath) {
+    if (!VaultManager::instance().isUnlocked()) return false;
+    const Entry* e = focused();
+    if (e == nullptr || e->isBack || inSmb_) return false;
+    std::string err = VaultManager::instance().moveFileToVault(e->path, outNewPath);
+    if (!err.empty()) {
+        status_ = "Move error: " + err;
+        return false;
+    }
+    status_ = "Moved " + e->label + " to Vault";
+    beginScan(location_, inSmb_);
+    return true;
+}
+
+bool Browser::moveFocusedTo(const std::string& destDir, std::string& outNewPath) {
+    const Entry* e = focused();
+    if (e == nullptr || e->isBack || inSmb_) return false;
+    std::error_code ec;
+    if (!fs::exists(destDir, ec) || !fs::is_directory(destDir, ec)) {
+        status_ = "Destination folder does not exist";
+        return false;
+    }
+    fs::path src(e->path);
+    const bool isDir = fs::is_directory(src, ec);
+    std::string stem = src.stem().string();
+    std::string ext = isDir ? "" : src.extension().string();
+    std::string targetFilename = src.filename().string();
+    fs::path dest = fs::path(destDir) / targetFilename;
+
+    int counter = 1;
+    while (fs::exists(dest, ec)) {
+        targetFilename = isDir ? (stem + "_" + std::to_string(counter++))
+                               : (stem + "_" + std::to_string(counter++) + ext);
+        dest = fs::path(destDir) / targetFilename;
+    }
+
+    fs::rename(src, dest, ec);
+    if (ec) {
+        ec.clear();
+        if (isDir) {
+            fs::copy(src, dest, fs::copy_options::recursive, ec);
+            if (ec) {
+                status_ = "Move failed: " + ec.message();
+                return false;
+            }
+            fs::remove_all(src, ec);
+        } else {
+            fs::copy_file(src, dest, fs::copy_options::overwrite_existing, ec);
+            if (ec) {
+                status_ = "Move failed: " + ec.message();
+                return false;
+            }
+            fs::remove(src, ec);
+        }
+    }
+    outNewPath = dest.string();
+    status_ = "Moved " + e->label + " to " + fs::path(destDir).filename().string();
+    beginScan(location_, inSmb_);
+    return true;
+}
+
+bool Browser::deleteFocused(std::string& deletedName) {
+    const Entry* e = focused();
+    if (e == nullptr || e->isBack || inSmb_) return false;
+    std::error_code ec;
+    deletedName = e->label;
+    fs::path p(e->path);
+    VaultManager::instance().cleanPublicThumbs(e->path);
+    if (fs::is_directory(p, ec)) {
+        fs::remove_all(p, ec);
+    } else {
+        fs::remove(p, ec);
+    }
+    if (ec) {
+        status_ = "Delete failed: " + ec.message();
+        return false;
+    }
+    status_ = "Deleted " + deletedName;
+    beginScan(location_, inSmb_);
+    return true;
+}
+
+bool Browser::renameFocused(const std::string& newName) {
+    const Entry* e = focused();
+    if (e == nullptr || e->isBack || inSmb_ || newName.empty()) return false;
+    std::error_code ec;
+    fs::path src(e->path);
+    fs::path dest = src.parent_path() / newName;
+    if (dest == src) return true; // unchanged
+    if (fs::exists(dest, ec)) {
+        status_ = "An item with that name already exists";
+        return false;
+    }
+    fs::rename(src, dest, ec);
+    if (ec) {
+        status_ = "Rename failed: " + ec.message();
+        return false;
+    }
+    status_ = "Renamed to " + newName;
+    beginScan(location_, inSmb_);
+    return true;
+}
+
+std::string Browser::parentDir() const {
+    if (location_.empty() || location_ == "/" || inSmb_) return "";
+    fs::path p(location_);
+    return p.parent_path().string();
+}
+
+std::string Browser::homeDir() const {
+    const char* h = std::getenv("HOME");
+    return h ? std::string(h) : "/";
+}
+
+std::string Browser::videosDir() const {
+    std::string d = homeDir() + "/Videos";
+    std::error_code ec;
+    return fs::is_directory(d, ec) ? d : homeDir();
+}
+
+std::string Browser::downloadsDir() const {
+    std::string d = homeDir() + "/Downloads";
+    std::error_code ec;
+    return fs::is_directory(d, ec) ? d : homeDir();
+}
+
 void Browser::runScan(std::string location, bool isSmb) {
     ScanResult r;
     if (isSmb) {
@@ -432,8 +573,17 @@ Browser::Result Browser::activate(std::string& playPath) {
                 beginScan(parent, true);
             }
         } else {
-            const fs::path p(location_);
-            beginScan(p.has_parent_path() ? p.parent_path().string() : "/", false);
+            if (VaultManager::instance().isVaultPath(location_)) {
+                if (location_ == VaultManager::instance().vaultDir()) {
+                    beginScan(homeDir_, false);
+                } else {
+                    const fs::path p(location_);
+                    beginScan(p.has_parent_path() ? p.parent_path().string() : homeDir_, false);
+                }
+            } else {
+                const fs::path p(location_);
+                beginScan(p.has_parent_path() ? p.parent_path().string() : "/", false);
+            }
         }
         return Result::Navigated;
     }
@@ -457,7 +607,7 @@ Browser::Result Browser::activate(std::string& playPath) {
 }
 
 bool Browser::downloadFocused() {
-    if (dlActive_.load() || selected_ < 0 ||
+    if (selected_ < 0 ||
         selected_ >= static_cast<int>(entries_.size())) {
         return false;
     }
@@ -488,19 +638,36 @@ Browser::~Browser() {
 
 void Browser::startDownload(const std::string& uri, const std::string& nameIn,
                             bool isDir) {
-    if (dlActive_.load()) return;
     std::string name = nameIn;
     while (!name.empty() && name.back() == '/') name.pop_back();
     const std::size_t slash = name.find_last_of('/');
     if (slash != std::string::npos) name = name.substr(slash + 1);
     if (name.empty()) return;
-    dlName_ = name;
+
+    for (const auto& j : dlJobs_) {
+        if (j.uri == uri && (j.state == 0 || j.state == 4)) {
+            status_ = "Already downloading or in queue: " + name;
+            return;
+        }
+    }
+
     const std::string destDir =
         downloadDir_.empty() ? homeDir_ + "/media" : downloadDir_;
+    const std::string targetPath = destDir + "/" + name;
+
+    if (dlActive_.load()) {
+        dlQueue_.push_back({uri, name, targetPath, isDir});
+        dlJobs_.push_back({name, targetPath, uri, 4, 0, 0, isDir});
+        status_ = "Added to download queue: " + name;
+        PIXELVR_LOG_INFO("Added to download queue: %s (%s)", name.c_str(), uri.c_str());
+        return;
+    }
+
+    dlName_ = name;
     if (isDir) {
-        startDownloadFolder(uri, destDir + "/" + name);
+        startDownloadFolder(uri, targetPath);
     } else {
-        startDownloadFile(uri, destDir + "/" + name);
+        startDownloadFile(uri, targetPath);
     }
 }
 
@@ -528,11 +695,33 @@ void Browser::startDownloadFile(const std::string& uri, const std::string& local
     dlActive_.store(true);
     status_ = "Downloading " + dlName_ + " ...";
     PIXELVR_LOG_INFO("Download file: %s -> %s", uri.c_str(), local.c_str());
-    dlJobs_.push_back({dlName_, local, uri, 0, 0, 0, false});
-    dlActiveJob_ = static_cast<int>(dlJobs_.size()) - 1;
-    if (dlJobs_.size() > 12) {
-        dlJobs_.erase(dlJobs_.begin());
+
+    int existingIdx = -1;
+    for (std::size_t i = 0; i < dlJobs_.size(); ++i) {
+        if (dlJobs_[i].uri == uri && (dlJobs_[i].state == 4 || dlJobs_[i].state == 0)) {
+            existingIdx = static_cast<int>(i);
+            dlJobs_[i].state = 0;
+            dlJobs_[i].name = dlName_;
+            dlJobs_[i].localPath = local;
+            break;
+        }
+    }
+    if (existingIdx >= 0) {
+        dlActiveJob_ = existingIdx;
+    } else {
+        dlJobs_.push_back({dlName_, local, uri, 0, 0, 0, false});
         dlActiveJob_ = static_cast<int>(dlJobs_.size()) - 1;
+        if (dlJobs_.size() > 16) {
+            for (auto it = dlJobs_.begin(); it != dlJobs_.end(); ++it) {
+                if (it->state != 0 && it->state != 4) {
+                    dlJobs_.erase(it);
+                    break;
+                }
+            }
+            for (std::size_t i = 0; i < dlJobs_.size(); ++i) {
+                if (dlJobs_[i].state == 0) dlActiveJob_ = static_cast<int>(i);
+            }
+        }
     }
     const std::string name = dlName_;
     dlLocalPath_ = local;
@@ -652,11 +841,32 @@ void Browser::startDownloadFolder(const std::string& uri,
     dlStopped_.store(false);
     dlPaused_.store(false);
     dlAbort_.store(false);
-    dlJobs_.push_back({dlName_, destDir, uri, 0, 0, 0, true});
-    dlActiveJob_ = static_cast<int>(dlJobs_.size()) - 1;
-    if (dlJobs_.size() > 12) {
-        dlJobs_.erase(dlJobs_.begin());
+    int existingIdx = -1;
+    for (std::size_t i = 0; i < dlJobs_.size(); ++i) {
+        if (dlJobs_[i].uri == uri && (dlJobs_[i].state == 4 || dlJobs_[i].state == 0)) {
+            existingIdx = static_cast<int>(i);
+            dlJobs_[i].state = 0;
+            dlJobs_[i].name = dlName_;
+            dlJobs_[i].localPath = destDir;
+            break;
+        }
+    }
+    if (existingIdx >= 0) {
+        dlActiveJob_ = existingIdx;
+    } else {
+        dlJobs_.push_back({dlName_, destDir, uri, 0, 0, 0, true});
         dlActiveJob_ = static_cast<int>(dlJobs_.size()) - 1;
+        if (dlJobs_.size() > 16) {
+            for (auto it = dlJobs_.begin(); it != dlJobs_.end(); ++it) {
+                if (it->state != 0 && it->state != 4) {
+                    dlJobs_.erase(it);
+                    break;
+                }
+            }
+            for (std::size_t i = 0; i < dlJobs_.size(); ++i) {
+                if (dlJobs_[i].state == 0) dlActiveJob_ = static_cast<int>(i);
+            }
+        }
     }
     dlThread_ = std::thread([this, uri, destDir]() {
         std::error_code ec;
@@ -829,8 +1039,8 @@ void Browser::clearFinished() {
     std::vector<DownloadJob> keep;
     keep.reserve(dlJobs_.size());
     for (const DownloadJob& j : dlJobs_) {
-        if (j.state == 0) {
-            keep.push_back(j);  // keep the in-flight job
+        if (j.state == 0 || j.state == 4) {
+            keep.push_back(j);  // keep the in-flight and queued jobs
             continue;
         }
         // Remove partial files from stopped/failed single-file downloads.
@@ -845,6 +1055,38 @@ void Browser::clearFinished() {
         if (dlJobs_[i].state == 0) dlActiveJob_ = static_cast<int>(i);
     }
     status_ = "Cleared finished downloads";
+}
+
+void Browser::cancelQueued(const std::string& uri) {
+    for (auto it = dlQueue_.begin(); it != dlQueue_.end(); ++it) {
+        if (it->uri == uri) {
+            dlQueue_.erase(it);
+            break;
+        }
+    }
+    for (auto it = dlJobs_.begin(); it != dlJobs_.end(); ++it) {
+        if (it->uri == uri && it->state == 4) {
+            dlJobs_.erase(it);
+            break;
+        }
+    }
+    status_ = "Removed from download queue";
+}
+
+void Browser::startNextQueued() {
+    if (dlActive_.load()) return;
+    if (dlQueue_.empty()) return;
+
+    DownloadQueueItem item = dlQueue_.front();
+    dlQueue_.pop_front();
+
+    dlName_ = item.name;
+    PIXELVR_LOG_INFO("Starting next queued download: %s (%s)", item.name.c_str(), item.uri.c_str());
+    if (item.isDir) {
+        startDownloadFolder(item.uri, item.destDir);
+    } else {
+        startDownloadFile(item.uri, item.destDir);
+    }
 }
 
 void Browser::measureFolder(const std::string& uri) {
@@ -984,6 +1226,7 @@ Browser::Result Browser::poll(std::string& playPath) {
         } else {
             status_ = "Download failed: " + dlName_;
         }
+        startNextQueued();
     }
     return Result::None;
 }

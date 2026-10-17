@@ -3,6 +3,7 @@
 #include "xr/xr_result.hpp"
 #include "util/logging.hpp"
 
+#include <algorithm>
 #include <array>
 #include <cstring>
 
@@ -236,8 +237,18 @@ bool XrContext::createSwapchains(int64_t colorFormat) {
 
     for (const auto& view : configViews_) {
         ViewSwapchain sc;
-        sc.width = static_cast<int32_t>(view.recommendedImageRectWidth);
-        sc.height = static_cast<int32_t>(view.recommendedImageRectHeight);
+        // Boost swapchain resolution from SteamVR's conservative default (1728) to the headset's
+        // native physical display resolution (2160x2160, 1.25x).
+        // Rendering at 1:1 panel resolution eliminates compositor magnification blur and
+        // edge shimmering during head movement in VR.
+        const uint32_t maxW = (view.maxImageRectWidth > 0) ? view.maxImageRectWidth : 4096;
+        const uint32_t maxH = (view.maxImageRectHeight > 0) ? view.maxImageRectHeight : 4096;
+        const uint32_t targetW = std::clamp(static_cast<uint32_t>(view.recommendedImageRectWidth * 1.25f),
+                                            view.recommendedImageRectWidth, maxW);
+        const uint32_t targetH = std::clamp(static_cast<uint32_t>(view.recommendedImageRectHeight * 1.25f),
+                                            view.recommendedImageRectHeight, maxH);
+        sc.width = static_cast<int32_t>(targetW);
+        sc.height = static_cast<int32_t>(targetH);
         sc.format = colorFormat;
 
         XrSwapchainCreateInfo createInfo{XR_TYPE_SWAPCHAIN_CREATE_INFO};
@@ -245,8 +256,8 @@ bool XrContext::createSwapchains(int64_t colorFormat) {
                                 XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
         createInfo.format = colorFormat;
         createInfo.sampleCount = 1;
-        createInfo.width = view.recommendedImageRectWidth;
-        createInfo.height = view.recommendedImageRectHeight;
+        createInfo.width = targetW;
+        createInfo.height = targetH;
         createInfo.faceCount = 1;
         createInfo.arraySize = 1;
         createInfo.mipCount = 1;
@@ -267,7 +278,9 @@ bool XrContext::createSwapchains(int64_t colorFormat) {
         swapchains_.push_back(std::move(sc));
     }
 
-    PIXELVR_LOG_INFO("Created %zu swapchains", swapchains_.size());
+    PIXELVR_LOG_INFO("Created %zu swapchains (%dx%d per eye)", swapchains_.size(),
+                     swapchains_.empty() ? 0 : swapchains_[0].width,
+                     swapchains_.empty() ? 0 : swapchains_[0].height);
     return true;
 }
 
@@ -337,6 +350,42 @@ bool XrContext::createActions() {
             gripPoseAction_ = XR_NULL_HANDLE;
         }
     }
+    {
+        XrActionCreateInfo ai{XR_TYPE_ACTION_CREATE_INFO};
+        std::strcpy(ai.actionName, "grip_full_press");
+        std::strcpy(ai.localizedActionName, "Grip Full Press Click");
+        ai.actionType = XR_ACTION_TYPE_BOOLEAN_INPUT;
+        ai.countSubactionPaths = 2;
+        ai.subactionPaths = handPaths_;
+        if (XR_FAILED(xrCreateAction(actionSet_, &ai, &gripFullPressAction_))) {
+            PIXELVR_LOG_WARN("Failed to create grip full press action");
+            gripFullPressAction_ = XR_NULL_HANDLE;
+        }
+    }
+    {
+        XrActionCreateInfo ai{XR_TYPE_ACTION_CREATE_INFO};
+        std::strcpy(ai.actionName, "squeeze_val");
+        std::strcpy(ai.localizedActionName, "Squeeze Value");
+        ai.actionType = XR_ACTION_TYPE_FLOAT_INPUT;
+        ai.countSubactionPaths = 2;
+        ai.subactionPaths = handPaths_;
+        if (XR_FAILED(xrCreateAction(actionSet_, &ai, &squeezeValueAction_))) {
+            PIXELVR_LOG_WARN("Failed to create squeeze value action");
+            squeezeValueAction_ = XR_NULL_HANDLE;
+        }
+    }
+    {
+        XrActionCreateInfo ai{XR_TYPE_ACTION_CREATE_INFO};
+        std::strcpy(ai.actionName, "haptic_out");
+        std::strcpy(ai.localizedActionName, "Haptic Output");
+        ai.actionType = XR_ACTION_TYPE_VIBRATION_OUTPUT;
+        ai.countSubactionPaths = 2;
+        ai.subactionPaths = handPaths_;
+        if (XR_FAILED(xrCreateAction(actionSet_, &ai, &hapticAction_))) {
+            PIXELVR_LOG_WARN("Failed to create haptic action");
+            hapticAction_ = XR_NULL_HANDLE;
+        }
+    }
 
     // Physical buttons for user-configurable bindings (native Steam Frame paths).
     static const struct {
@@ -344,11 +393,11 @@ bool XrContext::createActions() {
         const char* p0;
         const char* p1;
     } kBtns[] = {
-        {"btn_a", "/user/hand/right/input/a/click", nullptr},
-        {"btn_b", "/user/hand/right/input/b/click", nullptr},
-        {"btn_x", "/user/hand/right/input/x/click", nullptr},
-        {"btn_y", "/user/hand/right/input/y/click", nullptr},
-        {"btn_menu", "/user/hand/right/input/menu/click", nullptr},
+        {"btn_a", "/user/hand/right/input/a/click", "/user/hand/left/input/a/click"},
+        {"btn_b", "/user/hand/right/input/b/click", "/user/hand/left/input/b/click"},
+        {"btn_x", "/user/hand/left/input/x/click", "/user/hand/right/input/x/click"},
+        {"btn_y", "/user/hand/left/input/y/click", "/user/hand/right/input/y/click"},
+        {"btn_menu", "/user/hand/left/input/menu/click", "/user/hand/right/input/menu/click"},
         {"btn_view", "/user/hand/left/input/view/click", nullptr},
         {"btn_bumper", "/user/hand/left/input/bumper/click",
          "/user/hand/right/input/bumper/click"},
@@ -397,7 +446,9 @@ bool XrContext::createActions() {
              {aimPoseAction_, path("/user/hand/left/input/aim/pose")},
              {aimPoseAction_, path("/user/hand/right/input/aim/pose")},
              {gripPoseAction_, path("/user/hand/left/input/grip/pose")},
-             {gripPoseAction_, path("/user/hand/right/input/grip/pose")}});
+             {gripPoseAction_, path("/user/hand/right/input/grip/pose")},
+             {hapticAction_, path("/user/hand/left/output/haptic")},
+             {hapticAction_, path("/user/hand/right/output/haptic")}});
 
     suggest("/interaction_profiles/oculus/touch_controller",
             {{togglePlayAction_, path("/user/hand/right/input/a/click")},
@@ -408,6 +459,8 @@ bool XrContext::createActions() {
              {selectAction_, path("/user/hand/left/input/trigger/value")},
              {recenterAction_, path("/user/hand/right/input/squeeze/value")},
              {recenterAction_, path("/user/hand/left/input/squeeze/value")},
+             {squeezeValueAction_, path("/user/hand/right/input/squeeze/value")},
+             {squeezeValueAction_, path("/user/hand/left/input/squeeze/value")},
              {thumbstickAction_, path("/user/hand/right/input/thumbstick")},
              {thumbstickAction_, path("/user/hand/left/input/thumbstick")},
              {thumbstickLeftAction_, path("/user/hand/left/input/thumbstick")},
@@ -415,7 +468,18 @@ bool XrContext::createActions() {
              {aimPoseAction_, path("/user/hand/right/input/aim/pose")},
              {aimPoseAction_, path("/user/hand/left/input/aim/pose")},
              {gripPoseAction_, path("/user/hand/right/input/grip/pose")},
-             {gripPoseAction_, path("/user/hand/left/input/grip/pose")}});
+             {gripPoseAction_, path("/user/hand/left/input/grip/pose")},
+             {hapticAction_, path("/user/hand/right/output/haptic")},
+             {hapticAction_, path("/user/hand/left/output/haptic")},
+             {buttonActions_[XrInputState::BtnA], path("/user/hand/right/input/a/click")},
+             {buttonActions_[XrInputState::BtnB], path("/user/hand/right/input/b/click")},
+             {buttonActions_[XrInputState::BtnX], path("/user/hand/left/input/x/click")},
+             {buttonActions_[XrInputState::BtnY], path("/user/hand/left/input/y/click")},
+             {buttonActions_[XrInputState::BtnMenu], path("/user/hand/left/input/menu/click")},
+             {buttonActions_[XrInputState::BtnThumb], path("/user/hand/right/input/thumbstick/click")},
+             {buttonActions_[XrInputState::BtnThumb], path("/user/hand/left/input/thumbstick/click")},
+             {buttonActions_[XrInputState::BtnGrip], path("/user/hand/right/input/squeeze/value")},
+             {buttonActions_[XrInputState::BtnGrip], path("/user/hand/left/input/squeeze/value")}});
 
     suggest("/interaction_profiles/valve/index_controller",
             {{togglePlayAction_, path("/user/hand/right/input/a/click")},
@@ -426,6 +490,10 @@ bool XrContext::createActions() {
              {selectAction_, path("/user/hand/left/input/trigger/value")},
              {recenterAction_, path("/user/hand/right/input/squeeze/value")},
              {recenterAction_, path("/user/hand/left/input/squeeze/value")},
+             {gripFullPressAction_, path("/user/hand/right/input/squeeze/click")},
+             {gripFullPressAction_, path("/user/hand/left/input/squeeze/click")},
+             {squeezeValueAction_, path("/user/hand/right/input/squeeze/value")},
+             {squeezeValueAction_, path("/user/hand/left/input/squeeze/value")},
              {thumbstickAction_, path("/user/hand/right/input/thumbstick")},
              {thumbstickAction_, path("/user/hand/left/input/thumbstick")},
              {thumbstickLeftAction_, path("/user/hand/left/input/thumbstick")},
@@ -433,7 +501,17 @@ bool XrContext::createActions() {
              {aimPoseAction_, path("/user/hand/right/input/aim/pose")},
              {aimPoseAction_, path("/user/hand/left/input/aim/pose")},
              {gripPoseAction_, path("/user/hand/right/input/grip/pose")},
-             {gripPoseAction_, path("/user/hand/left/input/grip/pose")}});
+             {gripPoseAction_, path("/user/hand/left/input/grip/pose")},
+             {hapticAction_, path("/user/hand/right/output/haptic")},
+             {hapticAction_, path("/user/hand/left/output/haptic")},
+             {buttonActions_[XrInputState::BtnA], path("/user/hand/right/input/a/click")},
+             {buttonActions_[XrInputState::BtnA], path("/user/hand/left/input/a/click")},
+             {buttonActions_[XrInputState::BtnB], path("/user/hand/right/input/b/click")},
+             {buttonActions_[XrInputState::BtnB], path("/user/hand/left/input/b/click")},
+             {buttonActions_[XrInputState::BtnThumb], path("/user/hand/right/input/thumbstick/click")},
+             {buttonActions_[XrInputState::BtnThumb], path("/user/hand/left/input/thumbstick/click")},
+             {buttonActions_[XrInputState::BtnGrip], path("/user/hand/right/input/squeeze/value")},
+             {buttonActions_[XrInputState::BtnGrip], path("/user/hand/left/input/squeeze/value")}});
 
     // Native Steam Frame profile: the runtime rejects the whole set if any path
     // is invalid, so probe each candidate individually, keep the accepted ones,
@@ -466,6 +544,16 @@ bool XrContext::createActions() {
         probe(recenterAction_, "/user/hand/right/input/squeeze/value");
         probe(recenterAction_, "/user/hand/left/input/grip/value");
         probe(recenterAction_, "/user/hand/right/input/grip/value");
+        probe(gripFullPressAction_, "/user/hand/left/input/squeeze/click");
+        probe(gripFullPressAction_, "/user/hand/right/input/squeeze/click");
+        probe(gripFullPressAction_, "/user/hand/left/input/grip/click");
+        probe(gripFullPressAction_, "/user/hand/right/input/grip/click");
+        probe(squeezeValueAction_, "/user/hand/left/input/squeeze/value");
+        probe(squeezeValueAction_, "/user/hand/right/input/squeeze/value");
+        probe(squeezeValueAction_, "/user/hand/left/input/grip/value");
+        probe(squeezeValueAction_, "/user/hand/right/input/grip/value");
+        probe(hapticAction_, "/user/hand/left/output/haptic");
+        probe(hapticAction_, "/user/hand/right/output/haptic");
         probe(togglePlayAction_, "/user/hand/right/input/a/click");
         probe(browserAction_, "/user/hand/right/input/b/click");
         probe(browserAction_, "/user/hand/left/input/view/click");
@@ -645,6 +733,69 @@ void XrContext::syncActions() {
             }
         }
     }
+
+    // Discrete full-press click vs analog soft squeeze
+    for (int h = 0; h < 2; ++h) {
+        float sqVal = 0.0f;
+        if (squeezeValueAction_ != XR_NULL_HANDLE) {
+            XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO};
+            gi.action = squeezeValueAction_;
+            gi.subactionPath = handPaths_[h];
+            XrActionStateFloat st{XR_TYPE_ACTION_STATE_FLOAT};
+            if (XR_SUCCEEDED(xrGetActionStateFloat(session_, &gi, &st)) && st.isActive) {
+                sqVal = st.currentState;
+            }
+        }
+        input_.gripValue[h] = sqVal;
+
+        bool fullHeld = false;
+        bool fullDown = false;
+        if (gripFullPressAction_ != XR_NULL_HANDLE) {
+            XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO};
+            gi.action = gripFullPressAction_;
+            gi.subactionPath = handPaths_[h];
+            XrActionStateBoolean st{XR_TYPE_ACTION_STATE_BOOLEAN};
+            if (XR_SUCCEEDED(xrGetActionStateBoolean(session_, &gi, &st)) && st.isActive) {
+                fullHeld = st.currentState;
+                fullDown = st.currentState && st.changedSinceLastSync;
+            }
+        }
+        // Fallback for hardware profiles where squeeze/click is not exposed separately:
+        // Use a strict bottom-out threshold (>= 0.90f to engage, < 0.80f to release)
+        static bool sPrevFull[2] = {false, false};
+        if (!fullHeld) {
+            if (sPrevFull[h]) {
+                if (sqVal >= 0.80f) {
+                    fullHeld = true;
+                } else {
+                    sPrevFull[h] = false;
+                }
+            } else {
+                if (sqVal >= 0.90f) {
+                    fullHeld = true;
+                    fullDown = true;
+                    sPrevFull[h] = true;
+                }
+            }
+        }
+        input_.gripFullPressHeld[h] = fullHeld;
+        input_.gripFullPressDown[h] = fullDown;
+    }
+}
+
+void XrContext::triggerHaptic(int hand, float durationSec, float frequencyHz, float amplitude) {
+    if (session_ == XR_NULL_HANDLE || hapticAction_ == XR_NULL_HANDLE) return;
+    if (hand < 0 || hand >= 2 || handPaths_[hand] == XR_NULL_PATH) return;
+
+    XrHapticVibration vib{XR_TYPE_HAPTIC_VIBRATION};
+    vib.duration = static_cast<XrDuration>(durationSec * 1e9f);
+    vib.frequency = frequencyHz;
+    vib.amplitude = std::clamp(amplitude, 0.0f, 1.0f);
+
+    XrHapticActionInfo hai{XR_TYPE_HAPTIC_ACTION_INFO};
+    hai.action = hapticAction_;
+    hai.subactionPath = handPaths_[hand];
+    xrApplyHapticFeedback(session_, &hai, reinterpret_cast<const XrHapticBaseHeader*>(&vib));
 }
 
 void XrContext::handleSessionStateChange(const XrEventDataSessionStateChanged& ev,

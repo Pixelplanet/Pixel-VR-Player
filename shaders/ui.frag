@@ -173,7 +173,10 @@ void main() {
         d = sdRoundedBox(p, vec2(1.0), 0.0);
     }
 
-    float aa = max(length(vec2(dFdx(d), dFdy(d))) * 1.15, 0.003);
+    // Exact screen-space gradient magnitude of the distance field along the contour normal.
+    // Produces a crisp, razor-sharp 1.5 screen-pixel anti-aliased outline without crawling.
+    float gradLen = length(vec2(dFdx(d), dFdy(d)));
+    float aa = max(gradLen * 0.75, 0.0005);
     float fillAlpha = 1.0 - smoothstep(-aa, aa, d);
 
     if (fillAlpha <= 0.002) {
@@ -183,7 +186,8 @@ void main() {
     vec4 fillLin = vec4(pow(max(pc.color.rgb, vec3(0.0)), vec3(2.2)), pc.color.a);
     vec4 finalColor = fillLin;
     if (hasBorder) {
-        float borderWidth = max(pc.params.z, aa * 1.6);
+        // Crisp, razor-sharp border highlight line matching requested thickness
+        float borderWidth = pc.params.z;
         float innerD = d + borderWidth;
         float borderAlpha = 1.0 - smoothstep(-aa, aa, innerD);
         vec4 bordLin = vec4(pow(max(pc.borderColor.rgb, vec3(0.0)), vec3(2.2)), pc.borderColor.a);

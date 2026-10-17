@@ -37,6 +37,11 @@ public:
         PickAudioStream,
         PickLanguage,
         RecenterScreen,
+        CycleVaultAutoLockHeadset,
+        CycleVaultTimeout,
+        ListenVaultMoveBtn,
+        RecordVaultCombo,
+        LockVaultAction,
         Close
     };
 
@@ -54,6 +59,7 @@ public:
     void close() { open_ = false; }
     bool isOpen() const { return open_; }
     void setOpen(bool o) { open_ = o; if (o) refresh(); }
+    void refresh();
 
     const std::string& title() const { return title_; }
     const std::string& status() const { return status_; }
@@ -110,8 +116,6 @@ public:
     void saveConfig() const;
 
 private:
-    void refresh();
-
     bool open_ = false;
     std::string title_ = "Settings & Controller Remap";
     std::string status_ = "Point + Trigger: Change Setting | Grip: Recenter | B/Y: Close";

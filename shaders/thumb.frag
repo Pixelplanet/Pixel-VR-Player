@@ -20,7 +20,10 @@ void main() {
     vec2 b = 0.5 * pc.rect.zw - vec2(0.018);
     vec2 q = max(p - b, 0.0);
     float dist = length(q) - 0.018;
-    float aa = max(length(vec2(dFdx(dist), dFdy(dist))) * 1.15, 0.0025);
+    vec2 dpx = dFdx(p);
+    vec2 dpy = dFdy(p);
+    float pixSize = 0.70710678 * sqrt(dot(dpx, dpx) + dot(dpy, dpy));
+    float aa = max(pixSize * 1.4, 0.001);
     float alpha = 1.0 - smoothstep(-aa, aa, dist);
     if (alpha <= 0.002) {
         discard;

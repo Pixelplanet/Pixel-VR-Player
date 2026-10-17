@@ -13,6 +13,7 @@ namespace pixelvr {
 class XrContext;
 struct ViewSwapchain;
 struct DrmVideoFrame;
+struct GltfMesh;
 
 // Owns the Vulkan device (created through OpenXR) and the per-eye render
 // resources. For Phase 0/1 it draws a pose-anchored test triangle into each eye
@@ -152,6 +153,8 @@ public:
     int downloadsFilter() const { return downloadsFilter_; }
     void setActiveDownloadCount(int c) { activeDownloadCount_ = c; }
     void setSettingsSection(int s) { settingsSection_ = s; }
+    void setVaultUnlocked(bool u) { vaultUnlocked_ = u; }
+    bool vaultUnlocked() const { return vaultUnlocked_; }
     void setUiAppearance(float textScale, int textColorIdx, int accentColorIdx,
                          float uiDistance) {
         uiTextScale_ = textScale;
@@ -179,6 +182,22 @@ public:
     int downloadsHovered() const { return downloadsHovered_; }
     int downloadsButtonHovered() const { return downloadsBtnHovered_; }
 
+    // File Action Submenu (opened by button Y in file browser)
+    struct ActionMenuData {
+        bool visible = false;
+        int page = 0; // 0: Main, 1: MoveDestinations, 2: DeleteConfirm, 3: Rename
+        std::string title;
+        std::string subtitle;
+        std::vector<std::string> options;
+        int selectedOption = -1;
+        std::string renameBuffer;
+    };
+    void setActionMenu(const ActionMenuData& data) { actionMenu_ = data; }
+    const ActionMenuData& actionMenu() const { return actionMenu_; }
+    int actionMenuBtnHovered() const { return actionMenuBtnHovered_; }
+    int actionMenuKeyHovered() const { return actionMenuKeyHovered_; }
+    void setBrowserNetwork(bool onNet) { browserOnNetwork_ = onNet; }
+
     // Tracked controllers: aim poses used to draw pointer rays, controller
     // models and the UI cursor. Index 0 = left, 1 = right. Call once per frame,
     // after setBrowser, so the pointer can be raycast against the current panel.
@@ -195,8 +214,11 @@ public:
     void setControllers(const ControllerVis& left, const ControllerVis& right);
 
     // Replaces the procedural controller geometry with the runtime-provided glTF
-    // render model (parsed from the GLB bytes). Call once when the asset is ready.
-    bool loadControllerModel(const std::vector<uint8_t>& glb);
+    // render model (parsed from the GLB bytes) for hand (0 = left, 1 = right).
+    bool loadControllerModel(int hand, const std::vector<uint8_t>& glb);
+    bool loadControllerModel(const std::vector<uint8_t>& glb) {
+        return loadControllerModel(1, glb);
+    }
 
     // Per-node animated transforms from xrGetRenderModelStateEXT, matched to
     // submeshes by node name (drives button-press motion on the model).
@@ -206,7 +228,10 @@ public:
         float quat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
         bool visible = true;
     };
-    void setControllerNodeStates(const std::vector<NodeStateVis>& states);
+    void setControllerNodeStates(int hand, const std::vector<NodeStateVis>& states);
+    void setControllerNodeStates(const std::vector<NodeStateVis>& states) {
+        setControllerNodeStates(1, states);
+    }
 
     enum class UiShape : int {
         RoundedBox = 0,
@@ -264,11 +289,14 @@ public:
         hudAudioEnabled_ = audioEnabled;
     }
 
-    // Per-hand laser pointer toggle (grip press). A hand with the laser off
-    // neither casts a beam nor takes part in the UI raycast, so the other hand
-    // can own the pointer while this one drives a panel with its stick/d-pad.
+    // Per-hand laser pointer toggle (grip full press). Only one controller has
+    // an active laser pointer at any time. When a hand enables its laser, the
+    // other hand's laser is turned off.
     void setLaserOn(int hand, bool on) {
-        if (hand >= 0 && hand < 2) laserOn_[hand] = on;
+        if (hand >= 0 && hand < 2) {
+            laserOn_[hand] = on;
+            if (on) laserOn_[1 - hand] = false;
+        }
     }
     bool laserOn(int hand) const {
         return (hand >= 0 && hand < 2) ? laserOn_[hand] : false;
@@ -383,6 +411,12 @@ private:
     int downloadsBtnHovered_ = -1;
     int downloadsHovered_ = -1;
 
+    // Action menu state
+    ActionMenuData actionMenu_{};
+    int actionMenuBtnHovered_ = -1;
+    int actionMenuKeyHovered_ = -1;
+    bool browserOnNetwork_ = false;
+
     // Flat-screen placement in the app reference space (updated by recenter and
     // thumbstick distance control).
     float screenPivot_[3] = {0.0f, 0.0f, 0.0f};
@@ -428,6 +462,7 @@ private:
     VkImage fontImage_ = VK_NULL_HANDLE;
     VkDeviceMemory fontMemory_ = VK_NULL_HANDLE;
     VkImageView fontView_ = VK_NULL_HANDLE;
+    VkSampler fontSampler_ = VK_NULL_HANDLE;
     VkDescriptorSetLayout textSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool textPool_ = VK_NULL_HANDLE;
     VkDescriptorSet textSet_ = VK_NULL_HANDLE;
@@ -468,10 +503,12 @@ private:
     bool pointerActive_ = false;
     int pointerRow_ = -1;
     int pointerHand_ = -1;
-    // Whether each hand's laser pointer is on (toggled with the grip button).
-    bool laserOn_[2] = {true, true};
+    // Whether each hand's laser pointer is on. Only one controller has an active
+    // laser pointer at any time. Defaults to right controller active, left off.
+    bool laserOn_[2] = {false, true};
     float pointerHit_[3] = {0.0f, 0.0f, 0.0f};
     bool controlBarVisible_ = false;
+    bool vaultUnlocked_ = false;
     int pointerButton_ = -1;
     bool pointerOnTimeline_ = false;
     float pointerScrub_ = 0.0f;
@@ -575,18 +612,18 @@ private:
     int resolveH_ = 0;
     uint32_t resolveMips_ = 1;
 
-    // Lit, textured 3D controller render models. The merged glTF geometry is
-    // split into submeshes by material; each samples its own base-color texture
-    // (which carries the part colors and printed button labels). Drawn with the
-    // depth buffer so near parts occlude far ones.
+    // Lit, textured 3D controller render models. The glTF geometry is loaded
+    // separately for left (0) and right (1) hands into handModels_[2].
+    // Drawn with the depth buffer so near parts occlude far ones.
     VkPipelineLayout modelLayout_ = VK_NULL_HANDLE;
     VkPipeline modelPipeline_ = VK_NULL_HANDLE;
-    VkBuffer modelVertexBuffer_ = VK_NULL_HANDLE;
-    VkDeviceMemory modelVertexMemory_ = VK_NULL_HANDLE;
-    VkBuffer modelIndexBuffer_ = VK_NULL_HANDLE;
-    VkDeviceMemory modelIndexMemory_ = VK_NULL_HANDLE;
-    uint32_t modelIndexCount_ = 0;
-    VkIndexType modelIndexType_ = VK_INDEX_TYPE_UINT16;  // UINT32 for glTF models
+
+    // Procedural capsule fallback buffers (used before glTF is fetched)
+    VkBuffer capsuleVertexBuffer_ = VK_NULL_HANDLE;
+    VkDeviceMemory capsuleVertexMemory_ = VK_NULL_HANDLE;
+    VkBuffer capsuleIndexBuffer_ = VK_NULL_HANDLE;
+    VkDeviceMemory capsuleIndexMemory_ = VK_NULL_HANDLE;
+    uint32_t capsuleIndexCount_ = 0;
 
     struct ModelTexture {
         VkImage image = VK_NULL_HANDLE;
@@ -601,13 +638,27 @@ private:
         float color[4] = {1.0f, 1.0f, 1.0f, 1.0f};
         std::string nodeName;  // matched to an animated render-model node state
     };
+    struct HandModel {
+        VkBuffer vertexBuffer = VK_NULL_HANDLE;
+        VkDeviceMemory vertexMemory = VK_NULL_HANDLE;
+        VkBuffer indexBuffer = VK_NULL_HANDLE;
+        VkDeviceMemory indexMemory = VK_NULL_HANDLE;
+        uint32_t indexCount = 0;
+        VkIndexType indexType = VK_INDEX_TYPE_UINT32;
+        std::vector<ModelTexture> textures;
+        std::vector<ModelSubmesh> submeshes;
+        std::vector<NodeStateVis> nodeStates;
+        bool ready = false;
+    };
+    HandModel handModels_[2];  // 0 = left, 1 = right
+
     VkDescriptorSetLayout modelSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool modelDescPool_ = VK_NULL_HANDLE;
     VkSampler modelSampler_ = VK_NULL_HANDLE;
     ModelTexture modelWhite_;  // 1x1 white fallback for untextured submeshes
-    std::vector<ModelTexture> modelTextures_;
-    std::vector<ModelSubmesh> modelSubmeshes_;
-    std::vector<NodeStateVis> modelNodeStates_;
+
+    void destroyHandModel(HandModel& hm);
+    bool uploadHandMesh(int hand, const GltfMesh& mesh);
     bool createModelTexture(const uint8_t* rgba, int width, int height,
                             ModelTexture& out);
 };
