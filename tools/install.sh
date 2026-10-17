@@ -245,7 +245,11 @@ def main():
         with open(path, "rb") as handle:
             buf = handle.read()
     root = parse_file(buf)
-    shortcuts = root["shortcuts"][1]
+    root_key = next((k for k in root if k.lower() == "shortcuts"), None)
+    if root_key is None:
+        root_key = "shortcuts"
+        root[root_key] = [OBJ, {}]
+    shortcuts = root[root_key][1]
 
     key, entry = find(shortcuts, name, exe)
 
@@ -258,7 +262,7 @@ def main():
         ordered = sorted(shortcuts, key=lambda k: int(k) if k.isdigit() else 1 << 30)
         for index, old in enumerate(ordered):
             renumbered[str(index)] = shortcuts[old]
-        root["shortcuts"][1] = renumbered
+        root[root_key][1] = renumbered
         print("removed '%s'" % name)
     else:
         quoted_exe = '"%s"' % exe
@@ -491,12 +495,18 @@ cp "$srcdir/shaders/"*.spv "$INSTALL_DIR/shaders/"
 cp "$srcdir/run.sh" "$INSTALL_DIR/run.sh"
 chmod 0755 "$INSTALL_DIR/run.sh"
 INSTALLED_SCRIPT=0
-if [ -n "$script_dir" ] && [ -f "$script_dir/install.sh" ]; then
+if [ -f "$srcdir/install.sh" ]; then
+    cp "$srcdir/install.sh" "$INSTALL_DIR/install.sh"
+    chmod 0755 "$INSTALL_DIR/install.sh"
+    INSTALLED_SCRIPT=1
+elif [ -n "$script_dir" ] && [ -f "$script_dir/install.sh" ]; then
     cp "$script_dir/install.sh" "$INSTALL_DIR/install.sh"
     chmod 0755 "$INSTALL_DIR/install.sh"
     INSTALLED_SCRIPT=1
 fi
-if [ -n "$VERSION" ]; then
+if [ -f "$srcdir/VERSION" ]; then
+    cp "$srcdir/VERSION" "$INSTALL_DIR/VERSION"
+elif [ -n "$VERSION" ]; then
     printf '%s\n' "$VERSION" > "$INSTALL_DIR/VERSION"
 fi
 ok "$(ls -1 "$INSTALL_DIR/shaders" | wc -l | tr -d ' ') shaders, $(du -h "$INSTALL_DIR/pixelvr" 2>/dev/null | cut -f1) binary"
