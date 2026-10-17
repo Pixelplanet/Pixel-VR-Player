@@ -31,35 +31,37 @@ A native VR video player for the **Valve Steam Frame**, playing flat 2D, 180°, 
 
 ## Installation
 
-Choose whichever method is easiest for you. **Developer Mode and root access are NOT required.**
+Choose whichever method fits your setup:
 
-### Option A: From your PC over Wi-Fi (No typing on headset)
+### Option A: USB Drive / MicroSD Card (No typing & No Dev Mode needed)
 
-If you are on your PC or Mac and your Steam Frame is on the same local Wi-Fi:
+The simplest method for standard users without touching the terminal:
 
-- **Windows:** Double-click [`tools/install-from-pc.bat`](tools/install-from-pc.bat) and enter your headset's IP address.
-- **macOS / Linux:** Run `./tools/install-from-pc.sh`.
+1. Download `pixelvr-linux-arm64.tar.gz` from the [Releases](../../releases) page onto a USB flash drive or MicroSD card.
+2. Plug it into your Steam Frame and switch to **Desktop Mode**.
+3. Open the USB drive in Dolphin and double-click **`Install Pixel VR Player.desktop`**.
+4. A confirmation dialog will appear when finished. Return to Gaming Mode and launch it directly from your Steam Library!
 
-The script connects over your network, runs the installation, and adds Pixel VR Player to your Steam Library automatically.
+### Option B: One command in headset terminal
 
-### Option B: USB Drive / MicroSD Card (Double-Click Installer)
-
-1. On your PC, download `pixelvr-linux-arm64.tar.gz` from the [Releases](../../releases) page onto a USB flash drive or MicroSD card.
-2. Plug the USB drive into your Steam Frame and switch to **Desktop Mode**.
-3. Open the USB drive in the file manager and double-click **`Install Pixel VR Player.desktop`**.
-4. A confirmation window will appear when installation completes. Switch back to Gaming Mode and launch it from your Library!
-
-### Option C: One command in headset terminal
-
-In Desktop Mode on the Steam Frame, open **Konsole** (or over SSH) and paste:
+If you are already in Desktop Mode on the Steam Frame, open **Konsole** and paste:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Pixelplanet/Pixel-VR-Player/main/tools/install.sh | sh
 ```
 
-It downloads the latest ARM64 release, verifies its checksum, installs it to `~/PixelVRPlayer`, and registers **Pixel VR Player** as a Non-Steam Game in your Steam library. Restart Steam if it was already running.
+*(No root access or disabled read-only filesystem needed; it installs entirely into user space).*
 
-Launch **Pixel VR Player** directly from your library, or from terminal:
+### Option C: From your PC over Wi-Fi (Requires SSH or Dev Mode)
+
+If you have SSH enabled or Developer Mode turned on with your headset paired:
+
+- **Windows:** Double-click [`tools/install-from-pc.bat`](tools/install-from-pc.bat) and enter your headset's IP.
+- **macOS / Linux:** Run `./tools/install-from-pc.sh`.
+
+The script connects over SSH, installs the app, and registers the Steam shortcut remotely.
+
+Launch **Pixel VR Player** directly from your Steam library, or from terminal:
 
 ```bash
 ~/PixelVRPlayer/run.sh                 # opens the in-headset file browser
