@@ -4,8 +4,25 @@ This guide covers how to get the built app running on the headset, the available
 options, and which one to pick.
 
 **What you're shipping:** a single self-contained ARM64 binary
-(`build-aarch64/bin/pixelvr`, ~11 MB, static OpenXR loader) plus four SPIR-V
-shaders. That's it — no `libopenxr_loader.so` or other bundled libraries.
+(`build-aarch64/bin/pixelvr`, ~11 MB, static OpenXR loader) plus SPIR-V shaders
+and a shell launcher. That's it — no `libopenxr_loader.so` or other bundled
+libraries.
+
+---
+
+## Just installing a release (no devkit, no build)
+
+End users do not need any of the steps below. From a terminal on the headset
+(Desktop Mode or over SSH):
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Pixelplanet/Pixel-VR-Player/main/tools/install.sh | sh
+```
+
+That verifies the checksum, installs to `~/PixelVRPlayer`, and registers
+**Pixel VR Player** as a Non-Steam Game. Relaunch Steam if it was running. Rerun
+the same command to upgrade; `--uninstall` removes it. The rest of this document
+covers building and iterating as a developer.
 
 ---
 
@@ -20,6 +37,9 @@ shaders. That's it — no `libopenxr_loader.so` or other bundled libraries.
 
 # 2b. Or stage a clean folder for the GUI Devkit Client:
 ./tools/stage.sh          # -> dist/PixelVRPlayer/
+
+# 2c. Or build the release tarball end users install from:
+./tools/package-release.sh build-aarch64 pixelvr-linux-arm64.tar.gz v1.3.0
 ```
 
 ---

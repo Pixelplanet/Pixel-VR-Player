@@ -20,19 +20,41 @@ A native VR video player for the **Valve Steam Frame**, playing flat 2D, 180°, 
 
 ## Install (prebuilt release)
 
-Download `pixelvr-linux-arm64.tar.gz` from the
-[Releases](../../releases) page and copy it to your Steam Frame, then:
+One command, from a terminal on the headset (Desktop Mode or over SSH):
 
 ```bash
-tar -xzf pixelvr-linux-arm64.tar.gz -C ~
-chmod +x ~/PixelVRPlayer/run.sh
+curl -fsSL https://raw.githubusercontent.com/Pixelplanet/Pixel-VR-Player/main/tools/install.sh | sh
+```
+
+It downloads the latest ARM64 release, verifies its checksum, installs it to
+`~/PixelVRPlayer`, and adds **Pixel VR Player** to your Steam library as a
+Non-Steam Game. Restart Steam if it was already running. SteamVR must be
+installed.
+
+Launch **Pixel VR Player** from your library, or directly:
+
+```bash
 ~/PixelVRPlayer/run.sh                 # opens the in-headset file browser
 ~/PixelVRPlayer/run.sh /path/clip.mp4  # …or auto-play a specific clip
 ```
 
-To launch it from the headset library, add `~/PixelVRPlayer/run.sh` as a
-**Non-Steam Game** (Steam ▸ Add a Non-Steam Game). SteamVR must be running; the
-app logs to `~/pixelvr-run.log`.
+Installer options:
+
+| Option | Effect |
+| --- | --- |
+| `--dir DIR` | install somewhere other than `~/PixelVRPlayer` |
+| `--version vX.Y.Z` | install a specific release instead of the latest |
+| `--no-steam` | skip the Steam library entry |
+| `--restart-steam` | close Steam first, then reopen it so the entry appears at once |
+| `--uninstall` | remove the app and its Steam shortcut |
+
+Re-run the same command to upgrade. Settings (`~/.config/pixelvr`) and cached
+thumbnails (`~/.cache/pixelvr`) live outside the install directory and are kept.
+
+**Offline install:** download `pixelvr-linux-arm64.tar.gz` from the
+[Releases](../../releases) page, copy it to the headset, extract it and run
+`./install.sh` from the extracted folder — or use `run.sh` directly. The app logs
+to `~/pixelvr-run.log`.
 
 Requirements: the SteamVR OpenXR runtime (SteamOS), Vulkan, and FFmpeg with the
 V4L2 M2M decoders. For zero-copy dma-buf decoding, build the patched FFmpeg into
