@@ -13,10 +13,21 @@ A native VR video player for the **Valve Steam Frame**, playing flat 2D, 180°, 
 > NV12) with zero-copy dma-buf import; flat / 180° / 360° projection and mono /
 > SBS (including half-SBS) / TB stereo, auto-detected from the filename; spatial
 > audio with a master clock. In-headset UI: file browser (with file type and
-> size), transport bar, settings menu, and a downloads manager. Native Valve
+> size), transport bar, settings menu, downloads manager, and an encrypted hidden vault. Native Valve
 > Steam Frame controller support (`XR_VALVE_frame_controller_interaction`) using
 > the runtime's own render model, with per-button animation on the model and
 > press-to-bind remapping.
+
+## Screenshots
+
+<p align="center">
+  <img src="docs/ui-redesign/mockup-unified-1-files.jpg" width="49%" alt="Spatial File Browser" />
+  <img src="docs/ui-redesign/mockup-unified-2-downloads.jpg" width="49%" alt="Downloads Manager" />
+</p>
+<p align="center">
+  <img src="docs/ui-redesign/mockup-unified-3-settings.jpg" width="49%" alt="Settings Panel" />
+  <img src="docs/ui-redesign/mockup-unified-4-cinema-hud.jpg" width="49%" alt="Cinema Playback HUD" />
+</p>
 
 ## Install (prebuilt release)
 
