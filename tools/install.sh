@@ -230,7 +230,8 @@ def find(shortcuts, name, exe):
             continue
         stored_exe = entry.get("Exe", [STR, ""])[1].strip('"')
         stored_name = entry.get("AppName", [STR, ""])[1]
-        if (exe and stored_exe == exe) or stored_name == name:
+        devkit_id = entry.get("DevkitGameID", [STR, ""])[1]
+        if (exe and stored_exe == exe) or stored_name == name or stored_name in ("Devkit Game: PixelVRPlayer", "Devkit Game: Pixel VR Player") or devkit_id == "PixelVRPlayer":
             return key, entry
     return None, None
 
@@ -276,11 +277,12 @@ def main():
             shortcuts[str(index)] = [OBJ, entry]
         if "appid" not in entry:
             entry["appid"] = [INT, to_i32(app_id(quoted_exe, name))]
+        icon_path = os.path.join(start_dir, "icon.png") if os.path.isfile(os.path.join(start_dir, "icon.png")) else ""
         for field, value in (
             ("AppName", [STR, name]),
             ("Exe", [STR, quoted_exe]),
             ("StartDir", [STR, '"%s"' % start_dir]),
-            ("icon", [STR, ""]),
+            ("icon", [STR, icon_path]),
             ("ShortcutPath", [STR, ""]),
             ("LaunchOptions", [STR, ""]),
             ("IsHidden", [INT, 0]),
@@ -295,6 +297,17 @@ def main():
         ):
             entry[field] = value
         entry.setdefault("tags", [OBJ, {}])
+        if icon_path and os.path.isfile(icon_path):
+            try:
+                import shutil
+                steam_user_dir = os.path.dirname(os.path.dirname(path))
+                grid_dir = os.path.join(steam_user_dir, "config", "grid")
+                os.makedirs(grid_dir, exist_ok=True)
+                raw_appid = entry["appid"][1] & 0xFFFFFFFF
+                shutil.copyfile(icon_path, os.path.join(grid_dir, "%d_icon.png" % raw_appid))
+                shutil.copyfile(icon_path, os.path.join(grid_dir, "%d.png" % raw_appid))
+            except Exception:
+                pass
         print("%s '%s' (%d shortcut(s) in the library)" % (
             "added" if created else "updated", name, len(shortcuts)))
 
@@ -508,6 +521,13 @@ if [ -f "$srcdir/VERSION" ]; then
     cp "$srcdir/VERSION" "$INSTALL_DIR/VERSION"
 elif [ -n "$VERSION" ]; then
     printf '%s\n' "$VERSION" > "$INSTALL_DIR/VERSION"
+fi
+if [ -f "$srcdir/icon.png" ]; then
+    cp "$srcdir/icon.png" "$INSTALL_DIR/icon.png"
+elif [ -n "$script_dir" ] && [ -f "$script_dir/icon.png" ]; then
+    cp "$script_dir/icon.png" "$INSTALL_DIR/icon.png"
+elif [ -f "assets/icon.png" ]; then
+    cp "assets/icon.png" "$INSTALL_DIR/icon.png"
 fi
 ok "$(ls -1 "$INSTALL_DIR/shaders" | wc -l | tr -d ' ') shaders, $(du -h "$INSTALL_DIR/pixelvr" 2>/dev/null | cut -f1) binary"
 

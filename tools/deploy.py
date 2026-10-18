@@ -127,7 +127,7 @@ def main() -> int:
         'mkdir -p "$target/shaders"; printf %s "$target"'
     )
 
-    # 2. Copy binary, shaders and the direct-run helper.
+    # 2. Copy binary, shaders, launcher, and icon.
     print("Copying binary ...")
     scp([str(binary)], f"{REMOTE_DIR}/pixelvr")
     if shaders:
@@ -136,6 +136,9 @@ def main() -> int:
     launch_helper = PROJECT_ROOT / "tools" / "launch.sh"
     if launch_helper.is_file():
         scp([str(launch_helper)], f"{REMOTE_DIR}/launch.sh")
+    icon_file = PROJECT_ROOT / "assets" / "icon.png"
+    if icon_file.is_file():
+        scp([str(icon_file)], f"{REMOTE_DIR}/icon.png")
 
     # 3. Register the Non-Steam shortcut (runs on the host, not in Sniper).
     request = {
@@ -165,6 +168,67 @@ def main() -> int:
     if isinstance(response, dict) and response.get("error"):
         raise RuntimeError(f"shortcut registration failed: {response['error']}")
 
+    # 3b. Sanitize shortcuts.vdf to remove the 'Devkit Game: ' prefix and set icon.
+    sanitize_script = (
+        "import glob, os, struct, shutil\n"
+        "OBJ, STR, INT, U64, END = 0, 1, 2, 7, 8\n"
+        "def read_cstr(buf, pos):\n"
+        "    end = buf.find(b'\\0', pos)\n"
+        "    return buf[pos:end].decode('utf-8', 'surrogateescape'), end + 1\n"
+        "def parse_obj(buf, pos):\n"
+        "    entries = {}\n"
+        "    while pos < len(buf):\n"
+        "        kind = buf[pos]\n"
+        "        if kind in (END, 0x0B): return entries, pos + 1\n"
+        "        key, pos = read_cstr(buf, pos + 1)\n"
+        "        if kind == OBJ: value, pos = parse_obj(buf, pos)\n"
+        "        elif kind == STR: value, pos = read_cstr(buf, pos)\n"
+        "        elif kind == INT: value = struct.unpack_from('<i', buf, pos)[0]; pos += 4\n"
+        "        elif kind == U64: value = struct.unpack_from('<Q', buf, pos)[0]; pos += 8\n"
+        "        else: break\n"
+        "        entries[key] = [kind, value]\n"
+        "    return entries, pos\n"
+        "def dump(entries):\n"
+        "    out = bytearray()\n"
+        "    for key, (kind, value) in entries.items():\n"
+        "        kb = key.encode('utf-8', 'surrogateescape')\n"
+        "        if kind == OBJ: out += bytes([OBJ]) + kb + b'\\0' + dump(value) + bytes([END])\n"
+        "        elif kind == STR: out += bytes([STR]) + kb + b'\\0' + value.encode('utf-8', 'surrogateescape') + b'\\0'\n"
+        "        elif kind == INT: out += bytes([INT]) + kb + b'\\0' + struct.pack('<i', value)\n"
+        "        elif kind == U64: out += bytes([U64]) + kb + b'\\0' + struct.pack('<Q', value)\n"
+        "    return bytes(out)\n"
+        "for vdf in glob.glob(os.path.expanduser('~/.steam/steam/userdata/*/config/shortcuts.vdf')):\n"
+        "    try:\n"
+        "        with open(vdf, 'rb') as f: data = f.read()\n"
+        "        if not data or data[0] != OBJ: continue\n"
+        "        key, pos = read_cstr(data, 1)\n"
+        "        s_dict, _ = parse_obj(data, pos)\n"
+        "        mod = False\n"
+        "        for k, v in s_dict.items():\n"
+        "            if isinstance(v, list) and v[0] == OBJ:\n"
+        "                e = v[1]\n"
+        "                name = e.get('AppName', [STR, ''])[1]\n"
+        "                if 'Pixel' in name:\n"
+        "                    e['AppName'] = [STR, 'Pixel VR Player']\n"
+        "                    e['Devkit'] = [INT, 0]\n"
+        "                    e['DevkitGameID'] = [STR, '']\n"
+        "                    icon_p = os.path.expanduser('~/" + REMOTE_DIR + "/icon.png')\n"
+        "                    if os.path.isfile(icon_p):\n"
+        "                        e['icon'] = [STR, icon_p]\n"
+        "                        grid = os.path.join(os.path.dirname(os.path.dirname(vdf)), 'config', 'grid')\n"
+        "                        os.makedirs(grid, exist_ok=True)\n"
+        "                        raw_id = e.get('appid', [INT, 0])[1] & 0xFFFFFFFF\n"
+        "                        shutil.copyfile(icon_p, os.path.join(grid, f'{raw_id}.png'))\n"
+        "                    mod = True\n"
+        "        if mod:\n"
+        "            tmp = vdf + '.tmp'\n"
+        "            with open(tmp, 'wb') as f: f.write(dump({key: [OBJ, s_dict]}) + bytes([END]))\n"
+        "            os.replace(tmp, vdf)\n"
+        "    except Exception:\n"
+        "        pass\n"
+    )
+    ssh(f"python3 -c {shlex.quote(sanitize_script)}")
+
     # 4. Optionally launch it in the headset.
     if args.launch:
         print("Launching in the headset ...")
@@ -184,7 +248,7 @@ def main() -> int:
     print(f"Deployed to {host}:~/{REMOTE_DIR}")
     if player_args:
         print("  argv:", " ".join(["./pixelvr", *player_args]))
-    print(f"  Launch from Steam > Library > Non-Steam > 'Devkit Game: {GAME}'")
+    print("  Launch from Steam > Library > Non-Steam > 'Pixel VR Player'")
     print(f"  Or over SSH:  ssh {host} '{REMOTE_DIR}/launch.sh <video>'")
     return 0
 

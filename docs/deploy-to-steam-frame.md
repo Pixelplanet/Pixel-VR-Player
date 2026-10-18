@@ -94,8 +94,7 @@ All three methods below share the same setup. Do this once.
 - **Easiest to iterate:** Option B (one command builds nothing you didn't ask for
   and launches in the headset).
 
-They all end up in the same place: *Steam ▸ Library ▸ Non-Steam ▸ **Devkit Game:
-PixelVRPlayer***.
+They all end up in the same place: *Steam ▸ Library ▸ Non-Steam ▸ **Pixel VR Player***.
 
 ---
 

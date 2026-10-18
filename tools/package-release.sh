@@ -40,6 +40,9 @@ cp tools/install.sh "${stage}/PixelVRPlayer/install.sh"
 if [[ -f "tools/Install Pixel VR Player.desktop" ]]; then
     cp "tools/Install Pixel VR Player.desktop" "${stage}/PixelVRPlayer/Install Pixel VR Player.desktop"
 fi
+if [[ -f "assets/icon.png" ]]; then
+    cp "assets/icon.png" "${stage}/PixelVRPlayer/icon.png"
+fi
 if [[ -n "${VERSION}" ]]; then
     printf '%s\n' "${VERSION}" > "${stage}/PixelVRPlayer/VERSION"
 fi

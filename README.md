@@ -259,8 +259,7 @@ choice, and troubleshooting). In short, after a one-time Developer-Mode pairing:
   # override the target with --host steamos@<ip> or FRAME_HOST
   ```
 
-Either way the app appears in **Steam ▸ Library ▸ Non-Steam** as *Devkit Game:
-PixelVRPlayer*. To run it manually over SSH for debugging:
+Either way the app appears in **Steam ▸ Library ▸ Non-Steam** as **Pixel VR Player**. To run it manually over SSH for debugging:
 
 ```bash
 ssh steamos@frame '~/devkit-game/PixelVRPlayer/launch.sh /path/to/video.mp4'
