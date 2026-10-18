@@ -302,13 +302,24 @@ def main():
                 import shutil
                 steam_user_dir = os.path.dirname(os.path.dirname(path))
                 grid_dir = os.path.join(steam_user_dir, "config", "grid")
-                raw_appid = entry["appid"][1] & 0xFFFFFFFF
                 if icon_path and os.path.isfile(icon_path):
                     shutil.copyfile(icon_path, os.path.join(grid_dir, "%d_icon.png" % raw_appid))
+                capsule_path = os.path.join(os.path.dirname(icon_path), "capsule.png") if icon_path else ""
+                if capsule_path and os.path.isfile(capsule_path):
+                    shutil.copyfile(capsule_path, os.path.join(grid_dir, "%dp.png" % raw_appid))
+                elif icon_path and os.path.isfile(icon_path):
+                    shutil.copyfile(icon_path, os.path.join(grid_dir, "%dp.png" % raw_appid))
+                header_path = os.path.join(os.path.dirname(icon_path), "header.png") if icon_path else ""
+                if header_path and os.path.isfile(header_path):
+                    shutil.copyfile(header_path, os.path.join(grid_dir, "%d.png" % raw_appid))
+                elif icon_path and os.path.isfile(icon_path):
                     shutil.copyfile(icon_path, os.path.join(grid_dir, "%d.png" % raw_appid))
                 hero_path = os.path.join(os.path.dirname(icon_path), "hero.png") if icon_path else ""
                 if hero_path and os.path.isfile(hero_path):
                     shutil.copyfile(hero_path, os.path.join(grid_dir, "%d_hero.png" % raw_appid))
+                logo_path = os.path.join(os.path.dirname(icon_path), "logo.png") if icon_path else ""
+                if logo_path and os.path.isfile(logo_path):
+                    shutil.copyfile(logo_path, os.path.join(grid_dir, "%d_logo.png" % raw_appid))
             except Exception:
                 pass
         print("%s '%s' (%d shortcut(s) in the library)" % (
@@ -525,20 +536,15 @@ if [ -f "$srcdir/VERSION" ]; then
 elif [ -n "$VERSION" ]; then
     printf '%s\n' "$VERSION" > "$INSTALL_DIR/VERSION"
 fi
-if [ -f "$srcdir/icon.png" ]; then
-    cp "$srcdir/icon.png" "$INSTALL_DIR/icon.png"
-elif [ -n "$script_dir" ] && [ -f "$script_dir/icon.png" ]; then
-    cp "$script_dir/icon.png" "$INSTALL_DIR/icon.png"
-elif [ -f "assets/icon.png" ]; then
-    cp "assets/icon.png" "$INSTALL_DIR/icon.png"
-fi
-if [ -f "$srcdir/hero.png" ]; then
-    cp "$srcdir/hero.png" "$INSTALL_DIR/hero.png"
-elif [ -n "$script_dir" ] && [ -f "$script_dir/hero.png" ]; then
-    cp "$script_dir/hero.png" "$INSTALL_DIR/hero.png"
-elif [ -f "assets/hero.png" ]; then
-    cp "assets/hero.png" "$INSTALL_DIR/hero.png"
-fi
+for asset in icon.png hero.png capsule.png header.png logo.png; do
+    if [ -f "$srcdir/$asset" ]; then
+        cp "$srcdir/$asset" "$INSTALL_DIR/$asset"
+    elif [ -n "$script_dir" ] && [ -f "$script_dir/$asset" ]; then
+        cp "$script_dir/$asset" "$INSTALL_DIR/$asset"
+    elif [ -f "assets/$asset" ]; then
+        cp "assets/$asset" "$INSTALL_DIR/$asset"
+    fi
+done
 ok "$(ls -1 "$INSTALL_DIR/shaders" | wc -l | tr -d ' ') shaders, $(du -h "$INSTALL_DIR/pixelvr" 2>/dev/null | cut -f1) binary"
 
 missing_libs=""

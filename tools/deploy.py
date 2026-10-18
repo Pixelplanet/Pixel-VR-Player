@@ -136,12 +136,10 @@ def main() -> int:
     launch_helper = PROJECT_ROOT / "tools" / "launch.sh"
     if launch_helper.is_file():
         scp([str(launch_helper)], f"{REMOTE_DIR}/launch.sh")
-    icon_file = PROJECT_ROOT / "assets" / "icon.png"
-    if icon_file.is_file():
-        scp([str(icon_file)], f"{REMOTE_DIR}/icon.png")
-    hero_file = PROJECT_ROOT / "assets" / "hero.png"
-    if hero_file.is_file():
-        scp([str(hero_file)], f"{REMOTE_DIR}/hero.png")
+    for asset_name in ("icon.png", "hero.png", "capsule.png", "header.png", "logo.png"):
+        asset_file = PROJECT_ROOT / "assets" / asset_name
+        if asset_file.is_file():
+            scp([str(asset_file)], f"{REMOTE_DIR}/{asset_name}")
 
     # 3. Register the Non-Steam shortcut (runs on the host, not in Sniper).
     request = {
@@ -217,15 +215,27 @@ def main() -> int:
         "                    e['DevkitGameID'] = [STR, '']\n"
         "                    icon_p = os.path.expanduser('~/" + REMOTE_DIR + "/icon.png')\n"
         "                    hero_p = os.path.expanduser('~/" + REMOTE_DIR + "/hero.png')\n"
+        "                    capsule_p = os.path.expanduser('~/" + REMOTE_DIR + "/capsule.png')\n"
+        "                    header_p = os.path.expanduser('~/" + REMOTE_DIR + "/header.png')\n"
+        "                    logo_p = os.path.expanduser('~/" + REMOTE_DIR + "/logo.png')\n"
         "                    grid = os.path.join(os.path.dirname(os.path.dirname(vdf)), 'config', 'grid')\n"
         "                    os.makedirs(grid, exist_ok=True)\n"
         "                    raw_id = e.get('appid', [INT, 0])[1] & 0xFFFFFFFF\n"
         "                    if os.path.isfile(icon_p):\n"
         "                        e['icon'] = [STR, icon_p]\n"
-        "                        shutil.copyfile(icon_p, os.path.join(grid, f'{raw_id}.png'))\n"
         "                        shutil.copyfile(icon_p, os.path.join(grid, f'{raw_id}_icon.png'))\n"
+        "                    if os.path.isfile(capsule_p):\n"
+        "                        shutil.copyfile(capsule_p, os.path.join(grid, f'{raw_id}p.png'))\n"
+        "                    elif os.path.isfile(icon_p):\n"
+        "                        shutil.copyfile(icon_p, os.path.join(grid, f'{raw_id}p.png'))\n"
+        "                    if os.path.isfile(header_p):\n"
+        "                        shutil.copyfile(header_p, os.path.join(grid, f'{raw_id}.png'))\n"
+        "                    elif os.path.isfile(icon_p):\n"
+        "                        shutil.copyfile(icon_p, os.path.join(grid, f'{raw_id}.png'))\n"
         "                    if os.path.isfile(hero_p):\n"
         "                        shutil.copyfile(hero_p, os.path.join(grid, f'{raw_id}_hero.png'))\n"
+        "                    if os.path.isfile(logo_p):\n"
+        "                        shutil.copyfile(logo_p, os.path.join(grid, f'{raw_id}_logo.png'))\n"
         "                    mod = True\n"
         "        if mod:\n"
         "            tmp = vdf + '.tmp'\n"

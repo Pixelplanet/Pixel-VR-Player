@@ -40,12 +40,11 @@ cp tools/install.sh "${stage}/PixelVRPlayer/install.sh"
 if [[ -f "tools/Install Pixel VR Player.desktop" ]]; then
     cp "tools/Install Pixel VR Player.desktop" "${stage}/PixelVRPlayer/Install Pixel VR Player.desktop"
 fi
-if [[ -f "assets/icon.png" ]]; then
-    cp "assets/icon.png" "${stage}/PixelVRPlayer/icon.png"
-fi
-if [[ -f "assets/hero.png" ]]; then
-    cp "assets/hero.png" "${stage}/PixelVRPlayer/hero.png"
-fi
+for asset in icon.png hero.png capsule.png header.png logo.png; do
+    if [[ -f "assets/${asset}" ]]; then
+        cp "assets/${asset}" "${stage}/PixelVRPlayer/${asset}"
+    fi
+done
 if [[ -n "${VERSION}" ]]; then
     printf '%s\n' "${VERSION}" > "${stage}/PixelVRPlayer/VERSION"
 fi
