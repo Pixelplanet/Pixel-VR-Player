@@ -532,6 +532,13 @@ elif [ -n "$script_dir" ] && [ -f "$script_dir/icon.png" ]; then
 elif [ -f "assets/icon.png" ]; then
     cp "assets/icon.png" "$INSTALL_DIR/icon.png"
 fi
+if [ -f "$srcdir/hero.png" ]; then
+    cp "$srcdir/hero.png" "$INSTALL_DIR/hero.png"
+elif [ -n "$script_dir" ] && [ -f "$script_dir/hero.png" ]; then
+    cp "$script_dir/hero.png" "$INSTALL_DIR/hero.png"
+elif [ -f "assets/hero.png" ]; then
+    cp "assets/hero.png" "$INSTALL_DIR/hero.png"
+fi
 ok "$(ls -1 "$INSTALL_DIR/shaders" | wc -l | tr -d ' ') shaders, $(du -h "$INSTALL_DIR/pixelvr" 2>/dev/null | cut -f1) binary"
 
 missing_libs=""

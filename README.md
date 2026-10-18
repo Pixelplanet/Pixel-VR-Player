@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/hero.png" width="100%" alt="Pixel VR Player" />
+</p>
+
 # Pixel VR Player
 
 A native VR video player for the **Valve Steam Frame**, playing flat 2D, 180°, and

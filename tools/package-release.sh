@@ -43,6 +43,9 @@ fi
 if [[ -f "assets/icon.png" ]]; then
     cp "assets/icon.png" "${stage}/PixelVRPlayer/icon.png"
 fi
+if [[ -f "assets/hero.png" ]]; then
+    cp "assets/hero.png" "${stage}/PixelVRPlayer/hero.png"
+fi
 if [[ -n "${VERSION}" ]]; then
     printf '%s\n' "${VERSION}" > "${stage}/PixelVRPlayer/VERSION"
 fi

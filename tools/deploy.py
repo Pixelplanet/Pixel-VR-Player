@@ -139,6 +139,9 @@ def main() -> int:
     icon_file = PROJECT_ROOT / "assets" / "icon.png"
     if icon_file.is_file():
         scp([str(icon_file)], f"{REMOTE_DIR}/icon.png")
+    hero_file = PROJECT_ROOT / "assets" / "hero.png"
+    if hero_file.is_file():
+        scp([str(hero_file)], f"{REMOTE_DIR}/hero.png")
 
     # 3. Register the Non-Steam shortcut (runs on the host, not in Sniper).
     request = {
