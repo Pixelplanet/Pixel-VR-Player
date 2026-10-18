@@ -1,0 +1,9 @@
+# Force LF line endings for scripts and workflows so Linux/SteamOS execution never breaks
+*.sh text eol=lf
+*.py text eol=lf
+*.yml text eol=lf
+*.desktop text eol=lf
+*.spv binary
+*.png binary
+*.jpg binary
+*.jpeg binary
