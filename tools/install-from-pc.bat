@@ -25,13 +25,19 @@ if %ERRORLEVEL% neq 0 (
     exit /b 1
 )
 
-ssh -o StrictHostKeyChecking=no steamos@!FRAME_IP! "curl -fsSL https://raw.githubusercontent.com/Pixelplanet/Pixel-VR-Player/main/tools/install.sh | sh"
+set "EXTRA_ARGS=%*"
+if "%EXTRA_ARGS%"=="" (
+    set "REMOTE_CMD=curl -fsSL https://raw.githubusercontent.com/Pixelplanet/Pixel-VR-Player/main/tools/install.sh | sh"
+) else (
+    set "REMOTE_CMD=curl -fsSL https://raw.githubusercontent.com/Pixelplanet/Pixel-VR-Player/main/tools/install.sh | sh -s -- %EXTRA_ARGS%"
+)
+
+ssh -o StrictHostKeyChecking=no steamos@!FRAME_IP! "!REMOTE_CMD!"
 
 if %ERRORLEVEL% equ 0 (
     echo.
     echo ===============================================================
-    echo  [SUCCESS] Pixel VR Player installed on your Steam Frame!
-    echo  It is now in your Steam Library under Non-Steam Games.
+    echo  [SUCCESS] Operation completed on your Steam Frame!
     echo ===============================================================
 ) else (
     echo.

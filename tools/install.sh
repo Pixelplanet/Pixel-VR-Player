@@ -258,13 +258,25 @@ def main():
         if entry is None:
             print("no matching shortcut, nothing to remove")
             return 0
+        raw_appid = entry.get("appid", [INT, 0])[1] & 0xFFFFFFFF
+        if raw_appid:
+            steam_user_dir = os.path.dirname(os.path.dirname(path))
+            grid_dir = os.path.join(steam_user_dir, "config", "grid")
+            for suffix in ("", "p", "_hero", "_logo", "_icon"):
+                for ext in (".png", ".jpg"):
+                    gf = os.path.join(grid_dir, "%d%s%s" % (raw_appid, suffix, ext))
+                    if os.path.isfile(gf):
+                        try:
+                            os.remove(gf)
+                        except Exception:
+                            pass
         del shortcuts[key]
         renumbered = {}
         ordered = sorted(shortcuts, key=lambda k: int(k) if k.isdigit() else 1 << 30)
         for index, old in enumerate(ordered):
             renumbered[str(index)] = shortcuts[old]
         root[root_key][1] = renumbered
-        print("removed '%s'" % name)
+        print("removed '%s' and grid artwork" % name)
     else:
         quoted_exe = '"%s"' % exe
         created = entry is None

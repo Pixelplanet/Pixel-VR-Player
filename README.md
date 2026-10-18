@@ -97,6 +97,45 @@ V4L2 M2M decoders. For zero-copy dma-buf decoding, build the patched FFmpeg into
 back to the system FFmpeg with CPU colour conversion.
 
 
+## Uninstallation
+
+To remove Pixel VR Player and its Steam shortcut from your Steam Frame:
+
+### From the Headset (Desktop Mode / Konsole or SSH)
+
+Run the uninstaller script directly:
+
+```bash
+~/PixelVRPlayer/install.sh --uninstall
+```
+
+Or run the one-command uninstaller:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Pixelplanet/Pixel-VR-Player/main/tools/install.sh | sh -s -- --uninstall
+```
+
+This cleanly removes:
+* The application folder (`~/PixelVRPlayer`)
+* The Non-Steam Game shortcut from Steam's library (`shortcuts.vdf`)
+* All custom Steam grid artwork from `~/.steam/steam/userdata/*/config/grid/`
+
+### From your PC over Wi-Fi
+
+- **Windows:** Double-click [`tools/uninstall-from-pc.bat`](tools/uninstall-from-pc.bat) and enter your headset's IP.
+- **macOS / Linux:** Run `./tools/uninstall-from-pc.sh`.
+
+### Complete Data Purge (Optional)
+
+By default, user settings (`~/.config/pixelvr`), cached video thumbnails (`~/.cache/pixelvr`), and hidden vault media (`~/.pixelvr_vault`) are kept intact so upgrading or reinstalling never loses your library state.
+
+To completely erase all application data and settings from the headset, run:
+
+```bash
+rm -rf ~/.config/pixelvr ~/.cache/pixelvr ~/.pixelvr_vault
+```
+
+
 ## Controls
 
 The laser pointer and the control bar are **separate** input paths, so the bar

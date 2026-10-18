@@ -25,6 +25,27 @@ End users do not need to build anything or use devkits. Choose whichever option 
 
 The installer verifies checksums, installs to `~/PixelVRPlayer`, and registers **Pixel VR Player** as a Non-Steam Game in your library. Re-running upgrades in-place while keeping all settings, thumbnails, and hidden vault files (`~/.pixelvr_vault`).
 
+### Uninstalling
+
+To cleanly remove the application and its Steam shortcut:
+
+```bash
+# On headset:
+~/PixelVRPlayer/install.sh --uninstall
+
+# Or one-liner:
+curl -fsSL https://raw.githubusercontent.com/Pixelplanet/Pixel-VR-Player/main/tools/install.sh | sh -s -- --uninstall
+
+# Or from PC over Wi-Fi:
+./tools/uninstall-from-pc.sh          # Mac/Linux
+tools/uninstall-from-pc.bat           # Windows
+```
+
+To purge user settings, thumbnails, and vault files:
+```bash
+rm -rf ~/.config/pixelvr ~/.cache/pixelvr ~/.pixelvr_vault
+```
+
 The rest of this document covers building and deploying as a developer.
 
 ---

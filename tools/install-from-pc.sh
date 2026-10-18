@@ -19,11 +19,22 @@ echo "Connecting to steamos@${FRAME_IP}..."
 echo "(If prompted for a password, enter your SteamOS desktop password)"
 echo ""
 
-if ssh -o StrictHostKeyChecking=no "steamos@${FRAME_IP}" "curl -fsSL https://raw.githubusercontent.com/Pixelplanet/Pixel-VR-Player/main/tools/install.sh | sh"; then
+EXTRA_ARGS="${*:-}"
+if [ -n "${EXTRA_ARGS}" ]; then
+    REMOTE_CMD="curl -fsSL https://raw.githubusercontent.com/Pixelplanet/Pixel-VR-Player/main/tools/install.sh | sh -s -- ${EXTRA_ARGS}"
+else
+    REMOTE_CMD="curl -fsSL https://raw.githubusercontent.com/Pixelplanet/Pixel-VR-Player/main/tools/install.sh | sh"
+fi
+
+if ssh -o StrictHostKeyChecking=no "steamos@${FRAME_IP}" "${REMOTE_CMD}"; then
     echo ""
     echo "==============================================================="
-    echo " [SUCCESS] Pixel VR Player installed on your Steam Frame!"
-    echo " It is now in your Steam Library under Non-Steam Games."
+    if [[ "${EXTRA_ARGS}" == *"--uninstall"* ]]; then
+        echo " [SUCCESS] Pixel VR Player removed from your Steam Frame!"
+    else
+        echo " [SUCCESS] Pixel VR Player installed on your Steam Frame!"
+        echo " It is now in your Steam Library under Non-Steam Games."
+    fi
     echo "==============================================================="
 else
     echo ""
