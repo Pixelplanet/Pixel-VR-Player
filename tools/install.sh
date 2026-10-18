@@ -302,10 +302,13 @@ def main():
                 import shutil
                 steam_user_dir = os.path.dirname(os.path.dirname(path))
                 grid_dir = os.path.join(steam_user_dir, "config", "grid")
-                os.makedirs(grid_dir, exist_ok=True)
                 raw_appid = entry["appid"][1] & 0xFFFFFFFF
-                shutil.copyfile(icon_path, os.path.join(grid_dir, "%d_icon.png" % raw_appid))
-                shutil.copyfile(icon_path, os.path.join(grid_dir, "%d.png" % raw_appid))
+                if icon_path and os.path.isfile(icon_path):
+                    shutil.copyfile(icon_path, os.path.join(grid_dir, "%d_icon.png" % raw_appid))
+                    shutil.copyfile(icon_path, os.path.join(grid_dir, "%d.png" % raw_appid))
+                hero_path = os.path.join(os.path.dirname(icon_path), "hero.png") if icon_path else ""
+                if hero_path and os.path.isfile(hero_path):
+                    shutil.copyfile(hero_path, os.path.join(grid_dir, "%d_hero.png" % raw_appid))
             except Exception:
                 pass
         print("%s '%s' (%d shortcut(s) in the library)" % (
