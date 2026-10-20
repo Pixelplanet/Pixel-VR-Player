@@ -402,7 +402,7 @@ bool VrKeyboard::show(const std::string& description,
     vr::EVROverlayError err = ov->ShowKeyboard(
         mode,
         vr::k_EGamepadTextInputLineModeSingleLine,
-        vr::KeyboardFlag_Modal,
+        vr::KeyboardFlag_Modal | vr::KeyboardFlag_Minimal,
         description.c_str(),
         static_cast<uint32_t>(maxChars),
         existingText.c_str(),
@@ -483,11 +483,6 @@ void VrKeyboard::poll(std::function<void(const std::string&)> onDone,
                     kbConfigured_ = false;
                     doneSubmitted_ = true;
                     std::string text = currentText_;
-                    if (text.empty()) {
-                        char textBuf[1024] = {0};
-                        ov->GetKeyboardText(textBuf, sizeof(textBuf));
-                        text = textBuf;
-                    }
                     ov->HideKeyboard();
                     clearOrSetShmKeyboardBuffer("");
                     currentText_.clear();
@@ -500,15 +495,10 @@ void VrKeyboard::poll(std::function<void(const std::string&)> onDone,
                     }
                     return;
                 } else if (firstByte >= 32) {
-                    std::string inStrStr = inStr;
-                    // If inStr is a cumulative buffer that already starts with currentText_ (from cumulative keyboard mode),
-                    // adopt it directly so characters are not doubled.
-                    if (!currentText_.empty() && inStrStr.rfind(currentText_, 0) == 0) {
-                        currentText_ = inStrStr;
-                    } else if (currentText_.length() + inStrStr.length() <= static_cast<size_t>(maxChars_)) {
-                        currentText_ += inStrStr;
+                    if (currentText_.length() + std::strlen(inStr) <= static_cast<size_t>(maxChars_)) {
+                        currentText_ += inStr;
                     }
-                    PIXELVR_LOG_INFO("VrKeyboard: Input '%s', text now: '%s'", inStrStr.c_str(), currentText_.c_str());
+                    PIXELVR_LOG_INFO("VrKeyboard: Input '%s', text now: '%s'", inStr, currentText_.c_str());
                 }
             }
         } else if (event.eventType == vr::VREvent_KeyboardDone) {
@@ -516,11 +506,6 @@ void VrKeyboard::poll(std::function<void(const std::string&)> onDone,
             kbConfigured_ = false;
             doneSubmitted_ = true;
             std::string text = currentText_;
-            if (text.empty()) {
-                char textBuf[1024] = {0};
-                ov->GetKeyboardText(textBuf, sizeof(textBuf));
-                text = textBuf;
-            }
             ov->HideKeyboard();
             clearOrSetShmKeyboardBuffer("");
             currentText_.clear();
