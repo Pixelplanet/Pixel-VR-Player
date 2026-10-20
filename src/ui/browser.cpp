@@ -586,7 +586,8 @@ void Browser::scanBookmarksInto(ScanResult& out) {
         if (bm.path.empty()) continue;
         const bool isSmb = (bm.path.rfind("smb://", 0) == 0);
         std::error_code ec;
-        const bool isDir = isSmb || fs::is_directory(bm.path, ec);
+        const bool isVid = is_video(bm.path);
+        const bool isDir = isSmb ? !isVid : fs::is_directory(bm.path, ec);
         std::string label = bm.label;
         if (label.empty()) {
             if (isSmb) {
@@ -598,9 +599,9 @@ void Browser::scanBookmarksInto(ScanResult& out) {
                 if (label.empty()) label = bm.path;
             }
         }
-        std::string detail = isSmb ? "SMB Share" : (isDir ? "Folder" : "Video File");
+        std::string detail = isSmb ? (isVid ? "SMB Video" : "SMB Share") : (isDir ? "Folder" : "Video File");
         std::string previewPath = isDir ? "" : bm.path;
-        out.entries.push_back({label, bm.path, isDir, !isDir && is_video(bm.path), false, isSmb, detail, 0, previewPath});
+        out.entries.push_back({label, bm.path, isDir, isVid, false, false, detail, 0, previewPath});
     }
 }
 

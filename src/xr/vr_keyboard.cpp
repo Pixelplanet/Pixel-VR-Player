@@ -6,6 +6,14 @@
 
 #if defined(__linux__) || defined(__APPLE__)
 #include <dlfcn.h>
+#if defined(__linux__)
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <unistd.h>
+#include <dirent.h>
+#include <sys/stat.h>
+#include <algorithm>
+#endif
 #else
 #include <windows.h>
 #endif
@@ -25,6 +33,46 @@ Fn_VR_ShutdownInternal g_VR_ShutdownInternal = nullptr;
 Fn_VR_GetGenericInterface g_VR_GetGenericInterface = nullptr;
 
 static uint64_t sKeyboardNonce = 1000;
+
+#if defined(__linux__)
+static void clearOrSetShmKeyboardBuffer(const std::string& text) {
+    // SteamVR stores the active keyboard buffer across all GamepadUI CEF instances
+    // in a shared memory segment of size 0x40cc0 (265408 bytes) named /dev/shm/u<uid>-Shm_*
+    // at offset 0x3fe60.
+    DIR* dir = opendir("/dev/shm");
+    if (!dir) return;
+
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        if (std::strstr(entry->d_name, "Shm_") != nullptr) {
+            std::string path = std::string("/dev/shm/") + entry->d_name;
+            struct stat st{};
+            if (stat(path.c_str(), &st) == 0 && st.st_size == 0x40cc0) {
+                int fd = open(path.c_str(), O_RDWR);
+                if (fd >= 0) {
+                    void* ptr = mmap(nullptr, 0x40cc0, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+                    close(fd);
+                    if (ptr != MAP_FAILED) {
+                        char* kbBuf = reinterpret_cast<char*>(ptr) + 0x3fe60;
+                        std::memset(kbBuf, 0, 1024);
+                        if (!text.empty()) {
+                            std::size_t copyLen = std::min(text.length(), static_cast<std::size_t>(1023));
+                            std::memcpy(kbBuf, text.c_str(), copyLen);
+                        }
+                        msync(ptr, 0x40cc0, MS_SYNC);
+                        munmap(ptr, 0x40cc0);
+                        PIXELVR_LOG_INFO("VrKeyboard: Updated shm %s at 0x3fe60 to '%s'",
+                                         entry->d_name, text.c_str());
+                    }
+                }
+            }
+        }
+    }
+    closedir(dir);
+}
+#else
+static void clearOrSetShmKeyboardBuffer(const std::string&) {}
+#endif
 
 } // namespace
 
@@ -109,6 +157,9 @@ bool VrKeyboard::init() {
     vrSystem_ = sys;
     vrOverlay_ = ov;
     available_ = true;
+
+    // Clear any stale shared memory keyboard buffer left by previous sessions
+    clearOrSetShmKeyboardBuffer("");
 
     PIXELVR_LOG_INFO("VrKeyboard: Successfully initialized SteamVR overlay interface (sys=%p, ov=%p)",
                      reinterpret_cast<void*>(sys), reinterpret_cast<void*>(ov));
@@ -223,6 +274,9 @@ bool VrKeyboard::show(const std::string& description,
     }
     // Explicitly hide any existing keyboard session in SteamVR to clear lingering state
     ov->HideKeyboard();
+
+    // Reset shared memory keyboard buffer to existingText
+    clearOrSetShmKeyboardBuffer(existingText);
 
     currentNonce_ = ++sKeyboardNonce;
     description_ = description;
@@ -344,13 +398,11 @@ bool VrKeyboard::show(const std::string& description,
     // 1. Set keyboard transform in standing universe BEFORE ShowKeyboard
     ov->SetKeyboardTransformAbsolute(vr::TrackingUniverseStanding, &kbMatStage);
 
-    // 2. Invoke virtual keyboard with Modal | Minimal flags
-    // Minimal mode tells SteamVR GamepadUI not to show its internal text box
-    // and not to cache/accumulate dirty text drafts across sessions.
+    // 2. Invoke virtual keyboard with Modal flag
     vr::EVROverlayError err = ov->ShowKeyboard(
         mode,
         vr::k_EGamepadTextInputLineModeSingleLine,
-        vr::KeyboardFlag_Modal | vr::KeyboardFlag_Minimal,
+        vr::KeyboardFlag_Modal,
         description.c_str(),
         static_cast<uint32_t>(maxChars),
         existingText.c_str(),
@@ -360,6 +412,9 @@ bool VrKeyboard::show(const std::string& description,
         PIXELVR_LOG_WARN("VrKeyboard: ShowKeyboard failed with error %d", static_cast<int>(err));
         return false;
     }
+
+    // Reinforce existingText in shared memory so GamepadUI CEF reads it cleanly
+    clearOrSetShmKeyboardBuffer(existingText);
 
     // 3. Reinforce keyboard transform AFTER ShowKeyboard
     ov->SetKeyboardTransformAbsolute(vr::TrackingUniverseStanding, &kbMatStage);
@@ -381,6 +436,7 @@ void VrKeyboard::hide() {
     if (ov) {
         ov->HideKeyboard();
     }
+    clearOrSetShmKeyboardBuffer("");
     isOpen_ = false;
     kbConfigured_ = false;
     doneSubmitted_ = false;
@@ -410,45 +466,47 @@ void VrKeyboard::poll(std::function<void(const std::string&)> onDone,
             }
 
             const char* inStr = event.data.keyboard.cNewInput;
-            if (inStr && inStr[0] != 0) {
-                userTyped_ = true;
-                const unsigned char firstByte = static_cast<unsigned char>(inStr[0]);
-                if (firstByte == '' || firstByte == 0x7F || firstByte == 8) {
-                    // Backspace: pop last UTF-8 character
-                    while (!currentText_.empty() && (static_cast<unsigned char>(currentText_.back()) & 0xC0) == 0x80) {
-                        currentText_.pop_back();
-                    }
-                    if (!currentText_.empty()) {
-                        currentText_.pop_back();
-                    }
-                } else if (firstByte == '\n' || firstByte == '\r') {
-                    isOpen_ = false;
-                    kbConfigured_ = false;
-                    doneSubmitted_ = true;
-                    std::string text = currentText_;
-                    ov->HideKeyboard();
-                    currentText_.clear();
-                    existingText_.clear();
-                    userTyped_ = false;
-                    currentNonce_ = 0;
-                    PIXELVR_LOG_INFO("VrKeyboard: User submitted text via Return key: '%s'", text.c_str());
-                    if (onDone) {
-                        onDone(text);
-                    }
-                    return;
-                } else if (firstByte >= 32) {
-                    if (currentText_.length() + std::strlen(inStr) <= static_cast<size_t>(maxChars_)) {
-                        currentText_ += inStr;
-                    }
+            if (inStr && (inStr[0] == '\n' || inStr[0] == '\r')) {
+                isOpen_ = false;
+                kbConfigured_ = false;
+                doneSubmitted_ = true;
+                char textBuf[1024] = {0};
+                ov->GetKeyboardText(textBuf, sizeof(textBuf));
+                std::string text = textBuf;
+                if (text.empty() && !currentText_.empty()) {
+                    text = currentText_;
                 }
-                PIXELVR_LOG_INFO("VrKeyboard: CharInput live text: '%s'", currentText_.c_str());
+                ov->HideKeyboard();
+                clearOrSetShmKeyboardBuffer("");
+                currentText_.clear();
+                existingText_.clear();
+                userTyped_ = false;
+                currentNonce_ = 0;
+                PIXELVR_LOG_INFO("VrKeyboard: User submitted text via Return key: '%s'", text.c_str());
+                if (onDone) {
+                    onDone(text);
+                }
+                return;
             }
+
+            // Sync currentText_ directly with OpenVR's canonical keyboard buffer
+            char textBuf[1024] = {0};
+            uint32_t len = ov->GetKeyboardText(textBuf, sizeof(textBuf));
+            currentText_ = textBuf;
+            userTyped_ = true;
+            PIXELVR_LOG_INFO("VrKeyboard: CharInput live text from OpenVR (len=%u): '%s'", len, currentText_.c_str());
         } else if (event.eventType == vr::VREvent_KeyboardDone) {
             isOpen_ = false;
             kbConfigured_ = false;
             doneSubmitted_ = true;
-            std::string text = currentText_;
+            char textBuf[1024] = {0};
+            ov->GetKeyboardText(textBuf, sizeof(textBuf));
+            std::string text = textBuf;
+            if (text.empty() && !currentText_.empty()) {
+                text = currentText_;
+            }
             ov->HideKeyboard();
+            clearOrSetShmKeyboardBuffer("");
             currentText_.clear();
             existingText_.clear();
             userTyped_ = false;
@@ -463,6 +521,7 @@ void VrKeyboard::poll(std::function<void(const std::string&)> onDone,
             isOpen_ = false;
             kbConfigured_ = false;
             ov->HideKeyboard();
+            clearOrSetShmKeyboardBuffer("");
             PIXELVR_LOG_INFO("VrKeyboard: Keyboard closed (doneSubmitted=%d)", doneSubmitted_ ? 1 : 0);
             if (!doneSubmitted_) {
                 currentText_.clear();
