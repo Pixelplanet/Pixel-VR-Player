@@ -466,44 +466,60 @@ void VrKeyboard::poll(std::function<void(const std::string&)> onDone,
             }
 
             const char* inStr = event.data.keyboard.cNewInput;
-            if (inStr && (inStr[0] == '\n' || inStr[0] == '\r')) {
-                isOpen_ = false;
-                kbConfigured_ = false;
-                doneSubmitted_ = true;
-                char textBuf[1024] = {0};
-                ov->GetKeyboardText(textBuf, sizeof(textBuf));
-                std::string text = textBuf;
-                if (text.empty() && !currentText_.empty()) {
-                    text = currentText_;
+            if (inStr && inStr[0] != 0) {
+                userTyped_ = true;
+                const unsigned char firstByte = static_cast<unsigned char>(inStr[0]);
+                if (firstByte == '\b' || firstByte == 0x7F || firstByte == 8) {
+                    // Backspace: pop last UTF-8 character
+                    while (!currentText_.empty() && (static_cast<unsigned char>(currentText_.back()) & 0xC0) == 0x80) {
+                        currentText_.pop_back();
+                    }
+                    if (!currentText_.empty()) {
+                        currentText_.pop_back();
+                    }
+                    PIXELVR_LOG_INFO("VrKeyboard: Backspace pressed, text now: '%s'", currentText_.c_str());
+                } else if (firstByte == '\n' || firstByte == '\r') {
+                    isOpen_ = false;
+                    kbConfigured_ = false;
+                    doneSubmitted_ = true;
+                    std::string text = currentText_;
+                    if (text.empty()) {
+                        char textBuf[1024] = {0};
+                        ov->GetKeyboardText(textBuf, sizeof(textBuf));
+                        text = textBuf;
+                    }
+                    ov->HideKeyboard();
+                    clearOrSetShmKeyboardBuffer("");
+                    currentText_.clear();
+                    existingText_.clear();
+                    userTyped_ = false;
+                    currentNonce_ = 0;
+                    PIXELVR_LOG_INFO("VrKeyboard: User submitted text via Return key: '%s'", text.c_str());
+                    if (onDone) {
+                        onDone(text);
+                    }
+                    return;
+                } else if (firstByte >= 32) {
+                    std::string inStrStr = inStr;
+                    // If inStr is a cumulative buffer that already starts with currentText_ (from cumulative keyboard mode),
+                    // adopt it directly so characters are not doubled.
+                    if (!currentText_.empty() && inStrStr.rfind(currentText_, 0) == 0) {
+                        currentText_ = inStrStr;
+                    } else if (currentText_.length() + inStrStr.length() <= static_cast<size_t>(maxChars_)) {
+                        currentText_ += inStrStr;
+                    }
+                    PIXELVR_LOG_INFO("VrKeyboard: Input '%s', text now: '%s'", inStrStr.c_str(), currentText_.c_str());
                 }
-                ov->HideKeyboard();
-                clearOrSetShmKeyboardBuffer("");
-                currentText_.clear();
-                existingText_.clear();
-                userTyped_ = false;
-                currentNonce_ = 0;
-                PIXELVR_LOG_INFO("VrKeyboard: User submitted text via Return key: '%s'", text.c_str());
-                if (onDone) {
-                    onDone(text);
-                }
-                return;
             }
-
-            // Sync currentText_ directly with OpenVR's canonical keyboard buffer
-            char textBuf[1024] = {0};
-            uint32_t len = ov->GetKeyboardText(textBuf, sizeof(textBuf));
-            currentText_ = textBuf;
-            userTyped_ = true;
-            PIXELVR_LOG_INFO("VrKeyboard: CharInput live text from OpenVR (len=%u): '%s'", len, currentText_.c_str());
         } else if (event.eventType == vr::VREvent_KeyboardDone) {
             isOpen_ = false;
             kbConfigured_ = false;
             doneSubmitted_ = true;
-            char textBuf[1024] = {0};
-            ov->GetKeyboardText(textBuf, sizeof(textBuf));
-            std::string text = textBuf;
-            if (text.empty() && !currentText_.empty()) {
-                text = currentText_;
+            std::string text = currentText_;
+            if (text.empty()) {
+                char textBuf[1024] = {0};
+                ov->GetKeyboardText(textBuf, sizeof(textBuf));
+                text = textBuf;
             }
             ov->HideKeyboard();
             clearOrSetShmKeyboardBuffer("");
