@@ -7,19 +7,40 @@
 
 ---
 
+## Active backlog (2026-10-20 — Completed)
+
+- [x] **Virtual Keyboard Tilt Inversion, Raycast Auto-Focus & UI Hide Refinements**
+  - **Symptom 1:** Keyboard spawned tilted with the top edge pitched forward (slanted away from user).
+  - **Resolution 1:** Corrected tilt angle to \-0.38f\ (-21.8 degrees). The top edge slants backward away from user; face normal tilts upward directly toward the user's eyes.
+  - **Symptom 2:** Laser beam shot 2.5m past the keyboard with no cursor dot on the keys; laser wasn't focused.
+  - **Resolution 2:** Added keyboard plane collision test in \VulkanRenderer::updatePointer()\ using \KeyboardModalData::transform\. Laser ray terminates directly on the keyboard surface with glowing cursor dot on hovered keys. Also ensured active controller laser turns on automatically when keyboard opens, and guarded background menus from eating keyboard trigger clicks.
+  - **Symptom 3:** Trigger pull while HUD dismissed didn't reactivate the UI unless hitting a hidden button; empty-space clicks re-dismissed the UI in the same frame.
+  - **Resolution 3:** Recorded \wasHudDismissed\ at frame start and guarded dock interactions with \!wasHudDismissed\. Trigger click cleanly un-hides the HUD without clicking hidden buttons or re-dismissing in empty space.
+  - **Symptom 4:** Analog grip squeeze was overly sensitive and accidentally reactivated the dismissed UI.
+  - **Resolution 4:** Ignored soft analog grip (\in.gripDown\ and \BtnGrip\); only digital full grip click stop (\in.gripFullPressDown\) un-hides the HUD.
+
 ## Active backlog (2026-10-19 — Completed)
 
 - [x] **1. Fix Virtual Keyboard Laser Pointer Focus & Tracking**
-  - **Symptom:** Virtual keyboard opened, but laser pointer disappeared or wasn't focused on the keyboard; user had to squeeze/press the controller grip fully to activate it.
+  - **Symptom:** Virtual keyboard opened, but laser pointer disappeared or wasn't focused on the keyboard; user had to squeeze/press the controller grip fully to activate it. Also, the keyboard centered where the Steam menu was centered when the app launched instead of where the user centered their view.
   - **Root Cause:**
-    - SteamVR's `vrcompositor` switches system panel interaction mode to Gamepad (mode 0, hiding `system.pointer`) on session focus loss unless an interactive overlay requiring laser mouse is currently visible (`bOverlaysPresentThatForceLaserMouseOn`).
-    - `inputOverlay_` was created in `VrKeyboard::init()` but was **never shown** (`ShowOverlay` was never called, had no texture, dimensions, or transform).
-    - SteamVR's virtual keyboard overlay `valve.steam.gamepadui.keyboard` is spawned asynchronously and lacks `MakeOverlaysInteractiveIfVisible` by default.
+    - SteamVR's virtual keyboard overlay key is `VRKeyboard_uid0` (from CEF `webhelper`), not `valve.steam.gamepadui.keyboard`. Previous lookups failed, so `MakeOverlaysInteractiveIfVisible` and `VROverlayInputMethod_Mouse` were never applied to the actual keyboard overlay.
+    - `VulkanRenderer::updatePointer()` was returning early (`if (keyboardModal_.visible) return;`), which prevented raycasts to the modal plane and left `pointerActive_` false with no cursor dot.
+    - `SetKeyboardTransformAbsolute` was never called with the user's current centered view orientation/position, so SteamVR defaulted to the launch standing origin.
   - **Resolution:**
-    - Fully configured `inputOverlay_` in `VrKeyboard::show()`: set width (1.0m), HMD-relative transform (1.1m in front, tilted), 1x1 transparent raw pixel texture (`SetOverlayRaw`), and docked keyboard position (`SetKeyboardPositionForOverlay`).
-    - Called `ov->ShowOverlay(inputOverlay_)` before calling `ShowKeyboardForOverlay`, ensuring `vrcompositor`'s overlay scan sets `m_bOverlaysPresentThatForceLaserMouseOn = 1`.
-    - Added dynamic polling in `VrKeyboard::poll()` to detect and configure `MakeOverlaysInteractiveIfVisible` and `VROverlayInputMethod_Mouse` on `valve.steam.gamepadui.keyboard` as soon as it appears.
-    - Added proper overlay cleanup (`HideOverlay(inputOverlay_)`) in `hide()`, `KeyboardDone`, and `KeyboardClosed`.
+    - Implemented dynamic overlay discovery across handles 1..128 and known keys (`VRKeyboard*`, `valve.steam.gamepadui.keyboard`, `system.keyboard`).
+    - Configured `MakeOverlaysInteractiveIfVisible`, `VROverlayInputMethod_Mouse`, and `SendVRDiscreteScrollEvents` on the keyboard overlay.
+    - Calculated world matrix in `TrackingUniverseStanding` directly from the user's HMD pose (or OpenXR `headPos` and `headForward`): placed 1.05m in front of eyes, 0.38m below eye level, tilted 28° up toward the eyes.
+    - Applied transform via `SetKeyboardTransformAbsolute(vr::TrackingUniverseStanding, &kbMat)` and `SetOverlayTransformAbsolute`.
+    - Updated `VulkanRenderer::updatePointer()` to raycast against the modal plane when `keyboardModal_.visible` is active, ensuring sharp laser pointer focus and a visible cursor dot.
+    - Guarded `VrKeyboard::shutdown()` to prevent crash on exit.
+
+- [x] **2. Controller Movement UI Dismissal Fix**
+  - **Symptom:** When the user clicked "Hide UI" or clicked outside controls, any hand movement immediately reactivated the UI.
+  - **Requirement:** Once dismissed, the UI must stay hidden regardless of controller movement/rotation, and only reactivate when the user explicitly presses a physical button on the controller.
+  - **Resolution:**
+    - In `App::run()`, when `hudDismissed_` is true, controller movement (`moveDist`) and rotation (`rotDiff`) are blocked from clearing `hudDismissed_` or setting `activity = true`.
+    - Only physical button presses (`in.togglePlay`, `in.browserToggle`, `in.recenter`, `in.buttonDown[...]`, `in.gripDown`, `in.gripFullPressDown`, `in.select` outside cooldown, or thumbstick movement) reactivate the HUD.
 
 - [x] **2. Strict IPv4 Validation & Live Sanitization**
   - **Symptom:** Host field accepted invalid characters, spaces, and did not strip leading zeros.

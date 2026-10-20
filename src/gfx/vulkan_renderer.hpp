@@ -4,6 +4,7 @@
 #include "xr/openxr_headers.hpp"
 
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <string>
 #include <vector>
@@ -189,13 +190,22 @@ public:
         std::string prompt;
         std::string text;
         bool isPassword = false;
+        bool hasTransform = false;
+        float transform[3][4]{};
     };
     void setKeyboardModal(bool visible, const std::string& prompt,
-                          const std::string& text, bool isPassword = false) {
+                          const std::string& text, bool isPassword = false,
+                          const float* transform = nullptr) {
         keyboardModal_.visible = visible;
         keyboardModal_.prompt = prompt;
         keyboardModal_.text = text;
         keyboardModal_.isPassword = isPassword;
+        if (transform && visible) {
+            std::memcpy(keyboardModal_.transform, transform, sizeof(keyboardModal_.transform));
+            keyboardModal_.hasTransform = true;
+        } else {
+            keyboardModal_.hasTransform = false;
+        }
     }
     const KeyboardModalData& keyboardModal() const { return keyboardModal_; }
 

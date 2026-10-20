@@ -22,7 +22,9 @@ public:
     bool show(const std::string& description,
               const std::string& existingText,
               bool isPassword = false,
-              int maxChars = 256);
+              int maxChars = 256,
+              const float* headPos = nullptr,
+              const float* headForward = nullptr);
 
     // Closes the virtual keyboard if open.
     void hide();
@@ -35,15 +37,20 @@ public:
     std::string currentText() const;
     const std::string& description() const { return description_; }
     bool isPassword() const { return isPassword_; }
+    const float* transform() const { return &kbMat_[0][0]; }
 
 private:
     VrKeyboard() = default;
     ~VrKeyboard();
 
+    bool configureKeyboardOverlay();
+
     bool available_ = false;
     bool isOpen_ = false;
     bool doneSubmitted_ = false;
     bool kbConfigured_ = false;
+    int pollFramesSinceOpen_ = 0;
+    float kbMat_[3][4]{};
     std::string description_;
     std::string existingText_;
     std::string currentText_;
@@ -51,7 +58,6 @@ private:
     void* libHandle_ = nullptr;
     void* vrSystem_ = nullptr;
     void* vrOverlay_ = nullptr;
-    uint64_t inputOverlay_ = 0;
 };
 
 } // namespace pixelvr

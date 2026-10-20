@@ -1249,12 +1249,13 @@ void VulkanRenderer::updatePointer() {
     actionMenuKeyHovered_ = -1;
 
     const bool actionMenuOpen = actionMenu_.visible;
+    const bool kbOpen = keyboardModal_.visible;
     const bool hubOpen = (browserVisible_ || settingsVisible_ ||
-                         (downloadsVisible_ && !downloadsModal_)) && !actionMenuOpen;
-    const bool modalOpen = (downloadsVisible_ && downloadsModal_) && !actionMenuOpen;
-    const bool controlBar = controlBarVisible_ && !hubOpen && !modalOpen && !actionMenuOpen;
-    if (keyboardModal_.visible || (!hubOpen && !modalOpen && !controlBar && !actionMenuOpen)) {
-        return;  // Virtual keyboard active or no UI surface to point at.
+                         (downloadsVisible_ && !downloadsModal_)) && !actionMenuOpen && !kbOpen;
+    const bool modalOpen = (downloadsVisible_ && downloadsModal_) && !actionMenuOpen && !kbOpen;
+    const bool controlBar = controlBarVisible_ && !hubOpen && !modalOpen && !actionMenuOpen && !kbOpen;
+    if (!kbOpen && !hubOpen && !modalOpen && !controlBar && !actionMenuOpen) {
+        return;  // No UI surface to point at.
     }
 
     using namespace math;
@@ -1309,7 +1310,54 @@ void VulkanRenderer::updatePointer() {
         const float hyy = oL.y + t * dL.y;
         const Vec3 world = origin + dir * t;
 
-        // 0. File Action Submenu Modal takes highest priority
+        // 0. Virtual Keyboard takes top focus priority
+        if (kbOpen) {
+            // First check if pointing at the text preview box on the panel
+            if (hx >= -kPanelW && hx <= kPanelW && hyy >= -kPanelTop && hyy <= kPanelTop) {
+                pointerActive_ = true;
+                pointerHand_ = h;
+                pointerHit_[0] = world.x;
+                pointerHit_[1] = world.y;
+                pointerHit_[2] = world.z;
+                break;
+            }
+            // Next check if pointing directly at the virtual keyboard overlay keys
+            if (keyboardModal_.hasTransform) {
+                const auto& m = keyboardModal_.transform;
+                // Column 0: Local X axis (right)
+                const Vec3 kbRight{m[0][0], m[1][0], m[2][0]};
+                // Column 1: Local Y axis (up)
+                const Vec3 kbUp{m[0][1], m[1][1], m[2][1]};
+                // Column 2: Local Z axis (face normal pointing toward viewer)
+                const Vec3 kbNormal{m[0][2], m[1][2], m[2][2]};
+                // Column 3: Translation (center)
+                const Vec3 kbCenter{m[0][3], m[1][3], m[2][3]};
+
+                const float denom = dot(dir, kbNormal);
+                if (denom < -1e-4f) { // Ray points into front of keyboard
+                    const float tKb = dot(kbCenter - origin, kbNormal) / denom;
+                    if (tKb > 0.05f && tKb < 3.5f) {
+                        const Vec3 hitP = origin + dir * tKb;
+                        const Vec3 rel = hitP - kbCenter;
+                        const float localX = dot(rel, kbRight);
+                        const float localY = dot(rel, kbUp);
+                        // Overlay width is 1.05m (halfW = 0.525m). Height is ~0.45m (halfH = 0.225m).
+                        // Allow generous interactive margin (0.58m x 0.28m)
+                        if (std::fabs(localX) <= 0.58f && std::fabs(localY) <= 0.28f) {
+                            pointerActive_ = true;
+                            pointerHand_ = h;
+                            pointerHit_[0] = hitP.x;
+                            pointerHit_[1] = hitP.y;
+                            pointerHit_[2] = hitP.z;
+                            break;
+                        }
+                    }
+                }
+            }
+            continue;
+        }
+
+        // 1. File Action Submenu Modal takes next priority
         if (actionMenuOpen) {
             if (hx >= -kPanelW && hx <= kPanelW && hyy >= -kPanelTop && hyy <= kPanelTop) {
                 pointerActive_ = true;

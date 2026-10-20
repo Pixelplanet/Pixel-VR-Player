@@ -1,6 +1,7 @@
 #include "vr_keyboard.hpp"
 #include "util/logging.hpp"
 #include <cstring>
+#include <cmath>
 
 #if defined(__linux__) || defined(__APPLE__)
 #include <dlfcn.h>
@@ -106,36 +107,21 @@ bool VrKeyboard::init() {
     vrOverlay_ = ov;
     available_ = true;
 
-    // Create a persistent input overlay so ShowKeyboardForOverlay can link
-    // tracked controller pointer interactions directly to SteamVR's virtual keyboard.
-    vr::VROverlayHandle_t hOverlay = vr::k_ulOverlayHandleInvalid;
-    vr::EVROverlayError ovErr = ov->CreateOverlay("pixelvr.input_overlay", "PixelVR Input", &hOverlay);
-    if (ovErr == vr::VROverlayError_None && hOverlay != vr::k_ulOverlayHandleInvalid) {
-        inputOverlay_ = hOverlay;
-        ov->SetOverlayInputMethod(hOverlay, vr::VROverlayInputMethod_Mouse);
-        ov->SetOverlayFlag(hOverlay, vr::VROverlayFlags_MakeOverlaysInteractiveIfVisible, true);
-        PIXELVR_LOG_INFO("VrKeyboard: Created input overlay %llu with Mouse input method and MakeOverlaysInteractiveIfVisible",
-                         static_cast<unsigned long long>(inputOverlay_));
-    } else {
-        PIXELVR_LOG_WARN("VrKeyboard: Could not create input overlay (err=%d)", static_cast<int>(ovErr));
-    }
-
     PIXELVR_LOG_INFO("VrKeyboard: Successfully initialized SteamVR overlay interface (sys=%p, ov=%p)",
                      reinterpret_cast<void*>(sys), reinterpret_cast<void*>(ov));
     return true;
 }
 
 void VrKeyboard::shutdown() {
+    if (!available_) return;
+    available_ = false;
     if (isOpen_) {
         hide();
     }
-    if (inputOverlay_ != 0 && vrOverlay_) {
-        auto* ov = reinterpret_cast<vr::IVROverlay*>(vrOverlay_);
-        ov->DestroyOverlay(inputOverlay_);
-        inputOverlay_ = 0;
-    }
     if (g_VR_ShutdownInternal) {
-        g_VR_ShutdownInternal();
+        auto fn = g_VR_ShutdownInternal;
+        g_VR_ShutdownInternal = nullptr;
+        fn();
     }
     vrSystem_ = nullptr;
     vrOverlay_ = nullptr;
@@ -148,20 +134,81 @@ void VrKeyboard::shutdown() {
         libHandle_ = nullptr;
     }
     g_VR_InitInternal = nullptr;
-    g_VR_ShutdownInternal = nullptr;
     g_VR_GetGenericInterface = nullptr;
-    available_ = false;
     isOpen_ = false;
     doneSubmitted_ = false;
+    kbConfigured_ = false;
+}
+
+bool VrKeyboard::configureKeyboardOverlay() {
+    auto* ov = reinterpret_cast<vr::IVROverlay*>(vrOverlay_);
+    if (!ov) return false;
+
+    bool foundAny = false;
+    vr::HmdMatrix34_t mat{};
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            mat.m[r][c] = kbMat_[r][c];
+        }
+    }
+
+    auto configureHandle = [&](vr::VROverlayHandle_t h, const char* name) {
+        ov->SetOverlayTransformAbsolute(h, vr::TrackingUniverseStanding, &mat);
+        ov->SetOverlayWidthInMeters(h, 1.05f);
+        ov->SetOverlayInputMethod(h, vr::VROverlayInputMethod_Mouse);
+        ov->SetOverlayFlag(h, vr::VROverlayFlags_MakeOverlaysInteractiveIfVisible, true);
+        ov->SetOverlayFlag(h, vr::VROverlayFlags_SendVRDiscreteScrollEvents, true);
+        ov->ShowOverlay(h);
+        foundAny = true;
+        PIXELVR_LOG_INFO("VrKeyboard: Configured keyboard overlay %llu ('%s') with interactive laser mouse and standing transform",
+                         static_cast<unsigned long long>(h), name ? name : "unknown");
+    };
+
+    // 1. Check known specific overlay keys
+    const char* kbOverlayNames[] = {
+        "VRKeyboard_uid0",
+        "VRKeyboard_uid1",
+        "VRKeyboard",
+        "valve.steam.gamepadui.keyboard",
+        "system.keyboard"
+    };
+    for (const char* name : kbOverlayNames) {
+        vr::VROverlayHandle_t hKb = vr::k_ulOverlayHandleInvalid;
+        if (ov->FindOverlay(name, &hKb) == vr::VROverlayError_None && hKb != vr::k_ulOverlayHandleInvalid) {
+            configureHandle(hKb, name);
+        }
+    }
+
+    // 2. Scan active overlay handles (1..128) to catch any dynamic uid variations (e.g. VRKeyboard_uid2726460308)
+    for (uint64_t h = 1; h <= 128; ++h) {
+        char keyBuf[256] = {0};
+        vr::EVROverlayError kErr = vr::VROverlayError_None;
+        uint32_t len = ov->GetOverlayKey(h, keyBuf, sizeof(keyBuf), &kErr);
+        if (kErr == vr::VROverlayError_None && len > 0) {
+            if (std::strstr(keyBuf, "keyboard") != nullptr ||
+                std::strstr(keyBuf, "Keyboard") != nullptr ||
+                std::strstr(keyBuf, "VRKeyboard") != nullptr) {
+                configureHandle(h, keyBuf);
+            }
+        }
+    }
+
+    if (foundAny) {
+        kbConfigured_ = true;
+    }
+    return foundAny;
 }
 
 bool VrKeyboard::show(const std::string& description,
                       const std::string& existingText,
                       bool isPassword,
-                      int maxChars) {
+                      int maxChars,
+                      const float* headPos,
+                      const float* headForward) {
     if (!available_ && !init()) {
         return false;
     }
+    auto* sys = reinterpret_cast<vr::IVRSystem*>(vrSystem_);
     auto* ov = reinterpret_cast<vr::IVROverlay*>(vrOverlay_);
     if (!ov) return false;
 
@@ -175,81 +222,101 @@ bool VrKeyboard::show(const std::string& description,
         ? vr::k_EGamepadTextInputModePassword
         : vr::k_EGamepadTextInputModeNormal;
 
-    vr::EVROverlayError err = vr::VROverlayError_None;
-    if (inputOverlay_ != 0) {
-        ov->SetOverlayInputMethod(inputOverlay_, vr::VROverlayInputMethod_Mouse);
-        ov->SetOverlayFlag(inputOverlay_, vr::VROverlayFlags_MakeOverlaysInteractiveIfVisible, true);
-        ov->SetOverlayWidthInMeters(inputOverlay_, 1.0f);
+    // Calculate keyboard world matrix in TrackingUniverseStanding
+    float hx = 0.0f, hy = 1.6f, hz = 0.0f;
+    float fx = 0.0f, fz = -1.0f;
 
-        // Position overlay 1.1m in front of HMD, tilted slightly down/up to match comfortable view
-        vr::HmdMatrix34_t mat = {
-            1.0f, 0.0f, 0.0f, 0.0f,
-            0.0f, 1.0f, 0.0f, -0.2f,
-            0.0f, 0.0f, 1.0f, -1.1f
-        };
-        ov->SetOverlayTransformTrackedDeviceRelative(inputOverlay_, vr::k_unTrackedDeviceIndex_Hmd, &mat);
-
-        // Transparent 1x1 pixel texture so overlay is valid and active without rendering visual artifacts
-        static const uint32_t s_transparentPixel = 0x00000000;
-        ov->SetOverlayRaw(inputOverlay_, const_cast<uint32_t*>(&s_transparentPixel), 1, 1, 4);
-
-        // Tell keyboard to avoid overlay upper area and appear cleanly docked
-        vr::HmdRect2_t avoidRect = {
-            { 0.0f, 0.0f },
-            { 1.0f, 0.2f }
-        };
-        ov->SetKeyboardPositionForOverlay(inputOverlay_, avoidRect);
-
-        // Show overlay BEFORE opening keyboard so vrcompositor recognizes active interactive overlay
-        ov->ShowOverlay(inputOverlay_);
-
-        err = ov->ShowKeyboardForOverlay(
-            inputOverlay_,
-            mode,
-            vr::k_EGamepadTextInputLineModeSingleLine,
-            vr::KeyboardFlag_Modal,
-            description.c_str(),
-            static_cast<uint32_t>(maxChars),
-            existingText.c_str(),
-            0);
-    } else {
-        err = ov->ShowKeyboard(
-            mode,
-            vr::k_EGamepadTextInputLineModeSingleLine,
-            vr::KeyboardFlag_Modal,
-            description.c_str(),
-            static_cast<uint32_t>(maxChars),
-            existingText.c_str(),
-            0);
+    if (headPos && headForward) {
+        hx = headPos[0];
+        hy = headPos[1];
+        hz = headPos[2];
+        fx = headForward[0];
+        fz = headForward[2];
+    } else if (sys) {
+        vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount];
+        sys->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseStanding, 0.0f, poses, vr::k_unMaxTrackedDeviceCount);
+        if (poses[vr::k_unTrackedDeviceIndex_Hmd].bPoseIsValid) {
+            const auto& hMat = poses[vr::k_unTrackedDeviceIndex_Hmd].mDeviceToAbsoluteTracking;
+            hx = hMat.m[0][3];
+            hy = hMat.m[1][3];
+            hz = hMat.m[2][3];
+            // OpenVR forward is -Z (col 2 of rotation matrix)
+            fx = -hMat.m[0][2];
+            fz = -hMat.m[2][2];
+        }
     }
+
+    // Flatten forward vector to horizontal plane
+    float flen = std::sqrt(fx * fx + fz * fz);
+    if (flen < 1e-3f) {
+        fx = 0.0f;
+        fz = -1.0f;
+    } else {
+        fx /= flen;
+        fz /= flen;
+    }
+    const float yaw = std::atan2(-fx, -fz);
+
+    // Place keyboard 1.05m in front of eyes, 0.35m below eye level
+    const float dist = 1.05f;
+    const float kbX = hx + fx * dist;
+    const float kbY = hy - 0.35f;
+    const float kbZ = hz + fz * dist;
+
+    // Tilt upward toward eyes by ~22 degrees (-0.38 rad).
+    // Top side slants backward away from user; face normal points up and toward eyes.
+    const float tilt = -0.38f;
+    vr::HmdMatrix34_t kbMat{};
+    kbMat.m[0][0] = std::cos(yaw);
+    kbMat.m[0][1] = std::sin(yaw) * std::sin(tilt);
+    kbMat.m[0][2] = std::sin(yaw) * std::cos(tilt);
+    kbMat.m[0][3] = kbX;
+
+    kbMat.m[1][0] = 0.0f;
+    kbMat.m[1][1] = std::cos(tilt);
+    kbMat.m[1][2] = -std::sin(tilt);
+    kbMat.m[1][3] = kbY;
+
+    kbMat.m[2][0] = -std::sin(yaw);
+    kbMat.m[2][1] = std::cos(yaw) * std::sin(tilt);
+    kbMat.m[2][2] = std::cos(yaw) * std::cos(tilt);
+    kbMat.m[2][3] = kbZ;
+
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            kbMat_[r][c] = kbMat.m[r][c];
+        }
+    }
+    kbConfigured_ = false;
+
+    // 1. Set keyboard transform in standing universe BEFORE ShowKeyboard
+    ov->SetKeyboardTransformAbsolute(vr::TrackingUniverseStanding, &kbMat);
+
+    // 2. Invoke virtual keyboard
+    vr::EVROverlayError err = ov->ShowKeyboard(
+        mode,
+        vr::k_EGamepadTextInputLineModeSingleLine,
+        vr::KeyboardFlag_Modal,
+        description.c_str(),
+        static_cast<uint32_t>(maxChars),
+        existingText.c_str(),
+        0);
 
     if (err != vr::VROverlayError_None) {
         PIXELVR_LOG_WARN("VrKeyboard: ShowKeyboard failed with error %d", static_cast<int>(err));
-        if (inputOverlay_ != 0) {
-            ov->HideOverlay(inputOverlay_);
-        }
         return false;
     }
 
-    kbConfigured_ = false;
-    // Attempt early configuration of keyboard overlays if already created
-    const char* kbOverlayNames[] = {
-        "valve.steam.gamepadui.keyboard",
-        "system.keyboard"
-    };
-    for (const char* name : kbOverlayNames) {
-        vr::VROverlayHandle_t hKb = vr::k_ulOverlayHandleInvalid;
-        if (ov->FindOverlay(name, &hKb) == vr::VROverlayError_None && hKb != vr::k_ulOverlayHandleInvalid) {
-            ov->SetOverlayFlag(hKb, vr::VROverlayFlags_MakeOverlaysInteractiveIfVisible, true);
-            ov->SetOverlayInputMethod(hKb, vr::VROverlayInputMethod_Mouse);
-            kbConfigured_ = true;
-            PIXELVR_LOG_INFO("VrKeyboard: Configured interactive laser mouse for overlay '%s'", name);
-        }
-    }
+    // 3. Set keyboard transform AFTER ShowKeyboard as well
+    ov->SetKeyboardTransformAbsolute(vr::TrackingUniverseStanding, &kbMat);
+
+    // 4. Configure overlay laser and transform immediately if already present
+    configureKeyboardOverlay();
 
     isOpen_ = true;
-    PIXELVR_LOG_INFO("VrKeyboard: Shown virtual keyboard for '%s' (initial text: '%s')",
-                     description.c_str(), existingText.c_str());
+    pollFramesSinceOpen_ = 0;
+    PIXELVR_LOG_INFO("VrKeyboard: Shown virtual keyboard for '%s' at pos (%.2f, %.2f, %.2f) yaw=%.2f",
+                     description.c_str(), kbX, kbY, kbZ, yaw);
     return true;
 }
 
@@ -258,9 +325,6 @@ void VrKeyboard::hide() {
     auto* ov = reinterpret_cast<vr::IVROverlay*>(vrOverlay_);
     if (ov) {
         ov->HideKeyboard();
-        if (inputOverlay_ != 0) {
-            ov->HideOverlay(inputOverlay_);
-        }
     }
     isOpen_ = false;
     kbConfigured_ = false;
@@ -303,9 +367,6 @@ void VrKeyboard::poll(std::function<void(const std::string&)> onDone,
         } else if (event.eventType == vr::VREvent_KeyboardDone) {
             isOpen_ = false;
             kbConfigured_ = false;
-            if (inputOverlay_ != 0 && ov) {
-                ov->HideOverlay(inputOverlay_);
-            }
             doneSubmitted_ = true;
             char buf[1024] = {0};
             uint32_t len = ov->GetKeyboardText(buf, sizeof(buf));
@@ -321,9 +382,6 @@ void VrKeyboard::poll(std::function<void(const std::string&)> onDone,
                    event.eventType == vr::VREvent_KeyboardClosed_Global) {
             isOpen_ = false;
             kbConfigured_ = false;
-            if (inputOverlay_ != 0 && ov) {
-                ov->HideOverlay(inputOverlay_);
-            }
             PIXELVR_LOG_INFO("VrKeyboard: Keyboard closed (doneSubmitted=%d)", doneSubmitted_ ? 1 : 0);
             if (!doneSubmitted_) {
                 // On Steam Frame / SteamOS, pressing the checkmark or closing the keyboard issues KeyboardClosed
@@ -352,21 +410,11 @@ void VrKeyboard::poll(std::function<void(const std::string&)> onDone,
 
     // Keep currentText_ synchronized with the live SteamVR keyboard buffer every frame
     if (isOpen_) {
-        // Dynamically ensure SteamVR keyboard overlay has laser mouse flags as soon as spawned
-        if (!kbConfigured_) {
-            const char* kbOverlayNames[] = {
-                "valve.steam.gamepadui.keyboard",
-                "system.keyboard"
-            };
-            for (const char* name : kbOverlayNames) {
-                vr::VROverlayHandle_t hKb = vr::k_ulOverlayHandleInvalid;
-                if (ov->FindOverlay(name, &hKb) == vr::VROverlayError_None && hKb != vr::k_ulOverlayHandleInvalid) {
-                    ov->SetOverlayFlag(hKb, vr::VROverlayFlags_MakeOverlaysInteractiveIfVisible, true);
-                    ov->SetOverlayInputMethod(hKb, vr::VROverlayInputMethod_Mouse);
-                    kbConfigured_ = true;
-                    PIXELVR_LOG_INFO("VrKeyboard: Configured interactive laser mouse for overlay '%s'", name);
-                }
-            }
+        pollFramesSinceOpen_++;
+        // Maintain and reinforce keyboard overlay configuration across the first 90 frames (~1 sec)
+        // to catch asynchronous creation by SteamVR's GamepadUI
+        if (!kbConfigured_ || pollFramesSinceOpen_ < 90) {
+            configureKeyboardOverlay();
         }
 
         char liveBuf[1024] = {0};

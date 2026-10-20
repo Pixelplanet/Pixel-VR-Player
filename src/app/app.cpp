@@ -840,7 +840,8 @@ int App::run() {
             renderer_.setKeyboardModal(kbOpen,
                                        VrKeyboard::instance().description(),
                                        kbDisplayText,
-                                       VrKeyboard::instance().isPassword());
+                                       VrKeyboard::instance().isPassword(),
+                                       kbOpen ? VrKeyboard::instance().transform() : nullptr);
             if (kbOpen) {
                 in.select = false;
                 in.selectHeld = false;
@@ -1034,6 +1035,7 @@ int App::run() {
             // Controller activity: moving a controller past a small threshold (or
             // any button/stick input) keeps the laser, models and controls shown;
             // after a few seconds of stillness they fade away.
+            const bool wasHudDismissed = hudDismissed_;
             const auto timeSinceDismiss = nowT - hudDismissTime_;
             const bool inDismissCooldown = hudDismissed_ && (timeSinceDismiss < std::chrono::milliseconds(500));
             bool activity = false;
@@ -1060,13 +1062,10 @@ int App::run() {
                 const float rotDiff = std::fabs(od);
 
                 if (hudDismissed_) {
-                    // Requires intentional hand movement after dismissal cooldown to re-engage HUD
-                    if (!inDismissCooldown && (moveDist > 0.12f || rotDiff < 0.950f)) {
-                        hudDismissed_ = false;
-                        activity = true;
-                        for (int k = 0; k < 3; ++k) activityAnchorPos_[h][k] = c.position[k];
-                        for (int k = 0; k < 4; ++k) activityAnchorOrient_[h][k] = c.orientation[k];
-                    }
+                    // Controller movement MUST NEVER un-hide the HUD when dismissed.
+                    // Keep activity anchors updated so they don't accumulate delta.
+                    for (int k = 0; k < 3; ++k) activityAnchorPos_[h][k] = c.position[k];
+                    for (int k = 0; k < 4; ++k) activityAnchorOrient_[h][k] = c.orientation[k];
                 } else if (moveDist > 0.06f || rotDiff < 0.985f) {
                     // Normal threshold: filters micro-tremors from resting hands
                     activity = true;
@@ -1078,7 +1077,23 @@ int App::run() {
                                      std::fabs(in.thumbstickY) > 0.25f ||
                                      std::fabs(in.thumbstickRX) > 0.25f ||
                                      std::fabs(in.thumbstickRY) > 0.25f);
-            if (in.togglePlay || in.browserToggle || in.recenter || stickMoved) {
+            // Only digital full grip press (gripFullPressDown) or physical buttons wake the HUD.
+            // Soft analog squeeze (gripDown / BtnGrip) is ignored to prevent accidental wake-up from resting hands.
+            bool anyButtonPressed = (in.togglePlay || in.browserToggle || in.recenter ||
+                                     in.gripFullPressDown[0] || in.gripFullPressDown[1] ||
+                                     stickMoved);
+            for (int b = 0; b < XrInputState::BtnCount; ++b) {
+                if (b == XrInputState::BtnGrip) continue;
+                if (in.buttonDown[b]) {
+                    anyButtonPressed = true;
+                    break;
+                }
+            }
+            if (!inDismissCooldown && in.select) {
+                anyButtonPressed = true;
+            }
+
+            if (anyButtonPressed) {
                 activity = true;
                 if (!inDismissCooldown) {
                     hudDismissed_ = false;
@@ -1541,8 +1556,15 @@ int App::run() {
                                          in.controllers[1].active));
                 // Keep laser active when UI panels, activity, or virtual keyboard are active!
                 const bool kbActive = VrKeyboard::instance().isOpen();
-                if (kbActive && !renderer_.laserOn(0) && !renderer_.laserOn(1)) {
-                    renderer_.setLaserOn(1, true);
+                if (kbActive) {
+                    if (!renderer_.laserOn(0) && !renderer_.laserOn(1)) {
+                        if (in.controllers[1].active) renderer_.setLaserOn(1, true);
+                        else if (in.controllers[0].active) renderer_.setLaserOn(0, true);
+                    } else if (renderer_.laserOn(1) && !in.controllers[1].active && in.controllers[0].active) {
+                        renderer_.setLaserOn(0, true);
+                    } else if (renderer_.laserOn(0) && !in.controllers[0].active && in.controllers[1].active) {
+                        renderer_.setLaserOn(1, true);
+                    }
                 }
                 const bool showLaser = (uiPanelActive || (controllersEngaged && !hudDismissed_) || kbActive);
                 // Build each controller's render state: corrected model pose,
@@ -1883,25 +1905,25 @@ int App::run() {
 
                                 if (chosen == 0) {
                                     smbModal_.editingField = SmbModalState::Field::Host;
-                                    VrKeyboard::instance().show("SMB Server IP / Hostname", smbModal_.host, false);
+                                    VrKeyboard::instance().show("SMB Server IP / Hostname", smbModal_.host, false, 256, in.headPos, in.headForward);
                                 } else if (chosen == 1) {
                                     smbModal_.editingField = SmbModalState::Field::Share;
-                                    VrKeyboard::instance().show("SMB Share Name (empty for all)", smbModal_.share, false);
+                                    VrKeyboard::instance().show("SMB Share Name (empty for all)", smbModal_.share, false, 256, in.headPos, in.headForward);
                                 } else if (chosen == 2) {
                                     smbModal_.anon = !smbModal_.anon;
                                     updateSmbModalMenu();
                                 } else if (chosen == 3) {
                                     smbModal_.editingField = SmbModalState::Field::User;
-                                    VrKeyboard::instance().show("SMB Username", smbModal_.user, false);
+                                    VrKeyboard::instance().show("SMB Username", smbModal_.user, false, 256, in.headPos, in.headForward);
                                 } else if (chosen == 4) {
                                     smbModal_.editingField = SmbModalState::Field::Pass;
-                                    VrKeyboard::instance().show("SMB Password", smbModal_.pass, true);
+                                    VrKeyboard::instance().show("SMB Password", smbModal_.pass, true, 256, in.headPos, in.headForward);
                                 } else if (chosen == 5) {
                                     smbModal_.editingField = SmbModalState::Field::Workgroup;
-                                    VrKeyboard::instance().show("SMB Workgroup / Domain", smbModal_.workgroup, false);
+                                    VrKeyboard::instance().show("SMB Workgroup / Domain", smbModal_.workgroup, false, 256, in.headPos, in.headForward);
                                 } else if (chosen == 6) {
                                     smbModal_.editingField = SmbModalState::Field::Label;
-                                    VrKeyboard::instance().show("SMB Nickname", smbModal_.label, false);
+                                    VrKeyboard::instance().show("SMB Nickname", smbModal_.label, false, 256, in.headPos, in.headForward);
                                 } else if (chosen == 7) {
                                     // Save SMB Share
                                     saveSmbModal();
@@ -2089,7 +2111,7 @@ int App::run() {
             // Cinema Transport Dock is only active when the Unified Spatial Hub is closed.
             const bool barOk = !browserOpen && !settingsOpen && !downloadsWindow_ &&
                                pendingDl_.empty() && !actionMenu_.visible && !smbModal_.active;
-            if (barOk && renderer_.controlBarVisible()) {
+            if (barOk && renderer_.controlBarVisible() && !wasHudDismissed) {
                 // Point-and-click the media control bar with the trigger.
                 const int btn = renderer_.pointerButton();
                 // The trigger clicks the bar; A does too (A is the reliable
@@ -2254,7 +2276,7 @@ int App::run() {
                     // hardware decoder (a reopen each) and stalls it; one seek per
                     // gesture stays responsive.
                     bool scrubInput = false;
-                    if (renderer_.pointerOnTimeline() && in.selectHeld &&
+                    if (!wasHudDismissed && renderer_.pointerOnTimeline() && in.selectHeld &&
                         media_.duration() > 0.0) {
                         scrubTarget_ = renderer_.pointerScrub() * media_.duration();
                         scrubInput = true;
@@ -2385,6 +2407,7 @@ int App::run() {
     if (renderer_.device() != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(renderer_.device());
     }
+    VrKeyboard::instance().shutdown();
     renderModels_.shutdown();  // destroy XR model handles before the session
     PIXELVR_LOG_INFO("Shutting down");
     return 0;
