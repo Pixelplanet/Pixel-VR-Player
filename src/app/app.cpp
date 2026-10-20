@@ -311,6 +311,8 @@ void App::loadMedia(const std::string& path) {
         PIXELVR_LOG_WARN("Failed to open %s", path.c_str());
         return;
     }
+    hudDismissed_ = false;
+    lastControllerActivity_ = std::chrono::steady_clock::now();
 
     // Refine the stereo layout from the frame aspect ratio when the filename did
     // not state it: once the projection is a VR type the aspect is unambiguous
@@ -546,6 +548,20 @@ void App::performVaultLock() {
     settings_.refresh();
 
     PIXELVR_LOG_INFO("Vault locked and sanitized");
+}
+
+void App::dismissHud(const XrInputState& in, std::chrono::steady_clock::time_point nowT) {
+    hudDismissed_ = true;
+    hudDismissTime_ = nowT;
+    lastControllerActivity_ = nowT - std::chrono::seconds(10);
+    renderer_.setControlBar(false);
+    for (int h = 0; h < 2; ++h) {
+        if (in.controllers[h].active) {
+            for (int k = 0; k < 3; ++k) activityAnchorPos_[h][k] = in.controllers[h].position[k];
+            for (int k = 0; k < 4; ++k) activityAnchorOrient_[h][k] = in.controllers[h].orientation[k];
+        }
+    }
+    PIXELVR_LOG_INFO("Player HUD dismissed");
 }
 
 void App::openSmbModal(bool isNew, const std::string& smbPath) {
@@ -1018,6 +1034,8 @@ int App::run() {
             // Controller activity: moving a controller past a small threshold (or
             // any button/stick input) keeps the laser, models and controls shown;
             // after a few seconds of stillness they fade away.
+            const auto timeSinceDismiss = nowT - hudDismissTime_;
+            const bool inDismissCooldown = hudDismissed_ && (timeSinceDismiss < std::chrono::milliseconds(500));
             bool activity = false;
             for (int h = 0; h < 2; ++h) {
                 const auto& c = in.controllers[h];
@@ -1042,8 +1060,8 @@ int App::run() {
                 const float rotDiff = std::fabs(od);
 
                 if (hudDismissed_) {
-                    // Requires intentional hand movement to re-engage HUD after manual dismissal
-                    if (moveDist > 0.10f || rotDiff < 0.970f) {
+                    // Requires intentional hand movement after dismissal cooldown to re-engage HUD
+                    if (!inDismissCooldown && (moveDist > 0.12f || rotDiff < 0.950f)) {
                         hudDismissed_ = false;
                         activity = true;
                         for (int k = 0; k < 3; ++k) activityAnchorPos_[h][k] = c.position[k];
@@ -1056,12 +1074,17 @@ int App::run() {
                     for (int k = 0; k < 4; ++k) activityAnchorOrient_[h][k] = c.orientation[k];
                 }
             }
-            if (in.togglePlay || in.browserToggle || in.select || in.selectHeld ||
-                in.recenter || std::fabs(in.thumbstickX) > 0.15f ||
-                std::fabs(in.thumbstickY) > 0.15f ||
-                std::fabs(in.thumbstickRX) > 0.15f) {
+            const bool stickMoved = (std::fabs(in.thumbstickX) > 0.25f ||
+                                     std::fabs(in.thumbstickY) > 0.25f ||
+                                     std::fabs(in.thumbstickRX) > 0.25f ||
+                                     std::fabs(in.thumbstickRY) > 0.25f);
+            if (in.togglePlay || in.browserToggle || in.recenter || stickMoved) {
                 activity = true;
-                hudDismissed_ = false;
+                if (!inDismissCooldown) {
+                    hudDismissed_ = false;
+                }
+            } else if (!hudDismissed_ && (in.select || in.selectHeld)) {
+                activity = true;
             }
             if (activity) {
                 lastControllerActivity_ = nowT;
@@ -1085,9 +1108,7 @@ int App::run() {
                     browser_.setOpen(false);
                 } else if (mediaOpen_ && renderer_.controlBarVisible()) {
                     // HUD is visible during playback: B/Y dismisses the HUD!
-                    hudDismissed_ = true;
-                    lastControllerActivity_ = nowT - std::chrono::seconds(10);
-                    renderer_.setControlBar(false);
+                    dismissHud(in, nowT);
                 } else {
                     browser_.open();
                 }
@@ -1523,7 +1544,7 @@ int App::run() {
                 if (kbActive && !renderer_.laserOn(0) && !renderer_.laserOn(1)) {
                     renderer_.setLaserOn(1, true);
                 }
-                const bool showLaser = (uiPanelActive || controllersEngaged || kbActive);
+                const bool showLaser = (uiPanelActive || (controllersEngaged && !hudDismissed_) || kbActive);
                 // Build each controller's render state: corrected model pose,
                 // low-pass smoothed (the raw hand pose jitters), while the aim
                 // pose stays raw so the laser remains responsive.
@@ -2067,8 +2088,8 @@ int App::run() {
 
             // Cinema Transport Dock is only active when the Unified Spatial Hub is closed.
             const bool barOk = !browserOpen && !settingsOpen && !downloadsWindow_ &&
-                               pendingDl_.empty();
-            if (barOk) {
+                               pendingDl_.empty() && !actionMenu_.visible && !smbModal_.active;
+            if (barOk && renderer_.controlBarVisible()) {
                 // Point-and-click the media control bar with the trigger.
                 const int btn = renderer_.pointerButton();
                 // The trigger clicks the bar; A does too (A is the reliable
@@ -2160,18 +2181,14 @@ int App::run() {
                             renderer_.setSphereZoom(1.0f);
                         }
                     } else if (cb == VulkanRenderer::CtrlButton::HideHud) {
-                        hudDismissed_ = true;
-                        lastControllerActivity_ = nowT - std::chrono::seconds(10);
-                        renderer_.setControlBar(false);
+                        dismissHud(in, nowT);
                     }
 #endif
                     interacted = true;
                 }
                 // Click outside the control dock in empty space immediately hides the HUD
                 if (in.select && btn < 0 && !renderer_.pointerOnTimeline() && !renderer_.pointerOnTimeToggle()) {
-                    hudDismissed_ = true;
-                    lastControllerActivity_ = nowT - std::chrono::seconds(10);
-                    renderer_.setControlBar(false);
+                    dismissHud(in, nowT);
                     interacted = true;
                 }
                 if (in.select && renderer_.pointerOnTimeToggle()) {

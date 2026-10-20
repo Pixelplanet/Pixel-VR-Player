@@ -53,6 +53,19 @@
     - Updated `tools/package-release.sh` to package updater scripts in the release tarball.
     - Updated `README.md` with comprehensive update instructions across all platforms.
 
+- [x] **6. Fix UI Dismissal Flicker and Recessed Island Alignment**
+  - **Symptom:** Clicking outside the controls or clicking the Hide UI button caused the UI to briefly flicker for 1 frame and immediately reappear. The Hide UI button was also visually misaligned (half outside the dark island).
+  - **Root Cause:**
+    - `in.selectHeld` and trigger activity handling in `App::tick()` continuously reset `hudDismissed_ = false` and set `activity = true` on subsequent frames of the trigger pull, fighting the dismissal call.
+    - Controller activity anchors were not reset on dismissal, and there was no dismissal grace cooldown, causing slight hand tremor during trigger release to immediately re-trigger movement thresholds.
+    - The center transport recessed island background in `VulkanRenderer` was rendered at `cx = -0.05f, hw = 0.30f`, clipping through the center of the Hide UI button at `+0.26f`.
+  - **Resolution:**
+    - Created `App::dismissHud()` which sets `hudDismissed_ = true`, records `hudDismissTime_`, zeroes out activity, hides the control bar and laser ray, and snaps controller activity anchors to their exact current positions.
+    - Added a 500ms dismissal cooldown preventing accidental re-engagement from trigger release tremors.
+    - Blocked `in.select` and `in.selectHeld` from clearing `hudDismissed_` while the HUD is dismissed.
+    - Re-centered the transport recessed island background to `cx = 0.0f, hw = 0.34f`, creating perfect 34mm symmetrical padding for all 5 buttons (`Stop`, `SeekBack`, `PlayPause`, `SeekFwd`, `HideHud`).
+    - Added hover tooltip pills for `[Hide UI]` and `[Stop]`.
+
 
 ---
 

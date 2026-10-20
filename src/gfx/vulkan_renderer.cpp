@@ -2252,8 +2252,10 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         drawUiElement(vpPanel, 0.0f, kBarY + 0.125f, kDockHalfW - 0.045f, 0.052f,
                       UiShape::RoundedBox, grooveBg, 0.35f, 0.015f, grooveBorder);
 
-        // Center transport recessed island
-        drawUiElement(vpPanel, -0.05f, kBarY - 0.045f, 0.30f, 0.098f,
+        // Center transport recessed island: centered at 0.0f, symmetrically
+        // enclosing [Stop] (-0.26), [Seek -10] (-0.13), (Play/Pause) (0.00),
+        // [Seek +10] (+0.13), and [Hide UI] (+0.26).
+        drawUiElement(vpPanel, 0.0f, kBarY - 0.045f, 0.34f, 0.098f,
                       UiShape::RoundedBox, grooveBg, 0.50f, 0.015f, grooveBorder);
 
         const float btnBgHover[4] = {
@@ -2364,6 +2366,19 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                           UiShape::RoundedBox, tipBg, 0.35f, 0.03f, themeAccentCol);
         }
 
+        // Button hover tooltip pills
+        if (pointerButton_ == static_cast<int>(CtrlButton::HideHud)) {
+            const CtrlButtonRect rH = get_ctrl_button_rect(static_cast<int>(CtrlButton::HideHud));
+            const float tipBg[4] = {0.04f, 0.07f, 0.12f, 0.96f};
+            drawUiElement(vpPanel, rH.cx, rH.cy + 0.065f, 0.068f, 0.024f,
+                          UiShape::RoundedBox, tipBg, 0.35f, 0.025f, themeAccentCol);
+        } else if (pointerButton_ == static_cast<int>(CtrlButton::Stop)) {
+            const CtrlButtonRect rSt = get_ctrl_button_rect(static_cast<int>(CtrlButton::Stop));
+            const float tipBg[4] = {0.04f, 0.07f, 0.12f, 0.96f};
+            drawUiElement(vpPanel, rSt.cx, rSt.cy + 0.065f, 0.052f, 0.024f,
+                          UiShape::RoundedBox, tipBg, 0.35f, 0.025f, themeAccentCol);
+        }
+
         if (textReady_) {
             vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline_);
             vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -2407,6 +2422,15 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
 
             const CtrlButtonRect rS = get_ctrl_button_rect(static_cast<int>(CtrlButton::ScreenToggle));
             drawFitCentered(rS.cx, rS.cy, rS.hw * 1.88f, pillSc, themeTextCol, hudScreen_);
+
+            // Tooltip text for button hover
+            if (pointerButton_ == static_cast<int>(CtrlButton::HideHud)) {
+                const CtrlButtonRect rH = get_ctrl_button_rect(static_cast<int>(CtrlButton::HideHud));
+                drawFitCentered(rH.cx, rH.cy + 0.065f, 0.12f, pillSc * 0.90f, themeTextCol, "Hide UI");
+            } else if (pointerButton_ == static_cast<int>(CtrlButton::Stop)) {
+                const CtrlButtonRect rSt = get_ctrl_button_rect(static_cast<int>(CtrlButton::Stop));
+                drawFitCentered(rSt.cx, rSt.cy + 0.065f, 0.09f, pillSc * 0.90f, themeTextCol, "Stop");
+            }
         }
     }
 

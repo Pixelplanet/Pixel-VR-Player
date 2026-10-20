@@ -78,6 +78,8 @@ private:
     bool downloadsWindow_ = false;  // downloads list window toggled from the bar
     bool dlWasActive_ = false;      // edge detect: auto-open the window on start
     bool hudDismissed_ = false;     // manually dismissed player controls / HUD
+    std::chrono::steady_clock::time_point hudDismissTime_{}; // timestamp of manual dismissal
+    void dismissHud(const XrInputState& in, std::chrono::steady_clock::time_point nowT);
     // Low-pass smoothed model pose per hand (the raw hand pose jitters; the
     // system's own controller model is visibly smoothed).
     bool modelSmoothInit_[2] = {false, false};
