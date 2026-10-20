@@ -2,6 +2,7 @@
 #include "util/logging.hpp"
 #include <cstring>
 #include <cmath>
+#include <chrono>
 
 #if defined(__linux__) || defined(__APPLE__)
 #include <dlfcn.h>
@@ -22,6 +23,8 @@ typedef intptr_t (*Fn_VR_GetGenericInterface)(const char*, vr::EVRInitError*);
 Fn_VR_InitInternal g_VR_InitInternal = nullptr;
 Fn_VR_ShutdownInternal g_VR_ShutdownInternal = nullptr;
 Fn_VR_GetGenericInterface g_VR_GetGenericInterface = nullptr;
+
+static uint64_t sKeyboardNonce = 1000;
 
 } // namespace
 
@@ -138,6 +141,7 @@ void VrKeyboard::shutdown() {
     isOpen_ = false;
     doneSubmitted_ = false;
     kbConfigured_ = false;
+    currentNonce_ = 0;
 }
 
 bool VrKeyboard::configureKeyboardOverlay() {
@@ -148,7 +152,7 @@ bool VrKeyboard::configureKeyboardOverlay() {
     vr::HmdMatrix34_t mat{};
     for (int r = 0; r < 3; ++r) {
         for (int c = 0; c < 4; ++c) {
-            mat.m[r][c] = kbMat_[r][c];
+            mat.m[r][c] = kbMatStage_[r][c];
         }
     }
 
@@ -160,8 +164,9 @@ bool VrKeyboard::configureKeyboardOverlay() {
         ov->SetOverlayFlag(h, vr::VROverlayFlags_SendVRDiscreteScrollEvents, true);
         ov->ShowOverlay(h);
         foundAny = true;
-        PIXELVR_LOG_INFO("VrKeyboard: Configured keyboard overlay %llu ('%s') with interactive laser mouse and standing transform",
-                         static_cast<unsigned long long>(h), name ? name : "unknown");
+        PIXELVR_LOG_INFO("VrKeyboard: Configured keyboard overlay %llu ('%s') with interactive laser mouse at standing pos (%.2f, %.2f, %.2f)",
+                         static_cast<unsigned long long>(h), name ? name : "unknown",
+                         mat.m[0][3], mat.m[1][3], mat.m[2][3]);
     };
 
     // 1. Check known specific overlay keys
@@ -203,25 +208,28 @@ bool VrKeyboard::show(const std::string& description,
                       const std::string& existingText,
                       bool isPassword,
                       int maxChars,
-                      const float* headPos,
-                      const float* headForward) {
+                      const float* headPosLocal,
+                      const float* headForwardLocal,
+                      const float* headPosStage,
+                      const float* headForwardStage) {
     if (!available_ && !init()) {
         return false;
     }
-    auto* sys = reinterpret_cast<vr::IVRSystem*>(vrSystem_);
     auto* ov = reinterpret_cast<vr::IVROverlay*>(vrOverlay_);
     if (!ov) return false;
 
     if (isOpen_) {
         hide();
     }
-    // Explicitly hide any existing keyboard session in SteamVR to clear lingering text buffers
+    // Explicitly hide any existing keyboard session in SteamVR to clear lingering state
     ov->HideKeyboard();
 
+    currentNonce_ = ++sKeyboardNonce;
     description_ = description;
     existingText_ = existingText;
     currentText_ = existingText;
     isPassword_ = isPassword;
+    maxChars_ = maxChars;
     doneSubmitted_ = false;
     userTyped_ = false;
 
@@ -229,31 +237,18 @@ bool VrKeyboard::show(const std::string& description,
         ? vr::k_EGamepadTextInputModePassword
         : vr::k_EGamepadTextInputModeNormal;
 
-    // Calculate keyboard world matrix in TrackingUniverseStanding
-    float hx = 0.0f, hy = 1.6f, hz = 0.0f;
+    // -------------------------------------------------------------------------
+    // 1. Calculate Local transform (for OpenXR laser pointer collision in VulkanRenderer)
+    // -------------------------------------------------------------------------
+    float hx = 0.0f, hy = 0.0f, hz = 0.0f;
     float fx = 0.0f, fz = -1.0f;
-
-    if (headPos && headForward) {
-        hx = headPos[0];
-        hy = headPos[1];
-        hz = headPos[2];
-        fx = headForward[0];
-        fz = headForward[2];
-    } else if (sys) {
-        vr::TrackedDevicePose_t poses[vr::k_unMaxTrackedDeviceCount];
-        sys->GetDeviceToAbsoluteTrackingPose(vr::TrackingUniverseStanding, 0.0f, poses, vr::k_unMaxTrackedDeviceCount);
-        if (poses[vr::k_unTrackedDeviceIndex_Hmd].bPoseIsValid) {
-            const auto& hMat = poses[vr::k_unTrackedDeviceIndex_Hmd].mDeviceToAbsoluteTracking;
-            hx = hMat.m[0][3];
-            hy = hMat.m[1][3];
-            hz = hMat.m[2][3];
-            // OpenVR forward is -Z (col 2 of rotation matrix)
-            fx = -hMat.m[0][2];
-            fz = -hMat.m[2][2];
-        }
+    if (headPosLocal && headForwardLocal) {
+        hx = headPosLocal[0];
+        hy = headPosLocal[1];
+        hz = headPosLocal[2];
+        fx = headForwardLocal[0];
+        fz = headForwardLocal[2];
     }
-
-    // Flatten forward vector to horizontal plane
     float flen = std::sqrt(fx * fx + fz * fz);
     if (flen < 1e-3f) {
         fx = 0.0f;
@@ -262,71 +257,121 @@ bool VrKeyboard::show(const std::string& description,
         fx /= flen;
         fz /= flen;
     }
-    const float yaw = std::atan2(-fx, -fz);
+    const float yawLocal = std::atan2(-fx, -fz);
 
-    // Place keyboard 1.05m in front of eyes, 0.20m below eye level.
-    // The modal dialog box above ends at ~hy + 0.03m; this places the top edge of the
-    // keyboard (half-height ~0.20m) right at hy - 0.004m, exactly 3.4cm below the modal dialog.
-    const float dist = 1.05f;
-    const float kbX = hx + fx * dist;
-    const float kbY = hy - 0.20f;
-    const float kbZ = hz + fz * dist;
+    // Keyboard placed 1.15m in front of eyes, 0.22m below eye level.
+    // The floating modal dialog box in VulkanRenderer ends at ~hy + 0.03m; this places the top
+    // of the keyboard (half-height 0.20m) at ~hy - 0.02m, creating an elegant ~5cm vertical gap
+    // directly beneath the modal dialog.
+    const float dist = 1.15f;
+    const float kbLocalX = hx + fx * dist;
+    const float kbLocalY = hy - 0.22f;
+    const float kbLocalZ = hz + fz * dist;
 
-    // Tilt upward toward eyes by ~11.5 degrees (-0.20 rad).
-    // Center is 20cm below eyes at 1.05m distance: atan2(0.20, 1.05) ~= 0.189 rad.
-    // Tilt of -0.20 rad angles the keyboard face normal directly at the user's eyes!
+    // Tilt upward toward eyes by -0.20 rad (~11.5 degrees)
     const float tilt = -0.20f;
-    vr::HmdMatrix34_t kbMat{};
-    kbMat.m[0][0] = std::cos(yaw);
-    kbMat.m[0][1] = std::sin(yaw) * std::sin(tilt);
-    kbMat.m[0][2] = std::sin(yaw) * std::cos(tilt);
-    kbMat.m[0][3] = kbX;
+    vr::HmdMatrix34_t kbMatLocal{};
+    kbMatLocal.m[0][0] = std::cos(yawLocal);
+    kbMatLocal.m[0][1] = std::sin(yawLocal) * std::sin(tilt);
+    kbMatLocal.m[0][2] = std::sin(yawLocal) * std::cos(tilt);
+    kbMatLocal.m[0][3] = kbLocalX;
 
-    kbMat.m[1][0] = 0.0f;
-    kbMat.m[1][1] = std::cos(tilt);
-    kbMat.m[1][2] = -std::sin(tilt);
-    kbMat.m[1][3] = kbY;
+    kbMatLocal.m[1][0] = 0.0f;
+    kbMatLocal.m[1][1] = std::cos(tilt);
+    kbMatLocal.m[1][2] = -std::sin(tilt);
+    kbMatLocal.m[1][3] = kbLocalY;
 
-    kbMat.m[2][0] = -std::sin(yaw);
-    kbMat.m[2][1] = std::cos(yaw) * std::sin(tilt);
-    kbMat.m[2][2] = std::cos(yaw) * std::cos(tilt);
-    kbMat.m[2][3] = kbZ;
+    kbMatLocal.m[2][0] = -std::sin(yawLocal);
+    kbMatLocal.m[2][1] = std::cos(yawLocal) * std::sin(tilt);
+    kbMatLocal.m[2][2] = std::cos(yawLocal) * std::cos(tilt);
+    kbMatLocal.m[2][3] = kbLocalZ;
 
     for (int r = 0; r < 3; ++r) {
         for (int c = 0; c < 4; ++c) {
-            kbMat_[r][c] = kbMat.m[r][c];
+            kbMatLocal_[r][c] = kbMatLocal.m[r][c];
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // 2. Calculate Stage transform (for SteamVR TrackingUniverseStanding overlay rendering)
+    // -------------------------------------------------------------------------
+    float shx = hx, shy = hy + 1.65f, shz = hz;
+    float sfx = fx, sfz = fz;
+    if (headPosStage && headForwardStage) {
+        shx = headPosStage[0];
+        shy = headPosStage[1];
+        shz = headPosStage[2];
+        sfx = headForwardStage[0];
+        sfz = headForwardStage[2];
+    }
+    float sflen = std::sqrt(sfx * sfx + sfz * sfz);
+    if (sflen < 1e-3f) {
+        sfx = 0.0f;
+        sfz = -1.0f;
+    } else {
+        sfx /= sflen;
+        sfz /= sflen;
+    }
+    const float yawStage = std::atan2(-sfx, -sfz);
+
+    const float kbStageX = shx + sfx * dist;
+    const float kbStageY = shy - 0.22f; // In standing space (floor=0), shy ~1.65m, so kbStageY ~1.43m above floor!
+    const float kbStageZ = shz + sfz * dist;
+
+    vr::HmdMatrix34_t kbMatStage{};
+    kbMatStage.m[0][0] = std::cos(yawStage);
+    kbMatStage.m[0][1] = std::sin(yawStage) * std::sin(tilt);
+    kbMatStage.m[0][2] = std::sin(yawStage) * std::cos(tilt);
+    kbMatStage.m[0][3] = kbStageX;
+
+    kbMatStage.m[1][0] = 0.0f;
+    kbMatStage.m[1][1] = std::cos(tilt);
+    kbMatStage.m[1][2] = -std::sin(tilt);
+    kbMatStage.m[1][3] = kbStageY;
+
+    kbMatStage.m[2][0] = -std::sin(yawStage);
+    kbMatStage.m[2][1] = std::cos(yawStage) * std::sin(tilt);
+    kbMatStage.m[2][2] = std::cos(yawStage) * std::cos(tilt);
+    kbMatStage.m[2][3] = kbStageZ;
+
+    for (int r = 0; r < 3; ++r) {
+        for (int c = 0; c < 4; ++c) {
+            kbMatStage_[r][c] = kbMatStage.m[r][c];
         }
     }
     kbConfigured_ = false;
 
     // 1. Set keyboard transform in standing universe BEFORE ShowKeyboard
-    ov->SetKeyboardTransformAbsolute(vr::TrackingUniverseStanding, &kbMat);
+    ov->SetKeyboardTransformAbsolute(vr::TrackingUniverseStanding, &kbMatStage);
 
-    // 2. Invoke virtual keyboard
+    // 2. Invoke virtual keyboard with Modal | Minimal flags
+    // Minimal mode tells SteamVR GamepadUI not to show its internal text box
+    // and not to cache/accumulate dirty text drafts across sessions.
     vr::EVROverlayError err = ov->ShowKeyboard(
         mode,
         vr::k_EGamepadTextInputLineModeSingleLine,
-        vr::KeyboardFlag_Modal,
+        vr::KeyboardFlag_Modal | vr::KeyboardFlag_Minimal,
         description.c_str(),
         static_cast<uint32_t>(maxChars),
         existingText.c_str(),
-        0);
+        currentNonce_);
 
     if (err != vr::VROverlayError_None) {
         PIXELVR_LOG_WARN("VrKeyboard: ShowKeyboard failed with error %d", static_cast<int>(err));
         return false;
     }
 
-    // 3. Set keyboard transform AFTER ShowKeyboard as well
-    ov->SetKeyboardTransformAbsolute(vr::TrackingUniverseStanding, &kbMat);
+    // 3. Reinforce keyboard transform AFTER ShowKeyboard
+    ov->SetKeyboardTransformAbsolute(vr::TrackingUniverseStanding, &kbMatStage);
 
     // 4. Configure overlay laser and transform immediately if already present
     configureKeyboardOverlay();
 
     isOpen_ = true;
     pollFramesSinceOpen_ = 0;
-    PIXELVR_LOG_INFO("VrKeyboard: Shown virtual keyboard for '%s' at pos (%.2f, %.2f, %.2f) yaw=%.2f",
-                     description.c_str(), kbX, kbY, kbZ, yaw);
+    PIXELVR_LOG_INFO("VrKeyboard: Shown virtual keyboard for '%s' (nonce %llu, existing='%s') at stage pos (%.2f, %.2f, %.2f) local pos (%.2f, %.2f, %.2f)",
+                     description.c_str(), static_cast<unsigned long long>(currentNonce_),
+                     existingText.c_str(), kbStageX, kbStageY, kbStageZ, kbLocalX, kbLocalY, kbLocalZ);
     return true;
 }
 
@@ -340,6 +385,7 @@ void VrKeyboard::hide() {
     kbConfigured_ = false;
     doneSubmitted_ = false;
     userTyped_ = false;
+    currentNonce_ = 0;
     currentText_.clear();
     existingText_.clear();
     PIXELVR_LOG_INFO("VrKeyboard: Hidden virtual keyboard");
@@ -355,47 +401,63 @@ void VrKeyboard::poll(std::function<void(const std::string&)> onDone,
     vr::VREvent_t event{};
     while (sys->PollNextEvent(&event, sizeof(event))) {
         if (event.eventType == vr::VREvent_KeyboardCharInput) {
-            userTyped_ = true;
-            char keyBuf[1024] = {0};
-            uint32_t len = ov->GetKeyboardText(keyBuf, sizeof(keyBuf));
-            if (len > 0) {
-                currentText_ = std::string(keyBuf, len < sizeof(keyBuf) ? len : std::strlen(keyBuf));
-            } else {
-                // Fallback: check event.data.keyboard.cNewInput
-                const char* inStr = event.data.keyboard.cNewInput;
-                if (inStr && inStr[0] != 0) {
-                    const unsigned char firstByte = static_cast<unsigned char>(inStr[0]);
-                    if (firstByte == '\b' || firstByte == 0x7F || firstByte == 8) {
-                        while (!currentText_.empty() && (static_cast<unsigned char>(currentText_.back()) & 0xC0) == 0x80) {
-                            currentText_.pop_back();
-                        }
-                        if (!currentText_.empty()) {
-                            currentText_.pop_back();
-                        }
-                    } else if (firstByte >= 32) {
+            // Discard any events from old or stale keyboard sessions
+            if (event.data.keyboard.uUserValue != 0 && event.data.keyboard.uUserValue != currentNonce_) {
+                PIXELVR_LOG_INFO("VrKeyboard: Ignored stale CharInput (nonce %llu != current %llu)",
+                                 static_cast<unsigned long long>(event.data.keyboard.uUserValue),
+                                 static_cast<unsigned long long>(currentNonce_));
+                continue;
+            }
+
+            const char* inStr = event.data.keyboard.cNewInput;
+            if (inStr && inStr[0] != 0) {
+                userTyped_ = true;
+                const unsigned char firstByte = static_cast<unsigned char>(inStr[0]);
+                if (firstByte == '' || firstByte == 0x7F || firstByte == 8) {
+                    // Backspace: pop last UTF-8 character
+                    while (!currentText_.empty() && (static_cast<unsigned char>(currentText_.back()) & 0xC0) == 0x80) {
+                        currentText_.pop_back();
+                    }
+                    if (!currentText_.empty()) {
+                        currentText_.pop_back();
+                    }
+                } else if (firstByte == '\n' || firstByte == '\r') {
+                    isOpen_ = false;
+                    kbConfigured_ = false;
+                    doneSubmitted_ = true;
+                    std::string text = currentText_;
+                    ov->HideKeyboard();
+                    currentText_.clear();
+                    existingText_.clear();
+                    userTyped_ = false;
+                    currentNonce_ = 0;
+                    PIXELVR_LOG_INFO("VrKeyboard: User submitted text via Return key: '%s'", text.c_str());
+                    if (onDone) {
+                        onDone(text);
+                    }
+                    return;
+                } else if (firstByte >= 32) {
+                    if (currentText_.length() + std::strlen(inStr) <= static_cast<size_t>(maxChars_)) {
                         currentText_ += inStr;
                     }
                 }
+                PIXELVR_LOG_INFO("VrKeyboard: CharInput live text: '%s'", currentText_.c_str());
             }
-            PIXELVR_LOG_INFO("VrKeyboard: CharInput live text: '%s'", currentText_.c_str());
         } else if (event.eventType == vr::VREvent_KeyboardDone) {
             isOpen_ = false;
             kbConfigured_ = false;
             doneSubmitted_ = true;
-            char buf[1024] = {0};
-            uint32_t len = ov->GetKeyboardText(buf, sizeof(buf));
             std::string text = currentText_;
-            if (len > 0) {
-                text = std::string(buf, len < sizeof(buf) ? len : std::strlen(buf));
-            }
             ov->HideKeyboard();
             currentText_.clear();
             existingText_.clear();
             userTyped_ = false;
+            currentNonce_ = 0;
             PIXELVR_LOG_INFO("VrKeyboard: User submitted text via KeyboardDone: '%s'", text.c_str());
             if (onDone) {
                 onDone(text);
             }
+            return;
         } else if (event.eventType == vr::VREvent_KeyboardClosed ||
                    event.eventType == vr::VREvent_KeyboardClosed_Global) {
             isOpen_ = false;
@@ -403,35 +465,25 @@ void VrKeyboard::poll(std::function<void(const std::string&)> onDone,
             ov->HideKeyboard();
             PIXELVR_LOG_INFO("VrKeyboard: Keyboard closed (doneSubmitted=%d)", doneSubmitted_ ? 1 : 0);
             if (!doneSubmitted_) {
-                // Closed without KeyboardDone: treat as cancel and forget any input
                 currentText_.clear();
                 existingText_.clear();
                 userTyped_ = false;
+                currentNonce_ = 0;
                 PIXELVR_LOG_INFO("VrKeyboard: Discarded input on KeyboardClosed");
                 if (onCancel) {
                     onCancel();
                 }
             }
+            return;
         }
     }
 
-    // Keep currentText_ synchronized with the live SteamVR keyboard buffer every frame
     if (isOpen_) {
         pollFramesSinceOpen_++;
         // Maintain and reinforce keyboard overlay configuration across the first 90 frames (~1 sec)
         // until successfully configured
         if (!kbConfigured_ && pollFramesSinceOpen_ < 90) {
             configureKeyboardOverlay();
-        }
-
-        // Only synchronize with SteamVR live buffer if the user has actively typed in this session.
-        // This avoids contaminating a fresh/empty input field with stale residual buffer from a previous field.
-        if (userTyped_) {
-            char liveBuf[1024] = {0};
-            uint32_t liveLen = ov->GetKeyboardText(liveBuf, sizeof(liveBuf));
-            if (liveLen > 0) {
-                currentText_ = std::string(liveBuf, liveLen < sizeof(liveBuf) ? liveLen : std::strlen(liveBuf));
-            }
         }
     }
 }

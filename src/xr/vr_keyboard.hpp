@@ -23,8 +23,10 @@ public:
               const std::string& existingText,
               bool isPassword = false,
               int maxChars = 256,
-              const float* headPos = nullptr,
-              const float* headForward = nullptr);
+              const float* headPosLocal = nullptr,
+              const float* headForwardLocal = nullptr,
+              const float* headPosStage = nullptr,
+              const float* headForwardStage = nullptr);
 
     // Closes the virtual keyboard if open.
     void hide();
@@ -37,7 +39,7 @@ public:
     std::string currentText() const;
     const std::string& description() const { return description_; }
     bool isPassword() const { return isPassword_; }
-    const float* transform() const { return &kbMat_[0][0]; }
+    const float* transform() const { return &kbMatLocal_[0][0]; }
 
 private:
     VrKeyboard() = default;
@@ -51,7 +53,10 @@ private:
     bool userTyped_ = false;
     bool kbConfigured_ = false;
     int pollFramesSinceOpen_ = 0;
-    float kbMat_[3][4]{};
+    float kbMatLocal_[3][4]{};
+    float kbMatStage_[3][4]{};
+    uint64_t currentNonce_ = 0;
+    int maxChars_ = 256;
     std::string description_;
     std::string existingText_;
     std::string currentText_;

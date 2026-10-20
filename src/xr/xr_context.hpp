@@ -34,6 +34,10 @@ struct XrInputState {
     bool headValid = false;
     float headPos[3] = {0.0f, 0.0f, 0.0f};
     float headForward[3] = {0.0f, 0.0f, -1.0f};
+    bool stageValid = false;
+    XrPosef appToStagePose{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 1.65f, 0.0f}};
+    float headPosStage[3] = {0.0f, 1.65f, 0.0f};
+    float headForwardStage[3] = {0.0f, 0.0f, -1.0f};
 
     // Tracked controller aim poses (index 0 = left, 1 = right). The pointer ray
     // is the -Z axis of `orientation` from `position`, in the app reference space.
@@ -122,7 +126,10 @@ public:
     XrInstance instance() const { return instance_; }
     XrSession session() const { return session_; }
     XrSpace appSpace() const { return appSpace_; }
+    XrSpace stageSpace() const { return stageSpace_; }
     XrTime displayTime() const { return lastDisplayTime_; }
+    void transformToStage(const float localPos[3], const float localFwd[3],
+                          float stagePos[3], float stageFwd[3]) const;
     XrSystemId systemId() const { return systemId_; }
     bool renderModelEnabled() const { return renderModelEnabled_; }
     uint32_t viewCount() const { return static_cast<uint32_t>(configViews_.size()); }
@@ -145,6 +152,7 @@ private:
     XrSystemId systemId_ = XR_NULL_SYSTEM_ID;
     XrSession session_ = XR_NULL_HANDLE;
     XrSpace appSpace_ = XR_NULL_HANDLE;
+    XrSpace stageSpace_ = XR_NULL_HANDLE;
     XrTime lastDisplayTime_ = 0;
 
     XrSessionState sessionState_ = XR_SESSION_STATE_UNKNOWN;

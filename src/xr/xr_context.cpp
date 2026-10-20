@@ -35,6 +35,10 @@ XrContext::~XrContext() {
     if (appSpace_ != XR_NULL_HANDLE) {
         xrDestroySpace(appSpace_);
     }
+    if (stageSpace_ != XR_NULL_HANDLE) {
+        xrDestroySpace(stageSpace_);
+        stageSpace_ = XR_NULL_HANDLE;
+    }
     if (actionSet_ != XR_NULL_HANDLE) {
         xrDestroyActionSet(actionSet_);
     }
@@ -217,6 +221,18 @@ bool XrContext::createReferenceSpace() {
     createInfo.poseInReferenceSpace.orientation.w = 1.0f;
     PIXELVR_XR_CHECK(instance_,
                      xrCreateReferenceSpace(session_, &createInfo, &appSpace_));
+
+    // Create STAGE reference space (floor level tracking bounds, matching SteamVR TrackingUniverseStanding)
+    XrReferenceSpaceCreateInfo stageInfo{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+    stageInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_STAGE;
+    stageInfo.poseInReferenceSpace.orientation.w = 1.0f;
+    XrResult stageRes = xrCreateReferenceSpace(session_, &stageInfo, &stageSpace_);
+    if (XR_SUCCEEDED(stageRes)) {
+        PIXELVR_LOG_INFO("XrContext: Successfully created STAGE reference space");
+    } else {
+        PIXELVR_LOG_WARN("XrContext: STAGE reference space not available (%d), using calibrated standing fallback", static_cast<int>(stageRes));
+        stageSpace_ = XR_NULL_HANDLE;
+    }
     return true;
 }
 
@@ -922,6 +938,31 @@ bool XrContext::renderFrame(const RenderViewFn& renderView) {
         input_.headForward[2] = -(1.0f - 2.0f * (q.x * q.x + q.y * q.y));
     }
 
+    input_.stageValid = false;
+    if (stageSpace_ != XR_NULL_HANDLE && input_.headValid) {
+        XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
+        if (XR_SUCCEEDED(xrLocateSpace(appSpace_, stageSpace_, frameState.predictedDisplayTime, &loc))) {
+            constexpr XrSpaceLocationFlags need =
+                XR_SPACE_LOCATION_ORIENTATION_VALID_BIT |
+                XR_SPACE_LOCATION_POSITION_VALID_BIT;
+            if ((loc.locationFlags & need) == need) {
+                input_.stageValid = true;
+                input_.appToStagePose = loc.pose;
+                transformToStage(input_.headPos, input_.headForward,
+                                 input_.headPosStage, input_.headForwardStage);
+            }
+        }
+    }
+    if (!input_.stageValid) {
+        // Fallback: Standing stage eye level is ~1.65m above the physical floor
+        input_.headPosStage[0] = input_.headPos[0];
+        input_.headPosStage[1] = input_.headPos[1] + 1.65f;
+        input_.headPosStage[2] = input_.headPos[2];
+        input_.headForwardStage[0] = input_.headForward[0];
+        input_.headForwardStage[1] = input_.headForward[1];
+        input_.headForwardStage[2] = input_.headForward[2];
+    }
+
     // Locate each controller's aim pose (for the pointer rays and models).
     for (int h = 0; h < 2; ++h) {
         input_.controllers[h].active = false;
@@ -1026,6 +1067,33 @@ bool XrContext::renderFrame(const RenderViewFn& renderView) {
 
     PIXELVR_XR_CHECK(instance_, xrEndFrame(session_, &endInfo));
     return true;
+}
+
+void XrContext::transformToStage(const float localPos[3], const float localFwd[3],
+                                 float stagePos[3], float stageFwd[3]) const {
+    const auto& p = input_.appToStagePose.position;
+    const auto& q = input_.appToStagePose.orientation;
+
+    if (localPos && stagePos) {
+        const float vx = localPos[0], vy = localPos[1], vz = localPos[2];
+        const float tw = -q.x * vx - q.y * vy - q.z * vz;
+        const float tx =  q.w * vx + q.y * vz - q.z * vy;
+        const float ty =  q.w * vy + q.z * vx - q.x * vz;
+        const float tz =  q.w * vz + q.x * vy - q.y * vx;
+        stagePos[0] = p.x + (tx * q.w + tw * (-q.x) + ty * (-q.z) - tz * (-q.y));
+        stagePos[1] = p.y + (ty * q.w + tw * (-q.y) + tz * (-q.x) - tx * (-q.z));
+        stagePos[2] = p.z + (tz * q.w + tw * (-q.z) + tx * (-q.y) - ty * (-q.x));
+    }
+    if (localFwd && stageFwd) {
+        const float fx = localFwd[0], fy = localFwd[1], fz = localFwd[2];
+        const float ftw = -q.x * fx - q.y * fy - q.z * fz;
+        const float ftx =  q.w * fx + q.y * fz - q.z * fy;
+        const float fty =  q.w * fy + q.z * fx - q.x * fz;
+        const float ftz =  q.w * fz + q.x * fy - q.y * fx;
+        stageFwd[0] = ftx * q.w + ftw * (-q.x) + fty * (-q.z) - ftz * (-q.y);
+        stageFwd[1] = fty * q.w + ftw * (-q.y) + ftz * (-q.x) - ftx * (-q.z);
+        stageFwd[2] = ftz * q.w + ftw * (-q.z) + ftx * (-q.y) - fty * (-q.x);
+    }
 }
 
 } // namespace pixelvr

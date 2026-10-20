@@ -1920,27 +1920,30 @@ int App::run() {
                                 xr_.triggerHaptic(0, 0.025f, 0.0f, 0.5f);
                                 xr_.triggerHaptic(1, 0.025f, 0.0f, 0.5f);
 
+                                auto openKeyboardForField = [&](SmbModalState::Field field, const std::string& desc, const std::string& currentVal, bool isPass) {
+                                    smbModal_.editingField = field;
+                                    float stagePos[3]{0.0f, 1.65f, 0.0f};
+                                    float stageFwd[3]{0.0f, 0.0f, -1.0f};
+                                    const float* fwd = renderer_.screenForward();
+                                    xr_.transformToStage(in.headPos, fwd, stagePos, stageFwd);
+                                    VrKeyboard::instance().show(desc, currentVal, isPass, 256, in.headPos, fwd, stagePos, stageFwd);
+                                };
+
                                 if (chosen == 0) {
-                                    smbModal_.editingField = SmbModalState::Field::Host;
-                                    VrKeyboard::instance().show("SMB Server IP / Hostname", smbModal_.host, false, 256, in.headPos, in.headForward);
+                                    openKeyboardForField(SmbModalState::Field::Host, "SMB Server IP / Hostname", smbModal_.host, false);
                                 } else if (chosen == 1) {
-                                    smbModal_.editingField = SmbModalState::Field::Share;
-                                    VrKeyboard::instance().show("SMB Share Name (empty for all)", smbModal_.share, false, 256, in.headPos, in.headForward);
+                                    openKeyboardForField(SmbModalState::Field::Share, "SMB Share Name (empty for all)", smbModal_.share, false);
                                 } else if (chosen == 2) {
                                     smbModal_.anon = !smbModal_.anon;
                                     updateSmbModalMenu();
                                 } else if (chosen == 3) {
-                                    smbModal_.editingField = SmbModalState::Field::User;
-                                    VrKeyboard::instance().show("SMB Username", smbModal_.user, false, 256, in.headPos, in.headForward);
+                                    openKeyboardForField(SmbModalState::Field::User, "SMB Username", smbModal_.user, false);
                                 } else if (chosen == 4) {
-                                    smbModal_.editingField = SmbModalState::Field::Pass;
-                                    VrKeyboard::instance().show("SMB Password", smbModal_.pass, true, 256, in.headPos, in.headForward);
+                                    openKeyboardForField(SmbModalState::Field::Pass, "SMB Password", smbModal_.pass, true);
                                 } else if (chosen == 5) {
-                                    smbModal_.editingField = SmbModalState::Field::Workgroup;
-                                    VrKeyboard::instance().show("SMB Workgroup / Domain", smbModal_.workgroup, false, 256, in.headPos, in.headForward);
+                                    openKeyboardForField(SmbModalState::Field::Workgroup, "SMB Workgroup / Domain", smbModal_.workgroup, false);
                                 } else if (chosen == 6) {
-                                    smbModal_.editingField = SmbModalState::Field::Label;
-                                    VrKeyboard::instance().show("SMB Nickname", smbModal_.label, false, 256, in.headPos, in.headForward);
+                                    openKeyboardForField(SmbModalState::Field::Label, "SMB Nickname", smbModal_.label, false);
                                 } else if (chosen == 7) {
                                     // Save SMB Share
                                     saveSmbModal();

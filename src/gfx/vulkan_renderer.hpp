@@ -96,6 +96,8 @@ public:
     // Repositions the flat screen in front of the given head pose (headForward is
     // a world-space direction); resets the viewing distance to the default.
     void recenterScreen(const float headPos[3], const float headForward[3]);
+    const float* screenPivot() const { return screenPivot_; }
+    const float* screenForward() const { return screenForward_; }
     // Moves the flat screen farther (positive) or nearer (negative), clamped.
     void adjustScreenDistance(float delta);
     // Parametric curvature for cinema screen: 0.0 = flat plane, 1.0 = full cylinder wrap.
