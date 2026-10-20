@@ -1312,16 +1312,7 @@ void VulkanRenderer::updatePointer() {
 
         // 0. Virtual Keyboard takes top focus priority
         if (kbOpen) {
-            // First check if pointing at the text preview box on the panel
-            if (hx >= -kPanelW && hx <= kPanelW && hyy >= -kPanelTop && hyy <= kPanelTop) {
-                pointerActive_ = true;
-                pointerHand_ = h;
-                pointerHit_[0] = world.x;
-                pointerHit_[1] = world.y;
-                pointerHit_[2] = world.z;
-                break;
-            }
-            // Next check if pointing directly at the virtual keyboard overlay keys
+            // First priority: Check if pointing directly at the virtual keyboard overlay keys
             if (keyboardModal_.hasTransform) {
                 const auto& m = keyboardModal_.transform;
                 // Column 0: Local X axis (right)
@@ -1341,9 +1332,9 @@ void VulkanRenderer::updatePointer() {
                         const Vec3 rel = hitP - kbCenter;
                         const float localX = dot(rel, kbRight);
                         const float localY = dot(rel, kbUp);
-                        // Overlay width is 1.05m (halfW = 0.525m). Height is ~0.45m (halfH = 0.225m).
-                        // Allow generous interactive margin (0.58m x 0.28m)
-                        if (std::fabs(localX) <= 0.58f && std::fabs(localY) <= 0.28f) {
+                        // Overlay width is 1.05m (halfW = 0.525m). Height is ~0.40m (halfH = 0.20m).
+                        // Allow generous interactive margin (0.58m x 0.26m)
+                        if (std::fabs(localX) <= 0.58f && std::fabs(localY) <= 0.26f) {
                             pointerActive_ = true;
                             pointerHand_ = h;
                             pointerHit_[0] = hitP.x;
@@ -1353,6 +1344,16 @@ void VulkanRenderer::updatePointer() {
                         }
                     }
                 }
+            }
+            // Second priority: Check if pointing at the floating modal text box directly above the keyboard
+            // Modal box center is cy = 0.16f, half-width 0.23f, half-height 0.13f
+            if (std::fabs(hx) <= 0.25f && std::fabs(hyy - 0.16f) <= 0.14f) {
+                pointerActive_ = true;
+                pointerHand_ = h;
+                pointerHit_[0] = world.x;
+                pointerHit_[1] = world.y;
+                pointerHit_[2] = world.z;
+                break;
             }
             continue;
         }

@@ -48,6 +48,7 @@ private:
     bool available_ = false;
     bool isOpen_ = false;
     bool doneSubmitted_ = false;
+    bool userTyped_ = false;
     bool kbConfigured_ = false;
     int pollFramesSinceOpen_ = 0;
     float kbMat_[3][4]{};

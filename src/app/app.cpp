@@ -313,6 +313,13 @@ void App::loadMedia(const std::string& path) {
     }
     hudDismissed_ = false;
     lastControllerActivity_ = std::chrono::steady_clock::now();
+    VrKeyboard::instance().hide();
+    actionMenu_.visible = false;
+    smbModal_.active = false;
+    smbModal_.editingField = SmbModalState::Field::None;
+    browser_.setOpen(false);
+    downloadsWindow_ = false;
+    pendingDl_.clear();
 
     // Refine the stereo layout from the frame aspect ratio when the filename did
     // not state it: once the projection is a VR type the aspect is unambiguous
@@ -665,6 +672,8 @@ void App::saveSmbModal() {
     SmbCredentialsManager::instance().addOrUpdateShare(s);
 
     smbModal_.active = false;
+    smbModal_.editingField = SmbModalState::Field::None;
+    VrKeyboard::instance().hide();
     actionMenu_.visible = false;
     browser_.openNetwork();
 #endif
@@ -676,6 +685,8 @@ void App::deleteSmbModal() {
         SmbCredentialsManager::instance().deleteShare(smbModal_.origHost, smbModal_.origShare);
     }
     smbModal_.active = false;
+    smbModal_.editingField = SmbModalState::Field::None;
+    VrKeyboard::instance().hide();
     actionMenu_.visible = false;
     browser_.openNetwork();
 #endif
@@ -1115,12 +1126,18 @@ int App::run() {
             if (in.browserToggle) {
                 if (actionMenu_.visible) {
                     actionMenu_.visible = false;
+                    smbModal_.active = false;
+                    smbModal_.editingField = SmbModalState::Field::None;
+                    VrKeyboard::instance().hide();
                 } else if (downloadsWindow_) {
                     downloadsWindow_ = false;
                 } else if (settings_.isOpen()) {
                     settings_.close();
                 } else if (browser_.isOpen()) {
                     browser_.setOpen(false);
+                    smbModal_.active = false;
+                    smbModal_.editingField = SmbModalState::Field::None;
+                    VrKeyboard::instance().hide();
                 } else if (mediaOpen_ && renderer_.controlBarVisible()) {
                     // HUD is visible during playback: B/Y dismisses the HUD!
                     dismissHud(in, nowT);
@@ -1544,11 +1561,11 @@ int App::run() {
                     }
                 }
                 const bool uiPanelActive = browserOpen || settingsOpen ||
-                                           downloadsWindow_ || !pendingDl_.empty() || actionMenu_.visible;
+                                           downloadsWindow_ || !pendingDl_.empty() || actionMenu_.visible || smbModal_.active;
                 // The Transport HUD is only visible during playback when the
                 // Unified Spatial Hub and modals are closed.
                 const bool barBlocked = browserOpen || settingsOpen || downloadsWindow_ ||
-                                        !pendingDl_.empty() || actionMenu_.visible;
+                                        !pendingDl_.empty() || actionMenu_.visible || smbModal_.active;
                 // Controls (buttons + timeline) show only while a controller is
                 // actively moving; they fade after a few seconds of stillness.
                 renderer_.setControlBar(!barBlocked && controllersEngaged && !hudDismissed_ &&
@@ -1932,6 +1949,8 @@ int App::run() {
                                         // Cancel
                                         actionMenu_.visible = false;
                                         smbModal_.active = false;
+                                        smbModal_.editingField = SmbModalState::Field::None;
+                                        VrKeyboard::instance().hide();
                                     } else {
                                         // Delete Share
                                         deleteSmbModal();
@@ -1940,6 +1959,8 @@ int App::run() {
                                     // Cancel
                                     actionMenu_.visible = false;
                                     smbModal_.active = false;
+                                    smbModal_.editingField = SmbModalState::Field::None;
+                                    VrKeyboard::instance().hide();
                                 }
                             }
                             interacted = true;
@@ -2209,7 +2230,7 @@ int App::run() {
                     interacted = true;
                 }
                 // Click outside the control dock in empty space immediately hides the HUD
-                if (in.select && btn < 0 && !renderer_.pointerOnTimeline() && !renderer_.pointerOnTimeToggle()) {
+                if (in.select && !renderer_.pointerActive()) {
                     dismissHud(in, nowT);
                     interacted = true;
                 }

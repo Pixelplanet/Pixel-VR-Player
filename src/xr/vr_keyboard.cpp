@@ -212,11 +212,18 @@ bool VrKeyboard::show(const std::string& description,
     auto* ov = reinterpret_cast<vr::IVROverlay*>(vrOverlay_);
     if (!ov) return false;
 
+    if (isOpen_) {
+        hide();
+    }
+    // Explicitly hide any existing keyboard session in SteamVR to clear lingering text buffers
+    ov->HideKeyboard();
+
     description_ = description;
     existingText_ = existingText;
     currentText_ = existingText;
     isPassword_ = isPassword;
     doneSubmitted_ = false;
+    userTyped_ = false;
 
     const vr::EGamepadTextInputMode mode = isPassword
         ? vr::k_EGamepadTextInputModePassword
@@ -257,15 +264,18 @@ bool VrKeyboard::show(const std::string& description,
     }
     const float yaw = std::atan2(-fx, -fz);
 
-    // Place keyboard 1.05m in front of eyes, 0.35m below eye level
+    // Place keyboard 1.05m in front of eyes, 0.20m below eye level.
+    // The modal dialog box above ends at ~hy + 0.03m; this places the top edge of the
+    // keyboard (half-height ~0.20m) right at hy - 0.004m, exactly 3.4cm below the modal dialog.
     const float dist = 1.05f;
     const float kbX = hx + fx * dist;
-    const float kbY = hy - 0.35f;
+    const float kbY = hy - 0.20f;
     const float kbZ = hz + fz * dist;
 
-    // Tilt upward toward eyes by ~22 degrees (-0.38 rad).
-    // Top side slants backward away from user; face normal points up and toward eyes.
-    const float tilt = -0.38f;
+    // Tilt upward toward eyes by ~11.5 degrees (-0.20 rad).
+    // Center is 20cm below eyes at 1.05m distance: atan2(0.20, 1.05) ~= 0.189 rad.
+    // Tilt of -0.20 rad angles the keyboard face normal directly at the user's eyes!
+    const float tilt = -0.20f;
     vr::HmdMatrix34_t kbMat{};
     kbMat.m[0][0] = std::cos(yaw);
     kbMat.m[0][1] = std::sin(yaw) * std::sin(tilt);
@@ -329,6 +339,9 @@ void VrKeyboard::hide() {
     isOpen_ = false;
     kbConfigured_ = false;
     doneSubmitted_ = false;
+    userTyped_ = false;
+    currentText_.clear();
+    existingText_.clear();
     PIXELVR_LOG_INFO("VrKeyboard: Hidden virtual keyboard");
 }
 
@@ -342,6 +355,7 @@ void VrKeyboard::poll(std::function<void(const std::string&)> onDone,
     vr::VREvent_t event{};
     while (sys->PollNextEvent(&event, sizeof(event))) {
         if (event.eventType == vr::VREvent_KeyboardCharInput) {
+            userTyped_ = true;
             char keyBuf[1024] = {0};
             uint32_t len = ov->GetKeyboardText(keyBuf, sizeof(keyBuf));
             if (len > 0) {
@@ -374,6 +388,10 @@ void VrKeyboard::poll(std::function<void(const std::string&)> onDone,
             if (len > 0) {
                 text = std::string(buf, len < sizeof(buf) ? len : std::strlen(buf));
             }
+            ov->HideKeyboard();
+            currentText_.clear();
+            existingText_.clear();
+            userTyped_ = false;
             PIXELVR_LOG_INFO("VrKeyboard: User submitted text via KeyboardDone: '%s'", text.c_str());
             if (onDone) {
                 onDone(text);
@@ -382,27 +400,16 @@ void VrKeyboard::poll(std::function<void(const std::string&)> onDone,
                    event.eventType == vr::VREvent_KeyboardClosed_Global) {
             isOpen_ = false;
             kbConfigured_ = false;
+            ov->HideKeyboard();
             PIXELVR_LOG_INFO("VrKeyboard: Keyboard closed (doneSubmitted=%d)", doneSubmitted_ ? 1 : 0);
             if (!doneSubmitted_) {
-                // On Steam Frame / SteamOS, pressing the checkmark or closing the keyboard issues KeyboardClosed
-                // without KeyboardDone. Read the buffer and treat non-empty / modified input as submit!
-                char buf[1024] = {0};
-                uint32_t len = ov->GetKeyboardText(buf, sizeof(buf));
-                std::string text = currentText_;
-                if (len > 0) {
-                    text = std::string(buf, len < sizeof(buf) ? len : std::strlen(buf));
-                }
-                if (!text.empty() || text != existingText_) {
-                    PIXELVR_LOG_INFO("VrKeyboard: Treating KeyboardClosed as submit with text: '%s'", text.c_str());
-                    doneSubmitted_ = true;
-                    if (onDone) {
-                        onDone(text);
-                    }
-                } else {
-                    PIXELVR_LOG_INFO("VrKeyboard: Keyboard cancelled without text change");
-                    if (onCancel) {
-                        onCancel();
-                    }
+                // Closed without KeyboardDone: treat as cancel and forget any input
+                currentText_.clear();
+                existingText_.clear();
+                userTyped_ = false;
+                PIXELVR_LOG_INFO("VrKeyboard: Discarded input on KeyboardClosed");
+                if (onCancel) {
+                    onCancel();
                 }
             }
         }
@@ -412,15 +419,19 @@ void VrKeyboard::poll(std::function<void(const std::string&)> onDone,
     if (isOpen_) {
         pollFramesSinceOpen_++;
         // Maintain and reinforce keyboard overlay configuration across the first 90 frames (~1 sec)
-        // to catch asynchronous creation by SteamVR's GamepadUI
-        if (!kbConfigured_ || pollFramesSinceOpen_ < 90) {
+        // until successfully configured
+        if (!kbConfigured_ && pollFramesSinceOpen_ < 90) {
             configureKeyboardOverlay();
         }
 
-        char liveBuf[1024] = {0};
-        uint32_t liveLen = ov->GetKeyboardText(liveBuf, sizeof(liveBuf));
-        if (liveLen > 0) {
-            currentText_ = std::string(liveBuf, liveLen < sizeof(liveBuf) ? liveLen : std::strlen(liveBuf));
+        // Only synchronize with SteamVR live buffer if the user has actively typed in this session.
+        // This avoids contaminating a fresh/empty input field with stale residual buffer from a previous field.
+        if (userTyped_) {
+            char liveBuf[1024] = {0};
+            uint32_t liveLen = ov->GetKeyboardText(liveBuf, sizeof(liveBuf));
+            if (liveLen > 0) {
+                currentText_ = std::string(liveBuf, liveLen < sizeof(liveBuf) ? liveLen : std::strlen(liveBuf));
+            }
         }
     }
 }
