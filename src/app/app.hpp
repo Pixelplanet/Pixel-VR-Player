@@ -77,6 +77,7 @@ private:
     bool pendingDlFresh_ = false;  // suppress the same-frame A press
     bool downloadsWindow_ = false;  // downloads list window toggled from the bar
     bool dlWasActive_ = false;      // edge detect: auto-open the window on start
+    bool hudDismissed_ = false;     // manually dismissed player controls / HUD
     // Low-pass smoothed model pose per hand (the raw hand pose jitters; the
     // system's own controller model is visibly smoothed).
     bool modelSmoothInit_[2] = {false, false};
@@ -99,6 +100,25 @@ private:
     void performVaultLock();
     VulkanRenderer::ActionMenuData actionMenu_{};
     void openActionMenu();
+
+    struct SmbModalState {
+        bool active = false;
+        bool isNew = true;
+        std::string origHost;
+        std::string origShare;
+        std::string host;
+        std::string share;
+        bool anon = false;
+        std::string user;
+        std::string pass;
+        std::string workgroup = "WORKGROUP";
+        std::string label;
+        enum class Field { None, Host, Share, User, Pass, Workgroup, Label } editingField = Field::None;
+    } smbModal_{};
+    void openSmbModal(bool isNew, const std::string& smbPath = "");
+    void updateSmbModalMenu();
+    void saveSmbModal();
+    void deleteSmbModal();
 
 #ifdef PIXELVR_HAVE_FREETYPE
     Browser browser_;

@@ -43,13 +43,31 @@ extern "C" {
 #include <cerrno>
 #endif
 
+#include "net/smb_credentials.hpp"
+
 namespace pixelvr {
 
 #ifdef PIXELVR_HAVE_SMB
 namespace {
 
-void smb_auth(SMBCCTX*, const char*, const char*, char*, int, char* un, int unlen,
+void smb_auth(SMBCCTX*, const char* srv, const char* shr, char* wg, int wglen, char* un, int unlen,
               char* pw, int pwlen) {
+    std::string u, p, w;
+    if (srv != nullptr && SmbCredentialsManager::instance().findCredentials(srv, shr ? shr : "", u, p, w)) {
+        if (un && unlen > 0) {
+            std::strncpy(un, u.c_str(), unlen - 1);
+            un[unlen - 1] = '\0';
+        }
+        if (pw && pwlen > 0) {
+            std::strncpy(pw, p.c_str(), pwlen - 1);
+            pw[pwlen - 1] = '\0';
+        }
+        if (wg && wglen > 0 && !w.empty()) {
+            std::strncpy(wg, w.c_str(), wglen - 1);
+            wg[wglen - 1] = '\0';
+        }
+        return;
+    }
     if (un != nullptr && unlen > 0) un[0] = '\0';  // guest / anonymous
     if (pw != nullptr && pwlen > 0) pw[0] = '\0';
 }

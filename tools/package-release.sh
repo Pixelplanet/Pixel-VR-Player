@@ -37,8 +37,14 @@ cp "${bin}" "${stage}/PixelVRPlayer/pixelvr"
 cp "${BUILD_DIR}/shaders/"*.spv "${stage}/PixelVRPlayer/shaders/"
 cp tools/run.sh "${stage}/PixelVRPlayer/run.sh"
 cp tools/install.sh "${stage}/PixelVRPlayer/install.sh"
+if [[ -f "tools/update.sh" ]]; then
+    cp tools/update.sh "${stage}/PixelVRPlayer/update.sh"
+fi
 if [[ -f "tools/Install Pixel VR Player.desktop" ]]; then
     cp "tools/Install Pixel VR Player.desktop" "${stage}/PixelVRPlayer/Install Pixel VR Player.desktop"
+fi
+if [[ -f "tools/Update Pixel VR Player.desktop" ]]; then
+    cp "tools/Update Pixel VR Player.desktop" "${stage}/PixelVRPlayer/Update Pixel VR Player.desktop"
 fi
 for asset in icon.png hero.png capsule.png header.png logo.png; do
     if [[ -f "assets/${asset}" ]]; then
@@ -51,8 +57,14 @@ fi
 chmod +x "${stage}/PixelVRPlayer/pixelvr" \
          "${stage}/PixelVRPlayer/run.sh" \
          "${stage}/PixelVRPlayer/install.sh"
+if [[ -f "${stage}/PixelVRPlayer/update.sh" ]]; then
+    chmod +x "${stage}/PixelVRPlayer/update.sh"
+fi
 if [[ -f "${stage}/PixelVRPlayer/Install Pixel VR Player.desktop" ]]; then
     chmod +x "${stage}/PixelVRPlayer/Install Pixel VR Player.desktop"
+fi
+if [[ -f "${stage}/PixelVRPlayer/Update Pixel VR Player.desktop" ]]; then
+    chmod +x "${stage}/PixelVRPlayer/Update Pixel VR Player.desktop"
 fi
 
 rm -f "${OUT_TAR}"

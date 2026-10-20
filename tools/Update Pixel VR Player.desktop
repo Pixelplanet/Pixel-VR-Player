@@ -1,0 +1,8 @@
+[Desktop Entry]
+Name=Update Pixel VR Player
+Comment=Update Pixel VR Player to the latest version on Valve Steam Frame
+Exec=bash -c 'SCRIPT_DIR="$(dirname "%k")"; if [ -f "$HOME/PixelVRPlayer/update.sh" ]; then bash "$HOME/PixelVRPlayer/update.sh"; elif [ -f "$SCRIPT_DIR/update.sh" ]; then cd "$SCRIPT_DIR" && bash update.sh; else curl -fsSL https://raw.githubusercontent.com/Pixelplanet/Pixel-VR-Player/main/tools/install.sh | bash -s -- --update; fi; if [ $? -eq 0 ]; then command -v kdialog >/dev/null && kdialog --title "Pixel VR Player" --msgbox "Update complete!\n\nPixel VR Player has been updated to the latest version.\nYou can now return to Gaming Mode."; else command -v kdialog >/dev/null && kdialog --title "Pixel VR Player" --error "Update encountered an issue.\nCheck terminal output or internet connection."; fi; read -p "Press Enter to close..." dummy'
+Icon=steam
+Terminal=true
+Type=Application
+Categories=AudioVideo;Player;VR;

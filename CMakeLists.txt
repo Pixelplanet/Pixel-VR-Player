@@ -122,6 +122,8 @@ add_library(pixelvr_core STATIC
     src/xr/xr_result.cpp
     src/xr/xr_context.cpp
     src/xr/render_model.cpp
+    src/xr/vr_keyboard.cpp
+    src/net/smb_credentials.cpp
     src/gfx/vulkan_renderer.cpp
     src/gfx/gltf_mesh.cpp
     src/ui/settings_menu.cpp
@@ -130,7 +132,8 @@ add_library(pixelvr_core STATIC
     src/app/app.cpp)
 
 target_include_directories(pixelvr_core PUBLIC
-    "${CMAKE_CURRENT_SOURCE_DIR}/src")
+    "${CMAKE_CURRENT_SOURCE_DIR}/src"
+    "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openvr")
 target_include_directories(pixelvr_core PRIVATE "${cgltf_SOURCE_DIR}" "${stb_SOURCE_DIR}")
 
 target_compile_definitions(pixelvr_core PUBLIC
@@ -141,7 +144,8 @@ target_compile_definitions(pixelvr_core PUBLIC
 target_link_libraries(pixelvr_core PUBLIC
     OpenXR::openxr_loader
     Vulkan::Vulkan
-    Threads::Threads)
+    Threads::Threads
+    ${CMAKE_DL_LIBS})
 
 add_dependencies(pixelvr_core pixelvr_shaders)
 

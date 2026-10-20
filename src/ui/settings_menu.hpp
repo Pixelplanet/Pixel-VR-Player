@@ -30,6 +30,9 @@ public:
         CycleUiTextColor,
         CycleUiAccentColor,
         CycleUiDistance,
+        CycleUiFollowMode,
+        CycleBrowserViewMode,
+        ListenQuickPath,
         EnterVideoList,
         EnterAudioList,
         EnterLangList,
@@ -42,6 +45,12 @@ public:
         ListenVaultMoveBtn,
         RecordVaultCombo,
         LockVaultAction,
+        EnterListColsConfig,
+        ToggleListColFormat,
+        ToggleListColRes,
+        ToggleListColSize,
+        ToggleListColDuration,
+        BackToUI,
         Close
     };
 
@@ -95,6 +104,13 @@ public:
     int uiTextColorIdx() const { return uiTextColorIdx_; }
     int uiAccentColorIdx() const { return uiAccentColorIdx_; }
     float uiDistance() const;
+    int uiFollowMode() const { return uiFollowMode_; }
+    void setUiFollowMode(int m) { uiFollowMode_ = m; saveConfig(); refresh(); }
+    int browserViewMode() const { return browserViewMode_; }
+    void setBrowserViewMode(int m) { browserViewMode_ = m; saveConfig(); refresh(); }
+    int bindQuickPath() const { return bindQuickPathBtn_; }
+    const std::string& quickPath() const { return quickPath_; }
+    void setQuickPath(const std::string& p) { quickPath_ = p; saveConfig(); }
 
     int section() const { return section_; }
     void setSection(int s) {
@@ -115,6 +131,14 @@ public:
     void loadConfig();
     void saveConfig() const;
 
+    bool listShowFormat() const { return listShowFormat_; }
+    bool listShowRes() const { return listShowRes_; }
+    bool listShowSize() const { return listShowSize_; }
+    bool listShowDuration() const { return listShowDuration_; }
+
+    void onKeyboardSubmit(const std::string& text) { (void)text; }
+    void onKeyboardCancel() {}
+
 private:
     bool open_ = false;
     std::string title_ = "Settings & Controller Remap";
@@ -133,15 +157,23 @@ private:
     int bindPlayBtn_ = 0;      // default A
     int bindMenuBtn_ = 1;      // default B
     int bindRecenterBtn_ = 6;  // default Bumper (grip toggles the laser)
-    int listeningFunc_ = -1;   // 0=play 1=menu 2=recenter while binding, else -1
+    int bindQuickPathBtn_ = 7; // default Right Stick Click (BtnThumbR)
+    int listeningFunc_ = -1;   // 0=play 1=menu 2=recenter 3=move 4=quick path
     int downloadDirIdx_ = 0;   // index into the download-destination presets
     int curvatureIdx_ = 0;     // 0=Flat (0%), 1=Gentle (25%), 2=Cinema (50%), 3=Deep (75%), 4=IMAX (100%)
     int uiTextScaleIdx_ = 2;   // 0=90%, 1=105%, 2=120% (default), 3=140%, 4=160%
     int uiTextColorIdx_ = 0;   // 0=Pure White, 1=Ice Cyan, 2=Warm Cream, 3=Soft Gold, 4=Mint Green
     int uiAccentColorIdx_ = 0; // 0=Cyber Cyan, 1=Emerald, 2=Amber Gold, 3=Royal Purple, 4=Crimson
     int uiDistanceIdx_ = 1;    // 0=Near (1.5m), 1=Comfort (1.9m), 2=Mid (2.3m), 3=Far (2.8m)
+    int uiFollowMode_ = 0;     // 0=World Lock (default, zero drift/tilt), 1=Smooth Gaze Follow
+    int browserViewMode_ = 0;  // 0=Large Cards (3x2), 1=Smaller Cards (4x3), 2=Compact List (1-Col)
+    bool listShowFormat_ = true;
+    bool listShowRes_ = true;
+    bool listShowSize_ = true;
+    bool listShowDuration_ = true;
+    std::string quickPath_;
 
-    int section_ = 0;   // 0=Display, 1=Controls, 2=Streams, 3=System; 10..12=sub-lists
+    int section_ = 0;   // 0=Display, 1=UI, 2=Audio, 3=Controls, 4=Vault; 10..12=sub-lists
     std::vector<std::pair<int, std::string>> videoStreams_;  // (index, label)
     std::vector<std::pair<int, std::string>> audioStreams_;
     int videoSel_ = 0;      // position within videoStreams_

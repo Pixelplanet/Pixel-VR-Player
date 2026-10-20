@@ -1,5 +1,6 @@
 #include "ui/browser.hpp"
 #include "app/vault_manager.hpp"
+#include "net/smb_credentials.hpp"
 
 #include "util/logging.hpp"
 #include "util/smb_lock.hpp"
@@ -8,7 +9,9 @@
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
+#include <fstream>
 #include <functional>
 #include <mutex>
 #include <set>
@@ -48,8 +51,24 @@ bool is_video(const std::string& name) {
 }
 
 #ifdef PIXELVR_HAVE_SMB
-void smb_auth(const char*, const char*, char*, int, char* user, int userLen,
+void smb_auth(const char* srv, const char* shr, char* wg, int wgLen, char* user, int userLen,
               char* pass, int passLen) {
+    std::string u, p, w;
+    if (srv != nullptr && SmbCredentialsManager::instance().findCredentials(srv, shr ? shr : "", u, p, w)) {
+        if (user && userLen > 0) {
+            std::strncpy(user, u.c_str(), userLen - 1);
+            user[userLen - 1] = '\0';
+        }
+        if (pass && passLen > 0) {
+            std::strncpy(pass, p.c_str(), passLen - 1);
+            pass[passLen - 1] = '\0';
+        }
+        if (wg && wgLen > 0 && !w.empty()) {
+            std::strncpy(wg, w.c_str(), wgLen - 1);
+            wg[wgLen - 1] = '\0';
+        }
+        return;
+    }
     if (user != nullptr && userLen > 0) user[0] = '\0';  // anonymous / guest
     if (pass != nullptr && passLen > 0) pass[0] = '\0';
 }
@@ -100,6 +119,8 @@ Browser::Browser() {
     const char* home = std::getenv("HOME");
     homeDir_ = (home != nullptr) ? home : "/home/steamos";
     downloadDir_ = homeDir_ + "/media";
+    quickPath_ = homeDir_ + "/Videos";
+    loadBookmarks();
 }
 
 void Browser::open() {
@@ -288,10 +309,31 @@ void Browser::scanSmbInto(const std::string& uri, ScanResult& out) {
     }
 
     // NetBIOS browsing often misses modern servers; augment the network root with
-    // mDNS-advertised SMB hosts (NAS, macOS, Samba+avahi). The slow network probe
-    // runs OUTSIDE the SMB lock (it is not a libsmbclient call).
+    // configured manual shares and mDNS-advertised SMB hosts (NAS, macOS, Samba+avahi).
     if (uri == "smb://") {
         std::set<std::string> seen;
+        // The very first entry in the SMB list is the "+ Add SMB Share" button!
+        dirs.push_back({"+ Add SMB Share", "smb://__add_share__", true, false, false, false, "Configure New Network Share"});
+        seen.insert("smb://__add_share__");
+
+        // Prepend all user-configured manual SMB shares so private/unadvertised shares always appear
+        const auto configuredShares = SmbCredentialsManager::instance().shares();
+        for (const auto& s : configuredShares) {
+            if (s.host.empty()) continue;
+            std::string child = "smb://" + s.host;
+            if (!s.share.empty()) {
+                if (child.back() != '/') child += '/';
+                child += s.share;
+            }
+            if (!seen.insert(child).second) continue;
+            std::string label = s.name.empty() ? s.host : s.name;
+            std::string detail = s.anonymous ? "Configured (Guest)" : "Configured (Protected)";
+            if (!s.share.empty()) {
+                dirs.push_back({label + "  (" + s.host + "/" + s.share + ")", child, true, false, false, false, detail});
+            } else {
+                dirs.push_back({label + "  (" + s.host + ")", child, true, false, false, false, detail});
+            }
+        }
         for (const auto& d : dirs) seen.insert(d.path);
         FILE* pipe = popen("timeout 4 avahi-browse -trp _smb._tcp 2>/dev/null", "r");
         if (pipe != nullptr) {
@@ -411,6 +453,157 @@ void Browser::openVault() {
     openPath(VaultManager::instance().vaultDir());
 }
 
+void Browser::openBookmarks() {
+    open_ = true;
+    browseOpen_.store(true);
+    status_.clear();
+    beginScan("bookmarks://", false);
+}
+
+void Browser::addBookmark(const std::string& path, const std::string& label) {
+    if (path.empty() || path == "bookmarks://" || path == "smb://__add_share__") return;
+    for (auto& b : bookmarks_) {
+        if (b.path == path) return;
+    }
+    std::string l = label;
+    if (l.empty()) {
+        if (path.rfind("smb://", 0) == 0) {
+            std::string rest = path.substr(6);
+            while (!rest.empty() && rest.back() == '/') rest.pop_back();
+            l = rest;
+        } else {
+            fs::path p(path);
+            l = p.filename().string();
+            if (l.empty()) l = path;
+        }
+    }
+    bookmarks_.push_back({path, l});
+    quickPath_ = path;
+    saveBookmarks();
+    if (location_ == "bookmarks://") {
+        beginScan("bookmarks://", false);
+    }
+}
+
+void Browser::removeBookmark(const std::string& path) {
+    auto it = std::remove_if(bookmarks_.begin(), bookmarks_.end(), [&](const Bookmark& b) {
+        return b.path == path;
+    });
+    if (it != bookmarks_.end()) {
+        bookmarks_.erase(it, bookmarks_.end());
+        saveBookmarks();
+        if (location_ == "bookmarks://") {
+            beginScan("bookmarks://", false);
+        }
+    }
+}
+
+bool Browser::isBookmarked(const std::string& path) const {
+    if (path.empty() || path == "bookmarks://") return false;
+    for (const auto& b : bookmarks_) {
+        if (b.path == path) return true;
+    }
+    return false;
+}
+
+void Browser::loadBookmarks() {
+    bookmarks_.clear();
+    const char* home = std::getenv("HOME");
+    std::string path = std::string(home ? home : ".") + "/.config/pixelvr/bookmarks.json";
+    std::ifstream f(path);
+    if (f.is_open()) {
+        std::string content((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>());
+        f.close();
+
+        std::size_t pos = 0;
+        while ((pos = content.find('{', pos)) != std::string::npos) {
+            std::size_t endObj = content.find('}', pos);
+            if (endObj == std::string::npos) break;
+            std::string obj = content.substr(pos, endObj - pos + 1);
+            pos = endObj + 1;
+
+            auto extract = [&](const std::string& key) -> std::string {
+                std::string pat = "\"" + key + "\"";
+                auto kpos = obj.find(pat);
+                if (kpos == std::string::npos) return "";
+                auto col = obj.find(':', kpos + pat.length());
+                if (col == std::string::npos) return "";
+                auto q1 = obj.find('\"', col + 1);
+                if (q1 == std::string::npos) return "";
+                auto q2 = obj.find('\"', q1 + 1);
+                if (q2 == std::string::npos) return "";
+                return obj.substr(q1 + 1, q2 - q1 - 1);
+            };
+            std::string bPath = extract("path");
+            std::string bLabel = extract("label");
+            if (!bPath.empty()) {
+                bookmarks_.push_back({bPath, bLabel});
+            }
+        }
+    }
+
+    if (bookmarks_.empty() && !quickPath_.empty()) {
+        addBookmark(quickPath_);
+    }
+}
+
+void Browser::saveBookmarks() const {
+    const char* home = std::getenv("HOME");
+    std::string configDir = std::string(home ? home : ".") + "/.config/pixelvr";
+    std::error_code ec;
+    std::filesystem::create_directories(configDir, ec);
+
+    std::string path = configDir + "/bookmarks.json";
+    std::ofstream f(path, std::ios::trunc);
+    if (!f.is_open()) return;
+
+    f << "[\n";
+    for (std::size_t i = 0; i < bookmarks_.size(); ++i) {
+        f << "  {\n";
+        f << "    \"path\": \"" << bookmarks_[i].path << "\",\n";
+        f << "    \"label\": \"" << bookmarks_[i].label << "\"\n";
+        f << "  }" << (i + 1 < bookmarks_.size() ? ",\n" : "\n");
+    }
+    f << "]\n";
+    f.close();
+}
+
+void Browser::scanBookmarksInto(ScanResult& out) {
+    out.inSmb = false;
+    out.location = "bookmarks://";
+    out.title = "Bookmarks";
+    out.entries.clear();
+    out.entries.push_back({".. (Home)", homeDir_, true, false, true, false});
+
+    if (bookmarks_.empty()) {
+        out.status = "No bookmarks yet. Click [+ Bookmark] in any folder to add one.";
+        return;
+    }
+
+    out.status = std::to_string(bookmarks_.size()) + (bookmarks_.size() == 1 ? " bookmark" : " bookmarks");
+
+    for (const auto& bm : bookmarks_) {
+        if (bm.path.empty()) continue;
+        const bool isSmb = (bm.path.rfind("smb://", 0) == 0);
+        std::error_code ec;
+        const bool isDir = isSmb || fs::is_directory(bm.path, ec);
+        std::string label = bm.label;
+        if (label.empty()) {
+            if (isSmb) {
+                label = bm.path.substr(6);
+                while (!label.empty() && label.back() == '/') label.pop_back();
+            } else {
+                fs::path p(bm.path);
+                label = p.filename().string();
+                if (label.empty()) label = bm.path;
+            }
+        }
+        std::string detail = isSmb ? "SMB Share" : (isDir ? "Folder" : "Video File");
+        std::string previewPath = isDir ? "" : bm.path;
+        out.entries.push_back({label, bm.path, isDir, !isDir && is_video(bm.path), false, isSmb, detail, 0, previewPath});
+    }
+}
+
 bool Browser::inVault() const {
     return VaultManager::instance().isVaultPath(location_);
 }
@@ -519,6 +712,7 @@ bool Browser::renameFocused(const std::string& newName) {
 }
 
 std::string Browser::parentDir() const {
+    if (location_ == "bookmarks://") return homeDir_;
     if (location_.empty() || location_ == "/" || inSmb_) return "";
     fs::path p(location_);
     return p.parent_path().string();
@@ -543,7 +737,9 @@ std::string Browser::downloadsDir() const {
 
 void Browser::runScan(std::string location, bool isSmb) {
     ScanResult r;
-    if (isSmb) {
+    if (location == "bookmarks://") {
+        scanBookmarksInto(r);
+    } else if (isSmb) {
         scanSmbInto(location, r);
     } else {
         scanLocalInto(location, r);
@@ -565,6 +761,10 @@ Browser::Result Browser::activate(std::string& playPath) {
     const Entry e = entries_[static_cast<std::size_t>(selected_)];
 
     if (e.isBack) {
+        if (location_ == "bookmarks://") {
+            beginScan(homeDir_, false);
+            return Result::Navigated;
+        }
         if (inSmb_) {
             const std::string parent = smb_parent(location_);
             if (parent.empty()) {
@@ -587,12 +787,16 @@ Browser::Result Browser::activate(std::string& playPath) {
         }
         return Result::Navigated;
     }
+    if (e.path == "smb://__add_share__") {
+        return Result::AddSmbShare;
+    }
     if (e.isNetwork) {
         beginScan("smb://", true);
         return Result::Navigated;
     }
     if (e.isDir) {
-        beginScan(e.path, inSmb_);
+        const bool isSmb = e.isNetwork || (e.path.rfind("smb://", 0) == 0);
+        beginScan(e.path, isSmb);
         return Result::Navigated;
     }
     if (e.isVideo) {
@@ -793,6 +997,8 @@ int Browser::spawnCurl(const std::string& uri, const std::string& local) {
     const std::size_t s2 =
         (s1 == std::string::npos) ? std::string::npos : rest.find('/', s1 + 1);
     if (s2 == std::string::npos) return -1;
+    const std::string host = rest.substr(0, s1);
+    const std::string share = rest.substr(s1 + 1, s2 - s1 - 1);
     const std::string service = "//" + rest.substr(0, s2);
     const std::string remote = rest.substr(s2 + 1);
     std::string cmd = "get \"";
@@ -800,14 +1006,26 @@ int Browser::spawnCurl(const std::string& uri, const std::string& local) {
     cmd += "\" \"";
     cmd += local;
     cmd += "\"";
-    PIXELVR_LOG_INFO("DL spawn: smbclient %s -N -c '%s'", service.c_str(),
-                     cmd.c_str());
-    char* argv[] = {const_cast<char*>("smbclient"),
-                    const_cast<char*>(service.c_str()),
-                    const_cast<char*>("-N"),
-                    const_cast<char*>("-c"),
-                    const_cast<char*>(cmd.c_str()),
-                    nullptr};
+
+    std::string authFile = SmbCredentialsManager::instance().getAuthFilePath(host, share);
+    PIXELVR_LOG_INFO("DL spawn: smbclient %s %s -c '%s'", service.c_str(),
+                     authFile.empty() ? "-N" : ("-A " + authFile).c_str(), cmd.c_str());
+
+    char* argv[8] = {nullptr};
+    argv[0] = const_cast<char*>("smbclient");
+    argv[1] = const_cast<char*>(service.c_str());
+    if (!authFile.empty()) {
+        argv[2] = const_cast<char*>("-A");
+        argv[3] = const_cast<char*>(authFile.c_str());
+        argv[4] = const_cast<char*>("-c");
+        argv[5] = const_cast<char*>(cmd.c_str());
+        argv[6] = nullptr;
+    } else {
+        argv[2] = const_cast<char*>("-N");
+        argv[3] = const_cast<char*>("-c");
+        argv[4] = const_cast<char*>(cmd.c_str());
+        argv[5] = nullptr;
+    }
     posix_spawn_file_actions_t fa;
     posix_spawn_file_actions_init(&fa);
     // Take stdin from /dev/null so smbclient can never block on an auth prompt.

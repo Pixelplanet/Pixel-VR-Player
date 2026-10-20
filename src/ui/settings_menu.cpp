@@ -1,5 +1,7 @@
 #include "ui/settings_menu.hpp"
 #include "app/vault_manager.hpp"
+#include "net/smb_credentials.hpp"
+#include "xr/vr_keyboard.hpp"
 
 #include "util/logging.hpp"
 
@@ -78,7 +80,7 @@ SettingsMenu::SettingsMenu() {
 
 void SettingsMenu::open() {
     open_ = true;
-    if (section_ < 0 || section_ > 3) section_ = 0;
+    if (section_ < 0 || (section_ > 5 && section_ != 20)) section_ = 0;
     refresh();
 }
 
@@ -142,6 +144,17 @@ void SettingsMenu::refresh() {
         rows_.push_back({"UI Panel Distance",
                          kUiDistanceNames[uiDistanceIdx_ % kUiDistanceCount],
                          Action::CycleUiDistance});
+        const char* followModeNames[2] = {"World Lock (Fixed)", "Smooth Gaze Follow"};
+        rows_.push_back({"UI Follow Mode",
+                         followModeNames[uiFollowMode_ % 2],
+                         Action::CycleUiFollowMode});
+        const char* viewModeNames[3] = {"Large Cards (3x2)", "Smaller Cards (4x3)", "Compact List (1-Col)"};
+        rows_.push_back({"Browser View Mode",
+                         viewModeNames[browserViewMode_ % 3],
+                         Action::CycleBrowserViewMode});
+        rows_.push_back({"Configure List Columns",
+                         "[ Customize Columns > ]",
+                         Action::EnterListColsConfig});
         rows_.push_back({"Download Folder",
                          kDownloadDirs[downloadDirIdx_ % kDownloadDirCount],
                          Action::CycleDownloadDir});
@@ -183,6 +196,8 @@ void SettingsMenu::refresh() {
                          Action::ListenMenu});
         rows_.push_back({"Recenter View", btnLabel(2, bindRecenterBtn_),
                          Action::ListenRecenter});
+        rows_.push_back({"Bookmarks Shortcut", btnLabel(4, bindQuickPathBtn_),
+                         Action::ListenQuickPath});
         rows_.push_back({"Select / Click", "Trigger", Action::None});
         rows_.push_back({"Controller Models", drawModels_ ? "On" : "Off",
                          Action::ToggleModels});
@@ -220,6 +235,13 @@ void SettingsMenu::refresh() {
 
         rows_.push_back({"Lock Vault Now", "[ Lock & Return Home ]",
                          Action::LockVaultAction});
+    } else if (section_ == 21) {
+        title_ = "Settings > List Columns";
+        rows_.push_back({"Format / VR Badge", listShowFormat_ ? "Visible" : "Hidden", Action::ToggleListColFormat});
+        rows_.push_back({"Resolution & FPS", listShowRes_ ? "Visible" : "Hidden", Action::ToggleListColRes});
+        rows_.push_back({"File Size", listShowSize_ ? "Visible" : "Hidden", Action::ToggleListColSize});
+        rows_.push_back({"Video Duration", listShowDuration_ ? "Visible" : "Hidden", Action::ToggleListColDuration});
+        rows_.push_back({"< Back to UI & Appearance", "", Action::BackToUI});
     } else if (section_ == 10) {
         title_ = "Settings > Select Video Track";
         for (std::size_t i = 0; i < videoStreams_.size(); ++i) {
@@ -346,6 +368,21 @@ SettingsMenu::Action SettingsMenu::activate() {
             saveConfig();
             refresh();
             break;
+        case Action::CycleUiFollowMode:
+            uiFollowMode_ = (uiFollowMode_ + 1) % 2;
+            saveConfig();
+            refresh();
+            break;
+        case Action::CycleBrowserViewMode:
+            browserViewMode_ = (browserViewMode_ + 1) % 3;
+            saveConfig();
+            refresh();
+            break;
+        case Action::ListenQuickPath:
+            listeningFunc_ = 4;
+            status_ = "Press a controller button for Bookmarks shortcut";
+            refresh();
+            break;
         case Action::PickVideoStream:
             videoSel_ = rows_[selected_].data;
             section_ = 2;
@@ -399,6 +436,37 @@ SettingsMenu::Action SettingsMenu::activate() {
             section_ = 0;
             refresh();
             break;
+
+        case Action::EnterListColsConfig:
+            section_ = 21;
+            selected_ = 0;
+            refresh();
+            break;
+        case Action::ToggleListColFormat:
+            listShowFormat_ = !listShowFormat_;
+            refresh();
+            saveConfig();
+            break;
+        case Action::ToggleListColRes:
+            listShowRes_ = !listShowRes_;
+            refresh();
+            saveConfig();
+            break;
+        case Action::ToggleListColSize:
+            listShowSize_ = !listShowSize_;
+            refresh();
+            saveConfig();
+            break;
+        case Action::ToggleListColDuration:
+            listShowDuration_ = !listShowDuration_;
+            refresh();
+            saveConfig();
+            break;
+        case Action::BackToUI:
+            section_ = 1;
+            selected_ = 0;
+            refresh();
+            break;
         case Action::RecenterScreen:
             break;
         case Action::Close:
@@ -448,6 +516,7 @@ void SettingsMenu::assignListening(int button) {
     else if (listeningFunc_ == 1) bindMenuBtn_ = b;
     else if (listeningFunc_ == 2) bindRecenterBtn_ = b;
     else if (listeningFunc_ == 3) VaultManager::instance().setMoveButton(b);
+    else if (listeningFunc_ == 4) bindQuickPathBtn_ = b;
     listeningFunc_ = -1;
     status_ = "Bound to " + std::string(kButtonNames[b]);
     saveConfig();
@@ -505,6 +574,7 @@ void SettingsMenu::loadConfig() {
             // so a saved grip binding is migrated to the new default (Bumper).
             bindRecenterBtn_ = (b == 8) ? 6 : b;
         }
+        else if (key == "bind_quick_path_btn") bindQuickPathBtn_ = std::clamp(std::stoi(val), 0, kButtonCount - 1);
         else if (key == "download_dir") downloadDirIdx_ = std::clamp(std::stoi(val), 0, kDownloadDirCount - 1);
         else if (key == "audio_lang") audioLangIdx_ = std::clamp(std::stoi(val), 0, kLangCount - 1);
         else if (key == "curvature") curvatureIdx_ = std::clamp(std::stoi(val), 0, kCurvatureCount - 1);
@@ -512,6 +582,13 @@ void SettingsMenu::loadConfig() {
         else if (key == "ui_text_color") uiTextColorIdx_ = std::clamp(std::stoi(val), 0, kUiTextColorCount - 1);
         else if (key == "ui_accent_color") uiAccentColorIdx_ = std::clamp(std::stoi(val), 0, kUiAccentColorCount - 1);
         else if (key == "ui_distance") uiDistanceIdx_ = std::clamp(std::stoi(val), 0, kUiDistanceCount - 1);
+        else if (key == "ui_follow_mode") uiFollowMode_ = std::clamp(std::stoi(val), 0, 1);
+        else if (key == "browser_view_mode") browserViewMode_ = std::clamp(std::stoi(val), 0, 2);
+        else if (key == "list_show_format") listShowFormat_ = (val == "1" || val == "true");
+        else if (key == "list_show_res") listShowRes_ = (val == "1" || val == "true");
+        else if (key == "list_show_size") listShowSize_ = (val == "1" || val == "true");
+        else if (key == "list_show_dur") listShowDuration_ = (val == "1" || val == "true");
+        else if (key == "quick_path") quickPath_ = val;
     }
     PIXELVR_LOG_INFO("Loaded settings from %s", path.c_str());
 }
@@ -534,6 +611,7 @@ void SettingsMenu::saveConfig() const {
             file << "bind_play_btn=" << bindPlayBtn_ << "\n";
             file << "bind_menu_btn=" << bindMenuBtn_ << "\n";
             file << "bind_recenter_btn=" << bindRecenterBtn_ << "\n";
+            file << "bind_quick_path_btn=" << bindQuickPathBtn_ << "\n";
             file << "download_dir=" << downloadDirIdx_ << "\n";
             file << "audio_lang=" << audioLangIdx_ << "\n";
             file << "curvature=" << curvatureIdx_ << "\n";
@@ -541,6 +619,15 @@ void SettingsMenu::saveConfig() const {
             file << "ui_text_color=" << uiTextColorIdx_ << "\n";
             file << "ui_accent_color=" << uiAccentColorIdx_ << "\n";
             file << "ui_distance=" << uiDistanceIdx_ << "\n";
+            file << "ui_follow_mode=" << uiFollowMode_ << "\n";
+            file << "browser_view_mode=" << browserViewMode_ << "\n";
+            file << "list_show_format=" << (listShowFormat_ ? 1 : 0) << "\n";
+            file << "list_show_res=" << (listShowRes_ ? 1 : 0) << "\n";
+            file << "list_show_size=" << (listShowSize_ ? 1 : 0) << "\n";
+            file << "list_show_dur=" << (listShowDuration_ ? 1 : 0) << "\n";
+            if (!quickPath_.empty()) {
+                file << "quick_path=" << quickPath_ << "\n";
+            }
         }
     } catch (const std::exception& e) {
         PIXELVR_LOG_WARN("Could not save settings: %s", e.what());

@@ -26,7 +26,7 @@ public:
         long long size = 0;       // bytes (0 if unknown)
         std::string previewPath;  // video file inside folder or self (for thumbnail)
     };
-    enum class Result { None, Navigated, Play };
+    enum class Result { None, Navigated, Play, AddSmbShare };
 
     Browser();
 
@@ -42,12 +42,31 @@ public:
     void openDownloads();
     void openDrives();
     void openVault();
+    struct Bookmark {
+        std::string path;
+        std::string label;
+    };
+    void openBookmarks();
+    void addBookmark(const std::string& path, const std::string& label = "");
+    void removeBookmark(const std::string& path);
+    bool isBookmarked(const std::string& path) const;
+    bool isCurrentBookmarked() const { return isBookmarked(location_); }
+    const std::vector<Bookmark>& bookmarks() const { return bookmarks_; }
+    void loadBookmarks();
+    void saveBookmarks() const;
+    bool onBookmarks() const { return location_ == "bookmarks://"; }
+
+    void openQuickPath() { openBookmarks(); }
+    void setQuickPath(const std::string& path) { addBookmark(path); }
+    const std::string& quickPath() const { return quickPath_; }
+    bool isCurrentQuickPath() const { return isCurrentBookmarked(); }
     bool inVault() const;
     bool moveFocusedToVault(std::string& outNewPath);
     bool moveFocusedTo(const std::string& destDir, std::string& outNewPath);
     bool deleteFocused(std::string& deletedName);
     bool renameFocused(const std::string& newName);
     const std::string& currentLocation() const { return location_; }
+    const std::string& currentPath() const { return location_; }
     std::string parentDir() const;
     std::string homeDir() const;
     std::string videosDir() const;
@@ -164,6 +183,7 @@ private:
     bool hasPendingScan_ = false;
     void scanLocalInto(const std::string& dir, ScanResult& out);
     void scanSmbInto(const std::string& uri, ScanResult& out);
+    void scanBookmarksInto(ScanResult& out);
     void startDownloadFile(const std::string& uri, const std::string& local);
     void startDownloadFolder(const std::string& uri, const std::string& name);
     void startNextQueued();
@@ -174,6 +194,8 @@ private:
     std::string status_;
     std::string location_;   // current local dir or smb:// URI
     std::string homeDir_;
+    std::string quickPath_;  // bookmarked folder for one-button jump
+    std::vector<Bookmark> bookmarks_;
     std::string lastLocation_;  // last folder visited (local or smb), for re-open
     bool lastInSmb_ = false;
     std::vector<Entry> entries_;

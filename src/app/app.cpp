@@ -1,5 +1,8 @@
 #include "app/app.hpp"
 #include "app/vault_manager.hpp"
+#include "net/smb_credentials.hpp"
+#include "xr/vr_keyboard.hpp"
+#include "util/ipv4.hpp"
 
 #include "util/logging.hpp"
 
@@ -537,7 +540,7 @@ void App::performVaultLock() {
     thumbnailCache_.clearVaultThumbs(VaultManager::instance().vaultDir());
 #endif
 
-    if (settings_.section() == 4) {
+    if (settings_.section() == 5) {
         settings_.setSection(0);
     }
     settings_.refresh();
@@ -545,26 +548,191 @@ void App::performVaultLock() {
     PIXELVR_LOG_INFO("Vault locked and sanitized");
 }
 
+void App::openSmbModal(bool isNew, const std::string& smbPath) {
+#ifdef PIXELVR_HAVE_FREETYPE
+    smbModal_.active = true;
+    smbModal_.isNew = isNew;
+    smbModal_.editingField = SmbModalState::Field::None;
+
+    if (isNew) {
+        smbModal_.origHost.clear();
+        smbModal_.origShare.clear();
+        smbModal_.host.clear();
+        smbModal_.share.clear();
+        smbModal_.anon = false;
+        smbModal_.user.clear();
+        smbModal_.pass.clear();
+        smbModal_.workgroup = "WORKGROUP";
+        smbModal_.label.clear();
+    } else {
+        std::string rest = smbPath;
+        if (rest.rfind("smb://", 0) == 0) rest = rest.substr(6);
+        while (!rest.empty() && rest.back() == '/') rest.pop_back();
+        auto slash = rest.find('/');
+        std::string host = (slash == std::string::npos) ? rest : rest.substr(0, slash);
+        std::string share = (slash == std::string::npos) ? "" : rest.substr(slash + 1);
+
+        smbModal_.origHost = host;
+        smbModal_.origShare = share;
+        smbModal_.host = host;
+        smbModal_.share = share;
+        smbModal_.anon = false;
+        smbModal_.user.clear();
+        smbModal_.pass.clear();
+        smbModal_.workgroup = "WORKGROUP";
+        smbModal_.label.clear();
+
+        SmbShare existing;
+        if (SmbCredentialsManager::instance().findShare(host, share, existing)) {
+            smbModal_.anon = existing.anonymous;
+            smbModal_.user = existing.username;
+            smbModal_.pass = existing.password;
+            smbModal_.workgroup = existing.workgroup.empty() ? "WORKGROUP" : existing.workgroup;
+            smbModal_.label = existing.name;
+        }
+    }
+
+    actionMenu_.visible = true;
+    actionMenu_.page = 4;
+    actionMenu_.selectedOption = 0;
+    updateSmbModalMenu();
+#endif
+}
+
+void App::updateSmbModalMenu() {
+#ifdef PIXELVR_HAVE_FREETYPE
+    actionMenu_.title = smbModal_.isNew ? "Add SMB Network Share" : "Edit SMB Network Share";
+    actionMenu_.subtitle = "Point & click a field to enter text via keyboard";
+    actionMenu_.options.clear();
+
+    actionMenu_.options.push_back("Server IP: " + (smbModal_.host.empty() ? "[ Enter IPv4 Address ]" : smbModal_.host));
+    actionMenu_.options.push_back("Share Name: " + (smbModal_.share.empty() ? "[ All Shares ]" : smbModal_.share));
+    actionMenu_.options.push_back("Authentication: " + std::string(smbModal_.anon ? "Guest / Anonymous" : "Username & Password"));
+    actionMenu_.options.push_back("Username: " + (smbModal_.user.empty() ? "[ Enter Username ]" : smbModal_.user));
+    actionMenu_.options.push_back("Password: " + (smbModal_.pass.empty() ? "[ Enter Password ]" : std::string(smbModal_.pass.length(), '*')));
+    actionMenu_.options.push_back("Workgroup: " + smbModal_.workgroup);
+    actionMenu_.options.push_back("Nickname: " + (smbModal_.label.empty() ? "[ Optional Nickname ]" : smbModal_.label));
+
+    actionMenu_.options.push_back("[ Save SMB Share ]");
+    if (!smbModal_.isNew) {
+        actionMenu_.options.push_back("[ Delete Share ]");
+    }
+    actionMenu_.options.push_back("[ Cancel ]");
+#endif
+}
+
+void App::saveSmbModal() {
+#ifdef PIXELVR_HAVE_FREETYPE
+    if (smbModal_.host.empty()) {
+        actionMenu_.subtitle = "Error: Server IPv4 address is required!";
+        return;
+    }
+    std::string cleanHost = sanitizeIpv4(smbModal_.host, true);
+    if (!isValidIpv4(cleanHost)) {
+        actionMenu_.subtitle = "Error: Invalid IPv4 address (e.g. 192.168.1.100)";
+        return;
+    }
+    smbModal_.host = cleanHost;
+    if (!smbModal_.isNew && (smbModal_.host != smbModal_.origHost || smbModal_.share != smbModal_.origShare)) {
+        SmbCredentialsManager::instance().deleteShare(smbModal_.origHost, smbModal_.origShare);
+    }
+    SmbShare s;
+    s.host = smbModal_.host;
+    s.share = smbModal_.share;
+    s.username = smbModal_.user;
+    s.password = smbModal_.pass;
+    s.workgroup = smbModal_.workgroup.empty() ? "WORKGROUP" : smbModal_.workgroup;
+    s.name = smbModal_.label.empty() ? (s.host + (s.share.empty() ? "" : ("/" + s.share))) : smbModal_.label;
+    s.id = s.host + (s.share.empty() ? "" : ("/" + s.share));
+    s.anonymous = smbModal_.anon;
+
+    SmbCredentialsManager::instance().addOrUpdateShare(s);
+
+    smbModal_.active = false;
+    actionMenu_.visible = false;
+    browser_.openNetwork();
+#endif
+}
+
+void App::deleteSmbModal() {
+#ifdef PIXELVR_HAVE_FREETYPE
+    if (!smbModal_.isNew) {
+        SmbCredentialsManager::instance().deleteShare(smbModal_.origHost, smbModal_.origShare);
+    }
+    smbModal_.active = false;
+    actionMenu_.visible = false;
+    browser_.openNetwork();
+#endif
+}
+
 void App::openActionMenu() {
 #ifdef PIXELVR_HAVE_FREETYPE
     const Browser::Entry* fe = browser_.focused();
-    if (fe == nullptr || fe->isBack || browser_.onNetwork()) return;
-
     actionMenu_.visible = true;
     actionMenu_.page = 0;
     actionMenu_.selectedOption = 0;
+    actionMenu_.options.clear();
+    actionMenu_.renameBuffer.clear();
+
+    const bool inBookmarks = (browser_.currentPath() == "bookmarks://");
+    if (inBookmarks) {
+        actionMenu_.title = "Bookmarks";
+        actionMenu_.subtitle = (fe && !fe->isBack) ? fe->label : "Bookmarks Overview";
+        if (fe && !fe->isBack) {
+            actionMenu_.options.push_back("Open Bookmark");
+            actionMenu_.options.push_back("Remove Bookmark");
+        }
+        actionMenu_.options.push_back("Cancel");
+        return;
+    }
+
+    const bool hasFocused = (fe != nullptr && !fe->isBack && fe->path != "smb://__add_share__");
+    if (!hasFocused) {
+        actionMenu_.title = "Folder Actions";
+        actionMenu_.subtitle = browser_.currentPath();
+        if (browser_.isCurrentBookmarked()) {
+            actionMenu_.options.push_back("Remove from Bookmarks");
+        } else {
+            actionMenu_.options.push_back("Add to Bookmarks");
+        }
+        actionMenu_.options.push_back("Go to Bookmarks");
+        actionMenu_.options.push_back("Cancel");
+        return;
+    }
+
     actionMenu_.title = fe->isDir ? "Folder Actions" : "File Actions";
     actionMenu_.subtitle = fe->label;
-    actionMenu_.options.clear();
 
-    if (VaultManager::instance().isUnlocked() && !browser_.inVault()) {
-        actionMenu_.options.push_back("Move to Vault");
+    const bool isSmbRoot = (browser_.currentPath() == "smb://" || browser_.currentPath().empty());
+    const bool isSmbEntry = (fe->path.rfind("smb://", 0) == 0);
+
+    if (isSmbRoot && isSmbEntry) {
+        actionMenu_.options.push_back("Open Share");
+        actionMenu_.options.push_back("Edit SMB Share");
+        actionMenu_.options.push_back("Delete SMB Share");
+        if (browser_.isBookmarked(fe->path)) {
+            actionMenu_.options.push_back("Remove from Bookmarks");
+        } else {
+            actionMenu_.options.push_back("Add to Bookmarks");
+        }
+    } else {
+        const std::string itemPath = (fe && fe->isDir) ? fe->path : browser_.currentPath();
+        if (browser_.isBookmarked(itemPath)) {
+            actionMenu_.options.push_back("Remove from Bookmarks");
+        } else {
+            actionMenu_.options.push_back(fe->isDir ? "Add to Bookmarks" : "Add Folder to Bookmarks");
+        }
+        actionMenu_.options.push_back("Go to Bookmarks");
+        if (!browser_.onNetwork()) {
+            if (VaultManager::instance().isUnlocked() && !browser_.inVault()) {
+                actionMenu_.options.push_back("Move to Vault");
+            }
+            actionMenu_.options.push_back("Move To...");
+            actionMenu_.options.push_back("Rename");
+            actionMenu_.options.push_back("Delete");
+        }
     }
-    actionMenu_.options.push_back("Move To...");
-    actionMenu_.options.push_back("Rename");
-    actionMenu_.options.push_back("Delete");
     actionMenu_.options.push_back("Cancel");
-    actionMenu_.renameBuffer.clear();
 #endif
 }
 
@@ -613,6 +781,57 @@ int App::run() {
             const auto nowT = std::chrono::steady_clock::now();
             XrInputState in = xr_.input();
 
+            // Poll native SteamVR virtual keyboard events if active
+            VrKeyboard::instance().poll(
+                [this](const std::string& text) {
+                    if (smbModal_.active) {
+                        if (smbModal_.editingField == SmbModalState::Field::Host) {
+                            smbModal_.host = sanitizeIpv4(text, true);
+                        } else if (smbModal_.editingField == SmbModalState::Field::Share) {
+                            std::string s = text;
+                            while (!s.empty() && (s.front() == '/' || s.front() == '\\')) s.erase(s.begin());
+                            while (!s.empty() && (s.back() == '/' || s.back() == '\\')) s.pop_back();
+                            smbModal_.share = s;
+                        } else if (smbModal_.editingField == SmbModalState::Field::User) {
+                            smbModal_.user = text;
+                        } else if (smbModal_.editingField == SmbModalState::Field::Pass) {
+                            smbModal_.pass = text;
+                        } else if (smbModal_.editingField == SmbModalState::Field::Workgroup) {
+                            smbModal_.workgroup = text.empty() ? "WORKGROUP" : text;
+                        } else if (smbModal_.editingField == SmbModalState::Field::Label) {
+                            smbModal_.label = text;
+                        }
+                        smbModal_.editingField = SmbModalState::Field::None;
+                        updateSmbModalMenu();
+                    } else if (settings_.isOpen()) {
+                        settings_.onKeyboardSubmit(text);
+                    }
+                },
+                [this]() {
+                    if (smbModal_.active) {
+                        smbModal_.editingField = SmbModalState::Field::None;
+                        updateSmbModalMenu();
+                    } else if (settings_.isOpen()) {
+                        settings_.onKeyboardCancel();
+                    }
+                });
+
+            const bool kbOpen = VrKeyboard::instance().isOpen();
+            std::string kbDisplayText = VrKeyboard::instance().currentText();
+            if (smbModal_.active && smbModal_.editingField == SmbModalState::Field::Host) {
+                kbDisplayText = sanitizeIpv4(kbDisplayText, false);
+            }
+            renderer_.setKeyboardModal(kbOpen,
+                                       VrKeyboard::instance().description(),
+                                       kbDisplayText,
+                                       VrKeyboard::instance().isPassword());
+            if (kbOpen) {
+                in.select = false;
+                in.selectHeld = false;
+                in.togglePlay = false;
+                in.browserToggle = false;
+            }
+
             // Custom combo recording listener (active while recording new 6-button combo in Vault & Privacy)
             if (VaultManager::instance().isRecordingCombo()) {
                 for (int b : {XrInputState::BtnA, XrInputState::BtnB, XrInputState::BtnX, XrInputState::BtnY}) {
@@ -657,6 +876,20 @@ int App::run() {
                 PIXELVR_LOG_INFO("Grip full press state changed: %s (L val: %.2f, R val: %.2f)",
                                  gripFullHeld ? "HELD" : "RELEASED",
                                  in.gripValue[0], in.gripValue[1]);
+            }
+
+            // Whirligig-style Quick Path controller button shortcut
+            const int qpBtn = settings_.bindQuickPath();
+            const bool quickPathPressed =
+                !settings_.isListening() && !gripFullHeld &&
+                !VaultManager::instance().isRecordingCombo() && !kbOpen &&
+                qpBtn >= 0 && qpBtn < XrInputState::BtnCount && in.buttonDown[qpBtn];
+            if (quickPathPressed) {
+                browser_.openBookmarks();
+                downloadsWindow_ = false;
+                settings_.close();
+                browser_.setOpen(true);
+                xr_.triggerHaptic(1, 0.040f, 0.0f, 0.6f);
             }
 
             if (gripFullHeld && !settings_.isListening() && !VaultManager::instance().isRecordingCombo()) {
@@ -773,6 +1006,9 @@ int App::run() {
                                       settings_.uiTextColorIdx(),
                                       settings_.uiAccentColorIdx(),
                                       settings_.uiDistance());
+            renderer_.setUiFollowMode(settings_.uiFollowMode());
+            renderer_.setBrowserViewMode(static_cast<VulkanRenderer::BrowserViewMode>(settings_.browserViewMode()));
+            renderer_.setBrowserQuickPath(browser_.isCurrentBookmarked());
             if (!didInitialRecenter_ && in.headValid) {
                 renderer_.recenterScreen(in.headPos, in.headForward);
                 renderer_.setScreenCurvature(settings_.screenCurvature());
@@ -802,7 +1038,19 @@ int App::run() {
                 }
                 float od = 0.0f;
                 for (int k = 0; k < 4; ++k) od += c.orientation[k] * activityAnchorOrient_[h][k];
-                if (std::sqrt(dp) > 0.02f || std::fabs(od) < 0.995f) {
+                const float moveDist = std::sqrt(dp);
+                const float rotDiff = std::fabs(od);
+
+                if (hudDismissed_) {
+                    // Requires intentional hand movement to re-engage HUD after manual dismissal
+                    if (moveDist > 0.10f || rotDiff < 0.970f) {
+                        hudDismissed_ = false;
+                        activity = true;
+                        for (int k = 0; k < 3; ++k) activityAnchorPos_[h][k] = c.position[k];
+                        for (int k = 0; k < 4; ++k) activityAnchorOrient_[h][k] = c.orientation[k];
+                    }
+                } else if (moveDist > 0.06f || rotDiff < 0.985f) {
+                    // Normal threshold: filters micro-tremors from resting hands
                     activity = true;
                     for (int k = 0; k < 3; ++k) activityAnchorPos_[h][k] = c.position[k];
                     for (int k = 0; k < 4; ++k) activityAnchorOrient_[h][k] = c.orientation[k];
@@ -813,6 +1061,7 @@ int App::run() {
                 std::fabs(in.thumbstickY) > 0.15f ||
                 std::fabs(in.thumbstickRX) > 0.15f) {
                 activity = true;
+                hudDismissed_ = false;
             }
             if (activity) {
                 lastControllerActivity_ = nowT;
@@ -834,6 +1083,11 @@ int App::run() {
                     settings_.close();
                 } else if (browser_.isOpen()) {
                     browser_.setOpen(false);
+                } else if (mediaOpen_ && renderer_.controlBarVisible()) {
+                    // HUD is visible during playback: B/Y dismisses the HUD!
+                    hudDismissed_ = true;
+                    lastControllerActivity_ = nowT - std::chrono::seconds(10);
+                    renderer_.setControlBar(false);
                 } else {
                     browser_.open();
                 }
@@ -1108,6 +1362,27 @@ int App::run() {
                         item.tag = "FILE";
                     }
 
+                    // Format file size
+                    if (e.size > 0) {
+                        char sbuf[32];
+                        constexpr long long kGB = 1024LL * 1024LL * 1024LL;
+                        constexpr long long kMB = 1024LL * 1024LL;
+                        if (e.size >= kGB) {
+                            std::snprintf(sbuf, sizeof(sbuf), "%.2f GB", static_cast<double>(e.size) / static_cast<double>(kGB));
+                        } else if (e.size >= kMB) {
+                            std::snprintf(sbuf, sizeof(sbuf), "%.1f MB", static_cast<double>(e.size) / static_cast<double>(kMB));
+                        } else {
+                            std::snprintf(sbuf, sizeof(sbuf), "%.0f KB", static_cast<double>(e.size) / 1024.0);
+                        }
+                        item.sizeTag = sbuf;
+                    } else if (e.isDir) {
+                        item.sizeTag = "Folder";
+                    } else if (e.isBack) {
+                        item.sizeTag = "";
+                    } else {
+                        item.sizeTag = "--";
+                    }
+
                     if (hasMeta) {
                         if (meta.durationSec > 0.5) {
                             const int tot = static_cast<int>(meta.durationSec + 0.5);
@@ -1131,7 +1406,18 @@ int App::run() {
                             } else {
                                 item.detail = specBuf;
                             }
+                            char rbuf[48];
+                            if (meta.fps > 1.0) {
+                                std::snprintf(rbuf, sizeof(rbuf), "%dx%d %.0ffps", meta.width, meta.height, meta.fps);
+                            } else {
+                                std::snprintf(rbuf, sizeof(rbuf), "%dx%d", meta.width, meta.height);
+                            }
+                            item.resolutionTag = rbuf;
                         }
+                    }
+                    if (e.isVideo) {
+                        if (item.durationTag.empty()) item.durationTag = "--";
+                        if (item.resolutionTag.empty()) item.resolutionTag = "--";
                     }
                     items.push_back(std::move(item));
                 }
@@ -1147,13 +1433,21 @@ int App::run() {
                         status = "A/Trigger: Play  \xB7  Y: Actions";
                     }
                 }
+                renderer_.setListColumnVisibility(
+                    settings_.listShowFormat(),
+                    settings_.listShowRes(),
+                    settings_.listShowSize(),
+                    settings_.listShowDuration()
+                );
                 renderer_.setBrowserItems(true, browser_.title(), items,
                                          browser_.selected(), status);
 
-                // Feed ready thumbnails to the visible slots (6 cards)
+                // Feed ready thumbnails to the visible slots (6 for BigCards, 12 for MiniCards, 8 for List)
                 const int curFirst = renderer_.browserFirst();
                 const int totalItems = static_cast<int>(items.size());
-                for (int slot = 0; slot < 6; ++slot) {
+                const int numSlots = (renderer_.browserViewMode() == VulkanRenderer::BrowserViewMode::BigCards) ? 6 :
+                                     (renderer_.browserViewMode() == VulkanRenderer::BrowserViewMode::MiniCards ? 12 : 8);
+                for (int slot = 0; slot < numSlots; ++slot) {
                     const int idx = curFirst + slot;
                     if (idx >= 0 && idx < totalItems) {
                         const std::string thumbTarget = !items[idx].previewPath.empty()
@@ -1221,12 +1515,15 @@ int App::run() {
                                         !pendingDl_.empty() || actionMenu_.visible;
                 // Controls (buttons + timeline) show only while a controller is
                 // actively moving; they fade after a few seconds of stillness.
-                renderer_.setControlBar(!barBlocked && controllersEngaged &&
+                renderer_.setControlBar(!barBlocked && controllersEngaged && !hudDismissed_ &&
                                         (in.controllers[0].active ||
                                          in.controllers[1].active));
-                // Laser + models stay up while a panel is open (to point at it),
-                // otherwise they follow the same activity timeout.
-                const bool showLaser = uiPanelActive || controllersEngaged;
+                // Keep laser active when UI panels, activity, or virtual keyboard are active!
+                const bool kbActive = VrKeyboard::instance().isOpen();
+                if (kbActive && !renderer_.laserOn(0) && !renderer_.laserOn(1)) {
+                    renderer_.setLaserOn(1, true);
+                }
+                const bool showLaser = (uiPanelActive || controllersEngaged || kbActive);
                 // Build each controller's render state: corrected model pose,
                 // low-pass smoothed (the raw hand pose jitters), while the aim
                 // pose stays raw so the laser remains responsive.
@@ -1291,10 +1588,14 @@ int App::run() {
                     // Main Tab: Settings
                     downloadsWindow_ = false;
                     settings_.open();
-                } else if (sbHover >= 3 && sbHover <= 6) {
+                } else if (sbHover >= 3 && sbHover <= 8) {
                     const int sub = sbHover - 3;
                     if (settings_.isOpen()) {
-                        settings_.setSection(sub);
+                        if (sub <= 4) {
+                            settings_.setSection(sub);
+                        } else if (sub == 5 && VaultManager::instance().isUnlocked()) {
+                            settings_.setSection(5);
+                        }
                     } else if (downloadsWindow_) {
                         if (sub <= 2) renderer_.setDownloadsFilter(sub);
                     } else if (browser_.isOpen()) {
@@ -1302,17 +1603,10 @@ int App::run() {
                         else if (sub == 1) browser_.openVideos();
                         else if (sub == 2) browser_.openNetwork();
                         else if (sub == 3) browser_.openDownloads();
+                        else if (sub == 4) browser_.openBookmarks();
+                        else if (sub == 5 && VaultManager::instance().isUnlocked()) browser_.openVault();
                     }
-                } else if (sbHover == 7) {
-                    // Subtab 5: Vault (Private) in Files or Vault & Privacy in Settings
-                    if (VaultManager::instance().isUnlocked()) {
-                        if (settings_.isOpen()) {
-                            settings_.setSection(4);
-                        } else if (browser_.isOpen()) {
-                            browser_.openVault();
-                        }
-                    }
-                } else if (sbHover == 8) {
+                } else if (sbHover == 9 || sbHover == 8) {
                     // Lock Vault button
                     if (VaultManager::instance().isUnlocked()) {
                         xr_.triggerHaptic(0, 0.050f, 0.0f, 0.7f);
@@ -1388,7 +1682,48 @@ int App::run() {
                             if (chosen >= 0 && chosen < static_cast<int>(actionMenu_.options.size())) {
                                 const std::string opt = actionMenu_.options[chosen];
                                 if (actionMenu_.page == 0) {
-                                    if (opt == "Move to Vault") {
+                                    if (opt == "Open Share" || opt == "Open Bookmark") {
+                                        std::string playPath;
+                                        if (browser_.activate(playPath) == Browser::Result::Play && !playPath.empty()) {
+#ifdef PIXELVR_HAVE_MEDIA
+                                            loadMedia(playPath);
+#endif
+                                            browser_.setOpen(false);
+                                        }
+                                        actionMenu_.visible = false;
+                                    } else if (opt == "Edit SMB Share") {
+                                        if (fe) {
+                                            openSmbModal(false, fe->path);
+                                        }
+                                    } else if (opt == "Delete SMB Share") {
+                                        if (fe) {
+                                            std::string rest = fe->path;
+                                            if (rest.rfind("smb://", 0) == 0) rest = rest.substr(6);
+                                            while (!rest.empty() && rest.back() == '/') rest.pop_back();
+                                            auto slash = rest.find('/');
+                                            std::string host = (slash == std::string::npos) ? rest : rest.substr(0, slash);
+                                            std::string share = (slash == std::string::npos) ? "" : rest.substr(slash + 1);
+                                            SmbCredentialsManager::instance().deleteShare(host, share);
+                                            browser_.openNetwork();
+                                        }
+                                        actionMenu_.visible = false;
+                                    } else if (opt == "Go to Bookmarks" || opt == "Go to Quick Path") {
+                                        browser_.openBookmarks();
+                                        actionMenu_.visible = false;
+                                    } else if (opt == "Add to Bookmarks" || opt == "Add Folder to Bookmarks" ||
+                                               opt == "Set as Quick Path" || opt == "Set Folder as Quick Path") {
+                                        const std::string targetPath = (fe && fe->isDir) ? fe->path : browser_.currentPath();
+                                        browser_.addBookmark(targetPath, fe ? fe->label : "");
+                                        xr_.triggerHaptic(0, 0.060f, 0.0f, 0.8f);
+                                        xr_.triggerHaptic(1, 0.060f, 0.0f, 0.8f);
+                                        actionMenu_.visible = false;
+                                    } else if (opt == "Remove Bookmark" || opt == "Remove from Bookmarks") {
+                                        const std::string targetPath = (fe && !fe->isBack) ? fe->path : browser_.currentPath();
+                                        browser_.removeBookmark(targetPath);
+                                        xr_.triggerHaptic(0, 0.050f, 0.0f, 0.7f);
+                                        xr_.triggerHaptic(1, 0.050f, 0.0f, 0.7f);
+                                        actionMenu_.visible = false;
+                                    } else if (opt == "Move to Vault") {
                                         std::string newPath;
                                         if (browser_.moveFocusedToVault(newPath)) {
                                             xr_.triggerHaptic(0, 0.050f, 0.0f, 0.7f);
@@ -1507,28 +1842,119 @@ int App::run() {
                             }
                             interacted = true;
                         }
+                    } else if (actionMenu_.page == 4) {
+                        // SMB Share Editor Modal
+                        const int dy = navStep(in.thumbstickY, nowT);
+                        const int maxOpt = static_cast<int>(actionMenu_.options.size()) - 1;
+                        if (dy != 0) {
+                            actionMenu_.selectedOption += dy;
+                            if (actionMenu_.selectedOption < 0) actionMenu_.selectedOption = 0;
+                            if (actionMenu_.selectedOption > maxOpt) actionMenu_.selectedOption = maxOpt;
+                        }
+                        const int hov = renderer_.actionMenuBtnHovered();
+                        if (hov >= 0) actionMenu_.selectedOption = hov;
+
+                        if (in.select || in.togglePlay) {
+                            int chosen = (hov >= 0) ? hov : actionMenu_.selectedOption;
+                            if (chosen >= 0) {
+                                xr_.triggerHaptic(0, 0.025f, 0.0f, 0.5f);
+                                xr_.triggerHaptic(1, 0.025f, 0.0f, 0.5f);
+
+                                if (chosen == 0) {
+                                    smbModal_.editingField = SmbModalState::Field::Host;
+                                    VrKeyboard::instance().show("SMB Server IP / Hostname", smbModal_.host, false);
+                                } else if (chosen == 1) {
+                                    smbModal_.editingField = SmbModalState::Field::Share;
+                                    VrKeyboard::instance().show("SMB Share Name (empty for all)", smbModal_.share, false);
+                                } else if (chosen == 2) {
+                                    smbModal_.anon = !smbModal_.anon;
+                                    updateSmbModalMenu();
+                                } else if (chosen == 3) {
+                                    smbModal_.editingField = SmbModalState::Field::User;
+                                    VrKeyboard::instance().show("SMB Username", smbModal_.user, false);
+                                } else if (chosen == 4) {
+                                    smbModal_.editingField = SmbModalState::Field::Pass;
+                                    VrKeyboard::instance().show("SMB Password", smbModal_.pass, true);
+                                } else if (chosen == 5) {
+                                    smbModal_.editingField = SmbModalState::Field::Workgroup;
+                                    VrKeyboard::instance().show("SMB Workgroup / Domain", smbModal_.workgroup, false);
+                                } else if (chosen == 6) {
+                                    smbModal_.editingField = SmbModalState::Field::Label;
+                                    VrKeyboard::instance().show("SMB Nickname", smbModal_.label, false);
+                                } else if (chosen == 7) {
+                                    // Save SMB Share
+                                    saveSmbModal();
+                                } else if (chosen == 8) {
+                                    if (smbModal_.isNew) {
+                                        // Cancel
+                                        actionMenu_.visible = false;
+                                        smbModal_.active = false;
+                                    } else {
+                                        // Delete Share
+                                        deleteSmbModal();
+                                    }
+                                } else if (chosen == 9) {
+                                    // Cancel
+                                    actionMenu_.visible = false;
+                                    smbModal_.active = false;
+                                }
+                            }
+                            interacted = true;
+                        }
                     }
                 }
             } else if (actionBtnPressed && browser_.isOpen() && !downloadsWindow_ &&
-                       !settings_.isOpen() && pendingDl_.empty() && !browser_.onNetwork()) {
+                       !settings_.isOpen() && pendingDl_.empty()) {
                 openActionMenu();
                 interacted = true;
             } else if (browser_.isOpen() && !browser_.isScanning() && !downloadsWindow_ &&
                        !settings_.isOpen() && pendingDl_.empty()) {
-                // 2D grid thumbstick navigation: Y steps rows (3 cards), X steps columns (1 card)
+                // 2D grid thumbstick navigation: row steps depend on columns per row
+                const int cols = (renderer_.browserViewMode() == VulkanRenderer::BrowserViewMode::MiniCards) ? 4 :
+                                 (renderer_.browserViewMode() == VulkanRenderer::BrowserViewMode::CompactList) ? 1 : 3;
                 const int dy = navStep(in.thumbstickY, nowT);
                 const int dx = navStepX(in.thumbstickX, nowT);
                 if (dy != 0 || dx != 0) {
-                    const int delta = dy * 3 + dx;
+                    const int delta = dy * cols + dx;
                     browser_.move(delta);
                     renderer_.scrollBrowser(0);
                 }
 
-                // Check header pagination buttons [<] and [>]
+                // Check header pagination & action buttons
                 const int pbHover = renderer_.browserPageBtnHovered();
                 if ((in.togglePlay || in.select) && pbHover >= 0 && sbHover < 0) {
-                    renderer_.scrollBrowser(pbHover == 0 ? -2 : 2);
-                    browser_.setSelected(renderer_.browserFirst());
+                    const int pageStep = (renderer_.browserViewMode() == VulkanRenderer::BrowserViewMode::BigCards) ? 2 :
+                                         (renderer_.browserViewMode() == VulkanRenderer::BrowserViewMode::MiniCards ? 3 : 8);
+                    if (pbHover == 0) {
+                        renderer_.scrollBrowser(-pageStep);
+                        browser_.setSelected(renderer_.browserFirst());
+                    } else if (pbHover == 1) {
+                        renderer_.scrollBrowser(pageStep);
+                        browser_.setSelected(renderer_.browserFirst());
+                    } else if (pbHover == 2) {
+                        // Cycle View Mode: BigCards (0) -> MiniCards (1) -> CompactList (2)
+                        int curMode = settings_.browserViewMode();
+                        curMode = (curMode + 1) % 3;
+                        settings_.setBrowserViewMode(curMode);
+                        settings_.saveConfig();
+                        renderer_.setBrowserViewMode(static_cast<VulkanRenderer::BrowserViewMode>(curMode));
+                        renderer_.scrollBrowser(0);
+                        xr_.triggerHaptic(1, 0.025f, 0.0f, 0.5f);
+                    } else if (pbHover == 3) {
+                        const std::string cur = browser_.currentPath();
+                        if (cur != "bookmarks://") {
+                            if (browser_.isBookmarked(cur)) {
+                                browser_.removeBookmark(cur);
+                                renderer_.setBrowserQuickPath(false);
+                                xr_.triggerHaptic(1, 0.040f, 0.0f, 0.5f);
+                            } else {
+                                browser_.addBookmark(cur);
+                                renderer_.setBrowserQuickPath(true);
+                                xr_.triggerHaptic(1, 0.040f, 0.0f, 0.7f);
+                            }
+                        }
+                    }
+                    interacted = true;
                 } else if (sbHover < 0) {
                     const bool stickActive = (std::fabs(in.thumbstickY) > 0.25f || std::fabs(in.thumbstickX) > 0.25f);
                     const int hovered = renderer_.browserHovered();
@@ -1540,8 +1966,10 @@ int App::run() {
                     if ((in.togglePlay || in.select) &&
                         renderer_.pointerButton() < 0 && hovered >= 0) {
                         std::string playPath;
-                        if (browser_.activate(playPath) == Browser::Result::Play &&
-                            !playPath.empty()) {
+                        Browser::Result res = browser_.activate(playPath);
+                        if (res == Browser::Result::AddSmbShare) {
+                            openSmbModal(true);
+                        } else if (res == Browser::Result::Play && !playPath.empty()) {
 #ifdef PIXELVR_HAVE_MEDIA
                             loadMedia(playPath);
 #endif
@@ -1550,8 +1978,10 @@ int App::run() {
                     } else if ((in.togglePlay || in.select) &&
                                renderer_.pointerButton() < 0 && stickActive) {
                         std::string playPath;
-                        if (browser_.activate(playPath) == Browser::Result::Play &&
-                            !playPath.empty()) {
+                        Browser::Result res = browser_.activate(playPath);
+                        if (res == Browser::Result::AddSmbShare) {
+                            openSmbModal(true);
+                        } else if (res == Browser::Result::Play && !playPath.empty()) {
 #ifdef PIXELVR_HAVE_MEDIA
                             loadMedia(playPath);
 #endif
@@ -1729,8 +2159,19 @@ int App::run() {
                             renderer_.setSpherePitch(0.0f);
                             renderer_.setSphereZoom(1.0f);
                         }
+                    } else if (cb == VulkanRenderer::CtrlButton::HideHud) {
+                        hudDismissed_ = true;
+                        lastControllerActivity_ = nowT - std::chrono::seconds(10);
+                        renderer_.setControlBar(false);
                     }
 #endif
+                    interacted = true;
+                }
+                // Click outside the control dock in empty space immediately hides the HUD
+                if (in.select && btn < 0 && !renderer_.pointerOnTimeline() && !renderer_.pointerOnTimeToggle()) {
+                    hudDismissed_ = true;
+                    lastControllerActivity_ = nowT - std::chrono::seconds(10);
+                    renderer_.setControlBar(false);
                     interacted = true;
                 }
                 if (in.select && renderer_.pointerOnTimeToggle()) {

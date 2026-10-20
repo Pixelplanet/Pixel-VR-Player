@@ -1,6 +1,7 @@
 #include "xr/xr_context.hpp"
 
 #include "xr/xr_result.hpp"
+#include "xr/vr_keyboard.hpp"
 #include "util/logging.hpp"
 
 #include <algorithm>
@@ -637,6 +638,22 @@ void XrContext::syncActions() {
         return;
     }
 
+    if (!sessionFocused()) {
+        // Yield controller input and clear all held inputs when the session does not have focus (e.g. Steam dashboard).
+        input_.selectHeld = false;
+        input_.thumbstickX = 0.0f;
+        input_.thumbstickY = 0.0f;
+        input_.thumbstickLX = 0.0f;
+        input_.thumbstickLY = 0.0f;
+        input_.thumbstickRX = 0.0f;
+        input_.thumbstickRY = 0.0f;
+        for (int h = 0; h < 2; ++h) {
+            input_.gripValue[h] = 0.0f;
+            input_.gripFullPressHeld[h] = false;
+        }
+        return;
+    }
+
     XrActiveActionSet active{actionSet_, XR_NULL_PATH};
     XrActionsSyncInfo sync{XR_TYPE_ACTIONS_SYNC_INFO};
     sync.countActiveActionSets = 1;
@@ -908,7 +925,8 @@ bool XrContext::renderFrame(const RenderViewFn& renderView) {
     // Locate each controller's aim pose (for the pointer rays and models).
     for (int h = 0; h < 2; ++h) {
         input_.controllers[h].active = false;
-        if (aimSpaces_[h] == XR_NULL_HANDLE) {
+        const bool canTrack = sessionFocused() || VrKeyboard::instance().isOpen();
+        if (!canTrack || aimSpaces_[h] == XR_NULL_HANDLE) {
             continue;
         }
         XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
@@ -936,7 +954,8 @@ bool XrContext::renderFrame(const RenderViewFn& renderView) {
     // the model is authored around the grip, not the forward-pointing aim).
     for (int h = 0; h < 2; ++h) {
         input_.controllers[h].gripActive = false;
-        if (gripSpaces_[h] == XR_NULL_HANDLE) {
+        const bool canTrack = sessionFocused() || VrKeyboard::instance().isOpen();
+        if (!canTrack || gripSpaces_[h] == XR_NULL_HANDLE) {
             continue;
         }
         XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};

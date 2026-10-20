@@ -7,19 +7,71 @@
 
 ---
 
-## Active backlog (2026-10-14)
+## Active backlog (2026-10-19 — Completed)
 
-Carried over:
+- [x] **1. Fix Virtual Keyboard Laser Pointer Focus & Tracking**
+  - **Symptom:** Virtual keyboard opened, but laser pointer disappeared or wasn't focused on the keyboard; user had to squeeze/press the controller grip fully to activate it.
+  - **Root Cause:**
+    - SteamVR's `vrcompositor` switches system panel interaction mode to Gamepad (mode 0, hiding `system.pointer`) on session focus loss unless an interactive overlay requiring laser mouse is currently visible (`bOverlaysPresentThatForceLaserMouseOn`).
+    - `inputOverlay_` was created in `VrKeyboard::init()` but was **never shown** (`ShowOverlay` was never called, had no texture, dimensions, or transform).
+    - SteamVR's virtual keyboard overlay `valve.steam.gamepadui.keyboard` is spawned asynchronously and lacks `MakeOverlaysInteractiveIfVisible` by default.
+  - **Resolution:**
+    - Fully configured `inputOverlay_` in `VrKeyboard::show()`: set width (1.0m), HMD-relative transform (1.1m in front, tilted), 1x1 transparent raw pixel texture (`SetOverlayRaw`), and docked keyboard position (`SetKeyboardPositionForOverlay`).
+    - Called `ov->ShowOverlay(inputOverlay_)` before calling `ShowKeyboardForOverlay`, ensuring `vrcompositor`'s overlay scan sets `m_bOverlaysPresentThatForceLaserMouseOn = 1`.
+    - Added dynamic polling in `VrKeyboard::poll()` to detect and configure `MakeOverlaysInteractiveIfVisible` and `VROverlayInputMethod_Mouse` on `valve.steam.gamepadui.keyboard` as soon as it appears.
+    - Added proper overlay cleanup (`HideOverlay(inputOverlay_)`) in `hide()`, `KeyboardDone`, and `KeyboardClosed`.
+
+- [x] **2. Strict IPv4 Validation & Live Sanitization**
+  - **Symptom:** Host field accepted invalid characters, spaces, and did not strip leading zeros.
+  - **Resolution:**
+    - Created `src/util/ipv4.hpp` with `sanitizeIpv4()` and `isValidIpv4()`.
+    - Live typing sanitization: automatically strips non-digits/dots, discards duplicate dots, clamps octets to 255, drops leading zeros in each octet (e.g. `001` -> `1`, `010` -> `10`, `00` -> `0`), limits to 4 octets, and preserves trailing dots while typing.
+    - Added automated unit test suite `tests/test_ipv4.cpp` and verified all test cases pass on the device.
+    - Verified strict `isValidIpv4()` validation before saving an SMB share in `saveSmbModal()`.
+
+- [x] **3. Fix `???` Glyphs (Unicode Star Elimination)**
+  - **Symptom:** Sidebar and header button displayed `???` instead of the star icon.
+  - **Root Cause:** FreeType SDF text atlas was initialized only for ASCII codepoints 32..127. UTF-8 multi-byte sequence `★` (`\xe2\x98\x85`) produced 3 replacement `?` characters.
+  - **Resolution:** Replaced all UTF-8 star glyphs with clean ASCII strings: `"Bookmarks"`, `"[ Bookmarked ]"`, and `"[ + Bookmark ]"`. Adjusted header breadcrumb max width to `0.46f` to prevent collision with the header button.
+
+- [x] **4. Rename Quick Path to Bookmarks & Implement Multi-Bookmark Overview (`bookmarks://`)**
+  - **Requirement:** Rename Quick Path to Bookmarks, and have the Bookmarks sidebar tab open an overview showing all bookmarked folders and files in regular browser views.
+  - **Resolution:**
+    - Added `Bookmark` struct and multi-bookmark storage in `Browser` with persistent JSON serialization to `~/.config/pixelvr/bookmarks.json`.
+    - Implemented `bookmarks://` virtual directory navigation displaying all bookmarked paths with full cards (BigCards, MiniCards) and CompactList support, thumbnails, and direct activation.
+    - Sidebar subtab 4 navigates to `bookmarks://` with proper active tab highlighting.
+    - Header button toggles bookmark for the current open directory (`[ + Bookmark ]` / `[ Bookmarked ]`).
+    - Action Menu (Y button) provides `"Add to Bookmarks"` / `"Remove from Bookmarks"` / `"Go to Bookmarks"`, and in `bookmarks://` provides `"Open Bookmark"` / `"Remove Bookmark"`.
+    - Updated Settings Menu shortcut label to `"Bookmarks Shortcut"`.
+
+- [x] **5. Seamless 1-Click Update System & Streamlined Distribution**
+  - **Requirement:** Provide easy, friction-free updating so users do not need to memorize terminal commands or worry about losing their settings.
+  - **Resolution:**
+    - Added standalone local updater `tools/update.sh` and `--update` flag to `tools/install.sh`.
+    - Added KDE Plasma `Update Pixel VR Player.desktop` desktop shortcut deployed automatically to `~/Desktop/`.
+    - Added remote Wi-Fi 1-click updaters for PC users (`tools/update-from-pc.bat` for Windows and `tools/update-from-pc.sh` for macOS/Linux).
+    - Updated `tools/package-release.sh` to package updater scripts in the release tarball.
+    - Updated `README.md` with comprehensive update instructions across all platforms.
+
+
+---
+
+## Carried over & Completed
+
 - [ ] A. Full-pitch recenter (usable lying down) — reorient screen + controls + 360/180 to full head orientation, not just horizon yaw.
 - [ ] B. Real controller models (glTF) rendered with depth.
 - [ ] C. Dynamic controller button labels from the user's bindings.
 
-New (2026-10-14):
-- [x] D. Flat SBS/TB: detect + a working flat-stereo render mode (split per eye).
-- [x] E. Settings split into sections.
-- [x] F. Settings: pick video stream, audio stream, and a default audio language.
-- [ ] G. Downloads view: active downloads + speed + ETA; keep running in background.
-- [x] H. Sharper menu text (SDF).
+Completed (2026-10-18):
+- [x] I. Laser auto-release when pressing Steam button (unfocused session gates controller pointer).
+- [x] J. Native SteamVR / SteamOS Virtual Keyboard integration (OpenVR GamepadTextInput via dlopen).
+- [x] K. Protected SMB credentials manager: hardware-keyed AES-GCM encryption, strict permissions, full CRUD.
+- [x] L. Settings > Network & SMB Shares: manual IP/hostname input, authentication settings, auto-listed in Network browser.
+- [x] M. UI Follow Mode: Mode 0 (Rock-solid World Lock default, zero drift/tilt) and Mode 1 (Smooth Follow).
+- [x] N. Player UI dismissal: `[ ✕ Hide ]` button, empty space click-outside dismissal, B/Y toggle, and micro-tremor filtering (>0.06m threshold).
+- [x] O. Quick Path Whirligig-style bookmarking header button + R3 controller shortcut button.
+
+
 
 ---
 

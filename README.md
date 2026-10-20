@@ -17,7 +17,9 @@ A native VR video player for the **Valve Steam Frame**, playing flat 2D, 180°, 
 > NV12) with zero-copy dma-buf import; flat / 180° / 360° projection and mono /
 > SBS (including half-SBS) / TB stereo, auto-detected from the filename; spatial
 > audio with a master clock. In-headset UI: file browser (with file type and
-> size), transport bar, settings menu, downloads manager, and an encrypted hidden vault. Native Valve
+> size), transport bar, settings menu, downloads manager, bookmarks overview,
+> protected SMB network share manager with virtual keyboard laser auto-focus,
+> and an encrypted hidden vault. Native Valve
 > Steam Frame controller support (`XR_VALVE_frame_controller_interaction`) using
 > the runtime's own render model, with per-button animation on the model and
 > press-to-bind remapping.
@@ -95,6 +97,53 @@ Requirements: the SteamVR OpenXR runtime (SteamOS), Vulkan, and FFmpeg with the
 V4L2 M2M decoders. For zero-copy dma-buf decoding, build the patched FFmpeg into
 `~/ffbuild` — `run.sh` picks it up automatically when present, otherwise it falls
 back to the system FFmpeg with CPU colour conversion.
+
+
+## Updating
+
+Updating Pixel VR Player is seamless, fast, and 100% non-destructive.
+
+> [!NOTE]
+> **Your data is always preserved!**  
+> All user preferences (`~/.config/pixelvr/config.json`), saved SMB network shares and credentials (`~/.config/pixelvr/smb_shares.json`), quick bookmarks (`~/.config/pixelvr/bookmarks.json`), cached video thumbnails (`~/.cache/pixelvr`), and encrypted media in the Discreet Vault (`~/.pixelvr_vault`) are stored outside the application folder and remain completely untouched across updates.
+
+Choose your preferred update method:
+
+### Method 1: 1-Click Desktop Update (Easiest on Headset)
+
+No terminal or typing required:
+1. Switch your Steam Frame to **Desktop Mode** (Power menu in SteamVR or SteamOS).
+2. Double-click the **`Update Pixel VR Player`** icon on your Desktop.
+3. A popup will notify you that the update has started. The updater verifies SHA-256 checksums and updates the app in-place.
+4. When finished, a completion notification will appear. Switch back to Gaming Mode and launch the player!
+
+*(Alternatively, open Dolphin file manager, navigate to `~/PixelVRPlayer`, and double-click `update.sh`)*.
+
+### Method 2: 1-Click Update from your PC over Wi-Fi
+
+Update your headset remotely over your local network:
+- **Windows:** Double-click [`tools/update-from-pc.bat`](tools/update-from-pc.bat), enter your Steam Frame's IP address, and press Enter.
+- **macOS / Linux:** Run `./tools/update-from-pc.sh <headset-ip>`.
+
+### Method 3: One Command in Headset Terminal (Konsole / SSH)
+
+Open **Konsole** on the headset or connect via SSH, then run:
+
+```bash
+~/PixelVRPlayer/update.sh
+```
+
+Or re-run the web installer command:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/Pixelplanet/Pixel-VR-Player/main/tools/install.sh | sh
+```
+
+### Method 4: USB Drive / MicroSD Card (Offline)
+
+1. Download `pixelvr-linux-arm64.tar.gz` from the [Releases](https://github.com/Pixelplanet/Pixel-VR-Player/releases) page to a USB flash drive or MicroSD card.
+2. Plug it into your Steam Frame and open it in Desktop Mode.
+3. Double-click **`Install Pixel VR Player.desktop`** (or run `./install.sh --update` from the unpacked folder).
 
 
 ## Uninstallation

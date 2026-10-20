@@ -3,6 +3,7 @@
 *.py text eol=lf
 *.yml text eol=lf
 *.desktop text eol=lf
+*.bat text eol=crlf
 *.spv binary
 *.png binary
 *.jpg binary

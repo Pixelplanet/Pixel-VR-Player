@@ -29,6 +29,7 @@ VERSION=""
 DO_STEAM=1
 RESTART_STEAM=0
 UNINSTALL=0
+DO_UPDATE=0
 FORCE=0
 
 if [ -t 1 ]; then
@@ -57,6 +58,7 @@ Usage:
 Options:
   --dir DIR           install directory (default: ~/PixelVRPlayer)
   --version vX.Y.Z    release to install (default: the latest release)
+  --update            force fetching the latest release from GitHub
   --no-steam          do not add the Non-Steam Game shortcut
   --restart-steam     close Steam before registering, then start it again
   --uninstall         remove the app and its Steam shortcut
@@ -82,6 +84,7 @@ while [ $# -gt 0 ]; do
             [ $# -ge 2 ] || die "--version needs a value"
             VERSION="$2"; shift ;;
         --version=*) VERSION="${1#--version=}" ;;
+        --update) DO_UPDATE=1 ;;
         --no-steam) DO_STEAM=0 ;;
         --restart-steam) RESTART_STEAM=1 ;;
         --uninstall) UNINSTALL=1 ;;
@@ -430,6 +433,7 @@ if [ "$UNINSTALL" -eq 1 ]; then
         fi
     fi
     rm -rf "$INSTALL_DIR"
+    rm -f "$HOME/Desktop/Update Pixel VR Player.desktop"
     ok "removed $INSTALL_DIR"
     printf '\nSettings (%s/.config/pixelvr) and cached thumbnails were kept.\n' "$HOME"
     printf 'Delete them too with: rm -rf ~/.config/pixelvr ~/.cache/pixelvr\n'
@@ -472,7 +476,7 @@ tmp=""
 cleanup() { [ -z "$tmp" ] || rm -rf "$tmp"; }
 trap cleanup EXIT INT TERM
 
-if [ -n "$script_dir" ] && [ -f "$script_dir/pixelvr" ] && [ -d "$script_dir/shaders" ]; then
+if [ "$DO_UPDATE" -eq 0 ] && [ -n "$script_dir" ] && [ -f "$script_dir/pixelvr" ] && [ -d "$script_dir/shaders" ]; then
     info "Installing from $script_dir"
     srcdir="$script_dir"
     if [ -f "$script_dir/VERSION" ]; then
@@ -543,6 +547,38 @@ elif [ -n "$script_dir" ] && [ -f "$script_dir/install.sh" ]; then
     chmod 0755 "$INSTALL_DIR/install.sh"
     INSTALLED_SCRIPT=1
 fi
+# Copy updater script
+if [ -f "$srcdir/update.sh" ]; then
+    cp "$srcdir/update.sh" "$INSTALL_DIR/update.sh"
+    chmod 0755 "$INSTALL_DIR/update.sh"
+elif [ -n "$script_dir" ] && [ -f "$script_dir/update.sh" ]; then
+    cp "$script_dir/update.sh" "$INSTALL_DIR/update.sh"
+    chmod 0755 "$INSTALL_DIR/update.sh"
+elif [ -f "tools/update.sh" ]; then
+    cp "tools/update.sh" "$INSTALL_DIR/update.sh"
+    chmod 0755 "$INSTALL_DIR/update.sh"
+fi
+
+# Copy Desktop 1-click update entry
+DESKTOP_ENTRY="Update Pixel VR Player.desktop"
+if [ -f "$srcdir/$DESKTOP_ENTRY" ]; then
+    cp "$srcdir/$DESKTOP_ENTRY" "$INSTALL_DIR/$DESKTOP_ENTRY"
+    chmod 0755 "$INSTALL_DIR/$DESKTOP_ENTRY"
+elif [ -n "$script_dir" ] && [ -f "$script_dir/$DESKTOP_ENTRY" ]; then
+    cp "$script_dir/$DESKTOP_ENTRY" "$INSTALL_DIR/$DESKTOP_ENTRY"
+    chmod 0755 "$INSTALL_DIR/$DESKTOP_ENTRY"
+elif [ -f "tools/$DESKTOP_ENTRY" ]; then
+    cp "tools/$DESKTOP_ENTRY" "$INSTALL_DIR/$DESKTOP_ENTRY"
+    chmod 0755 "$INSTALL_DIR/$DESKTOP_ENTRY"
+fi
+
+# Install 1-click update shortcut to Desktop if Desktop folder exists
+if [ -d "$HOME/Desktop" ] && [ -f "$INSTALL_DIR/$DESKTOP_ENTRY" ]; then
+    cp "$INSTALL_DIR/$DESKTOP_ENTRY" "$HOME/Desktop/$DESKTOP_ENTRY"
+    chmod 0755 "$HOME/Desktop/$DESKTOP_ENTRY"
+    ok "Installed 1-click update shortcut to ~/Desktop/$DESKTOP_ENTRY"
+fi
+
 if [ -f "$srcdir/VERSION" ]; then
     cp "$srcdir/VERSION" "$INSTALL_DIR/VERSION"
 elif [ -n "$VERSION" ]; then
@@ -599,7 +635,7 @@ printf '\n  Launch now  : %s/run.sh\n' "$INSTALL_DIR"
 printf '  From Steam  : Library > Non-Steam > %s\n' "$APP_NAME"
 printf '  Play a clip : %s/run.sh /path/to/clip.mp4\n' "$INSTALL_DIR"
 printf '  Logs        : ~/pixelvr-run.log\n'
-printf '  Update      : run this script again (settings and cache are kept)\n'
+printf '  1-Click Upd : %s/update.sh (or "Update Pixel VR Player" icon on Desktop)\n' "$INSTALL_DIR"
 if [ "$INSTALLED_SCRIPT" -eq 1 ]; then
     printf '  Remove      : %s/install.sh --uninstall\n\n' "$INSTALL_DIR"
 else

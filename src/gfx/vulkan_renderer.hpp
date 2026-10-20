@@ -124,6 +124,9 @@ public:
         std::string detail;
         std::string tag;
         std::string durationTag;
+        std::string sizeTag;
+        std::string resolutionTag;
+        std::string codecTag;
         std::string previewPath;
         bool isDir = false;
         bool isVideo = false;
@@ -162,6 +165,44 @@ public:
         uiAccentColorIdx_ = accentColorIdx;
         uiDistance_ = uiDistance;
     }
+
+    enum class BrowserViewMode : int {
+        BigCards = 0,    // 3x2, 6 per page (Large cards with full 16:9 thumbnail)
+        MiniCards = 1,   // 4x3, 12 per page (Compact cards with 16:9 thumbnail)
+        CompactList = 2  // 1x8, 8 per page (Single-column detailed configurable list view)
+    };
+    void setBrowserViewMode(BrowserViewMode mode) { browserViewMode_ = mode; }
+    BrowserViewMode browserViewMode() const { return browserViewMode_; }
+    void setBrowserQuickPath(bool isCurrentQuickPath) { browserIsQuickPath_ = isCurrentQuickPath; }
+    void setBrowserBookmarked(bool isCurrentBookmarked) { browserIsQuickPath_ = isCurrentBookmarked; }
+    bool browserIsQuickPath() const { return browserIsQuickPath_; }
+    bool browserIsBookmarked() const { return browserIsQuickPath_; }
+    void setListColumnVisibility(bool showFormat, bool showRes, bool showSize, bool showDuration) {
+        listShowFormat_ = showFormat;
+        listShowRes_ = showRes;
+        listShowSize_ = showSize;
+        listShowDuration_ = showDuration;
+    }
+
+    struct KeyboardModalData {
+        bool visible = false;
+        std::string prompt;
+        std::string text;
+        bool isPassword = false;
+    };
+    void setKeyboardModal(bool visible, const std::string& prompt,
+                          const std::string& text, bool isPassword = false) {
+        keyboardModal_.visible = visible;
+        keyboardModal_.prompt = prompt;
+        keyboardModal_.text = text;
+        keyboardModal_.isPassword = isPassword;
+    }
+    const KeyboardModalData& keyboardModal() const { return keyboardModal_; }
+
+    void setUiFollowMode(int mode) { uiFollowMode_ = mode; }
+    int uiFollowMode() const { return uiFollowMode_; }
+
+    bool pointerActive() const { return pointerActive_; }
 
     // Downloads overlay: modern glassmorphic window with job cards
     void setDownloads(bool visible, const std::string& title,
@@ -276,9 +317,11 @@ public:
         FormatToggle = 8,
         AudioToggle = 9,
         ScreenToggle = 10,
-        Recenter = 11   // recenter screen/view from HUD
+        Recenter = 11,  // recenter screen/view from HUD
+        HideHud = 12    // immediately hide player controls
     };
     void setControlBar(bool visible) { controlBarVisible_ = visible; }
+    bool controlBarVisible() const { return controlBarVisible_; }
     void setHudLabels(const std::string& format, const std::string& audio,
                       const std::string& screen, bool formatEnabled = true,
                       bool audioEnabled = true) {
@@ -453,9 +496,17 @@ private:
         std::string path;
         bool ready = false;
     };
-    CardThumbnail cardThumbs_[6];
+    CardThumbnail cardThumbs_[12];
     VkPipeline thumbPipeline_ = VK_NULL_HANDLE;
     VkDescriptorPool thumbPool_ = VK_NULL_HANDLE;
+    BrowserViewMode browserViewMode_ = BrowserViewMode::BigCards;
+    bool browserIsQuickPath_ = false;
+    KeyboardModalData keyboardModal_{};
+    int uiFollowMode_ = 0; // 0 = World Lock (Default, zero drift/tilt), 1 = Smooth Gaze Follow
+    bool listShowFormat_ = true;
+    bool listShowRes_ = true;
+    bool listShowSize_ = true;
+    bool listShowDuration_ = true;
 
     // Text rendering (FreeType glyph atlas) + file browser overlay.
     FontAtlas fontAtlas_;
