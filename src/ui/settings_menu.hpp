@@ -50,6 +50,8 @@ public:
         ToggleListColRes,
         ToggleListColSize,
         ToggleListColDuration,
+        ToggleHoverHaptics,
+        CycleHoverHapticsStrength,
         BackToUI,
         Close
     };
@@ -137,6 +139,12 @@ public:
     bool listShowSize() const { return listShowSize_; }
     bool listShowDuration() const { return listShowDuration_; }
 
+    bool hoverHapticsEnabled() const { return hoverHapticsEnabled_; }
+    void setHoverHapticsEnabled(bool e) { hoverHapticsEnabled_ = e; saveConfig(); refresh(); }
+    int hoverHapticsStrengthIdx() const { return hoverHapticsStrengthIdx_; }
+    float hoverHapticsStrength() const;
+    const char* hoverHapticsStrengthStr() const;
+
     void onKeyboardSubmit(const std::string& text) { (void)text; }
     void onKeyboardCancel() {}
 
@@ -173,6 +181,8 @@ private:
     bool listShowSize_ = true;
     bool listShowDuration_ = true;
     std::string quickPath_;
+    bool hoverHapticsEnabled_ = true;
+    int hoverHapticsStrengthIdx_ = 1;
 
     int section_ = 0;   // 0=Display, 1=UI, 2=Audio, 3=Controls, 4=Vault; 10..12=sub-lists
     std::vector<std::pair<int, std::string>> videoStreams_;  // (index, label)

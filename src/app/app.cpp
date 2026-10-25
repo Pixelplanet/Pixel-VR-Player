@@ -1733,12 +1733,13 @@ int App::run() {
             const int pH = renderer_.pointerHand();
             const int activeH = (pH >= 0 && pH <= 1) ? pH : 1;
 
-            if ((curBrowserHov != lastBrowserHov && curBrowserHov >= 0) ||
-                (curPageBtnHov != lastPageBtnHov && curPageBtnHov >= 0) ||
-                (curSidebarHov != lastSidebarHov && curSidebarHov >= 0) ||
-                (curSettingsHov != lastSettingsHov && curSettingsHov >= 0) ||
-                (curCtrlBtnHov != lastCtrlBtnHov && curCtrlBtnHov >= 0)) {
-                xr_.triggerHaptic(activeH, 0.008f, 0.0f, 0.15f);
+            if (settings_.hoverHapticsEnabled() &&
+                ((curBrowserHov != lastBrowserHov && curBrowserHov >= 0) ||
+                 (curPageBtnHov != lastPageBtnHov && curPageBtnHov >= 0) ||
+                 (curSidebarHov != lastSidebarHov && curSidebarHov >= 0) ||
+                 (curSettingsHov != lastSettingsHov && curSettingsHov >= 0) ||
+                 (curCtrlBtnHov != lastCtrlBtnHov && curCtrlBtnHov >= 0))) {
+                xr_.triggerHaptic(activeH, 0.008f, 0.0f, settings_.hoverHapticsStrength());
             }
             lastBrowserHov = curBrowserHov;
             lastPageBtnHov = curPageBtnHov;
@@ -2273,6 +2274,15 @@ int App::run() {
                             switchTracks(true);
                         }
 #endif
+                        else if (act == SettingsMenu::Action::ToggleHoverHaptics) {
+                            const int pH = renderer_.pointerHand();
+                            const int activeH = (pH >= 0 && pH <= 1) ? pH : 1;
+                            xr_.triggerHaptic(activeH, 0.020f, 0.0f, settings_.hoverHapticsEnabled() ? settings_.hoverHapticsStrength() : 0.2f);
+                        } else if (act == SettingsMenu::Action::CycleHoverHapticsStrength) {
+                            const int pH = renderer_.pointerHand();
+                            const int activeH = (pH >= 0 && pH <= 1) ? pH : 1;
+                            xr_.triggerHaptic(activeH, 0.025f, 0.0f, settings_.hoverHapticsStrength());
+                        }
                 }
                 if (in.recenter && in.headValid) {
                     renderer_.recenterScreen(in.headPos, in.headForward);

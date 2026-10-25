@@ -56,6 +56,11 @@ const char* kUiDistanceNames[] = {"Near (1.5 m)", "Comfort (1.9 m)",
 const float kUiDistanceValues[] = {1.5f, 1.9f, 2.3f, 2.8f};
 constexpr int kUiDistanceCount = 4;
 
+const char* kHoverHapticsStrengthNames[] = {
+    "Subtle (25%)", "Medium (50%)", "Strong (75%)", "Maximum (100%)"};
+const float kHoverHapticsStrengthValues[] = {0.08f, 0.15f, 0.28f, 0.50f};
+constexpr int kHoverHapticsStrengthCount = 4;
+
 std::string getConfigPath() {
 #ifdef _WIN32
     const char* appData = std::getenv("APPDATA");
@@ -198,9 +203,12 @@ void SettingsMenu::refresh() {
                          Action::ListenRecenter});
         rows_.push_back({"Bookmarks Shortcut", btnLabel(4, bindQuickPathBtn_),
                          Action::ListenQuickPath});
-        rows_.push_back({"Select / Click", "Trigger", Action::None});
-        rows_.push_back({"Controller Models", drawModels_ ? "On" : "Off",
+        rows_.push_back({"Controller Models", drawModels_ ? "ON" : "OFF",
                          Action::ToggleModels});
+        rows_.push_back({"Laser Hover Rumble", hoverHapticsEnabled_ ? "ON" : "OFF",
+                         Action::ToggleHoverHaptics});
+        rows_.push_back({"Rumble Strength", hoverHapticsStrengthStr(),
+                         Action::CycleHoverHapticsStrength, hoverHapticsEnabled_});
     } else if (section_ == 4) {
         title_ = "Settings > Vault & Privacy";
         rows_.push_back({"Auto-Lock on Headset Removal",
@@ -375,6 +383,16 @@ SettingsMenu::Action SettingsMenu::activate() {
             break;
         case Action::CycleBrowserViewMode:
             browserViewMode_ = (browserViewMode_ + 1) % 3;
+            saveConfig();
+            refresh();
+            break;
+        case Action::ToggleHoverHaptics:
+            hoverHapticsEnabled_ = !hoverHapticsEnabled_;
+            saveConfig();
+            refresh();
+            break;
+        case Action::CycleHoverHapticsStrength:
+            hoverHapticsStrengthIdx_ = (hoverHapticsStrengthIdx_ + 1) % kHoverHapticsStrengthCount;
             saveConfig();
             refresh();
             break;
@@ -558,6 +576,14 @@ float SettingsMenu::uiDistance() const {
     return kUiDistanceValues[uiDistanceIdx_ % kUiDistanceCount];
 }
 
+float SettingsMenu::hoverHapticsStrength() const {
+    return kHoverHapticsStrengthValues[hoverHapticsStrengthIdx_ % kHoverHapticsStrengthCount];
+}
+
+const char* SettingsMenu::hoverHapticsStrengthStr() const {
+    return kHoverHapticsStrengthNames[hoverHapticsStrengthIdx_ % kHoverHapticsStrengthCount];
+}
+
 void SettingsMenu::loadConfig() {
     const std::string path = getConfigPath();
     std::ifstream file(path);
@@ -599,6 +625,8 @@ void SettingsMenu::loadConfig() {
         else if (key == "list_show_size") listShowSize_ = (val == "1" || val == "true");
         else if (key == "list_show_dur") listShowDuration_ = (val == "1" || val == "true");
         else if (key == "quick_path") quickPath_ = val;
+        else if (key == "hover_haptics") hoverHapticsEnabled_ = (val == "1" || val == "true");
+        else if (key == "hover_haptics_strength") hoverHapticsStrengthIdx_ = std::clamp(std::stoi(val), 0, kHoverHapticsStrengthCount - 1);
     }
     PIXELVR_LOG_INFO("Loaded settings from %s", path.c_str());
 }
@@ -635,6 +663,8 @@ void SettingsMenu::saveConfig() const {
             file << "list_show_res=" << (listShowRes_ ? 1 : 0) << "\n";
             file << "list_show_size=" << (listShowSize_ ? 1 : 0) << "\n";
             file << "list_show_dur=" << (listShowDuration_ ? 1 : 0) << "\n";
+            file << "hover_haptics=" << (hoverHapticsEnabled_ ? 1 : 0) << "\n";
+            file << "hover_haptics_strength=" << hoverHapticsStrengthIdx_ << "\n";
             if (!quickPath_.empty()) {
                 file << "quick_path=" << quickPath_ << "\n";
             }
