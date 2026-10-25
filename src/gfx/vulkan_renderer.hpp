@@ -156,6 +156,7 @@ public:
     void setBrowserFirst(int first) { browserFirst_ = first < 0 ? 0 : first; }
     int browserSidebarHovered() const { return browserSidebarHovered_; }
     int browserPageBtnHovered() const { return browserPageBtnHovered_; }
+    int pointerHand() const { return pointerHand_; }
     void setBrowserQuickFilter(int f) { browserQuickFilter_ = f; }
     int browserQuickFilter() const { return browserQuickFilter_; }
     void setDownloadsFilter(int f) { downloadsFilter_ = f; }

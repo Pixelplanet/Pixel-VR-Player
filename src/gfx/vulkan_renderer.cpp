@@ -1498,9 +1498,13 @@ void VulkanRenderer::updatePointer() {
 
             // Top Content Area: hx in [-0.49, +0.90]
             if (browserVisible_) {
-                // Top header buttons: [<] at cx=0.52, [>] at cx=0.74, [View] at cx=0.35, [QuickPath] at cx=0.14, cy=0.455
+                // Top header buttons: [<] at cx=0.52, [>] at cx=0.74, [View] at cx=0.35, [QuickPath] at cx=0.14, [Up] at cx=-0.43, cy=0.455
                 if (std::fabs(hyy - 0.455f) <= 0.036f) {
-                    if (std::fabs(hx - 0.52f) <= 0.040f) {
+                    const bool canGoUp = (!browserItems_.empty() && browserItems_[0].isBack);
+                    if (canGoUp && std::fabs(hx - (-0.43f)) <= 0.042f) {
+                        browserPageBtnHovered_ = 4; // Up to parent folder
+                        break;
+                    } else if (std::fabs(hx - 0.52f) <= 0.040f) {
                         browserPageBtnHovered_ = 0;
                         break;
                     } else if (std::fabs(hx - 0.74f) <= 0.040f) {
@@ -2362,6 +2366,43 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         return {visibleStr, startX, cursorX};
     };
 
+    auto formatBreadcrumbs = [](const std::string& path) -> std::string {
+        if (path.empty()) return "Local Storage";
+        if (path.rfind("smb://", 0) == 0) {
+            std::string s = path.substr(6);
+            std::string res = "SMB";
+            std::size_t start = 0;
+            while (start < s.size()) {
+                std::size_t slash = s.find('/', start);
+                std::string part = (slash == std::string::npos) ? s.substr(start) : s.substr(start, slash - start);
+                if (!part.empty()) {
+                    res += " > " + part;
+                }
+                if (slash == std::string::npos) break;
+                start = slash + 1;
+            }
+            return res;
+        }
+        std::string p = path;
+        const std::string home = "/home/steamos";
+        if (p.rfind(home, 0) == 0) {
+            p = "Home" + p.substr(home.size());
+        }
+        std::string res;
+        std::size_t start = 0;
+        while (start < p.size()) {
+            std::size_t slash = p.find('/', start);
+            std::string part = (slash == std::string::npos) ? p.substr(start) : p.substr(start, slash - start);
+            if (!part.empty()) {
+                if (!res.empty()) res += " > ";
+                res += part;
+            }
+            if (slash == std::string::npos) break;
+            start = slash + 1;
+        }
+        return res.empty() ? path : res;
+    };
+
     const bool hubOpen = browserVisible_ || settingsVisible_ ||
                          (downloadsVisible_ && !downloadsModal_);
     const bool modalOpen = downloadsVisible_ && downloadsModal_;
@@ -2817,6 +2858,14 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 drawUiElement(vpPanel, 0.14f, 0.455f, 0.090f, 0.028f,
                               UiShape::RoundedBox, bg, 0.40f, 0.025f, bord);
             }
+            // Header button 4: Dedicated Up button [ ^ Up ]
+            const bool canGoUp = (!browserItems_.empty() && browserItems_[0].isBack);
+            if (canGoUp) {
+                const bool phov = (browserPageBtnHovered_ == 4);
+                drawUiElement(vpPanel, -0.43f, 0.455f, 0.038f, 0.028f,
+                              UiShape::RoundedBox, phov ? tabHovBg : tabNormBg,
+                              0.40f, 0.025f, phov ? tabHovBord : tabNormBord);
+            }
 
             const float normCardBg[4] = {0.035f, 0.048f, 0.078f, 0.90f};
             const float normCardBorder[4] = {0.18f, 0.26f, 0.40f, 0.70f};
@@ -2851,6 +2900,18 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 // Thumbnail box
                 drawUiElement(vpPanel, lay.thumbCx, lay.thumbCy, lay.thumbHalfW, lay.thumbHalfH,
                               UiShape::RoundedBox, thumbBg, 0.05f, 0.018f, thumbBorder);
+
+                // Folder tab visual cue for directory cards
+                if (item.isDir && !item.isBack) {
+                    if (browserViewMode_ == BrowserViewMode::BigCards || browserViewMode_ == BrowserViewMode::MiniCards) {
+                        const float tabHalfW = lay.thumbHalfW * 0.36f;
+                        const float tabHalfH = 0.007f;
+                        const float tabCx = lay.thumbCx - lay.thumbHalfW + tabHalfW + 0.010f;
+                        const float tabCy = lay.thumbCy + lay.thumbHalfH + 0.005f;
+                        drawUiElement(vpPanel, tabCx, tabCy, tabHalfW, tabHalfH,
+                                      UiShape::RoundedBox, thumbBg, 0.40f, 0.020f, thumbBorder);
+                    }
+                }
 
                 const std::string& thumbKey = !item.previewPath.empty() ? item.previewPath : item.path;
                 if (!cardThumbs_[i].ready || cardThumbs_[i].path != thumbKey) {
@@ -2934,6 +2995,27 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 drawUiElement(vpPanel, 0.20f, 0.355f, 0.65f, 0.001f, UiShape::RoundedBox, headerLineCol, 0.0f);
             }
 
+            // Right-edge vertical scrollbar
+            if (total > perPage) {
+                const float trackCx = 0.880f;
+                const float trackCy = -0.040f;
+                const float trackHalfW = 0.0035f;
+                const float trackHalfH = 0.350f;
+                const float trackBg[4] = {0.08f, 0.12f, 0.18f, 0.50f};
+                const float trackBord[4] = {0.16f, 0.24f, 0.34f, 0.60f};
+                drawUiElement(vpPanel, trackCx, trackCy, trackHalfW, trackHalfH,
+                              UiShape::RoundedBox, trackBg, 0.50f, 0.015f, trackBord);
+
+                const float thumbFraction = std::clamp(static_cast<float>(perPage) / static_cast<float>(total), 0.12f, 0.90f);
+                const float thumbHalfH = trackHalfH * thumbFraction;
+                const float scrollProgress = std::clamp(static_cast<float>(first) / static_cast<float>(std::max(1, total - perPage)), 0.0f, 1.0f);
+                const float availableTravel = (trackHalfH - thumbHalfH) * 2.0f;
+                const float thumbCy = (trackCy + trackHalfH - thumbHalfH) - scrollProgress * availableTravel;
+                const float thumbCol[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.85f};
+                drawUiElement(vpPanel, trackCx, thumbCy, trackHalfW * 1.4f, thumbHalfH,
+                              UiShape::RoundedBox, thumbCol, 0.80f);
+            }
+
             // Text pass for Hub rail + Files content
             vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline_);
             vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -2962,8 +3044,16 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             }
 
             // Content header: Breadcrumb + Page switcher
-            std::string bread = browserTitle_.empty() ? "Local Storage" : browserTitle_;
-            drawFit(-0.46f, 0.455f, 0.46f, scHeader * 0.90f, themeTextCol, bread);
+            if (canGoUp) {
+                const bool phov = (browserPageBtnHovered_ == 4);
+                drawFitCentered(-0.43f, 0.455f, 0.070f, scSub * 0.90f,
+                                phov ? themeAccentCol : themeTextCol, "^ Up");
+            }
+            std::string rawBread = browserTitle_.empty() ? "Local Storage" : browserTitle_;
+            std::string bread = formatBreadcrumbs(rawBread);
+            const float breadX = canGoUp ? -0.375f : -0.460f;
+            const float breadMaxW = canGoUp ? 0.460f : 0.540f;
+            drawFit(breadX, 0.455f, breadMaxW, scHeader * 0.90f, themeTextCol, bread);
 
             const int totalPages = std::max(1, (total + perPage - 1) / perPage);
             const int curPage = (first / perPage) + 1;
@@ -3255,10 +3345,61 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                               0.10f, (hov || sel) ? 0.03f : 0.018f,
                               (hov || sel) ? tabActiveBord : cardBord);
 
+                const std::string& fullRow = settingsRows_[static_cast<std::size_t>(i)];
+                std::string label = fullRow;
+                std::string val;
+                const auto sep = fullRow.find(" : ");
+                if (sep != std::string::npos) {
+                    label = fullRow.substr(0, sep);
+                    val = fullRow.substr(sep + 3);
+                }
+
+                const bool isToggleOn = (val == "ON" || val == "Visible");
+                const bool isToggleOff = (val == "OFF" || val == "Hidden");
+                const bool isToggle = isToggleOn || isToggleOff;
+
                 // Consistent value pill inside every settings card
                 drawUiElement(vpPanel, cx, pillY, 0.275f, pillHalfH,
                               UiShape::RoundedBox, en ? tabActiveBg : tabNormBg,
                               0.45f, 0.03f, en ? tabActiveBord : tabNormBord);
+
+                if (isToggle) {
+                    // Graphical toggle switch capsule + sliding round knob
+                    const float swCx = cx + 0.190f;
+                    const float swHalfW = 0.038f;
+                    const float swHalfH = 0.015f;
+                    if (isToggleOn) {
+                        const float capBg[4] = {themeAccentCol[0] * 0.35f, themeAccentCol[1] * 0.35f, themeAccentCol[2] * 0.35f, 0.90f};
+                        drawUiElement(vpPanel, swCx, pillY, swHalfW, swHalfH,
+                                      UiShape::RoundedBox, capBg, 0.95f, 0.025f, themeAccentCol);
+                        drawUiElement(vpPanel, swCx + 0.020f, pillY, 0.012f, 0.012f,
+                                      UiShape::RoundedBox, themeAccentCol, 0.95f);
+                    } else {
+                        const float capBg[4] = {0.06f, 0.09f, 0.14f, 0.85f};
+                        const float capBord[4] = {0.20f, 0.28f, 0.40f, 0.70f};
+                        const float knobCol[4] = {0.45f, 0.55f, 0.65f, 0.95f};
+                        drawUiElement(vpPanel, swCx, pillY, swHalfW, swHalfH,
+                                      UiShape::RoundedBox, capBg, 0.95f, 0.020f, capBord);
+                        drawUiElement(vpPanel, swCx - 0.020f, pillY, 0.012f, 0.012f,
+                                      UiShape::RoundedBox, knobCol, 0.95f);
+                    }
+                } else if (label.find("Color") != std::string::npos || label.find("Theme") != std::string::npos) {
+                    // Color swatches preview for Text Color or Accent Theme
+                    const bool isAccent = (label.find("Accent") != std::string::npos || label.find("Theme") != std::string::npos);
+                    const int activeIdx = isAccent ? uiAccentColorIdx_ : uiTextColorIdx_;
+                    for (int p = 0; p < 5; ++p) {
+                        const float dotX = cx + 0.095f + static_cast<float>(p) * 0.034f;
+                        const float* palCol = isAccent ? kAccentPalettes[p] : kTextPalettes[p];
+                        const bool isCur = (p == activeIdx);
+                        if (isCur) {
+                            const float haloCol[4] = {1.0f, 1.0f, 1.0f, 0.95f};
+                            drawUiElement(vpPanel, dotX, pillY, 0.0125f, 0.0125f,
+                                          UiShape::RoundedBox, haloCol, 0.95f);
+                        }
+                        drawUiElement(vpPanel, dotX, pillY, 0.010f, 0.010f,
+                                      UiShape::RoundedBox, palCol, 0.95f);
+                    }
+                }
             }
 
             // Text pass for Hub rail + Settings cards
@@ -3328,10 +3469,22 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                     val = fullRow.substr(sep + 3);
                 }
 
+                const bool isToggleOn = (val == "ON" || val == "Visible");
+                const bool isToggleOff = (val == "OFF" || val == "Hidden");
+                const bool isToggle = isToggleOn || isToggleOff;
+
                 drawFit(cx - 0.275f, labelY, 0.55f, textSc,
                         en ? themeTextCol : dimCol, label);
-                drawFitCentered(cx, pillY, 0.51f, textSc,
-                                en ? themeTextCol : dimCol, val.empty() ? label : val);
+                if (isToggle) {
+                    drawFit(cx - 0.250f, pillY, 0.36f, textSc,
+                            en ? themeTextCol : dimCol, val);
+                } else if (label.find("Color") != std::string::npos || label.find("Theme") != std::string::npos) {
+                    drawFit(cx - 0.250f, pillY, 0.32f, textSc,
+                            en ? themeTextCol : dimCol, val);
+                } else {
+                    drawFitCentered(cx, pillY, 0.51f, textSc,
+                                    en ? themeTextCol : dimCol, val.empty() ? label : val);
+                }
             }
 
             if (!settingsStatus_.empty()) {

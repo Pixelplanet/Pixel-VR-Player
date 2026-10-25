@@ -63,15 +63,28 @@ ThumbnailCache::~ThumbnailCache() {
     }
 }
 
-void ThumbnailCache::request(const std::string& videoPath) {
+void ThumbnailCache::request(const std::string& videoPath, bool highPriority) {
     if (videoPath.empty() || videoPath[0] != '/') return;
     std::lock_guard<std::mutex> lk(mutex_);
-    if (queuedPaths_.find(videoPath) != queuedPaths_.end() ||
-        cache_.find(videoPath) != cache_.end()) {
+    if (cache_.find(videoPath) != cache_.end()) {
+        return;
+    }
+    if (highPriority) {
+        // If already queued, move it to the front so visible items decode immediately
+        auto it = std::find(queue_.begin(), queue_.end(), videoPath);
+        if (it != queue_.end()) {
+            queue_.erase(it);
+        }
+        queuedPaths_[videoPath] = true;
+        queue_.push_front(videoPath);
+        cv_.notify_one();
+        return;
+    }
+    if (queuedPaths_.find(videoPath) != queuedPaths_.end()) {
         return;
     }
     queuedPaths_[videoPath] = true;
-    queue_.push(videoPath);
+    queue_.push_back(videoPath);
     cv_.notify_one();
 }
 
@@ -236,8 +249,14 @@ bool ThumbnailCache::extractThumbnailAndMeta(const std::string& videoPath,
                             lowerPath.find("vr180") != std::string::npos ||
                             lowerPath.find("180") != std::string::npos ||
                             ar >= 2.6f);
+        const bool isTb = (lowerPath.find("tb") != std::string::npos ||
+                           lowerPath.find("ou") != std::string::npos ||
+                           lowerPath.find("overunder") != std::string::npos ||
+                           lowerPath.find("htab") != std::string::npos);
         if (isSbs && srcW >= 2 * kThumbW) {
             srcW = frame->width / 2;
+        } else if (isTb && srcH >= 2 * kThumbH) {
+            srcH = frame->height / 2;
         }
 
         SwsContext* sws = sws_getContext(
@@ -275,7 +294,8 @@ void ThumbnailCache::workerLoop() {
             cv_.wait(lk, [this] { return stop_.load() || !queue_.empty(); });
             if (stop_.load()) break;
             path = queue_.front();
-            queue_.pop();
+            queue_.pop_front();
+            queuedPaths_.erase(path);
         }
 
         if (path.empty() || path[0] != '/') {

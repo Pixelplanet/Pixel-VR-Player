@@ -31,5 +31,9 @@ void main() {
 
     // Thumbnail pixels are sRGB; convert to linear for the VK_FORMAT_*_SRGB framebuffer
     vec3 linRgb = pow(max(col.rgb, vec3(0.0)), vec3(2.2));
+    // Top scrim (for format badges) and bottom scrim (for duration / title pills)
+    float topScrim = mix(0.68, 1.0, smoothstep(0.0, 0.26, vUV.y));
+    float botScrim = mix(0.58, 1.0, smoothstep(1.0, 0.70, vUV.y));
+    linRgb *= (topScrim * botScrim);
     outColor = vec4(linRgb * pc.color.rgb, col.a * pc.color.a * alpha);
 }

@@ -3,8 +3,8 @@
 #include <atomic>
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <mutex>
-#include <queue>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -26,7 +26,8 @@ public:
     ~ThumbnailCache();
 
     // Requests thumbnail extraction/load and metadata probe for a path (non-blocking).
-    void request(const std::string& videoPath);
+    // If highPriority is true, it is inserted at the front of the queue (e.g. visible page cards).
+    void request(const std::string& videoPath, bool highPriority = false);
 
     // Returns true and copies out the 256x144 RGBA pixels if ready.
     bool get(const std::string& videoPath, std::vector<uint8_t>& outRgba);
@@ -46,7 +47,7 @@ private:
     std::string cacheDir_;
     std::mutex mutex_;
     std::condition_variable cv_;
-    std::queue<std::string> queue_;
+    std::deque<std::string> queue_;
     std::unordered_map<std::string, bool> queuedPaths_;
     std::unordered_map<std::string, std::vector<uint8_t>> cache_;
     std::unordered_map<std::string, MediaMeta> metaCache_;

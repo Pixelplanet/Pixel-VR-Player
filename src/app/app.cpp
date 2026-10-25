@@ -1346,6 +1346,22 @@ int App::run() {
 
             // Publish the browser panel when Files tab is active in the Hub
             if (browser_.isOpen() && !dlWin && !settings_.isOpen()) {
+                // Prioritize visible cards on current page so their thumbnails decode immediately
+                const int visFirst = renderer_.browserFirst();
+                const int visibleSlots = (renderer_.browserViewMode() == VulkanRenderer::BrowserViewMode::BigCards) ? 6 : 12;
+                for (int s = 0; s < visibleSlots; ++s) {
+                    const int idx = visFirst + s;
+                    if (idx >= 0 && idx < static_cast<int>(browser_.entries().size())) {
+                        const auto& e = browser_.entries()[idx];
+                        const std::string thumbTarget = !e.previewPath.empty()
+                            ? e.previewPath
+                            : (e.isVideo ? e.path : "");
+                        if (!thumbTarget.empty() && thumbTarget.rfind("smb://", 0) != 0) {
+                            thumbnailCache_.request(thumbTarget, /*highPriority=*/true);
+                        }
+                    }
+                }
+
                 std::vector<VulkanRenderer::BrowserItem> items;
                 items.reserve(browser_.entries().size());
                 for (const auto& e : browser_.entries()) {
@@ -1702,6 +1718,33 @@ int App::run() {
                 };
                 renderer_.setControllers(build(0), build(1));
             }
+
+            // Spatial haptic feedback on pointer hover transitions
+            static int lastBrowserHov = -1;
+            static int lastPageBtnHov = -1;
+            static int lastSidebarHov = -1;
+            static int lastSettingsHov = -1;
+            static int lastCtrlBtnHov = -1;
+            const int curBrowserHov = renderer_.browserHovered();
+            const int curPageBtnHov = renderer_.browserPageBtnHovered();
+            const int curSidebarHov = renderer_.browserSidebarHovered();
+            const int curSettingsHov = renderer_.settingsHovered();
+            const int curCtrlBtnHov = renderer_.pointerButton();
+            const int pH = renderer_.pointerHand();
+            const int activeH = (pH >= 0 && pH <= 1) ? pH : 1;
+
+            if ((curBrowserHov != lastBrowserHov && curBrowserHov >= 0) ||
+                (curPageBtnHov != lastPageBtnHov && curPageBtnHov >= 0) ||
+                (curSidebarHov != lastSidebarHov && curSidebarHov >= 0) ||
+                (curSettingsHov != lastSettingsHov && curSettingsHov >= 0) ||
+                (curCtrlBtnHov != lastCtrlBtnHov && curCtrlBtnHov >= 0)) {
+                xr_.triggerHaptic(activeH, 0.008f, 0.0f, 0.15f);
+            }
+            lastBrowserHov = curBrowserHov;
+            lastPageBtnHov = curPageBtnHov;
+            lastSidebarHov = curSidebarHov;
+            lastSettingsHov = curSettingsHov;
+            lastCtrlBtnHov = curCtrlBtnHov;
 
 #ifdef PIXELVR_HAVE_FREETYPE
             // Unified Spatial Hub left navigation rail clicks (shared across Files, Downloads, Settings)
@@ -2115,6 +2158,14 @@ int App::run() {
                                 renderer_.setBrowserQuickPath(true);
                                 xr_.triggerHaptic(1, 0.040f, 0.0f, 0.7f);
                             }
+                        }
+                    } else if (pbHover == 4) {
+                        // Dedicated Up button in header: activate parent navigation
+                        if (!browser_.entries().empty() && browser_.entries()[0].isBack) {
+                            browser_.setSelected(0);
+                            std::string playPath;
+                            browser_.activate(playPath);
+                            xr_.triggerHaptic(1, 0.025f, 0.0f, 0.5f);
                         }
                     }
                     interacted = true;
