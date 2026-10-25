@@ -269,9 +269,13 @@ bool XrContext::createSwapchains(int64_t colorFormat, float scaleFactor) {
         // clarity, and reduces moire/specular shimmering during head movement in VR.
         const uint32_t maxW = (view.maxImageRectWidth > 0) ? view.maxImageRectWidth : 4096;
         const uint32_t maxH = (view.maxImageRectHeight > 0) ? view.maxImageRectHeight : 4096;
-        uint32_t targetW = std::clamp(static_cast<uint32_t>(std::round(view.recommendedImageRectWidth * scaleFactor)),
+        // Anchor baseline resolution to physical panel dimensions (2160x2160 per eye),
+        // preventing SteamVR's conservative default (e.g. 1728) from degrading display sharpness.
+        const uint32_t baseW = std::max(view.recommendedImageRectWidth, 2160u);
+        const uint32_t baseH = std::max(view.recommendedImageRectHeight, 2160u);
+        uint32_t targetW = std::clamp(static_cast<uint32_t>(std::round(baseW * scaleFactor)),
                                       256u, maxW);
-        uint32_t targetH = std::clamp(static_cast<uint32_t>(std::round(view.recommendedImageRectHeight * scaleFactor)),
+        uint32_t targetH = std::clamp(static_cast<uint32_t>(std::round(baseH * scaleFactor)),
                                       256u, maxH);
         targetW = (targetW + 1) & ~1u;
         targetH = (targetH + 1) & ~1u;

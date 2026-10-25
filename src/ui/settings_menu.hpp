@@ -196,7 +196,7 @@ private:
     bool hoverHapticsEnabled_ = true;
     int hoverHapticsStrengthIdx_ = 1;
     int ambilightIdx_ = 2;     // 0=Off, 1=Subtle, 2=Medium (default), 3=Strong
-    int resScaleIdx_ = 1;      // 0=1.00x Native, 1=1.25x Balanced (default), 2=1.40x Sharp, 3=1.50x Crisp, 4=1.75x Ultra
+    int resScaleIdx_ = 3;      // 0=1.00x Panel 2160p, 1=1.15x Enhanced, 2=1.25x Balanced, 3=1.40x Ultra 3024p (default), 4=1.50x Extreme
 
     int section_ = 0;   // 0=Display, 1=UI, 2=Audio, 3=Controls, 4=Vault; 10..12=sub-lists
     std::vector<std::pair<int, std::string>> videoStreams_;  // (index, label)

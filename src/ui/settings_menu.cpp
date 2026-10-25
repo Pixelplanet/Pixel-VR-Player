@@ -65,8 +65,14 @@ const char* kAmbilightNames[] = {"Off", "Subtle", "Medium", "Strong"};
 const float kAmbilightValues[] = {0.0f, 0.30f, 0.55f, 0.85f};
 constexpr int kAmbilightCount = 4;
 
-const char* kResScaleNames[] = {"1.00x (Native)", "1.25x (Balanced)", "1.40x (Sharp)", "1.50x (Crisp)", "1.75x (Ultra)"};
-const float kResScaleValues[] = {1.00f, 1.25f, 1.40f, 1.50f, 1.75f};
+const char* kResScaleNames[] = {
+    "1.00x (Panel 2160p)",
+    "1.15x (Enhanced 2484p)",
+    "1.25x (Balanced 2700p)",
+    "1.40x (Ultra 3024p)",
+    "1.50x (Extreme 3240p)"
+};
+const float kResScaleValues[] = {1.00f, 1.15f, 1.25f, 1.40f, 1.50f};
 constexpr int kResScaleCount = 5;
 
 std::string getConfigPath() {

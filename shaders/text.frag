@@ -32,12 +32,12 @@ void main() {
     // Range [-8, +8] font pixels is mapped across [0, 1].
     float distInFontPixels = (d - 0.50196078) * 16.0;
 
-    // Convert distance to screen pixels, adding a subtle stem-darkening bias (+0.14 screen px)
+    // Convert distance to screen pixels, adding a subtle stem-darkening bias (+0.18 screen px)
     // to preserve thin strokes and legibility against high-contrast dark VR backgrounds.
-    float distInScreenPixels = (distInFontPixels / max(fontPixelsPerScreenPixel, 1e-4)) + 0.14;
+    float distInScreenPixels = (distInFontPixels / max(fontPixelsPerScreenPixel, 1e-4)) + 0.18;
 
-    // Smooth Hermite anti-aliasing across 1.4 screen pixels (smooth transition matches VR subpixel PSF)
-    float a = smoothstep(-0.70, 0.70, distInScreenPixels);
+    // Crisp Hermite anti-aliasing across 0.9 screen pixels (tighter edge transition for razor-sharp text in VR)
+    float a = smoothstep(-0.45, 0.45, distInScreenPixels);
     if (a <= 0.002) {
         discard;
     }
