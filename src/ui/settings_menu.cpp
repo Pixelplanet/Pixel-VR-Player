@@ -65,6 +65,10 @@ const char* kAmbilightNames[] = {"Off", "Subtle", "Medium", "Strong"};
 const float kAmbilightValues[] = {0.0f, 0.30f, 0.55f, 0.85f};
 constexpr int kAmbilightCount = 4;
 
+const char* kResScaleNames[] = {"1.00x (Native)", "1.25x (Balanced)", "1.40x (Sharp)", "1.50x (Crisp)", "1.75x (Ultra)"};
+const float kResScaleValues[] = {1.00f, 1.25f, 1.40f, 1.50f, 1.75f};
+constexpr int kResScaleCount = 5;
+
 std::string getConfigPath() {
 #ifdef _WIN32
     const char* appData = std::getenv("APPDATA");
@@ -135,6 +139,8 @@ void SettingsMenu::refresh() {
                          Action::CycleCurvature});
         rows_.push_back({"Ambient Screen Glow", kAmbilightNames[ambilightIdx_ % kAmbilightCount],
                          Action::CycleAmbilight, projectionMode_ == 0});
+        rows_.push_back({"Render Resolution", kResScaleNames[resScaleIdx_ % kResScaleCount],
+                         Action::CycleResScale});
         rows_.push_back({"Screen Distance", distStream.str(),
                          Action::CycleDistance});
         rows_.push_back({"Swap Left/Right Eye", swapEyes_ ? "On" : "Off",
@@ -407,6 +413,11 @@ SettingsMenu::Action SettingsMenu::activate() {
             saveConfig();
             refresh();
             break;
+        case Action::CycleResScale:
+            resScaleIdx_ = (resScaleIdx_ + 1) % kResScaleCount;
+            saveConfig();
+            refresh();
+            break;
         case Action::ListenQuickPath:
             listeningFunc_ = 4;
             status_ = "Press a controller button for Bookmarks shortcut";
@@ -599,6 +610,20 @@ float SettingsMenu::ambilightIntensity() const {
     return kAmbilightValues[ambilightIdx_ % kAmbilightCount];
 }
 
+float SettingsMenu::resScale() const {
+    return kResScaleValues[resScaleIdx_ % kResScaleCount];
+}
+
+const char* SettingsMenu::resScaleStr() const {
+    return kResScaleNames[resScaleIdx_ % kResScaleCount];
+}
+
+void SettingsMenu::setResScaleIdx(int idx) {
+    resScaleIdx_ = ((idx % kResScaleCount) + kResScaleCount) % kResScaleCount;
+    saveConfig();
+    refresh();
+}
+
 void SettingsMenu::loadConfig() {
     const std::string path = getConfigPath();
     std::ifstream file(path);
@@ -643,6 +668,7 @@ void SettingsMenu::loadConfig() {
         else if (key == "hover_haptics") hoverHapticsEnabled_ = (val == "1" || val == "true");
         else if (key == "hover_haptics_strength") hoverHapticsStrengthIdx_ = std::clamp(std::stoi(val), 0, kHoverHapticsStrengthCount - 1);
         else if (key == "ambilight") ambilightIdx_ = std::clamp(std::stoi(val), 0, kAmbilightCount - 1);
+        else if (key == "res_scale") resScaleIdx_ = std::clamp(std::stoi(val), 0, kResScaleCount - 1);
     }
     PIXELVR_LOG_INFO("Loaded settings from %s", path.c_str());
 }
@@ -682,6 +708,7 @@ void SettingsMenu::saveConfig() const {
             file << "hover_haptics=" << (hoverHapticsEnabled_ ? 1 : 0) << "\n";
             file << "hover_haptics_strength=" << hoverHapticsStrengthIdx_ << "\n";
             file << "ambilight=" << ambilightIdx_ << "\n";
+            file << "res_scale=" << resScaleIdx_ << "\n";
             if (!quickPath_.empty()) {
                 file << "quick_path=" << quickPath_ << "\n";
             }

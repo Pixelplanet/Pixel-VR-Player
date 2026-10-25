@@ -248,22 +248,32 @@ std::vector<int64_t> XrContext::enumerateSwapchainFormats() {
     return formats;
 }
 
-bool XrContext::createSwapchains(int64_t colorFormat) {
+bool XrContext::createSwapchains(int64_t colorFormat, float scaleFactor) {
+    for (auto& sc : swapchains_) {
+        if (sc.handle != XR_NULL_HANDLE) {
+            xrDestroySwapchain(sc.handle);
+        }
+    }
     swapchains_.clear();
     swapchains_.reserve(configViews_.size());
 
+    scaleFactor = std::clamp(scaleFactor, 0.5f, 2.5f);
+
     for (const auto& view : configViews_) {
         ViewSwapchain sc;
-        // Boost swapchain resolution from SteamVR's conservative default (1728) to the headset's
-        // native physical display resolution (2160x2160, 1.25x).
-        // Rendering at 1:1 panel resolution eliminates compositor magnification blur and
-        // edge shimmering during head movement in VR.
+        // Configurable OpenXR Swapchain Supersampling:
+        // Boost swapchain resolution from SteamVR's conservative default (e.g. 1728) to the headset's
+        // native physical display resolution (2160x2160, 1.25x) or crisp supersampling (1.4x-1.75x).
+        // Rendering at higher pixel density eliminates compositor magnification blur, improves text
+        // clarity, and reduces moire/specular shimmering during head movement in VR.
         const uint32_t maxW = (view.maxImageRectWidth > 0) ? view.maxImageRectWidth : 4096;
         const uint32_t maxH = (view.maxImageRectHeight > 0) ? view.maxImageRectHeight : 4096;
-        const uint32_t targetW = std::clamp(static_cast<uint32_t>(view.recommendedImageRectWidth * 1.25f),
-                                            view.recommendedImageRectWidth, maxW);
-        const uint32_t targetH = std::clamp(static_cast<uint32_t>(view.recommendedImageRectHeight * 1.25f),
-                                            view.recommendedImageRectHeight, maxH);
+        uint32_t targetW = std::clamp(static_cast<uint32_t>(std::round(view.recommendedImageRectWidth * scaleFactor)),
+                                      256u, maxW);
+        uint32_t targetH = std::clamp(static_cast<uint32_t>(std::round(view.recommendedImageRectHeight * scaleFactor)),
+                                      256u, maxH);
+        targetW = (targetW + 1) & ~1u;
+        targetH = (targetH + 1) & ~1u;
         sc.width = static_cast<int32_t>(targetW);
         sc.height = static_cast<int32_t>(targetH);
         sc.format = colorFormat;
@@ -295,9 +305,10 @@ bool XrContext::createSwapchains(int64_t colorFormat) {
         swapchains_.push_back(std::move(sc));
     }
 
-    PIXELVR_LOG_INFO("Created %zu swapchains (%dx%d per eye)", swapchains_.size(),
+    PIXELVR_LOG_INFO("Created %zu swapchains (%dx%d per eye, scale %.2fx)", swapchains_.size(),
                      swapchains_.empty() ? 0 : swapchains_[0].width,
-                     swapchains_.empty() ? 0 : swapchains_[0].height);
+                     swapchains_.empty() ? 0 : swapchains_[0].height,
+                     scaleFactor);
     return true;
 }
 

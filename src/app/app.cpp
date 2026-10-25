@@ -253,8 +253,8 @@ bool App::init(const std::string& mediaPath) {
         PIXELVR_LOG_ERROR("Runtime reported no swapchain formats");
         return false;
     }
-    const int64_t colorFormat = renderer_.chooseColorFormat(formats);
-    if (!xr_.createSwapchains(colorFormat)) {
+    colorFormat_ = renderer_.chooseColorFormat(formats);
+    if (!xr_.createSwapchains(colorFormat_, settings_.resScale())) {
         return false;
     }
     if (!renderer_.createRenderResources(xr_.swapchains())) {
@@ -284,6 +284,23 @@ bool App::init(const std::string& mediaPath) {
 
     PIXELVR_LOG_INFO("Initialization complete");
     return true;
+}
+
+void App::applyResolutionScale(float scale) {
+    if (colorFormat_ == 0) return;
+    PIXELVR_LOG_INFO("Applying resolution scale %.2fx...", scale);
+    renderer_.waitIdle();
+    if (!xr_.createSwapchains(colorFormat_, scale)) {
+        PIXELVR_LOG_ERROR("Failed to recreate OpenXR swapchains with scale %.2fx", scale);
+        return;
+    }
+    if (!renderer_.recreateSwapchainTargets(xr_.swapchains())) {
+        PIXELVR_LOG_ERROR("Failed to recreate Vulkan render targets for swapchain");
+        return;
+    }
+    PIXELVR_LOG_INFO("Resolution scale applied successfully: %dx%d per eye",
+                     xr_.swapchains().empty() ? 0 : xr_.swapchains()[0].width,
+                     xr_.swapchains().empty() ? 0 : xr_.swapchains()[0].height);
 }
 
 #ifdef PIXELVR_HAVE_MEDIA
@@ -464,6 +481,12 @@ void App::updateStats() {
     std::snprintf(buf, sizeof(buf), "FPS %.1f   (%.1f ms)", fps,
                   fps > 0.0 ? 1000.0 / fps : 0.0);
     statsLines_.emplace_back(buf);
+    if (!xr_.swapchains().empty()) {
+        std::snprintf(buf, sizeof(buf), "Render %dx%d (%.2fx)",
+                      xr_.swapchains()[0].width, xr_.swapchains()[0].height,
+                      settings_.resScale());
+        statsLines_.emplace_back(buf);
+    }
     if (mediaOpen_) {
         std::snprintf(buf, sizeof(buf), "Video %dx%d  %s", media_.width(),
                       media_.height(), media_.codecName().c_str());
@@ -2328,6 +2351,11 @@ int App::run() {
                             const int pH = renderer_.pointerHand();
                             const int activeH = (pH >= 0 && pH <= 1) ? pH : 1;
                             xr_.triggerHaptic(activeH, 0.025f, 0.0f, settings_.hoverHapticsStrength());
+                        } else if (act == SettingsMenu::Action::CycleResScale) {
+                            applyResolutionScale(settings_.resScale());
+                            const int pH = renderer_.pointerHand();
+                            const int activeH = (pH >= 0 && pH <= 1) ? pH : 1;
+                            xr_.triggerHaptic(activeH, 0.030f, 0.0f, settings_.hoverHapticsStrength());
                         }
                 }
                 if (in.recenter && in.headValid) {

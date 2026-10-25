@@ -41,6 +41,12 @@ public:
     // provided per-eye swapchains.
     bool createRenderResources(const std::vector<ViewSwapchain>& swapchains);
 
+    // Recreates the MSAA target, depth target, image views, and framebuffers
+    // when swapchains are recreated or dynamically resized for supersampling.
+    bool recreateSwapchainTargets(const std::vector<ViewSwapchain>& swapchains);
+
+    void waitIdle() const;
+
     // Records and submits the draw for one eye. Invoked by XrContext::renderFrame.
     void renderView(uint32_t viewIndex, uint32_t imageIndex, const XrView& view,
                     const ViewSwapchain& swapchain);

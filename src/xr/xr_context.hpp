@@ -99,7 +99,7 @@ public:
     bool createSession(const XrGraphicsBindingVulkan2KHR& binding);
     bool createReferenceSpace();
     std::vector<int64_t> enumerateSwapchainFormats();
-    bool createSwapchains(int64_t colorFormat);
+    bool createSwapchains(int64_t colorFormat, float scaleFactor = 1.25f);
 
     // Controller input (OpenXR actions). Call createActions after createSession.
     bool createActions();

@@ -53,6 +53,7 @@ public:
         ToggleHoverHaptics,
         CycleHoverHapticsStrength,
         CycleAmbilight,
+        CycleResScale,
         BackToUI,
         Close
     };
@@ -150,6 +151,12 @@ public:
     int ambilightIdx() const { return ambilightIdx_; }
     float ambilightIntensity() const;  // 0 = off
 
+    // OpenXR swapchain supersampling / render resolution scale.
+    int resScaleIdx() const { return resScaleIdx_; }
+    float resScale() const;
+    const char* resScaleStr() const;
+    void setResScaleIdx(int idx);
+
     void onKeyboardSubmit(const std::string& text) { (void)text; }
     void onKeyboardCancel() {}
 
@@ -189,6 +196,7 @@ private:
     bool hoverHapticsEnabled_ = true;
     int hoverHapticsStrengthIdx_ = 1;
     int ambilightIdx_ = 2;     // 0=Off, 1=Subtle, 2=Medium (default), 3=Strong
+    int resScaleIdx_ = 1;      // 0=1.00x Native, 1=1.25x Balanced (default), 2=1.40x Sharp, 3=1.50x Crisp, 4=1.75x Ultra
 
     int section_ = 0;   // 0=Display, 1=UI, 2=Audio, 3=Controls, 4=Vault; 10..12=sub-lists
     std::vector<std::pair<int, std::string>> videoStreams_;  // (index, label)

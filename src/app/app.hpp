@@ -97,6 +97,8 @@ private:
     unsigned long long cpuPrevTotal_ = 0;
     std::vector<std::string> statsLines_;
     void updateStats();
+    int64_t colorFormat_ = 0;
+    void applyResolutionScale(float scale);
     // Menu nav stick auto-repeat: -1/+1 to step (initial press + hold), else 0.
     int navStep(float axisY, std::chrono::steady_clock::time_point now);
     int navStepX(float axisX, std::chrono::steady_clock::time_point now);

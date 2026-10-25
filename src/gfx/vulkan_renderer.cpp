@@ -816,38 +816,58 @@ bool VulkanRenderer::createPipelines() {
                          uiPipeline_, true);
 }
 
-bool VulkanRenderer::createRenderResources(
+void VulkanRenderer::waitIdle() const {
+    if (device_ != VK_NULL_HANDLE) {
+        vkDeviceWaitIdle(device_);
+    }
+}
+
+bool VulkanRenderer::recreateSwapchainTargets(
     const std::vector<ViewSwapchain>& swapchains) {
-    if (swapchains.empty()) {
+    if (swapchains.empty() || device_ == VK_NULL_HANDLE) {
         return false;
     }
-    colorFormat_ = static_cast<VkFormat>(swapchains.front().format);
-    sampleCount_ = chooseSampleCount();
+    vkDeviceWaitIdle(device_);
 
-    if (!createRenderPass(colorFormat_) || !createSamplerAndDescriptors() ||
-        !createPipelines()) {
-        return false;
+    for (auto& vt : viewTargets_) {
+        for (auto fb : vt.framebuffers) {
+            if (fb != VK_NULL_HANDLE) {
+                vkDestroyFramebuffer(device_, fb, nullptr);
+            }
+        }
+        for (auto iv : vt.imageViews) {
+            if (iv != VK_NULL_HANDLE) {
+                vkDestroyImageView(device_, iv, nullptr);
+            }
+        }
+    }
+    viewTargets_.clear();
+
+    if (msaaView_ != VK_NULL_HANDLE) {
+        vkDestroyImageView(device_, msaaView_, nullptr);
+        msaaView_ = VK_NULL_HANDLE;
+    }
+    if (msaaImage_ != VK_NULL_HANDLE) {
+        vkDestroyImage(device_, msaaImage_, nullptr);
+        msaaImage_ = VK_NULL_HANDLE;
+    }
+    if (msaaMemory_ != VK_NULL_HANDLE) {
+        vkFreeMemory(device_, msaaMemory_, nullptr);
+        msaaMemory_ = VK_NULL_HANDLE;
     }
 
-    VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
-    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
-    poolInfo.queueFamilyIndex = queueFamilyIndex_;
-    PIXELVR_VK_CHECK(vkCreateCommandPool(device_, &poolInfo, nullptr, &commandPool_));
-
-    VkCommandBufferAllocateInfo allocInfo{
-        VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
-    allocInfo.commandPool = commandPool_;
-    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    allocInfo.commandBufferCount = 1;
-    PIXELVR_VK_CHECK(
-        vkAllocateCommandBuffers(device_, &allocInfo, &commandBuffer_));
-
-    VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-    PIXELVR_VK_CHECK(vkCreateFence(device_, &fenceInfo, nullptr, &fence_));
-
-    // A second command buffer + fence dedicated to video texture uploads.
-    PIXELVR_VK_CHECK(vkAllocateCommandBuffers(device_, &allocInfo, &uploadCmd_));
-    PIXELVR_VK_CHECK(vkCreateFence(device_, &fenceInfo, nullptr, &uploadFence_));
+    if (depthView_ != VK_NULL_HANDLE) {
+        vkDestroyImageView(device_, depthView_, nullptr);
+        depthView_ = VK_NULL_HANDLE;
+    }
+    if (depthImage_ != VK_NULL_HANDLE) {
+        vkDestroyImage(device_, depthImage_, nullptr);
+        depthImage_ = VK_NULL_HANDLE;
+    }
+    if (depthMemory_ != VK_NULL_HANDLE) {
+        vkFreeMemory(device_, depthMemory_, nullptr);
+        depthMemory_ = VK_NULL_HANDLE;
+    }
 
     // Shared multisampled color target (sized to the largest eye), resolved into
     // each eye's swapchain image for anti-aliased edges.
@@ -911,6 +931,45 @@ bool VulkanRenderer::createRenderResources(
             PIXELVR_VK_CHECK(
                 vkCreateFramebuffer(device_, &fbInfo, nullptr, &vt.framebuffers[i]));
         }
+    }
+    return true;
+}
+
+bool VulkanRenderer::createRenderResources(
+    const std::vector<ViewSwapchain>& swapchains) {
+    if (swapchains.empty()) {
+        return false;
+    }
+    colorFormat_ = static_cast<VkFormat>(swapchains.front().format);
+    sampleCount_ = chooseSampleCount();
+
+    if (!createRenderPass(colorFormat_) || !createSamplerAndDescriptors() ||
+        !createPipelines()) {
+        return false;
+    }
+
+    VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
+    poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
+    poolInfo.queueFamilyIndex = queueFamilyIndex_;
+    PIXELVR_VK_CHECK(vkCreateCommandPool(device_, &poolInfo, nullptr, &commandPool_));
+
+    VkCommandBufferAllocateInfo allocInfo{
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+    allocInfo.commandPool = commandPool_;
+    allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+    allocInfo.commandBufferCount = 1;
+    PIXELVR_VK_CHECK(
+        vkAllocateCommandBuffers(device_, &allocInfo, &commandBuffer_));
+
+    VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+    PIXELVR_VK_CHECK(vkCreateFence(device_, &fenceInfo, nullptr, &fence_));
+
+    // A second command buffer + fence dedicated to video texture uploads.
+    PIXELVR_VK_CHECK(vkAllocateCommandBuffers(device_, &allocInfo, &uploadCmd_));
+    PIXELVR_VK_CHECK(vkCreateFence(device_, &fenceInfo, nullptr, &uploadFence_));
+
+    if (!recreateSwapchainTargets(swapchains)) {
+        return false;
     }
 
     initText();  // best-effort; text and browser are disabled if no font is found
