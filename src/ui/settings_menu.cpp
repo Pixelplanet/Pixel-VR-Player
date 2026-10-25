@@ -61,6 +61,10 @@ const char* kHoverHapticsStrengthNames[] = {
 const float kHoverHapticsStrengthValues[] = {0.08f, 0.15f, 0.28f, 0.50f};
 constexpr int kHoverHapticsStrengthCount = 4;
 
+const char* kAmbilightNames[] = {"Off", "Subtle", "Medium", "Strong"};
+const float kAmbilightValues[] = {0.0f, 0.30f, 0.55f, 0.85f};
+constexpr int kAmbilightCount = 4;
+
 std::string getConfigPath() {
 #ifdef _WIN32
     const char* appData = std::getenv("APPDATA");
@@ -129,6 +133,8 @@ void SettingsMenu::refresh() {
                          Action::CycleStereo});
         rows_.push_back({"Cinema Screen Curve", kCurvatureNames[curvatureIdx_ % kCurvatureCount],
                          Action::CycleCurvature});
+        rows_.push_back({"Ambient Screen Glow", kAmbilightNames[ambilightIdx_ % kAmbilightCount],
+                         Action::CycleAmbilight, projectionMode_ == 0});
         rows_.push_back({"Screen Distance", distStream.str(),
                          Action::CycleDistance});
         rows_.push_back({"Swap Left/Right Eye", swapEyes_ ? "On" : "Off",
@@ -396,6 +402,11 @@ SettingsMenu::Action SettingsMenu::activate() {
             saveConfig();
             refresh();
             break;
+        case Action::CycleAmbilight:
+            ambilightIdx_ = (ambilightIdx_ + 1) % kAmbilightCount;
+            saveConfig();
+            refresh();
+            break;
         case Action::ListenQuickPath:
             listeningFunc_ = 4;
             status_ = "Press a controller button for Bookmarks shortcut";
@@ -584,6 +595,10 @@ const char* SettingsMenu::hoverHapticsStrengthStr() const {
     return kHoverHapticsStrengthNames[hoverHapticsStrengthIdx_ % kHoverHapticsStrengthCount];
 }
 
+float SettingsMenu::ambilightIntensity() const {
+    return kAmbilightValues[ambilightIdx_ % kAmbilightCount];
+}
+
 void SettingsMenu::loadConfig() {
     const std::string path = getConfigPath();
     std::ifstream file(path);
@@ -627,6 +642,7 @@ void SettingsMenu::loadConfig() {
         else if (key == "quick_path") quickPath_ = val;
         else if (key == "hover_haptics") hoverHapticsEnabled_ = (val == "1" || val == "true");
         else if (key == "hover_haptics_strength") hoverHapticsStrengthIdx_ = std::clamp(std::stoi(val), 0, kHoverHapticsStrengthCount - 1);
+        else if (key == "ambilight") ambilightIdx_ = std::clamp(std::stoi(val), 0, kAmbilightCount - 1);
     }
     PIXELVR_LOG_INFO("Loaded settings from %s", path.c_str());
 }
@@ -665,6 +681,7 @@ void SettingsMenu::saveConfig() const {
             file << "list_show_dur=" << (listShowDuration_ ? 1 : 0) << "\n";
             file << "hover_haptics=" << (hoverHapticsEnabled_ ? 1 : 0) << "\n";
             file << "hover_haptics_strength=" << hoverHapticsStrengthIdx_ << "\n";
+            file << "ambilight=" << ambilightIdx_ << "\n";
             if (!quickPath_.empty()) {
                 file << "quick_path=" << quickPath_ << "\n";
             }

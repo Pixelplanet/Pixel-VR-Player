@@ -172,6 +172,10 @@ public:
         uiAccentColorIdx_ = accentColorIdx;
         uiDistance_ = uiDistance;
     }
+    void setAmbilightIntensity(float intensity) {
+        ambilightIntensity_ = intensity < 0.0f ? 0.0f : (intensity > 1.0f ? 1.0f : intensity);
+    }
+    float ambilightIntensity() const { return ambilightIntensity_; }
 
     enum class BrowserViewMode : int {
         BigCards = 0,    // 3x2, 6 per page (Large cards with full 16:9 thumbnail)
@@ -445,10 +449,13 @@ private:
     VkRenderPass renderPass_ = VK_NULL_HANDLE;
     VkPipelineLayout pipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline pipeline_ = VK_NULL_HANDLE;
+    VkPipeline ambilightPipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout spherePipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline spherePipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout uiPipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline uiPipeline_ = VK_NULL_HANDLE;
+
+    float ambilightIntensity_ = 0.55f;
 
     ProjectionMode projectionMode_ = ProjectionMode::Flat;
     StereoMode stereoMode_ = StereoMode::Mono;
@@ -518,6 +525,7 @@ private:
         bool ready = false;
     };
     CardThumbnail cardThumbs_[12];
+    float cardHoverAnim_[12]{};
     VkPipeline thumbPipeline_ = VK_NULL_HANDLE;
     VkDescriptorPool thumbPool_ = VK_NULL_HANDLE;
     BrowserViewMode browserViewMode_ = BrowserViewMode::BigCards;
@@ -652,6 +660,7 @@ private:
     VkDescriptorSet ycbcrSet_ = VK_NULL_HANDLE;
     VkPipelineLayout ycbcrQuadLayout_ = VK_NULL_HANDLE;
     VkPipeline ycbcrQuadPipeline_ = VK_NULL_HANDLE;
+    VkPipeline ycbcrAmbilightPipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout ycbcrSphereLayout_ = VK_NULL_HANDLE;
     VkPipeline ycbcrSpherePipeline_ = VK_NULL_HANDLE;
     VkFormat ycbcrFormat_ = VK_FORMAT_UNDEFINED;

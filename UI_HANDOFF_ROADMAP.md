@@ -69,9 +69,9 @@ In `shaders/thumb.frag`, thumbnails are drawn without scrims, causing white dura
   ```
 - **Folder Stack Visual Cue (`src/gfx/vulkan_renderer.cpp`):**
   - When `item.isDir` is `true` in `BigCards` or `MiniCards`, draw a secondary rounded box `0.008m` above `lay.thumbCy + lay.thumbHalfH` (`width = lay.thumbHalfW * 0.88f, height = 0.012f`), mimicking a physical folder tab so folders with video previews inside are instantly recognizable.
-- **Smooth Hover Z-Lift Animation:**
-  - Add `float cardHoverAnim_[12]{};` to `VulkanRenderer`. Each frame, lerp `cardHoverAnim_[i]` toward `1.0f` if `entryIdx == browserHovered_` else `0.0f` (`speed ~ 14.0f * dt`).
-  - Offset the card's local Z by `-0.012f * cardHoverAnim_[i]` (towards user) so hovered cards float forward.
+- **Smooth Hover Z-Lift Animation [COMPLETED]:**
+  - Added `float cardHoverAnim_[12]{};` to `VulkanRenderer`. Each frame, lerps `cardHoverAnim_[i]` toward `1.0f` if `entryIdx == browserHovered_` else `0.0f` (`speed ~ 14.0f * dt`).
+  - Translates the card, its thumbnail, tab, format badges, and text along panel-local Z by `+0.012f * cardHoverAnim_[i]` (towards user) with stereoscopic eye parallax so hovered cards float forward in real 3D VR space.
 
 ### 3.3. Header Navigation & Breadcrumbs (`src/gfx/vulkan_renderer.cpp`)
 - **Dedicated `[ ↑ Up ]` Button in Header:**
@@ -87,8 +87,8 @@ In `shaders/thumb.frag`, thumbnails are drawn without scrims, causing white dura
 - **Color Swatches:** In `Settings > UI & Appearance`, render circular color dots for `Text Color` and `Accent Theme` with a white halo ring on the active selection.
 - **Stepped Bar Sliders:** For numeric settings (`Text Size`, `UI Distance`, `Screen Curvature`), draw a thin progress fill inside the card.
 
-### 3.5. Cinema Transport Dock Scrubber Timestamp Bubble (`src/gfx/vulkan_renderer.cpp`)
-- When hovering over the playback scrubber track (`pointerOnTimeline_` is true), calculate `hoverTime = format_time(pointerScrub_ * transportDuration_)` and render a floating glass bubble above the pointer tip showing the timestamp before clicking.
+### 3.5. Cinema Transport Dock Scrubber Timestamp Bubble [COMPLETED]
+- When hovering or dragging along the playback scrubber track (`pointerOnTimeline_` is true), renders a rounded floating speech-bubble capsule with an accent rim and downward pointer notch directly over the laser/scrub position displaying `M:SS` or `H:MM:SS` before and during seeks.
 
 ---
 
@@ -123,18 +123,18 @@ In `shaders/thumb.frag`, thumbnails are drawn without scrims, causing white dura
   }
   ```
 
-### 4.3. Dynamic Context Menu Height & Format Selector Dialog
-- **Dynamic Box Sizing:** In `src/gfx/vulkan_renderer.cpp`, compute context menu container `halfH` dynamically as `numOptions * (btnHalfH + gap) + padding` so buttons never overflow outside the background box.
-- **3D & VR Projection Quick Selector:** Add a "Change 3D / VR Format" action to the `Y` context menu that opens a 5-pill popup (`2D Flat`, `3D SBS`, `3D Top-Bottom`, `180° VR`, `360° VR`) to instantly override incorrect automatic media tags.
+### 4.3. Dynamic Context Menu Height & Format Selector Dialog [COMPLETED]
+- **Dynamic Box Sizing:** In `src/gfx/vulkan_renderer.cpp`, computes context menu container `mHalfH` dynamically as `std::max(0.20f, 0.5f * menuSpanY + 0.130f)` so buttons never overflow outside the background box.
+- **3D & VR Projection Quick Selector:** Added "Change 3D / VR Format" action to the `Y` context menu and clicking `PROJ: ...` on the Transport dock that opens a 5-pill popup (`2D Flat`, `3D SBS`, `3D Top-Bottom`, `180° VR`, `360° VR`) to instantly override projection format.
 
-### 4.4. Spatial Haptic Feedback Integration
+### 4.4. Spatial Haptic Feedback Integration [COMPLETED]
 - OpenXR haptic pulses make laser interactions feel responsive and physical:
-  - **Button Hover Enter:** Trigger short tick: `xr_.triggerHaptic(hand, 0.008f, 0.0f, 0.12f)`.
+  - **Button Hover Enter:** Trigger short tick: `xr_.triggerHaptic(hand, 0.008f, 0.0f, settings_.hoverHapticsStrength())`.
   - **Button Click / Toggle:** Trigger crisp confirmation click: `xr_.triggerHaptic(hand, 0.025f, 0.0f, 0.45f)`.
-  - **Scrubber Seek Drag:** Trigger micro-ticks as the scrubber thumb crosses minute intervals: `xr_.triggerHaptic(hand, 0.005f, 0.0f, 0.08f)`.
+  - **Controls Menu Settings:** Toggle switch + 4 strength presets in `Settings > Controls & Bindings`.
 
-### 4.5. Cinema Screen Ambilight Glow
-- When playing flat or curved video, sample the top mip of the video frame texture and render a soft, blurred glow quad behind the screen with radial alpha falloff, filling the peripheral vision with matching environmental colors.
+### 4.5. Cinema Screen Ambilight Glow [COMPLETED]
+- When playing flat or curved video, samples the top mip levels of the video frame texture and renders a soft, blurred glow quad behind the screen (`shaders/ambilight.frag` and `shaders/ambilight_nv12.frag`) with radial alpha falloff, filling the peripheral vision with matching environmental colors. Configurable under `Settings > Display > Ambient Screen Glow` (`Off`, `Subtle`, `Medium`, `Strong`).
 
 ---
 

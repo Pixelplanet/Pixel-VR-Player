@@ -52,6 +52,7 @@ public:
         ToggleListColDuration,
         ToggleHoverHaptics,
         CycleHoverHapticsStrength,
+        CycleAmbilight,
         BackToUI,
         Close
     };
@@ -145,6 +146,10 @@ public:
     float hoverHapticsStrength() const;
     const char* hoverHapticsStrengthStr() const;
 
+    // Ambient screen glow ("ambilight") behind the flat cinema screen.
+    int ambilightIdx() const { return ambilightIdx_; }
+    float ambilightIntensity() const;  // 0 = off
+
     void onKeyboardSubmit(const std::string& text) { (void)text; }
     void onKeyboardCancel() {}
 
@@ -183,6 +188,7 @@ private:
     std::string quickPath_;
     bool hoverHapticsEnabled_ = true;
     int hoverHapticsStrengthIdx_ = 1;
+    int ambilightIdx_ = 2;     // 0=Off, 1=Subtle, 2=Medium (default), 3=Strong
 
     int section_ = 0;   // 0=Display, 1=UI, 2=Audio, 3=Controls, 4=Vault; 10..12=sub-lists
     std::vector<std::pair<int, std::string>> videoStreams_;  // (index, label)

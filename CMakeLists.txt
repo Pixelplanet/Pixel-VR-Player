@@ -109,7 +109,9 @@ set(PIXELVR_SHADERS
     shaders/ui.frag
     shaders/text.vert
     shaders/text.frag
-    shaders/thumb.frag)
+    shaders/thumb.frag
+    shaders/ambilight.frag
+    shaders/ambilight_nv12.frag)
 pixelvr_compile_shaders(pixelvr_shaders
     OUTPUT_DIR "${CMAKE_BINARY_DIR}/shaders"
     SOURCES ${PIXELVR_SHADERS})

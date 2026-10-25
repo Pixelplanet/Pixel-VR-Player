@@ -192,6 +192,7 @@ VulkanRenderer::~VulkanRenderer() {
         if (descriptorSetLayout_ != VK_NULL_HANDLE)
             vkDestroyDescriptorSetLayout(device_, descriptorSetLayout_, nullptr);
         if (pipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, pipeline_, nullptr);
+        if (ambilightPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, ambilightPipeline_, nullptr);
         if (pipelineLayout_ != VK_NULL_HANDLE)
             vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr);
         if (spherePipeline_ != VK_NULL_HANDLE)
@@ -807,6 +808,8 @@ bool VulkanRenderer::createPipelines() {
 
     return buildPipeline("quad.vert.spv", "quad.frag.spv", pipelineLayout_,
                          pipeline_) &&
+           buildPipeline("quad.vert.spv", "ambilight_nv12.frag.spv", pipelineLayout_,
+                         ambilightPipeline_, true) &&
            buildPipeline("sphere.vert.spv", "sphere.frag.spv",
                          spherePipelineLayout_, spherePipeline_) &&
            buildPipeline("ui.vert.spv", "ui.frag.spv", uiPipelineLayout_,
@@ -1367,7 +1370,7 @@ void VulkanRenderer::updatePointer() {
                 pointerHit_[1] = world.y;
                 pointerHit_[2] = world.z;
 
-                if (actionMenu_.page == 0 || actionMenu_.page == 1) {
+                if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5) {
                     const int optCount = static_cast<int>(actionMenu_.options.size());
                     const float stepY = 0.068f;
                     const float spanY = static_cast<float>(std::max(0, optCount - 1)) * stepY;
@@ -1978,9 +1981,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         if (projectionMode_ == ProjectionMode::Flat) {
             VkPipeline pipe = ycbcr ? ycbcrQuadPipeline_ : pipeline_;
             VkPipelineLayout layout = ycbcr ? ycbcrQuadLayout_ : pipelineLayout_;
-            vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
-            vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                    layout, 0, 1, &videoSet, 0, nullptr);
+
             const Mat4 viewMat = rigidInverse(rigidTransform(
                 Quat{view.pose.orientation.x, view.pose.orientation.y,
                      view.pose.orientation.z, view.pose.orientation.w},
@@ -2004,6 +2005,45 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             } else if (stereoMode_ == StereoMode::TopBottom) {
                 if (videoAspect_ <= 1.2f) eyeAspect = videoAspect_ * 2.0f;
             }
+
+            // Cinema Screen Ambilight Glow: soft ambient lighting cast into the room
+            if (ambilightIntensity_ > 0.01f) {
+                VkPipeline ambPipe = ycbcr ? ycbcrAmbilightPipeline_ : ambilightPipeline_;
+                if (ambPipe != VK_NULL_HANDLE) {
+                    vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, ambPipe);
+                    vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                            layout, 0, 1, &videoSet, 0, nullptr);
+                    const Vec3 ambCenter{center.x + screenForward_[0] * 0.015f,
+                                         center.y + screenForward_[1] * 0.015f,
+                                         center.z + screenForward_[2] * 0.015f};
+                    const Mat4 ambModel = multiply(
+                        multiply(translation(ambCenter), yawRot),
+                        scaling(Vec3{(eyeAspect / (16.0f / 9.0f)) * 1.55f, 1.90f, 1.0f}));
+                    const Mat4 ambMvp = multiply(multiply(proj, viewMat), ambModel);
+                    PushConstants ambPush{};
+                    std::memcpy(ambPush.mvp, ambMvp.m, sizeof(ambPush.mvp));
+                    std::memcpy(ambPush.conversion, conversion_, sizeof(ambPush.conversion));
+                    std::memcpy(ambPush.range, range_, sizeof(ambPush.range));
+                    ambPush.range[3] = ambilightIntensity_;
+                    ambPush.stereo[0] = static_cast<float>(static_cast<int>(stereoMode_));
+                    ambPush.stereo[1] = static_cast<float>(viewIndex);
+                    ambPush.stereo[2] = swapEyes_ ? 1.0f : 0.0f;
+                    ambPush.stereo[3] = screenCurvature_;
+                    if (ycbcr) {
+                        ambPush.conversion[0] = drmUvScaleX_;
+                        ambPush.conversion[1] = drmUvScaleY_;
+                    }
+                    vkCmdPushConstants(commandBuffer_, layout,
+                                       VK_SHADER_STAGE_VERTEX_BIT |
+                                           VK_SHADER_STAGE_FRAGMENT_BIT,
+                                       0, sizeof(PushConstants), &ambPush);
+                    vkCmdDraw(commandBuffer_, 64 * 6, 1, 0, 0);
+                }
+            }
+
+            vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+            vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    layout, 0, 1, &videoSet, 0, nullptr);
             const Mat4 model = multiply(
                 multiply(translation(center), yawRot),
                 scaling(Vec3{eyeAspect / (16.0f / 9.0f), 1.0f, 1.0f}));
@@ -2212,6 +2252,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         if (cp == 0x2122) return 136; // ™
         return '?';
     };
+    const Mat4* curTextVp = &vpPanel;
     auto drawString = [&](float x, float baseline, float scale, const float col[4],
                           const std::string& s) {
         float penX = x;
@@ -2221,7 +2262,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             const Glyph& g = fontAtlas_.glyphs[c];
             if (g.width > 0.0f && g.height > 0.0f) {
                 TextPush push{};
-                std::memcpy(push.mvp, vpPanel.m, sizeof(push.mvp));
+                std::memcpy(push.mvp, curTextVp->m, sizeof(push.mvp));
                 std::memcpy(push.color, col, sizeof(push.color));
                 push.rect[0] = penX + g.bearingX * scale;
                 push.rect[1] = baseline - (g.height - g.bearingY) * scale;
@@ -2554,12 +2595,17 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         drawUiElement(vpPanel, thumbX, trackY, 0.011f, 0.024f,
                       UiShape::RoundedBox, thumbCol, 0.45f, 0.03f, themeAccentCol);
 
-        // Floating scrub hover tooltip pill
+        // Floating scrub hover tooltip speech bubble
         if (pointerOnTimeline_ && transportDuration_ > 0.0) {
-            const float scrubX = -trackHalfW + 2.0f * trackHalfW * pointerScrub_;
-            const float tipBg[4] = {0.04f, 0.07f, 0.12f, 0.96f};
-            drawUiElement(vpPanel, scrubX, trackY + 0.058f, 0.076f, 0.028f,
-                          UiShape::RoundedBox, tipBg, 0.35f, 0.03f, themeAccentCol);
+            const float rawScrubX = -trackHalfW + 2.0f * trackHalfW * pointerScrub_;
+            const float bubbleX = std::clamp(rawScrubX, -trackHalfW + 0.09f, trackHalfW - 0.09f);
+            const float tipBg[4] = {0.04f, 0.07f, 0.13f, 0.98f};
+            // Main bubble capsule
+            drawUiElement(vpPanel, bubbleX, trackY + 0.062f, 0.086f, 0.028f,
+                          UiShape::RoundedBox, tipBg, 0.45f, 0.025f, themeAccentCol);
+            // Stem notch connecting bubble to timeline track
+            drawUiElement(vpPanel, rawScrubX, trackY + 0.032f, 0.005f, 0.008f,
+                          UiShape::RoundedBox, themeAccentCol, 0.30f);
         }
 
         // Button hover tooltip pills
@@ -2593,9 +2639,10 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 drawFit(trackHalfW + 0.026f, trackY, 0.25f, timeSc, themeAccentCol, rightStr);
 
                 if (pointerOnTimeline_) {
-                    const float scrubX = -trackHalfW + 2.0f * trackHalfW * pointerScrub_;
+                    const float rawScrubX = -trackHalfW + 2.0f * trackHalfW * pointerScrub_;
+                    const float bubbleX = std::clamp(rawScrubX, -trackHalfW + 0.09f, trackHalfW - 0.09f);
                     const std::string tipStr = format_time(pointerScrub_ * transportDuration_);
-                    drawFitCentered(scrubX, trackY + 0.058f, 0.14f, pillSc, themeTextCol, tipStr);
+                    drawFitCentered(bubbleX, trackY + 0.062f, 0.16f, pillSc * 1.05f, themeTextCol, tipStr);
                 }
             }
 
@@ -2886,6 +2933,18 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             const float thumbBg[4] = {0.035f, 0.050f, 0.080f, 0.98f};
             const float thumbBorder[4] = {0.22f, 0.32f, 0.48f, 0.80f};
 
+            static auto sLastCardAnimT = std::chrono::steady_clock::now();
+            const auto sNowCardT = std::chrono::steady_clock::now();
+            float dtCard = std::chrono::duration<float>(sNowCardT - sLastCardAnimT).count();
+            if (dtCard <= 0.0f || dtCard > 0.1f) dtCard = 0.016f;
+            sLastCardAnimT = sNowCardT;
+
+            for (int i = 0; i < perPage && i < 12; ++i) {
+                const int entryIdx = first + i;
+                const float target = (entryIdx >= 0 && entryIdx < total && entryIdx == browserHovered_) ? 1.0f : 0.0f;
+                cardHoverAnim_[i] += (target - cardHoverAnim_[i]) * std::clamp(14.0f * dtCard, 0.0f, 1.0f);
+            }
+
             for (int i = 0; i < perPage; ++i) {
                 const int entryIdx = first + i;
                 if (entryIdx >= total) break;
@@ -2893,22 +2952,24 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 const CardLayout lay = getCardLayout(i);
                 const bool hovered = (entryIdx == browserHovered_);
                 const bool selected = (entryIdx == browserSelected_);
+                const float zLift = (i < 12) ? (0.012f * cardHoverAnim_[i]) : 0.0f;
+                const Mat4 vpCard = (zLift > 0.0002f) ? multiply(vpPanel, translation(Vec3{0.0f, 0.0f, zLift})) : vpPanel;
 
                 if (hovered) {
-                    drawUiElement(vpPanel, lay.cx, lay.cy, lay.cardHalfW * 1.035f, lay.cardHalfH * 1.035f,
+                    drawUiElement(vpCard, lay.cx, lay.cy, lay.cardHalfW * 1.035f, lay.cardHalfH * 1.035f,
                                   UiShape::RoundedBox, glowCol, 0.08f);
-                    drawUiElement(vpPanel, lay.cx, lay.cy, lay.cardHalfW, lay.cardHalfH,
+                    drawUiElement(vpCard, lay.cx, lay.cy, lay.cardHalfW, lay.cardHalfH,
                                   UiShape::RoundedBox, hovCardBg, 0.06f, 0.032f, tabActiveBord);
                 } else if (selected) {
-                    drawUiElement(vpPanel, lay.cx, lay.cy, lay.cardHalfW, lay.cardHalfH,
+                    drawUiElement(vpCard, lay.cx, lay.cy, lay.cardHalfW, lay.cardHalfH,
                                   UiShape::RoundedBox, selCardBg, 0.06f, 0.026f, tabActiveBord);
                 } else {
-                    drawUiElement(vpPanel, lay.cx, lay.cy, lay.cardHalfW, lay.cardHalfH,
+                    drawUiElement(vpCard, lay.cx, lay.cy, lay.cardHalfW, lay.cardHalfH,
                                   UiShape::RoundedBox, normCardBg, 0.06f, 0.018f, normCardBorder);
                 }
 
                 // Thumbnail box
-                drawUiElement(vpPanel, lay.thumbCx, lay.thumbCy, lay.thumbHalfW, lay.thumbHalfH,
+                drawUiElement(vpCard, lay.thumbCx, lay.thumbCy, lay.thumbHalfW, lay.thumbHalfH,
                               UiShape::RoundedBox, thumbBg, 0.05f, 0.018f, thumbBorder);
 
                 // Folder tab visual cue for directory cards
@@ -2918,7 +2979,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                         const float tabHalfH = 0.007f;
                         const float tabCx = lay.thumbCx - lay.thumbHalfW + tabHalfW + 0.010f;
                         const float tabCy = lay.thumbCy + lay.thumbHalfH + 0.005f;
-                        drawUiElement(vpPanel, tabCx, tabCy, tabHalfW, tabHalfH,
+                        drawUiElement(vpCard, tabCx, tabCy, tabHalfW, tabHalfH,
                                       UiShape::RoundedBox, thumbBg, 0.40f, 0.020f, thumbBorder);
                     }
                 }
@@ -2931,7 +2992,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                     else if (item.isVideo) iconShape = UiShape::Play;
                     const float iconSize = (browserViewMode_ == BrowserViewMode::CompactList) ? 0.020f :
                                            (browserViewMode_ == BrowserViewMode::MiniCards) ? 0.026f : 0.032f;
-                    drawUiElement(vpPanel, lay.thumbCx, lay.thumbCy, iconSize, iconSize, iconShape, themeAccentCol);
+                    drawUiElement(vpCard, lay.thumbCx, lay.thumbCy, iconSize, iconSize, iconShape, themeAccentCol);
                 }
             }
 
@@ -2948,8 +3009,10 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                         vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                                 textPipelineLayout_, 0, 1, &cardThumbs_[i].set, 0, nullptr);
                         const CardLayout lay = getCardLayout(i);
+                        const float zLift = (i < 12) ? (0.012f * cardHoverAnim_[i]) : 0.0f;
+                        const Mat4 vpCard = (zLift > 0.0002f) ? multiply(vpPanel, translation(Vec3{0.0f, 0.0f, zLift})) : vpPanel;
                         TextPush push{};
-                        std::memcpy(push.mvp, vpPanel.m, sizeof(push.mvp));
+                        std::memcpy(push.mvp, vpCard.m, sizeof(push.mvp));
                         const float white4[4] = {1.0f, 1.0f, 1.0f, 1.0f};
                         std::memcpy(push.color, white4, sizeof(push.color));
                         push.rect[0] = lay.thumbCx - lay.thumbHalfW;
@@ -2979,24 +3042,26 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 if (entryIdx >= total) break;
                 const auto& item = browserItems_[static_cast<std::size_t>(entryIdx)];
                 const CardLayout lay = getCardLayout(i);
+                const float zLift = (i < 12) ? (0.012f * cardHoverAnim_[i]) : 0.0f;
+                const Mat4 vpCard = (zLift > 0.0002f) ? multiply(vpPanel, translation(Vec3{0.0f, 0.0f, zLift})) : vpPanel;
 
                 if (browserViewMode_ == BrowserViewMode::BigCards) {
-                    drawUiElement(vpPanel, lay.cx - lay.thumbHalfW + 0.062f, lay.thumbCy + lay.thumbHalfH - 0.024f,
+                    drawUiElement(vpCard, lay.cx - lay.thumbHalfW + 0.062f, lay.thumbCy + lay.thumbHalfH - 0.024f,
                                   0.056f, 0.018f, UiShape::RoundedBox, badgeBg, 0.45f, 0.03f, tabActiveBord);
                     if (!item.durationTag.empty()) {
-                        drawUiElement(vpPanel, lay.cx + lay.thumbHalfW - 0.050f, lay.thumbCy - lay.thumbHalfH + 0.024f,
+                        drawUiElement(vpCard, lay.cx + lay.thumbHalfW - 0.050f, lay.thumbCy - lay.thumbHalfH + 0.024f,
                                       0.044f, 0.017f, UiShape::RoundedBox, durBg, 0.40f, 0.02f, normCardBorder);
                     }
                 } else if (browserViewMode_ == BrowserViewMode::MiniCards) {
-                    drawUiElement(vpPanel, lay.cx - lay.thumbHalfW + 0.046f, lay.thumbCy + lay.thumbHalfH - 0.018f,
+                    drawUiElement(vpCard, lay.cx - lay.thumbHalfW + 0.046f, lay.thumbCy + lay.thumbHalfH - 0.018f,
                                   0.042f, 0.014f, UiShape::RoundedBox, badgeBg, 0.45f, 0.025f, tabActiveBord);
                     if (!item.durationTag.empty()) {
-                        drawUiElement(vpPanel, lay.cx + lay.thumbHalfW - 0.038f, lay.thumbCy - lay.thumbHalfH + 0.018f,
+                        drawUiElement(vpCard, lay.cx + lay.thumbHalfW - 0.038f, lay.thumbCy - lay.thumbHalfH + 0.018f,
                                       0.034f, 0.014f, UiShape::RoundedBox, durBg, 0.40f, 0.02f, normCardBorder);
                     }
                 } else { // CompactList
                     if (listShowFormat_) {
-                        drawUiElement(vpPanel, listCols.fmtCx, lay.cy,
+                        drawUiElement(vpCard, listCols.fmtCx, lay.cy,
                                       0.055f, 0.016f, UiShape::RoundedBox, badgeBg, 0.45f, 0.025f, tabActiveBord);
                     }
                 }
@@ -3107,6 +3172,9 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 const CardLayout lay = getCardLayout(i);
                 const std::string cardDet = item.detail.empty() ? (item.isDir ? "Folder" : "Media") : item.detail;
                 const std::string& bTag = item.tag.empty() ? (item.isVideo ? "VIDEO" : "FILE") : item.tag;
+                const float zLift = (i < 12) ? (0.012f * cardHoverAnim_[i]) : 0.0f;
+                const Mat4 vpCard = (zLift > 0.0002f) ? multiply(vpPanel, translation(Vec3{0.0f, 0.0f, zLift})) : vpPanel;
+                curTextVp = &vpCard;
 
                 if (browserViewMode_ == BrowserViewMode::BigCards) {
                     const float textLeft = lay.cx - lay.cardHalfW + 0.016f;
@@ -3149,6 +3217,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                         drawFitCentered(listCols.durCx, lay.cy, 0.11f, scDetail * 0.95f, slateCol, durStr);
                     }
                 }
+                curTextVp = &vpPanel;
             }
 
             // Bottom status bar
@@ -3603,7 +3672,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 1.0f};
         const float slateCol[4] = {0.60f, 0.70f, 0.84f, 1.0f};
 
-        if (actionMenu_.page == 0 || actionMenu_.page == 1) {
+        if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5) {
             const float btnHalfW = 0.38f;
             const float btnHalfH = 0.028f;
             for (int i = 0; i < menuOptCount; ++i) {
@@ -3695,7 +3764,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             drawFitCentered(0.0f, mHalfH - 0.090f, mHalfW * 1.8f, sc * 0.85f, slateCol, actionMenu_.subtitle);
         }
 
-        if (actionMenu_.page == 0 || actionMenu_.page == 1) {
+        if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5) {
             for (int i = 0; i < menuOptCount; ++i) {
                 const float cy = menuStartY - static_cast<float>(i) * menuStepY;
                 const bool hov = (actionMenuBtnHovered_ == i) || (actionMenu_.selectedOption == i);
@@ -4559,6 +4628,8 @@ bool VulkanRenderer::createYcbcrPipeline(uint32_t fourcc, int colorspace,
 
     if (!buildPipeline("quad.vert.spv", "video_quad.frag.spv", ycbcrQuadLayout_,
                        ycbcrQuadPipeline_) ||
+        !buildPipeline("quad.vert.spv", "ambilight.frag.spv", ycbcrQuadLayout_,
+                       ycbcrAmbilightPipeline_, true) ||
         !buildPipeline("sphere.vert.spv", "video_sphere.frag.spv",
                        ycbcrSphereLayout_, ycbcrSpherePipeline_)) {
         return false;
@@ -4591,6 +4662,10 @@ void VulkanRenderer::destroyYcbcr() {
     if (ycbcrQuadPipeline_ != VK_NULL_HANDLE) {
         vkDestroyPipeline(device_, ycbcrQuadPipeline_, nullptr);
         ycbcrQuadPipeline_ = VK_NULL_HANDLE;
+    }
+    if (ycbcrAmbilightPipeline_ != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device_, ycbcrAmbilightPipeline_, nullptr);
+        ycbcrAmbilightPipeline_ = VK_NULL_HANDLE;
     }
     if (ycbcrSpherePipeline_ != VK_NULL_HANDLE) {
         vkDestroyPipeline(device_, ycbcrSpherePipeline_, nullptr);

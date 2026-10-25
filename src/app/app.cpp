@@ -792,6 +792,9 @@ void App::openActionMenu() {
             if (VaultManager::instance().isUnlocked() && !browser_.inVault()) {
                 actionMenu_.options.push_back("Move to Vault");
             }
+            if (fe && !fe->isDir && fe->isVideo) {
+                actionMenu_.options.push_back("Change 3D / VR Format");
+            }
             actionMenu_.options.push_back("Move To...");
             actionMenu_.options.push_back("Rename");
             actionMenu_.options.push_back("Delete");
@@ -1072,6 +1075,7 @@ int App::run() {
                                       settings_.uiTextColorIdx(),
                                       settings_.uiAccentColorIdx(),
                                       settings_.uiDistance());
+            renderer_.setAmbilightIntensity(settings_.ambilightIntensity());
             renderer_.setUiFollowMode(settings_.uiFollowMode());
             renderer_.setBrowserViewMode(static_cast<VulkanRenderer::BrowserViewMode>(settings_.browserViewMode()));
             renderer_.setBrowserQuickPath(browser_.isCurrentBookmarked());
@@ -1837,7 +1841,7 @@ int App::run() {
 
             // File Action Submenu or Files view interaction inside Unified Spatial Hub
             if (actionMenu_.visible) {
-                if (!browser_.isOpen() || downloadsWindow_ || settings_.isOpen() || !pendingDl_.empty()) {
+                if ((!browser_.isOpen() && actionMenu_.page != 5) || downloadsWindow_ || settings_.isOpen() || !pendingDl_.empty()) {
                     actionMenu_.visible = false;
                 } else {
                     const Browser::Entry* fe = browser_.focused();
@@ -1845,7 +1849,7 @@ int App::run() {
                     // Button Y (or configured move button) toggles/cancels
                     if (actionBtnPressed) {
                         actionMenu_.visible = false;
-                    } else if (actionMenu_.page == 0 || actionMenu_.page == 1) {
+                    } else if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5) {
                         const int dy = navStep(in.thumbstickY, nowT);
                         if (dy != 0) {
                             actionMenu_.selectedOption += dy;
@@ -1909,6 +1913,18 @@ int App::run() {
                                             xr_.triggerHaptic(1, 0.050f, 0.0f, 0.7f);
                                         }
                                         actionMenu_.visible = false;
+                                    } else if (opt == "Change 3D / VR Format") {
+                                        actionMenu_.page = 5;
+                                        actionMenu_.title = "3D & VR Format";
+                                        actionMenu_.subtitle = fe ? fe->label : "";
+                                        actionMenu_.options.clear();
+                                        actionMenu_.options.push_back("2D Flat (Standard)");
+                                        actionMenu_.options.push_back("3D Side-by-Side (SBS)");
+                                        actionMenu_.options.push_back("3D Top-Bottom (Over-Under)");
+                                        actionMenu_.options.push_back("VR 180° (Side-by-Side)");
+                                        actionMenu_.options.push_back("VR 360° (Equirectangular)");
+                                        actionMenu_.options.push_back("Cancel");
+                                        actionMenu_.selectedOption = 0;
                                     } else if (opt == "Move To...") {
                                         actionMenu_.page = 1;
                                         actionMenu_.title = "Move Destination";
@@ -1982,6 +1998,36 @@ int App::run() {
                                         }
                                         actionMenu_.visible = false;
                                     }
+                                } else if (actionMenu_.page == 5) {
+                                    if (opt == "2D Flat (Standard)") {
+                                        settings_.setProjectionMode(0);
+                                        settings_.setStereoMode(0);
+                                        renderer_.setProjectionMode(VulkanRenderer::ProjectionMode::Flat);
+                                        renderer_.setStereoMode(VulkanRenderer::StereoMode::Mono);
+                                    } else if (opt == "3D Side-by-Side (SBS)") {
+                                        settings_.setProjectionMode(0);
+                                        settings_.setStereoMode(1);
+                                        renderer_.setProjectionMode(VulkanRenderer::ProjectionMode::Flat);
+                                        renderer_.setStereoMode(VulkanRenderer::StereoMode::SideBySide);
+                                    } else if (opt == "3D Top-Bottom (Over-Under)") {
+                                        settings_.setProjectionMode(0);
+                                        settings_.setStereoMode(2);
+                                        renderer_.setProjectionMode(VulkanRenderer::ProjectionMode::Flat);
+                                        renderer_.setStereoMode(VulkanRenderer::StereoMode::TopBottom);
+                                    } else if (opt == "VR 180° (Side-by-Side)") {
+                                        settings_.setProjectionMode(2);
+                                        settings_.setStereoMode(1);
+                                        renderer_.setProjectionMode(VulkanRenderer::ProjectionMode::Equirect180);
+                                        renderer_.setStereoMode(VulkanRenderer::StereoMode::SideBySide);
+                                    } else if (opt == "VR 360° (Equirectangular)") {
+                                        settings_.setProjectionMode(1);
+                                        settings_.setStereoMode(0);
+                                        renderer_.setProjectionMode(VulkanRenderer::ProjectionMode::Equirect360);
+                                        renderer_.setStereoMode(VulkanRenderer::StereoMode::Mono);
+                                    }
+                                    xr_.triggerHaptic(0, 0.040f, 0.0f, 0.6f);
+                                    xr_.triggerHaptic(1, 0.040f, 0.0f, 0.6f);
+                                    actionMenu_.visible = false;
                                 }
                             }
                             interacted = true;
@@ -2347,30 +2393,20 @@ int App::run() {
                                cb == VulkanRenderer::CtrlButton::SeekFwd) {
                         media_.seekRelative(10.0);
                     } else if (cb == VulkanRenderer::CtrlButton::FormatToggle) {
-                        int pm = settings_.projectionMode();
-                        int sm = settings_.stereoMode();
-                        if (pm == 0 && sm == 0) {
-                            settings_.setStereoMode(1);
-                            renderer_.setStereoMode(VulkanRenderer::StereoMode::SideBySide);
-                        } else if (pm == 0) {
-                            settings_.setProjectionMode(2);
-                            settings_.setStereoMode(1);
-                            renderer_.setProjectionMode(VulkanRenderer::ProjectionMode::Equirect180);
-                            renderer_.setStereoMode(VulkanRenderer::StereoMode::SideBySide);
-                        } else if (pm == 2 && sm == 1) {
-                            settings_.setStereoMode(2);
-                            renderer_.setStereoMode(VulkanRenderer::StereoMode::TopBottom);
-                        } else if (pm == 2) {
-                            settings_.setProjectionMode(1);
-                            settings_.setStereoMode(1);
-                            renderer_.setProjectionMode(VulkanRenderer::ProjectionMode::Equirect360);
-                            renderer_.setStereoMode(VulkanRenderer::StereoMode::SideBySide);
-                        } else {
-                            settings_.setProjectionMode(0);
-                            settings_.setStereoMode(0);
-                            renderer_.setProjectionMode(VulkanRenderer::ProjectionMode::Flat);
-                            renderer_.setStereoMode(VulkanRenderer::StereoMode::Mono);
-                        }
+                        actionMenu_.visible = true;
+                        actionMenu_.page = 5;
+                        actionMenu_.title = "Playback Format";
+                        actionMenu_.subtitle = "Select 3D / VR Projection";
+                        actionMenu_.options.clear();
+                        actionMenu_.options.push_back("2D Flat (Standard)");
+                        actionMenu_.options.push_back("3D Side-by-Side (SBS)");
+                        actionMenu_.options.push_back("3D Top-Bottom (Over-Under)");
+                        actionMenu_.options.push_back("VR 180° (Side-by-Side)");
+                        actionMenu_.options.push_back("VR 360° (Equirectangular)");
+                        actionMenu_.options.push_back("Cancel");
+                        actionMenu_.selectedOption = 0;
+                        xr_.triggerHaptic(0, 0.020f, 0.0f, 0.4f);
+                        xr_.triggerHaptic(1, 0.020f, 0.0f, 0.4f);
                     } else if (cb == VulkanRenderer::CtrlButton::AudioToggle) {
                         if (mediaOpen_ && media_.audioStreams().size() > 1) {
                             const auto& streams = media_.audioStreams();
