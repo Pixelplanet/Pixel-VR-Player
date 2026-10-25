@@ -136,6 +136,12 @@ In `shaders/thumb.frag`, thumbnails are drawn without scrims, causing white dura
 ### 4.5. Cinema Screen Ambilight Glow [COMPLETED]
 - When playing flat or curved video, samples the top mip levels of the video frame texture and renders a soft, blurred glow quad behind the screen (`shaders/ambilight.frag` and `shaders/ambilight_nv12.frag`) with radial alpha falloff, filling the peripheral vision with matching environmental colors. Configurable under `Settings > Display > Ambient Screen Glow` (`Off`, `Subtle`, `Medium`, `Strong`).
 
+### 4.6. OpenXR Swapchain Supersampling & Dynamic Resolution Scaling [COMPLETED]
+- Multi-tier resolution scale setting in `Settings > Display > Render Resolution` (`1.00x Native`, `1.25x Balanced`, `1.40x Sharp`, `1.50x Crisp`, `1.75x Ultra`).
+- Recreates OpenXR swapchains and Vulkan render targets (MSAA color resolve + depth targets) on-the-fly at runtime without app restarts.
+- Eliminates compositor magnification blur and dramatically enhances FreeType SDF text readability and high-frequency cinema screen fidelity in VR.
+- Real-time render resolution and supersampling multiplier displayed in `Settings > System > Performance Stats`.
+
 ---
 
 ## 5. Build, Test & Headset Deployment Reference
