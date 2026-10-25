@@ -36,7 +36,7 @@ FontAtlas buildFontAtlas(const char* ttfPath, int pixelHeight) {
     FT_Set_Pixel_Sizes(face, 0, static_cast<FT_UInt>(pixelHeight));
 
     constexpr int kFirst = 32;
-    constexpr int kLast = 127;
+    constexpr int kLast = 255;
     constexpr int kCols = 16;
     const int count = kLast - kFirst + 1;
     const int rows = (count + kCols - 1) / kCols;
@@ -49,11 +49,27 @@ FontAtlas buildFontAtlas(const char* ttfPath, int pixelHeight) {
     atlas.ascent = face->size->metrics.ascender / 64.0f;
 
     for (int ch = kFirst; ch <= kLast; ++ch) {
-        FT_ULong codepoint = (ch == 127) ? 0x2022UL : static_cast<FT_ULong>(ch);
+        if (ch >= 137 && ch < 160) {
+            continue;
+        }
+        FT_ULong codepoint = static_cast<FT_ULong>(ch);
+        if (ch == 127) codepoint = 0x2022UL;      // bullet (•)
+        else if (ch == 128) codepoint = 0x20ACUL; // Euro (€)
+        else if (ch == 129) codepoint = 0x2013UL; // en-dash (–)
+        else if (ch == 130) codepoint = 0x2014UL; // em-dash (—)
+        else if (ch == 131) codepoint = 0x2018UL; // left single quote (‘)
+        else if (ch == 132) codepoint = 0x2019UL; // right single quote (’)
+        else if (ch == 133) codepoint = 0x201CUL; // left double quote (“)
+        else if (ch == 134) codepoint = 0x201DUL; // right double quote (”)
+        else if (ch == 135) codepoint = 0x2026UL; // ellipsis (…)
+        else if (ch == 136) codepoint = 0x2122UL; // trademark (™)
+
         if (FT_Load_Char(face, codepoint, FT_LOAD_DEFAULT) != 0) {
-            if (ch == 127 && FT_Load_Char(face, 0x00B7UL, FT_LOAD_DEFAULT) != 0) {
-                continue;
-            } else if (ch != 127) {
+            if (ch == 127 && FT_Load_Char(face, 0x00B7UL, FT_LOAD_DEFAULT) == 0) {
+                // fallback to middle dot
+            } else if (ch == 160 && FT_Load_Char(face, 0x0020UL, FT_LOAD_DEFAULT) == 0) {
+                // fallback to regular space for NBSP
+            } else {
                 continue;
             }
         }

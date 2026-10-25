@@ -373,10 +373,14 @@ void App::loadMedia(const std::string& path) {
 void App::switchTracks(bool byLanguage) {
     if (currentMediaPath_.empty() || !mediaOpen_) return;
     const double pos = media_.position();
-    media_.setPreferredAudioLanguage(settings_.audioLanguage());
+    if (byLanguage) {
+        media_.setPreferredAudioLanguage(settings_.audioLanguage());
+        media_.setPreferredAudioStream(-1);
+    } else {
+        media_.setPreferredAudioLanguage("");
+        media_.setPreferredAudioStream(settings_.selectedAudioStream());
+    }
     media_.setPreferredVideoStream(settings_.selectedVideoStream());
-    media_.setPreferredAudioStream(byLanguage ? -1
-                                              : settings_.selectedAudioStream());
     loadMedia(currentMediaPath_);  // same file: keeps the preferences set above
     if (pos > 0.5 && media_.duration() > 0.0) media_.seek(pos);
 }
@@ -627,14 +631,30 @@ void App::updateSmbModalMenu() {
     actionMenu_.title = smbModal_.isNew ? "Add SMB Network Share" : "Edit SMB Network Share";
     actionMenu_.subtitle = "Point & click a field to enter text via keyboard";
     actionMenu_.options.clear();
+    actionMenu_.editingRow = -1;
+    actionMenu_.cursorPos = 0;
 
-    actionMenu_.options.push_back("Server IP: " + (smbModal_.host.empty() ? "[ Enter IPv4 Address ]" : smbModal_.host));
-    actionMenu_.options.push_back("Share Name: " + (smbModal_.share.empty() ? "[ All Shares ]" : smbModal_.share));
+    const bool kbActive = VrKeyboard::instance().isOpen();
+    const std::string liveText = VrKeyboard::instance().currentText();
+    const int liveCur = VrKeyboard::instance().cursorPos();
+
+    auto fieldVal = [&](SmbModalState::Field f, int rowIdx, const std::string& saved, const std::string& placeholder, bool mask) {
+        if (kbActive && smbModal_.editingField == f) {
+            actionMenu_.editingRow = rowIdx;
+            actionMenu_.cursorPos = liveCur;
+            return mask ? std::string(liveText.length(), '*') : liveText;
+        }
+        if (saved.empty()) return placeholder;
+        return mask ? std::string(saved.length(), '*') : saved;
+    };
+
+    actionMenu_.options.push_back("Server / Host: " + fieldVal(SmbModalState::Field::Host, 0, smbModal_.host, "[ Enter IP or Hostname ]", false));
+    actionMenu_.options.push_back("Share Name: " + fieldVal(SmbModalState::Field::Share, 1, smbModal_.share, "[ All Shares ]", false));
     actionMenu_.options.push_back("Authentication: " + std::string(smbModal_.anon ? "Guest / Anonymous" : "Username & Password"));
-    actionMenu_.options.push_back("Username: " + (smbModal_.user.empty() ? "[ Enter Username ]" : smbModal_.user));
-    actionMenu_.options.push_back("Password: " + (smbModal_.pass.empty() ? "[ Enter Password ]" : std::string(smbModal_.pass.length(), '*')));
-    actionMenu_.options.push_back("Workgroup: " + smbModal_.workgroup);
-    actionMenu_.options.push_back("Nickname: " + (smbModal_.label.empty() ? "[ Optional Nickname ]" : smbModal_.label));
+    actionMenu_.options.push_back("Username: " + fieldVal(SmbModalState::Field::User, 3, smbModal_.user, "[ Enter Username ]", false));
+    actionMenu_.options.push_back("Password: " + fieldVal(SmbModalState::Field::Pass, 4, smbModal_.pass, "[ Enter Password ]", true));
+    actionMenu_.options.push_back("Workgroup: " + fieldVal(SmbModalState::Field::Workgroup, 5, smbModal_.workgroup, "WORKGROUP", false));
+    actionMenu_.options.push_back("Nickname: " + fieldVal(SmbModalState::Field::Label, 6, smbModal_.label, "[ Optional Nickname ]", false));
 
     actionMenu_.options.push_back("[ Save SMB Share ]");
     if (!smbModal_.isNew) {
@@ -646,16 +666,20 @@ void App::updateSmbModalMenu() {
 
 void App::saveSmbModal() {
 #ifdef PIXELVR_HAVE_FREETYPE
+    while (!smbModal_.host.empty() &&
+           (std::isspace(static_cast<unsigned char>(smbModal_.host.front())) ||
+            smbModal_.host.front() == '/' || smbModal_.host.front() == '\\')) {
+        smbModal_.host.erase(smbModal_.host.begin());
+    }
+    while (!smbModal_.host.empty() &&
+           (std::isspace(static_cast<unsigned char>(smbModal_.host.back())) ||
+            smbModal_.host.back() == '/' || smbModal_.host.back() == '\\')) {
+        smbModal_.host.pop_back();
+    }
     if (smbModal_.host.empty()) {
-        actionMenu_.subtitle = "Error: Server IPv4 address is required!";
+        actionMenu_.subtitle = "Error: Server IP or Hostname is required!";
         return;
     }
-    std::string cleanHost = sanitizeIpv4(smbModal_.host, true);
-    if (!isValidIpv4(cleanHost)) {
-        actionMenu_.subtitle = "Error: Invalid IPv4 address (e.g. 192.168.1.100)";
-        return;
-    }
-    smbModal_.host = cleanHost;
     if (!smbModal_.isNew && (smbModal_.host != smbModal_.origHost || smbModal_.share != smbModal_.origShare)) {
         SmbCredentialsManager::instance().deleteShare(smbModal_.origHost, smbModal_.origShare);
     }
@@ -692,6 +716,22 @@ void App::deleteSmbModal() {
 #endif
 }
 
+void App::openKeyboard(const std::string& prompt,
+                       const std::string& initialText,
+                       bool isPassword,
+                       const XrInputState& in,
+                       std::function<void(const std::string&)> onDone,
+                       std::function<void()> onCancel) {
+    kbOnDone_ = std::move(onDone);
+    kbOnCancel_ = std::move(onCancel);
+    float stagePos[3]{0.0f, 1.65f, 0.0f};
+    float stageFwd[3]{0.0f, 0.0f, -1.0f};
+    const float* fwd = renderer_.screenForward();
+    xr_.transformToStage(in.headPos, fwd, stagePos, stageFwd);
+    VrKeyboard::instance().show(prompt, initialText, isPassword, 256,
+                                in.headPos, fwd, stagePos, stageFwd);
+}
+
 void App::openActionMenu() {
 #ifdef PIXELVR_HAVE_FREETYPE
     const Browser::Entry* fe = browser_.focused();
@@ -722,7 +762,6 @@ void App::openActionMenu() {
         } else {
             actionMenu_.options.push_back("Add to Bookmarks");
         }
-        actionMenu_.options.push_back("Go to Bookmarks");
         actionMenu_.options.push_back("Cancel");
         return;
     }
@@ -749,7 +788,6 @@ void App::openActionMenu() {
         } else {
             actionMenu_.options.push_back(fe->isDir ? "Add to Bookmarks" : "Add Folder to Bookmarks");
         }
-        actionMenu_.options.push_back("Go to Bookmarks");
         if (!browser_.onNetwork()) {
             if (VaultManager::instance().isUnlocked() && !browser_.inVault()) {
                 actionMenu_.options.push_back("Move to Vault");
@@ -811,54 +849,54 @@ int App::run() {
             // Poll native SteamVR virtual keyboard events if active
             VrKeyboard::instance().poll(
                 [this](const std::string& text) {
-                    if (smbModal_.active) {
-                        if (smbModal_.editingField == SmbModalState::Field::Host) {
-                            smbModal_.host = sanitizeIpv4(text, true);
-                        } else if (smbModal_.editingField == SmbModalState::Field::Share) {
-                            std::string s = text;
-                            while (!s.empty() && (s.front() == '/' || s.front() == '\\')) s.erase(s.begin());
-                            while (!s.empty() && (s.back() == '/' || s.back() == '\\')) s.pop_back();
-                            smbModal_.share = s;
-                        } else if (smbModal_.editingField == SmbModalState::Field::User) {
-                            smbModal_.user = text;
-                        } else if (smbModal_.editingField == SmbModalState::Field::Pass) {
-                            smbModal_.pass = text;
-                        } else if (smbModal_.editingField == SmbModalState::Field::Workgroup) {
-                            smbModal_.workgroup = text.empty() ? "WORKGROUP" : text;
-                        } else if (smbModal_.editingField == SmbModalState::Field::Label) {
-                            smbModal_.label = text;
-                        }
-                        smbModal_.editingField = SmbModalState::Field::None;
-                        updateSmbModalMenu();
+                    if (kbOnDone_) {
+                        auto cb = std::move(kbOnDone_);
+                        kbOnDone_ = nullptr;
+                        kbOnCancel_ = nullptr;
+                        cb(text);
                     } else if (settings_.isOpen()) {
                         settings_.onKeyboardSubmit(text);
                     }
                 },
                 [this]() {
-                    if (smbModal_.active) {
-                        smbModal_.editingField = SmbModalState::Field::None;
-                        updateSmbModalMenu();
-                    } else if (settings_.isOpen()) {
-                        settings_.onKeyboardCancel();
+                    if (kbOnCancel_) {
+                        auto cb = std::move(kbOnCancel_);
+                        kbOnDone_ = nullptr;
+                        kbOnCancel_ = nullptr;
+                        cb();
+                    } else {
+                        kbOnDone_ = nullptr;
+                        if (settings_.isOpen()) {
+                            settings_.onKeyboardCancel();
+                        }
                     }
                 });
 
             const bool kbOpen = VrKeyboard::instance().isOpen();
-            std::string kbDisplayText = VrKeyboard::instance().currentText();
-            if (smbModal_.active && smbModal_.editingField == SmbModalState::Field::Host) {
-                kbDisplayText = sanitizeIpv4(kbDisplayText, false);
-            }
-            renderer_.setKeyboardModal(kbOpen,
-                                       VrKeyboard::instance().description(),
-                                       kbDisplayText,
-                                       VrKeyboard::instance().isPassword(),
-                                       kbOpen ? VrKeyboard::instance().transform() : nullptr);
             if (kbOpen) {
+                const int kbDx = navStepX(in.thumbstickX, nowT);
+                if (kbDx != 0) {
+                    VrKeyboard::instance().moveCursor(kbDx);
+                    xr_.triggerHaptic(0, 0.012f, 0.0f, 0.35f);
+                    xr_.triggerHaptic(1, 0.012f, 0.0f, 0.35f);
+                }
+                in.thumbstickX = 0.0f;
+                in.thumbstickY = 0.0f;
                 in.select = false;
                 in.selectHeld = false;
                 in.togglePlay = false;
                 in.browserToggle = false;
+                if (smbModal_.active && smbModal_.editingField != SmbModalState::Field::None) {
+                    updateSmbModalMenu();
+                }
             }
+            std::string kbDisplayText = VrKeyboard::instance().currentText();
+            renderer_.setKeyboardModal(kbOpen,
+                                       VrKeyboard::instance().description(),
+                                       kbDisplayText,
+                                       VrKeyboard::instance().isPassword(),
+                                       kbOpen ? VrKeyboard::instance().transform() : nullptr,
+                                       VrKeyboard::instance().cursorPos());
 
             // Custom combo recording listener (active while recording new 6-button combo in Vault & Privacy)
             if (VaultManager::instance().isRecordingCombo()) {
@@ -1476,6 +1514,7 @@ int App::run() {
                 }
 
                 renderer_.setBrowserNetwork(browser_.onNetwork());
+                renderer_.setBrowserQuickFilter(browser_.activeFilter());
                 std::string status = browser_.status();
                 if (browser_.onNetwork() && !browser_.isBusy()) {
                     if (status.empty()) {
@@ -1492,8 +1531,15 @@ int App::run() {
                     settings_.listShowSize(),
                     settings_.listShowDuration()
                 );
+                int restoredFirst = 0;
+                if (browser_.consumeRestoredFirst(restoredFirst)) {
+                    renderer_.setBrowserFirst(restoredFirst);
+                }
                 renderer_.setBrowserItems(true, browser_.title(), items,
                                          browser_.selected(), status);
+                if (!browser_.isScanning()) {
+                    browser_.setFirst(renderer_.browserFirst());
+                }
 
                 // Feed ready thumbnails to the visible slots (6 for BigCards, 12 for MiniCards, 8 for List)
                 const int curFirst = renderer_.browserFirst();
@@ -1574,7 +1620,36 @@ int App::run() {
                 // Keep laser active when UI panels, activity, or virtual keyboard are active!
                 const bool kbActive = VrKeyboard::instance().isOpen();
                 if (kbActive) {
-                    if (!renderer_.laserOn(0) && !renderer_.laserOn(1)) {
+                    // Auto-focus the laser on whichever hand is actually aiming at the
+                    // keyboard, so the user never has to grip to "activate" a pointer.
+                    // The keyboard's local transform and the controller aim poses live in
+                    // the same space the renderer raycasts in, so we can score each hand by
+                    // how directly it points at the keyboard centre.
+                    const float* kb = VrKeyboard::instance().transform();
+                    const float kbCenter[3] = { kb[3], kb[7], kb[11] };
+                    float score[2] = { -2.0f, -2.0f };
+                    for (int h = 0; h < 2; ++h) {
+                        if (!in.controllers[h].active) continue;
+                        const float fwdLocal[3] = { 0.0f, 0.0f, -1.0f };
+                        float fwd[3];
+                        quatRotate(in.controllers[h].orientation, fwdLocal, fwd);
+                        float d[3] = { kbCenter[0] - in.controllers[h].position[0],
+                                       kbCenter[1] - in.controllers[h].position[1],
+                                       kbCenter[2] - in.controllers[h].position[2] };
+                        const float dl = std::sqrt(d[0]*d[0] + d[1]*d[1] + d[2]*d[2]);
+                        if (dl > 1e-4f) { d[0] /= dl; d[1] /= dl; d[2] /= dl; }
+                        score[h] = fwd[0]*d[0] + fwd[1]*d[1] + fwd[2]*d[2];
+                    }
+                    const int cur = renderer_.laserOn(1) ? 1 : (renderer_.laserOn(0) ? 0 : -1);
+                    const int best = (score[1] >= score[0]) ? 1 : 0;
+                    if (score[best] > 0.55f && in.controllers[best].active) {
+                        // A hand is pointing at the keyboard: give it the laser, but only
+                        // switch away from the current hand when it is clearly better (hysteresis).
+                        if (cur < 0 || best == cur || score[best] > score[cur] + 0.12f) {
+                            if (!renderer_.laserOn(best)) renderer_.setLaserOn(best, true);
+                        }
+                    } else if (!renderer_.laserOn(0) && !renderer_.laserOn(1)) {
+                        // Neither hand aims at the keyboard yet: make sure some laser is on.
                         if (in.controllers[1].active) renderer_.setLaserOn(1, true);
                         else if (in.controllers[0].active) renderer_.setLaserOn(0, true);
                     } else if (renderer_.laserOn(1) && !in.controllers[1].active && in.controllers[0].active) {
@@ -1804,11 +1879,34 @@ int App::run() {
                                         actionMenu_.options.push_back("Cancel");
                                         actionMenu_.selectedOption = 0;
                                     } else if (opt == "Rename") {
-                                        actionMenu_.page = 3;
-                                        actionMenu_.title = (fe && fe->isDir) ? "Rename Folder" : "Rename File";
-                                        actionMenu_.subtitle = fe ? fe->label : "";
-                                        actionMenu_.renameBuffer = fe ? fe->label : "";
-                                        actionMenu_.selectedOption = -1;
+                                        actionMenu_.visible = false;
+                                        if (fe) {
+                                            std::string curName = fe->label;
+                                            while (!curName.empty() && (curName.back() == '/' || curName.back() == '\\')) {
+                                                curName.pop_back();
+                                            }
+                                            const bool isDir = fe->isDir;
+                                            openKeyboard(
+                                                isDir ? "Rename Folder" : "Rename File",
+                                                curName,
+                                                false,
+                                                in,
+                                                [this](const std::string& newText) {
+                                                    std::string clean = newText;
+                                                    while (!clean.empty() && (std::isspace(static_cast<unsigned char>(clean.front())) || clean.front() == '/' || clean.front() == '\\')) {
+                                                        clean.erase(clean.begin());
+                                                    }
+                                                    while (!clean.empty() && (std::isspace(static_cast<unsigned char>(clean.back())) || clean.back() == '/' || clean.back() == '\\')) {
+                                                        clean.pop_back();
+                                                    }
+                                                    if (!clean.empty()) {
+                                                        if (browser_.renameFocused(clean)) {
+                                                            xr_.triggerHaptic(0, 0.050f, 0.0f, 0.7f);
+                                                            xr_.triggerHaptic(1, 0.050f, 0.0f, 0.7f);
+                                                        }
+                                                    }
+                                                });
+                                        }
                                     } else if (opt == "Delete") {
                                         actionMenu_.page = 2;
                                         actionMenu_.title = (fe && fe->isDir) ? "Delete Folder?" : "Delete File?";
@@ -1867,41 +1965,6 @@ int App::run() {
                             }
                             interacted = true;
                         }
-                    } else if (actionMenu_.page == 3) {
-                        const int btnHov = renderer_.actionMenuBtnHovered();
-                        const int keyHov = renderer_.actionMenuKeyHovered();
-
-                        if (in.select || in.togglePlay) {
-                            if (btnHov == 0) {
-                                actionMenu_.renameBuffer.clear();
-                                xr_.triggerHaptic(0, 0.020f, 0.0f, 0.5f);
-                                xr_.triggerHaptic(1, 0.020f, 0.0f, 0.5f);
-                            } else if (btnHov == 1) {
-                                if (!actionMenu_.renameBuffer.empty()) {
-                                    actionMenu_.renameBuffer.pop_back();
-                                    xr_.triggerHaptic(0, 0.020f, 0.0f, 0.5f);
-                                    xr_.triggerHaptic(1, 0.020f, 0.0f, 0.5f);
-                                }
-                            } else if (btnHov == 2) {
-                                if (!actionMenu_.renameBuffer.empty()) {
-                                    if (browser_.renameFocused(actionMenu_.renameBuffer)) {
-                                        xr_.triggerHaptic(0, 0.050f, 0.0f, 0.7f);
-                                        xr_.triggerHaptic(1, 0.050f, 0.0f, 0.7f);
-                                    }
-                                    actionMenu_.visible = false;
-                                }
-                            } else if (btnHov == 3) {
-                                actionMenu_.visible = false;
-                            } else if (keyHov >= 0) {
-                                static const char* kKeys = "1234567890-_QWERTYUIOPASDFGHJKLZXCVBNM. ";
-                                if (keyHov < static_cast<int>(std::strlen(kKeys))) {
-                                    actionMenu_.renameBuffer.push_back(kKeys[keyHov]);
-                                    xr_.triggerHaptic(0, 0.015f, 0.0f, 0.4f);
-                                    xr_.triggerHaptic(1, 0.015f, 0.0f, 0.4f);
-                                }
-                            }
-                            interacted = true;
-                        }
                     } else if (actionMenu_.page == 4) {
                         // SMB Share Editor Modal
                         const int dy = navStep(in.thumbstickY, nowT);
@@ -1922,11 +1985,42 @@ int App::run() {
 
                                 auto openKeyboardForField = [&](SmbModalState::Field field, const std::string& desc, const std::string& currentVal, bool isPass) {
                                     smbModal_.editingField = field;
-                                    float stagePos[3]{0.0f, 1.65f, 0.0f};
-                                    float stageFwd[3]{0.0f, 0.0f, -1.0f};
-                                    const float* fwd = renderer_.screenForward();
-                                    xr_.transformToStage(in.headPos, fwd, stagePos, stageFwd);
-                                    VrKeyboard::instance().show(desc, currentVal, isPass, 256, in.headPos, fwd, stagePos, stageFwd);
+                                    openKeyboard(
+                                        desc,
+                                        currentVal,
+                                        isPass,
+                                        in,
+                                        [this, field](const std::string& text) {
+                                            if (!smbModal_.active) return;
+                                            if (field == SmbModalState::Field::Host) {
+                                                std::string h = text;
+                                                if (h.rfind("smb://", 0) == 0) h = h.substr(6);
+                                                while (!h.empty() && (std::isspace(static_cast<unsigned char>(h.front())) || h.front() == '/' || h.front() == '\\')) h.erase(h.begin());
+                                                while (!h.empty() && (std::isspace(static_cast<unsigned char>(h.back())) || h.back() == '/' || h.back() == '\\')) h.pop_back();
+                                                smbModal_.host = h;
+                                            } else if (field == SmbModalState::Field::Share) {
+                                                std::string s = text;
+                                                while (!s.empty() && (s.front() == '/' || s.front() == '\\')) s.erase(s.begin());
+                                                while (!s.empty() && (s.back() == '/' || s.back() == '\\')) s.pop_back();
+                                                smbModal_.share = s;
+                                            } else if (field == SmbModalState::Field::User) {
+                                                smbModal_.user = text;
+                                            } else if (field == SmbModalState::Field::Pass) {
+                                                smbModal_.pass = text;
+                                            } else if (field == SmbModalState::Field::Workgroup) {
+                                                smbModal_.workgroup = text.empty() ? "WORKGROUP" : text;
+                                            } else if (field == SmbModalState::Field::Label) {
+                                                smbModal_.label = text;
+                                            }
+                                            smbModal_.editingField = SmbModalState::Field::None;
+                                            updateSmbModalMenu();
+                                        },
+                                        [this]() {
+                                            if (smbModal_.active) {
+                                                smbModal_.editingField = SmbModalState::Field::None;
+                                                updateSmbModalMenu();
+                                            }
+                                        });
                                 };
 
                                 if (chosen == 0) {
@@ -1994,9 +2088,11 @@ int App::run() {
                                          (renderer_.browserViewMode() == VulkanRenderer::BrowserViewMode::MiniCards ? 3 : 8);
                     if (pbHover == 0) {
                         renderer_.scrollBrowser(-pageStep);
+                        browser_.setFirst(renderer_.browserFirst());
                         browser_.setSelected(renderer_.browserFirst());
                     } else if (pbHover == 1) {
                         renderer_.scrollBrowser(pageStep);
+                        browser_.setFirst(renderer_.browserFirst());
                         browser_.setSelected(renderer_.browserFirst());
                     } else if (pbHover == 2) {
                         // Cycle View Mode: BigCards (0) -> MiniCards (1) -> CompactList (2)
@@ -2216,7 +2312,22 @@ int App::run() {
                         }
                     } else if (cb == VulkanRenderer::CtrlButton::AudioToggle) {
                         if (mediaOpen_ && media_.audioStreams().size() > 1) {
+                            const auto& streams = media_.audioStreams();
+                            int curStream = media_.currentAudioStream();
+                            int nextIdx = 0;
+                            for (size_t i = 0; i < streams.size(); ++i) {
+                                if (streams[i].index == curStream) {
+                                    nextIdx = static_cast<int>((i + 1) % streams.size());
+                                    break;
+                                }
+                            }
+                            int nextStreamIndex = streams[nextIdx].index;
+                            settings_.setSelectedAudioStream(nextStreamIndex);
+                            media_.setPreferredAudioStream(nextStreamIndex);
+                            media_.setPreferredAudioLanguage("");
                             switchTracks(false);
+                            xr_.triggerHaptic(0, 0.02f, 0.0f, 0.5f);
+                            xr_.triggerHaptic(1, 0.02f, 0.0f, 0.5f);
                         }
                     } else if (cb == VulkanRenderer::CtrlButton::ScreenToggle) {
                         if (settings_.projectionMode() == 0) {

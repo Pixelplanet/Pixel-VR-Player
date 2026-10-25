@@ -1369,11 +1369,13 @@ void VulkanRenderer::updatePointer() {
 
                 if (actionMenu_.page == 0 || actionMenu_.page == 1) {
                     const int optCount = static_cast<int>(actionMenu_.options.size());
-                    const float startY = (optCount > 4) ? 0.12f : 0.08f;
+                    const float stepY = 0.068f;
+                    const float spanY = static_cast<float>(std::max(0, optCount - 1)) * stepY;
+                    const float startY = -0.040f + 0.5f * spanY;
                     const float btnHalfW = 0.38f;
                     const float btnHalfH = 0.030f;
                     for (int i = 0; i < optCount; ++i) {
-                        const float cy = startY - static_cast<float>(i) * 0.072f;
+                        const float cy = startY - static_cast<float>(i) * stepY;
                         if (std::fabs(hx) <= btnHalfW && std::fabs(hyy - cy) <= btnHalfH) {
                             actionMenuBtnHovered_ = i;
                             break;
@@ -1388,37 +1390,6 @@ void VulkanRenderer::updatePointer() {
                         if (std::fabs(hx - (-0.15f)) <= btnHalfW) actionMenuBtnHovered_ = 0;
                         else if (std::fabs(hx - 0.15f) <= btnHalfW) actionMenuBtnHovered_ = 1;
                     }
-                } else if (actionMenu_.page == 3) {
-                    // Rename page: Top action buttons at cy = 0.08f
-                    if (std::fabs(hyy - 0.08f) <= 0.028f) {
-                        if (std::fabs(hx - (-0.27f)) <= 0.07f) actionMenuBtnHovered_ = 0; // Clear
-                        else if (std::fabs(hx - (-0.09f)) <= 0.09f) actionMenuBtnHovered_ = 1; // Backspace
-                        else if (std::fabs(hx - 0.11f) <= 0.09f) actionMenuBtnHovered_ = 2; // Save
-                        else if (std::fabs(hx - 0.28f) <= 0.07f) actionMenuBtnHovered_ = 3; // Cancel
-                    }
-                    // On-screen keyboard keys: 4 rows
-                    static const char* kRow0 = "1234567890-_";
-                    static const char* kRow1 = "QWERTYUIOP";
-                    static const char* kRow2 = "ASDFGHJKL";
-                    static const char* kRow3 = "ZXCVBNM. ";
-                    auto checkRow = [&](const char* rowKeys, float rowY, int keyOffset, float keyW, float keySpacing) {
-                        const int count = static_cast<int>(std::strlen(rowKeys));
-                        const float totalW = count * keyW + (count - 1) * keySpacing;
-                        const float startX = -0.5f * totalW + 0.5f * keyW;
-                        if (std::fabs(hyy - rowY) <= 0.026f) {
-                            for (int k = 0; k < count; ++k) {
-                                const float kx = startX + k * (keyW + keySpacing);
-                                if (std::fabs(hx - kx) <= keyW * 0.5f) {
-                                    actionMenuKeyHovered_ = keyOffset + k;
-                                    break;
-                                }
-                            }
-                        }
-                    };
-                    checkRow(kRow0, 0.005f, 0, 0.055f, 0.010f);
-                    checkRow(kRow1, -0.055f, 12, 0.065f, 0.012f);
-                    checkRow(kRow2, -0.115f, 22, 0.070f, 0.012f);
-                    checkRow(kRow3, -0.175f, 31, 0.070f, 0.012f);
                 } else if (actionMenu_.page == 4) {
                     // SMB Share Editor Modal: Top fields 0..6: cy = 0.19f - i * 0.054f
                     const int optCount = static_cast<int>(actionMenu_.options.size());
@@ -1633,46 +1604,30 @@ void VulkanRenderer::updatePointer() {
                     }
                 }
             } else if (settingsVisible_) {
-                // Settings cards in 2-column grid (or list when >6 items)
+                // Settings cards in 2-column grid
                 const int total = static_cast<int>(settingsRows_.size());
-                if (total > 0 && total <= 6) {
-                    const float sColX[2] = {-0.135f, 0.535f};
-                    const float sRowY[3] = {0.22f, -0.02f, -0.26f};
-                    for (int i = 0; i < total; ++i) {
-                        const int c = i % 2;
-                        const int r = i / 2;
-                        if (std::fabs(hx - sColX[c]) <= 0.315f &&
-                            std::fabs(hyy - sRowY[r]) <= 0.098f) {
-                            settingsRow_ = i;
-                            settingsHovered_ = i;
-                            break;
-                        }
+                const int maxVis = (total > 8) ? 10 : 8;
+                for (int i = 0; i < total && i < maxVis; ++i) {
+                    const int c = i % 2;
+                    const int r = i / 2;
+                    const float cx = (c == 0) ? -0.135f : 0.535f;
+                    float ry = 0.0f;
+                    float cardHalfH = 0.0f;
+                    if (total <= 6) {
+                        ry = 0.22f - static_cast<float>(r) * 0.24f;
+                        cardHalfH = 0.098f;
+                    } else if (total <= 8) {
+                        ry = 0.26f - static_cast<float>(r) * 0.185f;
+                        cardHalfH = 0.078f;
+                    } else {
+                        ry = 0.28f - static_cast<float>(r) * 0.152f;
+                        cardHalfH = 0.066f;
                     }
-                } else if (total > 6 && total <= 8) {
-                    for (int i = 0; i < total && i < 8; ++i) {
-                        const int c = i % 2;
-                        const int r = i / 2;
-                        const float cx = (c == 0) ? -0.135f : 0.535f;
-                        const float ry = 0.25f - static_cast<float>(r) * 0.17f;
-                        if (std::fabs(hx - cx) <= 0.315f &&
-                            std::fabs(hyy - ry) <= 0.072f) {
-                            settingsRow_ = i;
-                            settingsHovered_ = i;
-                            break;
-                        }
-                    }
-                } else if (total > 8) {
-                    for (int i = 0; i < total && i < 10; ++i) {
-                        const int c = i % 2;
-                        const int r = i / 2;
-                        const float cx = (c == 0) ? -0.135f : 0.535f;
-                        const float ry = 0.27f - static_cast<float>(r) * 0.142f;
-                        if (std::fabs(hx - cx) <= 0.315f &&
-                            std::fabs(hyy - ry) <= 0.058f) {
-                            settingsRow_ = i;
-                            settingsHovered_ = i;
-                            break;
-                        }
+                    if (std::fabs(hx - cx) <= 0.315f &&
+                        std::fabs(hyy - ry) <= cardHalfH) {
+                        settingsRow_ = i;
+                        settingsHovered_ = i;
+                        break;
                     }
                 }
             }
@@ -2192,17 +2147,73 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
 
     // Standardized typography helpers (never shrink font dynamically across buttons;
     // truncate cleanly with ellipsis if text exceeds maxW).
-    auto mapChar = [](char rawc) -> unsigned char {
-        unsigned char c = static_cast<unsigned char>(rawc);
-        if (c == 0xB7) return 127;  // middle dot / bullet slot in atlas
-        if (c < 32 || c > 127) return '?';
-        return c;
+    auto nextGlyphIndex = [](const std::string& s, std::size_t& idx) -> unsigned char {
+        const std::size_t len = s.size();
+        if (idx >= len) return '?';
+        const unsigned char b0 = static_cast<unsigned char>(s[idx]);
+        if (b0 < 0x80) {
+            ++idx;
+            if (b0 < 32 || b0 == 127) return '?';
+            return b0;
+        }
+        // Legacy standalone 0xB7 middle-dot separator used in UI strings
+        if (b0 == 0xB7) {
+            ++idx;
+            return 127;
+        }
+        uint32_t cp = 0;
+        if ((b0 & 0xE0) == 0xC0 && idx + 1 < len) {
+            const unsigned char b1 = static_cast<unsigned char>(s[idx + 1]);
+            if ((b1 & 0xC0) == 0x80) {
+                cp = ((static_cast<uint32_t>(b0 & 0x1F) << 6) |
+                      static_cast<uint32_t>(b1 & 0x3F));
+                idx += 2;
+            }
+        } else if ((b0 & 0xF0) == 0xE0 && idx + 2 < len) {
+            const unsigned char b1 = static_cast<unsigned char>(s[idx + 1]);
+            const unsigned char b2 = static_cast<unsigned char>(s[idx + 2]);
+            if ((b1 & 0xC0) == 0x80 && (b2 & 0xC0) == 0x80) {
+                cp = ((static_cast<uint32_t>(b0 & 0x0F) << 12) |
+                      (static_cast<uint32_t>(b1 & 0x3F) << 6) |
+                      static_cast<uint32_t>(b2 & 0x3F));
+                idx += 3;
+            }
+        } else if ((b0 & 0xF8) == 0xF0 && idx + 3 < len) {
+            const unsigned char b1 = static_cast<unsigned char>(s[idx + 1]);
+            const unsigned char b2 = static_cast<unsigned char>(s[idx + 2]);
+            const unsigned char b3 = static_cast<unsigned char>(s[idx + 3]);
+            if ((b1 & 0xC0) == 0x80 && (b2 & 0xC0) == 0x80 && (b3 & 0xC0) == 0x80) {
+                cp = ((static_cast<uint32_t>(b0 & 0x07) << 18) |
+                      (static_cast<uint32_t>(b1 & 0x3F) << 12) |
+                      (static_cast<uint32_t>(b2 & 0x3F) << 6) |
+                      static_cast<uint32_t>(b3 & 0x3F));
+                idx += 4;
+            }
+        }
+        if (cp == 0) {
+            ++idx;
+            if (b0 >= 160) return b0;
+            return '?';
+        }
+        if (cp == 0x00B7 || cp == 0x2022) return 127;
+        if (cp >= 160 && cp <= 255) return static_cast<unsigned char>(cp);
+        if (cp == 0x20AC) return 128; // €
+        if (cp == 0x2013) return 129; // –
+        if (cp == 0x2014) return 130; // —
+        if (cp == 0x2018) return 131; // ‘
+        if (cp == 0x2019) return 132; // ’
+        if (cp == 0x201C) return 133; // “
+        if (cp == 0x201D) return 134; // ”
+        if (cp == 0x2026) return 135; // …
+        if (cp == 0x2122) return 136; // ™
+        return '?';
     };
     auto drawString = [&](float x, float baseline, float scale, const float col[4],
                           const std::string& s) {
         float penX = x;
-        for (char rawc : s) {
-            unsigned char c = mapChar(rawc);
+        std::size_t idx = 0;
+        while (idx < s.size()) {
+            unsigned char c = nextGlyphIndex(s, idx);
             const Glyph& g = fontAtlas_.glyphs[c];
             if (g.width > 0.0f && g.height > 0.0f) {
                 TextPush push{};
@@ -2227,8 +2238,9 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
     };
     auto measureString = [&](float scale, const std::string& s) -> float {
         float tw = 0.0f;
-        for (char rawc : s) {
-            unsigned char c = mapChar(rawc);
+        std::size_t idx = 0;
+        while (idx < s.size()) {
+            unsigned char c = nextGlyphIndex(s, idx);
             tw += fontAtlas_.glyphs[c].advance * scale;
         }
         return tw;
@@ -2238,7 +2250,13 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         if (measureString(scale, str) <= maxW) return str;
         std::string trunc = str;
         while (trunc.size() > 1 && measureString(scale, trunc + "...") > maxW) {
-            trunc.pop_back();
+            while (!trunc.empty() &&
+                   (static_cast<unsigned char>(trunc.back()) & 0xC0) == 0x80) {
+                trunc.pop_back();
+            }
+            if (!trunc.empty()) {
+                trunc.pop_back();
+            }
         }
         return trunc + "...";
     };
@@ -2256,6 +2274,92 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         const float finalW = measureString(fixedScale, out);
         const float baseline = centerY - 0.35f * fontAtlas_.ascent * fixedScale;
         drawString(cx - finalW * 0.5f, baseline, fixedScale, col, out);
+    };
+
+    struct TextFieldLayout {
+        std::string visibleStr;
+        float startX = 0.0f;
+        float cursorX = 0.0f;
+    };
+    auto layoutTextField = [&](float fieldLeft, float fieldRight, float scale,
+                               const std::string& rawText, int cursorPos,
+                               bool isPassword, bool centerIfFits) -> TextFieldLayout {
+        const float maxW = std::max(0.01f, fieldRight - fieldLeft);
+        const std::string dispText = isPassword
+            ? std::string(rawText.length(), '*')
+            : rawText;
+        const int n = static_cast<int>(dispText.size());
+        const int c = (cursorPos >= 0) ? std::clamp(cursorPos, 0, n) : n;
+
+        auto nextCharPos = [&](int pos) -> int {
+            if (pos >= n) return n;
+            int p = pos + 1;
+            while (p < n && (static_cast<unsigned char>(dispText[p]) & 0xC0) == 0x80) {
+                ++p;
+            }
+            return p;
+        };
+        auto prevCharPos = [&](int pos) -> int {
+            if (pos <= 0) return 0;
+            int p = pos - 1;
+            while (p > 0 && (static_cast<unsigned char>(dispText[p]) & 0xC0) == 0x80) {
+                --p;
+            }
+            return p;
+        };
+
+        int visStart = 0;
+        int visEnd = n;
+        if (measureString(scale, dispText) > maxW) {
+            visStart = c;
+            visEnd = c;
+            auto windowW = [&](int s, int e) {
+                std::string pre = (s > 0) ? "..." : "";
+                std::string suf = (e < n) ? "..." : "";
+                return measureString(scale, pre + dispText.substr(s, e - s) + suf);
+            };
+            // Keep up to 3 lookahead characters after the cursor when editing inside text
+            int lookahead = 0;
+            while (visEnd < n && lookahead < 3) {
+                const int nxt = nextCharPos(visEnd);
+                if (windowW(visStart, nxt) <= maxW) {
+                    visEnd = nxt;
+                    ++lookahead;
+                } else {
+                    break;
+                }
+            }
+            // Expand left from the cursor so the text scrolls to keep the cursor in view
+            while (visStart > 0) {
+                const int prv = prevCharPos(visStart);
+                if (windowW(prv, visEnd) <= maxW) {
+                    visStart = prv;
+                } else {
+                    break;
+                }
+            }
+            // Fill any remaining space to the right
+            while (visEnd < n) {
+                const int nxt = nextCharPos(visEnd);
+                if (windowW(visStart, nxt) <= maxW) {
+                    visEnd = nxt;
+                } else {
+                    break;
+                }
+            }
+        }
+        const std::string prefix = (visStart > 0) ? "..." : "";
+        const std::string suffix = (visEnd < n) ? "..." : "";
+        const std::string visibleStr =
+            prefix + dispText.substr(visStart, visEnd - visStart) + suffix;
+        const float totalVisW = measureString(scale, visibleStr);
+        const float startX = (centerIfFits && visStart == 0 && visEnd == n)
+                                 ? (0.5f * (fieldLeft + fieldRight) - totalVisW * 0.5f)
+                                 : fieldLeft;
+        const std::string beforeCursor =
+            prefix + dispText.substr(visStart, std::clamp(c, visStart, visEnd) - visStart);
+        const float cursorX = startX + measureString(scale, beforeCursor);
+        return {visibleStr, startX, cursorX};
     };
 
     const bool hubOpen = browserVisible_ || settingsVisible_ ||
@@ -2522,12 +2626,8 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             themeAccentCol[2] * 0.58f, 0.95f};
         const float tabActiveBord[4] = {
             themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 1.0f};
-        const float tabHovBg[4] = {
-            themeAccentCol[0] * 0.32f, themeAccentCol[1] * 0.32f,
-            themeAccentCol[2] * 0.42f, 0.90f};
-        const float tabHovBord[4] = {
-            themeAccentCol[0] * 0.9f, themeAccentCol[1] * 0.9f,
-            themeAccentCol[2] * 0.9f, 0.95f};
+        const float tabHovBg[4] = {0.10f, 0.15f, 0.24f, 0.78f};
+        const float tabHovBord[4] = {0.35f, 0.48f, 0.65f, 0.72f};
         const float tabNormBg[4] = {0.05f, 0.08f, 0.14f, 0.70f};
         const float tabNormBord[4] = {0.20f, 0.28f, 0.42f, 0.55f};
 
@@ -2555,31 +2655,24 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         const bool isSet = (activeMainTab == 2);
         const bool isDl = (activeMainTab == 1);
         const int subCount = isDl ? 3 : (isSet ? (vaultUnlocked_ ? 5 : 4) : (vaultUnlocked_ ? 6 : 5));
+        int activeSubTab = browserQuickFilter_;
+        if (activeMainTab == 1) {
+            activeSubTab = downloadsFilter_;
+        } else if (activeMainTab == 2) {
+            activeSubTab = (settingsSection_ >= 10 && settingsSection_ <= 12) ? 2 : (settingsSection_ == 21 ? 1 : settingsSection_);
+        }
+        const float subActBg[4] = {
+            themeAccentCol[0] * 0.28f, themeAccentCol[1] * 0.28f,
+            themeAccentCol[2] * 0.38f, 0.92f};
         for (int sub = 0; sub < subCount; ++sub) {
             const float sy = isSet ? setSubY[sub] : (isDl ? dlSubY[sub] : fileSubY[sub]);
             const float sH = isSet ? 0.030f : 0.032f;
             const bool hov = (browserSidebarHovered_ == (3 + sub));
-            bool subAct = false;
-            if (activeMainTab == 1) {
-                subAct = (downloadsFilter_ == sub);
-            } else if (activeMainTab == 2) {
-                const int effSec = (settingsSection_ >= 10 && settingsSection_ <= 12) ? 2 : (settingsSection_ == 21 ? 1 : settingsSection_);
-                subAct = (effSec == sub);
-            } else if (activeMainTab == 0) {
-                if (sub == 0) subAct = (browserTitle_ != "Bookmarks" && browserTitle_ != "bookmarks://" && browserTitle_.find("Videos") == std::string::npos && browserTitle_.rfind("smb://", 0) != 0 && browserTitle_.find("Downloads") == std::string::npos && browserTitle_.find("Vault") == std::string::npos);
-                else if (sub == 1) subAct = (browserTitle_.find("Videos") != std::string::npos);
-                else if (sub == 2) subAct = (browserTitle_.rfind("smb://", 0) == 0 || browserTitle_ == "smb://");
-                else if (sub == 3) subAct = (browserTitle_.find("Downloads") != std::string::npos);
-                else if (sub == 4) subAct = (browserTitle_ == "Bookmarks" || browserTitle_ == "bookmarks://");
-                else if (sub == 5) subAct = (browserTitle_.find("Vault") != std::string::npos);
-            }
-            const float subActBg[4] = {
-                themeAccentCol[0] * 0.25f, themeAccentCol[1] * 0.25f,
-                themeAccentCol[2] * 0.35f, 0.90f};
+            const bool subAct = (sub == activeSubTab);
             if (subAct || hov) {
                 drawUiElement(vpPanel, -0.695f, sy, 0.172f, sH,
-                              UiShape::RoundedBox, hov ? tabHovBg : subActBg,
-                              0.40f, 0.025f, hov ? tabHovBord : tabActiveBord);
+                              UiShape::RoundedBox, subAct ? subActBg : tabHovBg,
+                              0.40f, 0.025f, subAct ? tabActiveBord : tabHovBord);
             }
             if (activeMainTab == 0) {
                 const UiShape qIcons[6] = {UiShape::Home, UiShape::CurvedDisplay, UiShape::List, UiShape::Download, UiShape::RoundedBox, UiShape::RoundedBox};
@@ -2860,7 +2953,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             const char* qLabels[6] = {"Local Storage", "Videos", "SMB Shares", "Downloads", "Bookmarks", "Vault (Private)"};
             const int qCount = vaultUnlocked_ ? 6 : 5;
             for (int sub = 0; sub < qCount; ++sub) {
-                const float* col = (sub == 4) ? themeAccentCol : ((sub == 5) ? themeAccentCol : slateCol);
+                const float* col = (browserQuickFilter_ == sub) ? themeTextCol : slateCol;
                 drawFit(-0.790f, fileSubY[sub], 0.28f, scSub, col, qLabels[sub]);
             }
             if (vaultUnlocked_) {
@@ -2937,21 +3030,21 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                     }
                 } else { // CompactList
                     const float textLeft = -0.315f;
-                    drawFit(textLeft, lay.cy - 0.005f, listCols.nameMaxW, scSub * 0.95f, themeTextCol, item.name);
+                    drawFit(textLeft, lay.cy, listCols.nameMaxW, scSub * 0.95f, themeTextCol, item.name);
                     if (listShowFormat_) {
-                        drawFitCentered(listCols.fmtCx, lay.cy - 0.005f, 0.11f, scBadge * 0.90f, themeAccentCol, bTag);
+                        drawFitCentered(listCols.fmtCx, lay.cy, 0.11f, scBadge * 0.90f, themeAccentCol, bTag);
                     }
                     if (listShowRes_) {
                         const std::string resStr = item.resolutionTag.empty() ? (item.isDir || item.isBack ? "" : "--") : item.resolutionTag;
-                        drawFitCentered(listCols.resCx, lay.cy - 0.005f, 0.15f, scDetail * 0.95f, slateCol, resStr);
+                        drawFitCentered(listCols.resCx, lay.cy, 0.15f, scDetail * 0.95f, slateCol, resStr);
                     }
                     if (listShowSize_) {
                         const std::string sizeStr = item.sizeTag.empty() ? (item.isDir || item.isBack ? "" : "--") : item.sizeTag;
-                        drawFitCentered(listCols.sizeCx, lay.cy - 0.005f, 0.11f, scDetail * 0.95f, slateCol, sizeStr);
+                        drawFitCentered(listCols.sizeCx, lay.cy, 0.11f, scDetail * 0.95f, slateCol, sizeStr);
                     }
                     if (listShowDuration_) {
                         const std::string durStr = item.durationTag.empty() ? (item.isDir || item.isBack ? "" : "--") : item.durationTag;
-                        drawFitCentered(listCols.durCx, lay.cy - 0.005f, 0.11f, scDetail * 0.95f, slateCol, durStr);
+                        drawFitCentered(listCols.durCx, lay.cy, 0.11f, scDetail * 0.95f, slateCol, durStr);
                     }
                 }
             }
@@ -3133,15 +3226,23 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 const float cx = (c == 0) ? -0.135f : 0.535f;
                 float ry = 0.0f;
                 float cardHalfH = 0.0f;
+                float pillY = 0.0f;
+                float pillHalfH = 0.0f;
                 if (total <= 6) {
                     ry = 0.22f - static_cast<float>(r) * 0.24f;
                     cardHalfH = 0.098f;
+                    pillY = ry - 0.028f;
+                    pillHalfH = 0.036f;
                 } else if (total <= 8) {
-                    ry = 0.25f - static_cast<float>(r) * 0.17f;
-                    cardHalfH = 0.072f;
+                    ry = 0.26f - static_cast<float>(r) * 0.185f;
+                    cardHalfH = 0.078f;
+                    pillY = ry - 0.022f;
+                    pillHalfH = 0.029f;
                 } else {
-                    ry = 0.27f - static_cast<float>(r) * 0.142f;
-                    cardHalfH = 0.058f;
+                    ry = 0.28f - static_cast<float>(r) * 0.152f;
+                    cardHalfH = 0.066f;
+                    pillY = ry - 0.019f;
+                    pillHalfH = 0.025f;
                 }
                 const bool en = settingsEnabled_.empty() ||
                                 (i < static_cast<int>(settingsEnabled_.size()) &&
@@ -3154,12 +3255,10 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                               0.10f, (hov || sel) ? 0.03f : 0.018f,
                               (hov || sel) ? tabActiveBord : cardBord);
 
-                // Value pill inside card
-                if (total <= 6) {
-                    drawUiElement(vpPanel, cx, ry - 0.028f, 0.275f, 0.036f,
-                                  UiShape::RoundedBox, en ? tabActiveBg : tabNormBg,
-                                  0.45f, 0.03f, en ? tabActiveBord : tabNormBord);
-                }
+                // Consistent value pill inside every settings card
+                drawUiElement(vpPanel, cx, pillY, 0.275f, pillHalfH,
+                              UiShape::RoundedBox, en ? tabActiveBg : tabNormBg,
+                              0.45f, 0.03f, en ? tabActiveBord : tabNormBord);
             }
 
             // Text pass for Hub rail + Settings cards
@@ -3198,12 +3297,23 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 const int r = i / 2;
                 const float cx = (c == 0) ? -0.135f : 0.535f;
                 float ry = 0.0f;
+                float labelY = 0.0f;
+                float pillY = 0.0f;
+                float textSc = scSub;
                 if (total <= 6) {
                     ry = 0.22f - static_cast<float>(r) * 0.24f;
+                    labelY = ry + 0.044f;
+                    pillY = ry - 0.028f;
                 } else if (total <= 8) {
-                    ry = 0.25f - static_cast<float>(r) * 0.17f;
+                    ry = 0.26f - static_cast<float>(r) * 0.185f;
+                    labelY = ry + 0.034f;
+                    pillY = ry - 0.022f;
+                    textSc = scSub * 0.95f;
                 } else {
-                    ry = 0.27f - static_cast<float>(r) * 0.142f;
+                    ry = 0.28f - static_cast<float>(r) * 0.152f;
+                    labelY = ry + 0.028f;
+                    pillY = ry - 0.019f;
+                    textSc = scSub * 0.90f;
                 }
                 const bool en = settingsEnabled_.empty() ||
                                 (i < static_cast<int>(settingsEnabled_.size()) &&
@@ -3218,24 +3328,10 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                     val = fullRow.substr(sep + 3);
                 }
 
-                if (total <= 6) {
-                    drawFit(cx - 0.275f, ry + 0.044f, 0.55f, scSub,
-                            en ? themeTextCol : dimCol, label);
-                    drawFitCentered(cx, ry - 0.028f, 0.51f, scSub,
-                                    en ? themeTextCol : dimCol, val.empty() ? label : val);
-                } else if (total <= 8) {
-                    drawFit(cx - 0.275f, ry + 0.016f, 0.55f, scSub,
-                            en ? themeTextCol : dimCol, label);
-                    if (!val.empty()) {
-                        drawFit(cx - 0.275f, ry - 0.026f, 0.55f, scDetail, themeAccentCol, val);
-                    }
-                } else {
-                    drawFit(cx - 0.275f, ry + 0.014f, 0.55f, scSub * 0.90f,
-                            en ? themeTextCol : dimCol, label);
-                    if (!val.empty()) {
-                        drawFit(cx - 0.275f, ry - 0.020f, 0.55f, scDetail * 0.95f, themeAccentCol, val);
-                    }
-                }
+                drawFit(cx - 0.275f, labelY, 0.55f, textSc,
+                        en ? themeTextCol : dimCol, label);
+                drawFitCentered(cx, pillY, 0.51f, textSc,
+                                en ? themeTextCol : dimCol, val.empty() ? label : val);
             }
 
             if (!settingsStatus_.empty()) {
@@ -3305,8 +3401,14 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         drawUiElement(vpPanel, 0.0f, 0.0f, kPanelW, kPanelTop,
                       UiShape::RoundedBox, backdrop, 0.045f);
 
-        const float mHalfW = (actionMenu_.page == 4) ? 0.48f : ((actionMenu_.page == 3) ? 0.48f : 0.44f);
-        const float mHalfH = (actionMenu_.page == 4) ? 0.38f : ((actionMenu_.page == 3) ? 0.32f : 0.28f);
+        const int menuOptCount = static_cast<int>(actionMenu_.options.size());
+        const float menuStepY = 0.068f;
+        const float menuSpanY = static_cast<float>(std::max(0, menuOptCount - 1)) * menuStepY;
+        const float menuStartY = -0.040f + 0.5f * menuSpanY;
+        const float menuDynHalfH = std::max(0.22f, 0.5f * menuSpanY + 0.125f);
+
+        const float mHalfW = (actionMenu_.page == 4) ? 0.48f : 0.44f;
+        const float mHalfH = (actionMenu_.page == 4) ? 0.38f : ((actionMenu_.page == 2) ? 0.24f : menuDynHalfH);
         const float modalBg[4] = {0.032f, 0.045f, 0.075f, 0.98f};
         drawUiElement(vpPanel, 0.0f, 0.0f, mHalfW, mHalfH,
                       UiShape::RoundedBox, modalBg, 0.07f, 0.02f, themeAccentCol);
@@ -3320,11 +3422,6 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         const float slateBg[4] = {0.10f, 0.14f, 0.22f, 0.92f};
         const float slateBgHov[4] = {0.20f, 0.28f, 0.42f, 1.0f};
         const float slateBorder[4] = {0.30f, 0.42f, 0.62f, 0.85f};
-
-        // Green button palette
-        const float greenBg[4] = {0.12f, 0.58f, 0.34f, 0.95f};
-        const float greenBgHov[4] = {0.18f, 0.74f, 0.44f, 1.0f};
-        const float greenBorder[4] = {0.35f, 0.88f, 0.58f, 0.95f};
 
         // Vault gold/cyan palette
         const float goldBg[4] = {0.28f, 0.22f, 0.08f, 0.95f};
@@ -3342,12 +3439,10 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         const float slateCol[4] = {0.60f, 0.70f, 0.84f, 1.0f};
 
         if (actionMenu_.page == 0 || actionMenu_.page == 1) {
-            const int optCount = static_cast<int>(actionMenu_.options.size());
-            const float startY = (optCount > 4) ? 0.12f : 0.08f;
             const float btnHalfW = 0.38f;
             const float btnHalfH = 0.028f;
-            for (int i = 0; i < optCount; ++i) {
-                const float cy = startY - static_cast<float>(i) * 0.072f;
+            for (int i = 0; i < menuOptCount; ++i) {
+                const float cy = menuStartY - static_cast<float>(i) * menuStepY;
                 const bool hov = (actionMenuBtnHovered_ == i) || (actionMenu_.selectedOption == i);
                 const std::string& optStr = actionMenu_.options[i];
                 const bool isDelete = (optStr.find("Delete") != std::string::npos);
@@ -3371,56 +3466,36 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                           UiShape::RoundedBox, delHov ? redBgHov : redBg, 0.42f, 0.03f, redBorder);
             drawUiElement(vpPanel, 0.15f, cy, btnHalfW, btnHalfH,
                           UiShape::RoundedBox, canHov ? slateBgHov : slateBg, 0.42f, 0.03f, slateBorder);
-        } else if (actionMenu_.page == 3) {
-            // Rename: text input box
-            const float innerBg[4] = {0.018f, 0.026f, 0.046f, 0.90f};
-            drawUiElement(vpPanel, 0.0f, 0.16f, mHalfW - 0.04f, 0.035f,
-                          UiShape::RoundedBox, innerBg, 0.25f, 0.02f, themeAccentCol);
-
-            // 4 action buttons
-            const float btnY = 0.08f;
-            const float btnH = 0.025f;
-            auto drawBtn = [&](float cx, float hw, int idx, const float* bg, const float* bgHov, const float* bord) {
-                const bool hov = (actionMenuBtnHovered_ == idx);
-                drawUiElement(vpPanel, cx, btnY, hw, btnH,
-                              UiShape::RoundedBox, hov ? bgHov : bg, 0.35f, 0.02f, bord);
-            };
-            drawBtn(-0.27f, 0.07f, 0, slateBg, slateBgHov, slateBorder);
-            drawBtn(-0.09f, 0.09f, 1, slateBg, slateBgHov, slateBorder);
-            drawBtn(0.11f, 0.09f, 2, greenBg, greenBgHov, greenBorder);
-            drawBtn(0.28f, 0.07f, 3, slateBg, slateBgHov, slateBorder);
-
-            // On-screen keyboard keys
-            static const char* kRow0 = "1234567890-_";
-            static const char* kRow1 = "QWERTYUIOP";
-            static const char* kRow2 = "ASDFGHJKL";
-            static const char* kRow3 = "ZXCVBNM. ";
-            auto drawRowKeys = [&](const char* rowKeys, float rowY, int keyOffset, float keyW, float keySpacing) {
-                const int count = static_cast<int>(std::strlen(rowKeys));
-                const float totalW = count * keyW + (count - 1) * keySpacing;
-                const float startX = -0.5f * totalW + 0.5f * keyW;
-                for (int k = 0; k < count; ++k) {
-                    const float kx = startX + k * (keyW + keySpacing);
-                    const bool hov = (actionMenuKeyHovered_ == keyOffset + k);
-                    drawUiElement(vpPanel, kx, rowY, keyW * 0.5f, 0.022f,
-                                  UiShape::RoundedBox, hov ? slateBgHov : slateBg, 0.35f, 0.015f,
-                                  hov ? tabActiveBord : slateBorder);
-                }
-            };
-            drawRowKeys(kRow0, 0.005f, 0, 0.055f, 0.010f);
-            drawRowKeys(kRow1, -0.055f, 12, 0.065f, 0.012f);
-            drawRowKeys(kRow2, -0.115f, 22, 0.070f, 0.012f);
-            drawRowKeys(kRow3, -0.175f, 31, 0.070f, 0.012f);
         } else if (actionMenu_.page == 4) {
             // SMB Share Editor Modal
             const int optCount = static_cast<int>(actionMenu_.options.size());
             const int fieldCount = std::min(optCount, 7);
+            const float scField = ((0.032f * tScale) / fontAtlas_.lineHeight) * 0.92f;
+            const float innerFieldBg[4] = {0.010f, 0.015f, 0.026f, 0.95f};
+            const float innerFieldBord[4] = {0.16f, 0.26f, 0.42f, 0.75f};
             for (int i = 0; i < fieldCount; ++i) {
                 const float cy = 0.19f - static_cast<float>(i) * 0.054f;
                 const bool hov = (actionMenuBtnHovered_ == i) || (actionMenu_.selectedOption == i);
+                const bool editing = (actionMenu_.editingRow == i);
                 drawUiElement(vpPanel, 0.0f, cy, 0.42f, 0.024f,
                               UiShape::RoundedBox, hov ? tabHovBg : tabNormBg, 0.35f, 0.018f,
-                              hov ? tabActiveBord : tabNormBord);
+                              (hov || editing) ? tabActiveBord : tabNormBord);
+                if (i != 2) {
+                    drawUiElement(vpPanel, 0.13f, cy, 0.275f, 0.018f,
+                                  UiShape::RoundedBox, innerFieldBg, 0.30f, 0.015f,
+                                  editing ? tabActiveBord : innerFieldBord);
+                }
+                if (editing) {
+                    const std::string& opt = actionMenu_.options[i];
+                    const auto colonPos = opt.find(':');
+                    std::string val = (colonPos != std::string::npos) ? opt.substr(colonPos + 1) : opt;
+                    while (!val.empty() && val.front() == ' ') val.erase(val.begin());
+                    const TextFieldLayout rowLay =
+                        layoutTextField(-0.13f, 0.39f, scField, val, actionMenu_.cursorPos, false, false);
+                    const float caretCol[4] = {1.0f, 1.0f, 1.0f, 0.98f};
+                    drawUiElement(vpPanel, rowLay.cursorX + 0.002f, cy, 0.0022f, 0.013f,
+                                  UiShape::RoundedBox, caretCol, 0.45f, 0.001f, tabActiveBord);
+                }
             }
             if (optCount == 8) {
                 // Save (7) and Cancel (8)
@@ -3456,10 +3531,8 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         }
 
         if (actionMenu_.page == 0 || actionMenu_.page == 1) {
-            const int optCount = static_cast<int>(actionMenu_.options.size());
-            const float startY = (optCount > 4) ? 0.12f : 0.08f;
-            for (int i = 0; i < optCount; ++i) {
-                const float cy = startY - static_cast<float>(i) * 0.072f;
+            for (int i = 0; i < menuOptCount; ++i) {
+                const float cy = menuStartY - static_cast<float>(i) * menuStepY;
                 const bool hov = (actionMenuBtnHovered_ == i) || (actionMenu_.selectedOption == i);
                 drawFitCentered(0.0f, cy, 0.38f * 1.85f, sc, hov ? themeTextCol : slateCol, actionMenu_.options[i]);
             }
@@ -3467,52 +3540,28 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             drawFitCentered(0.0f, 0.035f, (mHalfW - 0.06f) * 2.0f, sc, themeTextCol, actionMenu_.subtitle);
             drawFitCentered(-0.15f, -0.12f, 0.13f * 1.8f, sc, themeTextCol, "Delete");
             drawFitCentered(0.15f, -0.12f, 0.13f * 1.8f, sc, themeTextCol, "Cancel");
-        } else if (actionMenu_.page == 3) {
-            std::string disp = actionMenu_.renameBuffer.empty() ? "|" : (actionMenu_.renameBuffer + "|");
-            drawFitCentered(0.0f, 0.16f, (mHalfW - 0.06f) * 1.85f, sc, themeTextCol, disp);
-
-            const float btnY = 0.08f;
-            drawFitCentered(-0.27f, btnY, 0.12f, sc * 0.90f, themeTextCol, "Clear");
-            drawFitCentered(-0.09f, btnY, 0.16f, sc * 0.90f, themeTextCol, "Backspace");
-            drawFitCentered(0.11f, btnY, 0.16f, sc * 0.90f, themeTextCol, "Save");
-            drawFitCentered(0.28f, btnY, 0.12f, sc * 0.90f, themeTextCol, "Cancel");
-
-            static const char* kRow0 = "1234567890-_";
-            static const char* kRow1 = "QWERTYUIOP";
-            static const char* kRow2 = "ASDFGHJKL";
-            static const char* kRow3 = "ZXCVBNM. ";
-            auto drawRowText = [&](const char* rowKeys, float rowY, int keyOffset, float keyW, float keySpacing) {
-                const int count = static_cast<int>(std::strlen(rowKeys));
-                const float totalW = count * keyW + (count - 1) * keySpacing;
-                const float startX = -0.5f * totalW + 0.5f * keyW;
-                for (int k = 0; k < count; ++k) {
-                    const float kx = startX + k * (keyW + keySpacing);
-                    char label[8];
-                    if (rowKeys[k] == ' ') std::snprintf(label, sizeof(label), "Space");
-                    else std::snprintf(label, sizeof(label), "%c", rowKeys[k]);
-                    drawFitCentered(kx, rowY, keyW * 0.85f, sc * 0.85f, themeTextCol, label);
-                }
-            };
-            drawRowText(kRow0, 0.005f, 0, 0.055f, 0.010f);
-            drawRowText(kRow1, -0.055f, 12, 0.065f, 0.012f);
-            drawRowText(kRow2, -0.115f, 22, 0.070f, 0.012f);
-            drawRowText(kRow3, -0.175f, 31, 0.070f, 0.012f);
         } else if (actionMenu_.page == 4) {
             const int optCount = static_cast<int>(actionMenu_.options.size());
             const int fieldCount = std::min(optCount, 7);
+            const float scField = sc * 0.92f;
             for (int i = 0; i < fieldCount; ++i) {
                 const float cy = 0.19f - static_cast<float>(i) * 0.054f;
                 const bool hov = (actionMenuBtnHovered_ == i) || (actionMenu_.selectedOption == i);
+                const bool editing = (actionMenu_.editingRow == i);
                 const std::string& opt = actionMenu_.options[i];
                 const auto colonPos = opt.find(':');
                 if (colonPos != std::string::npos) {
                     std::string label = opt.substr(0, colonPos + 1);
                     std::string val = opt.substr(colonPos + 1);
                     while (!val.empty() && val.front() == ' ') val.erase(val.begin());
-                    drawFit(-0.39f, cy - 0.003f, 0.24f, sc * 0.90f, hov ? themeTextCol : slateCol, label);
-                    drawFit(-0.13f, cy - 0.003f, 0.52f, sc * 0.92f, themeAccentCol, val);
+                    drawFit(-0.39f, cy, 0.24f, sc * 0.90f, hov ? themeTextCol : slateCol, label);
+                    const int curP = editing ? actionMenu_.cursorPos : static_cast<int>(val.size());
+                    const TextFieldLayout rowLay =
+                        layoutTextField(-0.13f, 0.39f, scField, val, curP, false, false);
+                    const float baseline = cy - 0.35f * fontAtlas_.ascent * scField;
+                    drawString(rowLay.startX, baseline, scField, themeAccentCol, rowLay.visibleStr);
                 } else {
-                    drawFitCentered(0.0f, cy - 0.003f, 0.78f, sc * 0.90f, hov ? themeTextCol : slateCol, opt);
+                    drawFitCentered(0.0f, cy, 0.78f, sc * 0.90f, hov ? themeTextCol : slateCol, opt);
                 }
             }
             if (optCount == 8) {
@@ -3551,35 +3600,57 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         const float fieldBord[4] = {0.20f, 0.32f, 0.50f, 0.85f};
         drawUiElement(vpPanel, 0.0f, 0.15f, 0.40f, 0.038f, UiShape::RoundedBox, fieldBg, 0.035f, 0.015f, fieldBord);
 
+        const float scHeader = (0.038f * tScale) / fontAtlas_.lineHeight;
+        const float scStd    = (0.030f * tScale) / fontAtlas_.lineHeight;
+        const float scDetail = (0.022f * tScale) / fontAtlas_.lineHeight;
+        const float fieldSc  = scStd * 1.15f;
+        const float kbSlateCol[4] = {themeTextCol[0] * 0.78f, themeTextCol[1] * 0.84f, themeTextCol[2] * 0.94f, 0.95f};
+
+        // Compute scrolled text window and exact cursor position inside [-0.37f, +0.37f]
+        const TextFieldLayout kbLay = layoutTextField(
+            -0.370f, 0.370f, fieldSc, keyboardModal_.text,
+            keyboardModal_.cursorPos, keyboardModal_.isPassword, false);
+
+        // Keep cursor solid while typing/moving, and blink smoothly when idle
+        static std::string sLastText;
+        static int sLastCursor = -1;
+        static auto sLastEditT = std::chrono::steady_clock::now();
+        const auto nowT = std::chrono::steady_clock::now();
+        if (keyboardModal_.text != sLastText || keyboardModal_.cursorPos != sLastCursor) {
+            sLastText = keyboardModal_.text;
+            sLastCursor = keyboardModal_.cursorPos;
+            sLastEditT = nowT;
+        }
+        const auto idleMs = std::chrono::duration_cast<std::chrono::milliseconds>(nowT - sLastEditT).count();
+        const bool cursorVisible = (idleMs < 450) || (((idleMs / 480) % 2) == 0);
+        if (cursorVisible) {
+            const float caretCol[4] = {1.0f, 1.0f, 1.0f, 0.98f};
+            drawUiElement(vpPanel, kbLay.cursorX + 0.0025f, 0.15f, 0.0028f, 0.022f,
+                          UiShape::RoundedBox, caretCol, 0.45f, 0.001f, mBorder);
+        }
+
         // Text pass
         vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline_);
         vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
 
-        const float scHeader = (0.038f * tScale) / fontAtlas_.lineHeight;
-        const float scStd    = (0.030f * tScale) / fontAtlas_.lineHeight;
-        const float scDetail = (0.022f * tScale) / fontAtlas_.lineHeight;
-        const float kbSlateCol[4] = {themeTextCol[0] * 0.78f, themeTextCol[1] * 0.84f, themeTextCol[2] * 0.94f, 0.95f};
-
         // Prompt Title
         drawFitCentered(0.0f, 0.235f, 0.85f, scHeader * 0.85f, themeTextCol,
                         keyboardModal_.prompt.empty() ? "Virtual Keyboard Input" : keyboardModal_.prompt);
 
-        // Live Typed Text Buffer (with password masking and blinking cursor)
-        std::string dispText = keyboardModal_.isPassword
-            ? std::string(keyboardModal_.text.length(), '*')
-            : keyboardModal_.text;
-
-        static auto sStartT = std::chrono::steady_clock::now();
-        const auto nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - sStartT).count();
-        const bool cursorBlink = ((nowMs / 500) % 2) == 0;
-        dispText += (cursorBlink ? "_" : " ");
-
-        drawFitCentered(0.0f, 0.15f, 0.76f, scStd * 1.15f, themeAccentCol, dispText);
+        // Live Scrolled Text Buffer
+        if (!kbLay.visibleStr.empty()) {
+            const float baseline = 0.15f - 0.35f * fontAtlas_.ascent * fieldSc;
+            drawString(kbLay.startX, baseline, fieldSc, themeAccentCol, kbLay.visibleStr);
+        } else {
+            const float placeCol[4] = {kbSlateCol[0], kbSlateCol[1], kbSlateCol[2], 0.38f};
+            const float baseline = 0.15f - 0.35f * fontAtlas_.ascent * fieldSc;
+            drawString(kbLay.startX + 0.010f, baseline, fieldSc * 0.90f, placeCol, "Type here...");
+        }
 
         // Instruction Subtitle
         drawFitCentered(0.0f, 0.075f, 0.85f, scDetail * 0.95f, kbSlateCol,
-                        "Type on the SteamVR virtual keyboard below  \xB7  Press Enter/Done to submit");
+                        "Type on keyboard below  \xB7  Stick L/R: Move Cursor  \xB7  Enter/Done: Submit");
     }
 
     // Tracked controller 3D models (lit capsule), drawn before the laser/cursor.

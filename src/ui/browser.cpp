@@ -127,9 +127,10 @@ void Browser::open() {
     open_ = true;
     browseOpen_.store(true);
     status_.clear();
+    saveCurrentFolderState();
     // Resume where the user last was this session (local folder or SMB share).
     if (lastInSmb_ && !lastLocation_.empty()) {
-        beginScan(lastLocation_, true);
+        beginScan(lastLocation_, true, true);
         return;
     }
     std::string start = homeDir_;
@@ -139,7 +140,7 @@ void Browser::open() {
             start = lastLocation_;
         }
     }
-    beginScan(start, false);
+    beginScan(start, false, !lastLocation_.empty() && start == lastLocation_);
 }
 
 void Browser::move(int delta) {
@@ -374,11 +375,57 @@ void Browser::scanSmbInto(const std::string& uri, ScanResult& out) {
 #endif
 }
 
+void Browser::updateActiveFilterFor(const std::string& loc, bool isSmb) {
+    if (loc == "bookmarks://") {
+        activeFilter_ = 4;
+    } else if (isSmb || loc.rfind("smb://", 0) == 0) {
+        activeFilter_ = 2;
+    } else if (VaultManager::instance().isVaultPath(loc)) {
+        activeFilter_ = 5;
+    } else if (!downloadDir_.empty() && loc.rfind(downloadDir_, 0) == 0) {
+        activeFilter_ = 3;
+    } else if (loc.rfind(homeDir_ + "/Downloads", 0) == 0) {
+        activeFilter_ = 3;
+    } else if (loc.rfind(homeDir_ + "/Videos", 0) == 0) {
+        activeFilter_ = 1;
+    } else {
+        activeFilter_ = 0;
+    }
+}
+
+void Browser::saveCurrentFolderState() {
+    if (location_.empty() || scanning_.load()) return;
+    if (entries_.size() == 1 && entries_[0].label == "Scanning..." && entries_[0].path.empty()) {
+        return;
+    }
+    std::string selPath;
+    if (selected_ >= 0 && selected_ < static_cast<int>(entries_.size())) {
+        selPath = entries_[static_cast<std::size_t>(selected_)].path;
+    }
+    folderHistory_[location_] = {selected_, first_, selPath};
+}
+
 // Starts a background scan so SMB discovery (NetBIOS + mDNS, seconds) and large
 // directories never freeze the render loop. poll() publishes the result.
-void Browser::beginScan(const std::string& location, bool isSmb) {
-    PIXELVR_LOG_INFO("beginScan '%s' smb=%d scanning=%d", location.c_str(),
-                     isSmb ? 1 : 0, scanning_.load() ? 1 : 0);
+void Browser::beginScan(const std::string& location, bool isSmb,
+                        bool restoreView, const std::string& childPath) {
+    PIXELVR_LOG_INFO("beginScan '%s' smb=%d scanning=%d restore=%d", location.c_str(),
+                     isSmb ? 1 : 0, scanning_.load() ? 1 : 0, restoreView ? 1 : 0);
+    updateActiveFilterFor(location, isSmb);
+    location_ = location;
+    inSmb_ = isSmb;
+    if (VaultManager::instance().isVaultPath(location)) {
+        title_ = "Vault (Private)";
+    } else if (location == "bookmarks://") {
+        title_ = "Bookmarks";
+    } else {
+        title_ = location;
+    }
+    status_ = "Scanning...";
+    entries_.clear();
+    entries_.push_back({"Scanning...", "", false, false, false, false});
+    selected_ = 0;
+
     if (scanning_.load() && scanThread_.joinable()) {
         PIXELVR_LOG_INFO("beginScan DEFERRED (scan in progress)");
         // A scan is already running (possibly waiting on the SMB lock held by a
@@ -386,17 +433,16 @@ void Browser::beginScan(const std::string& location, bool isSmb) {
         // which would freeze the UI until the download's read returns.
         pendingScanLoc_ = location;
         pendingScanSmb_ = isSmb;
+        pendingScanRestore_ = restoreView;
+        pendingScanChildPath_ = childPath;
         hasPendingScan_ = true;
         return;
     }
     if (scanThread_.joinable()) scanThread_.join();  // previous scan has finished
+    restoreViewOnScan_ = restoreView;
+    restoreChildPath_ = childPath;
     scanReady_.store(false);
     scanning_.store(true);
-    title_ = location;
-    status_ = "Scanning...";
-    entries_.clear();
-    entries_.push_back({"Scanning...", "", false, false, false, false});
-    selected_ = 0;
     scanThread_ =
         std::thread([this, location, isSmb] { runScan(location, isSmb); });
 }
@@ -413,10 +459,12 @@ void Browser::openNetwork() {
     browseOpen_.store(true);
     status_.clear();
     beginScan("smb://", true);
+    activeFilter_ = 2;
 }
 
 void Browser::openHome() {
     openPath(homeDir_);
+    activeFilter_ = 0;
 }
 
 void Browser::openVideos() {
@@ -427,6 +475,7 @@ void Browser::openVideos() {
     } else {
         openPath(homeDir_);
     }
+    activeFilter_ = 1;
 }
 
 void Browser::openDownloads() {
@@ -435,6 +484,7 @@ void Browser::openDownloads() {
         fs::create_directories(downloadDir_, ec);
     }
     openPath(downloadDir_);
+    activeFilter_ = 3;
 }
 
 void Browser::openDrives() {
@@ -445,12 +495,14 @@ void Browser::openDrives() {
     } else {
         openPath("/");
     }
+    activeFilter_ = 0;
 }
 
 void Browser::openVault() {
     if (!VaultManager::instance().isUnlocked()) return;
     VaultManager::instance().ensureDirectories();
     openPath(VaultManager::instance().vaultDir());
+    activeFilter_ = 5;
 }
 
 void Browser::openBookmarks() {
@@ -458,6 +510,7 @@ void Browser::openBookmarks() {
     browseOpen_.store(true);
     status_.clear();
     beginScan("bookmarks://", false);
+    activeFilter_ = 4;
 }
 
 void Browser::addBookmark(const std::string& path, const std::string& label) {
@@ -619,7 +672,8 @@ bool Browser::moveFocusedToVault(std::string& outNewPath) {
         return false;
     }
     status_ = "Moved " + e->label + " to Vault";
-    beginScan(location_, inSmb_);
+    saveCurrentFolderState();
+    beginScan(location_, inSmb_, true);
     return true;
 }
 
@@ -666,7 +720,8 @@ bool Browser::moveFocusedTo(const std::string& destDir, std::string& outNewPath)
     }
     outNewPath = dest.string();
     status_ = "Moved " + e->label + " to " + fs::path(destDir).filename().string();
-    beginScan(location_, inSmb_);
+    saveCurrentFolderState();
+    beginScan(location_, inSmb_, true);
     return true;
 }
 
@@ -687,7 +742,8 @@ bool Browser::deleteFocused(std::string& deletedName) {
         return false;
     }
     status_ = "Deleted " + deletedName;
-    beginScan(location_, inSmb_);
+    saveCurrentFolderState();
+    beginScan(location_, inSmb_, true);
     return true;
 }
 
@@ -708,7 +764,9 @@ bool Browser::renameFocused(const std::string& newName) {
         return false;
     }
     status_ = "Renamed to " + newName;
-    beginScan(location_, inSmb_);
+    saveCurrentFolderState();
+    folderHistory_[location_].selectedPath = dest.string();
+    beginScan(location_, inSmb_, true);
     return true;
 }
 
@@ -762,28 +820,29 @@ Browser::Result Browser::activate(std::string& playPath) {
     const Entry e = entries_[static_cast<std::size_t>(selected_)];
 
     if (e.isBack) {
+        const std::string prevChild = location_;
         if (location_ == "bookmarks://") {
-            beginScan(homeDir_, false);
+            beginScan(homeDir_, false, true, prevChild);
             return Result::Navigated;
         }
         if (inSmb_) {
             const std::string parent = smb_parent(location_);
             if (parent.empty()) {
-                beginScan(homeDir_, false);
+                beginScan(homeDir_, false, true, prevChild);
             } else {
-                beginScan(parent, true);
+                beginScan(parent, true, true, prevChild);
             }
         } else {
             if (VaultManager::instance().isVaultPath(location_)) {
                 if (location_ == VaultManager::instance().vaultDir()) {
-                    beginScan(homeDir_, false);
+                    beginScan(homeDir_, false, true, prevChild);
                 } else {
                     const fs::path p(location_);
-                    beginScan(p.has_parent_path() ? p.parent_path().string() : homeDir_, false);
+                    beginScan(p.has_parent_path() ? p.parent_path().string() : homeDir_, false, true, prevChild);
                 }
             } else {
                 const fs::path p(location_);
-                beginScan(p.has_parent_path() ? p.parent_path().string() : "/", false);
+                beginScan(p.has_parent_path() ? p.parent_path().string() : "/", false, true, prevChild);
             }
         }
         return Result::Navigated;
@@ -792,15 +851,18 @@ Browser::Result Browser::activate(std::string& playPath) {
         return Result::AddSmbShare;
     }
     if (e.isNetwork) {
-        beginScan("smb://", true);
+        saveCurrentFolderState();
+        beginScan("smb://", true, false);
         return Result::Navigated;
     }
     if (e.isDir) {
+        saveCurrentFolderState();
         const bool isSmb = e.isNetwork || (e.path.rfind("smb://", 0) == 0);
-        beginScan(e.path, isSmb);
+        beginScan(e.path, isSmb, false);
         return Result::Navigated;
     }
     if (e.isVideo) {
+        saveCurrentFolderState();
         // Stream by default: local files and SMB shares both play in place. The
         // media engine opens smb:// URLs directly, so there is no need to copy
         // the file to the device first. Downloading is an explicit action
@@ -1367,21 +1429,73 @@ Browser::Result Browser::poll(std::string& playPath) {
     // Publish a finished async directory scan (SMB discovery / large dirs).
     if (scanReady_.exchange(false)) {
         if (scanThread_.joinable()) scanThread_.join();
-        {
+        // If the user switched to another directory while this scan was busy,
+        // discard the stale result and immediately start the pending scan.
+        if (hasPendingScan_) {
+            hasPendingScan_ = false;
+            const int savedFilter = activeFilter_;
+            beginScan(pendingScanLoc_, pendingScanSmb_,
+                      pendingScanRestore_, pendingScanChildPath_);
+            activeFilter_ = savedFilter;
+        } else {
             std::lock_guard<std::mutex> lk(scanMutex_);
             entries_ = std::move(scanResult_.entries);
             title_ = std::move(scanResult_.title);
             status_ = std::move(scanResult_.status);
             location_ = scanResult_.location;
             inSmb_ = scanResult_.inSmb;
-            selected_ = 0;
             lastLocation_ = location_;  // remember for the next open()
             lastInSmb_ = inSmb_;
-        }
-        // Run a navigation the user requested while this scan was busy.
-        if (hasPendingScan_) {
-            hasPendingScan_ = false;
-            beginScan(pendingScanLoc_, pendingScanSmb_);
+
+            const int n = static_cast<int>(entries_.size());
+            if (restoreViewOnScan_ && n > 0) {
+                auto it = folderHistory_.find(location_);
+                if (it != folderHistory_.end()) {
+                    const FolderViewState& st = it->second;
+                    int foundIdx = -1;
+                    if (!st.selectedPath.empty()) {
+                        for (int i = 0; i < n; ++i) {
+                            if (entries_[static_cast<std::size_t>(i)].path == st.selectedPath) {
+                                foundIdx = i;
+                                break;
+                            }
+                        }
+                    }
+                    if (foundIdx < 0 && !restoreChildPath_.empty()) {
+                        for (int i = 0; i < n; ++i) {
+                            if (entries_[static_cast<std::size_t>(i)].path == restoreChildPath_) {
+                                foundIdx = i;
+                                break;
+                            }
+                        }
+                    }
+                    selected_ = (foundIdx >= 0) ? foundIdx : std::clamp(st.selected, 0, n - 1);
+                    first_ = std::clamp(st.first, 0, n - 1);
+                    pendingRestoreFirst_ = first_;
+                    hasPendingRestoreFirst_ = true;
+                } else {
+                    int foundIdx = 0;
+                    if (!restoreChildPath_.empty()) {
+                        for (int i = 0; i < n; ++i) {
+                            if (entries_[static_cast<std::size_t>(i)].path == restoreChildPath_) {
+                                foundIdx = i;
+                                break;
+                            }
+                        }
+                    }
+                    selected_ = foundIdx;
+                    first_ = 0;
+                    pendingRestoreFirst_ = 0;
+                    hasPendingRestoreFirst_ = true;
+                }
+            } else {
+                selected_ = 0;
+                first_ = 0;
+                pendingRestoreFirst_ = 0;
+                hasPendingRestoreFirst_ = true;
+            }
+            restoreViewOnScan_ = false;
+            restoreChildPath_.clear();
         }
     }
     if (dlActive_.load()) {

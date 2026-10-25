@@ -37,6 +37,8 @@ public:
 
     // Retrieves current entered buffer
     std::string currentText() const;
+    int cursorPos() const { return static_cast<int>(cursorPos_); }
+    void moveCursor(int delta);
     const std::string& description() const { return description_; }
     bool isPassword() const { return isPassword_; }
     const float* transform() const { return &kbMatLocal_[0][0]; }
@@ -46,6 +48,7 @@ private:
     ~VrKeyboard();
 
     bool configureKeyboardOverlay();
+    void setLaserPointerActive(bool active);
 
     bool available_ = false;
     bool isOpen_ = false;
@@ -60,10 +63,16 @@ private:
     std::string description_;
     std::string existingText_;
     std::string currentText_;
+    std::size_t cursorPos_ = 0;
+    int escState_ = 0;
+    std::string escParams_;
     bool isPassword_ = false;
     void* libHandle_ = nullptr;
     void* vrSystem_ = nullptr;
     void* vrOverlay_ = nullptr;
+    void* vrSettings_ = nullptr;
+    void* vrProperties_ = nullptr;
+    void* vrInputFocus_ = nullptr;
 };
 
 } // namespace pixelvr

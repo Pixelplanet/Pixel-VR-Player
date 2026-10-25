@@ -27,10 +27,10 @@ constexpr int kDownloadDirCount = 3;
 
 const char* kLangNames[] = {"Auto",    "English",  "German",  "French",
                            "Spanish", "Japanese", "Italian", "Russian",
-                           "Chinese", "Korean"};
+                           "Chinese"};
 const char* kLangCodes[] = {"",    "eng", "deu", "fra", "spa",
-                           "jpn", "ita", "rus", "chi", "kor"};
-constexpr int kLangCount = 10;
+                           "jpn", "ita", "rus", "chi"};
+constexpr int kLangCount = 9;
 
 const char* kCurvatureNames[] = {"Flat (0%)", "Gentle (25%)", "Cinema (50%)",
                                  "Deep Curve (75%)", "IMAX Wrap (100%)"};
@@ -503,6 +503,16 @@ int SettingsMenu::selectedAudioStream() const {
     return (audioSel_ >= 0 && audioSel_ < static_cast<int>(audioStreams_.size()))
                ? audioStreams_[audioSel_].first
                : -1;
+}
+
+void SettingsMenu::setSelectedAudioStream(int containerIndex) {
+    for (std::size_t i = 0; i < audioStreams_.size(); ++i) {
+        if (audioStreams_[i].first == containerIndex) {
+            audioSel_ = static_cast<int>(i);
+            break;
+        }
+    }
+    if (open_) refresh();
 }
 
 std::string SettingsMenu::audioLanguage() const {

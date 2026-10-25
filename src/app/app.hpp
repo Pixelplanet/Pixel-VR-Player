@@ -16,6 +16,7 @@
 #include "ui/settings_menu.hpp"
 
 #include <chrono>
+#include <functional>
 #include <string>
 
 namespace pixelvr {
@@ -121,6 +122,15 @@ private:
     void updateSmbModalMenu();
     void saveSmbModal();
     void deleteSmbModal();
+
+    std::function<void(const std::string&)> kbOnDone_;
+    std::function<void()> kbOnCancel_;
+    void openKeyboard(const std::string& prompt,
+                      const std::string& initialText,
+                      bool isPassword,
+                      const XrInputState& in,
+                      std::function<void(const std::string&)> onDone,
+                      std::function<void()> onCancel = nullptr);
 
 #ifdef PIXELVR_HAVE_FREETYPE
     Browser browser_;

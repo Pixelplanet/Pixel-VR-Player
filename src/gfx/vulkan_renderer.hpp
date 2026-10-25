@@ -153,8 +153,11 @@ public:
     void updateCardThumbnail(int slot, const std::string& path, const uint8_t* rgba, int width, int height);
     void clearCardThumbnails();
     int browserFirst() const { return browserFirst_; }
+    void setBrowserFirst(int first) { browserFirst_ = first < 0 ? 0 : first; }
     int browserSidebarHovered() const { return browserSidebarHovered_; }
     int browserPageBtnHovered() const { return browserPageBtnHovered_; }
+    void setBrowserQuickFilter(int f) { browserQuickFilter_ = f; }
+    int browserQuickFilter() const { return browserQuickFilter_; }
     void setDownloadsFilter(int f) { downloadsFilter_ = f; }
     int downloadsFilter() const { return downloadsFilter_; }
     void setActiveDownloadCount(int c) { activeDownloadCount_ = c; }
@@ -192,16 +195,19 @@ public:
         std::string prompt;
         std::string text;
         bool isPassword = false;
+        int cursorPos = 0;
         bool hasTransform = false;
         float transform[3][4]{};
     };
     void setKeyboardModal(bool visible, const std::string& prompt,
                           const std::string& text, bool isPassword = false,
-                          const float* transform = nullptr) {
+                          const float* transform = nullptr,
+                          int cursorPos = -1) {
         keyboardModal_.visible = visible;
         keyboardModal_.prompt = prompt;
         keyboardModal_.text = text;
         keyboardModal_.isPassword = isPassword;
+        keyboardModal_.cursorPos = (cursorPos >= 0) ? cursorPos : static_cast<int>(text.size());
         if (transform && visible) {
             std::memcpy(keyboardModal_.transform, transform, sizeof(keyboardModal_.transform));
             keyboardModal_.hasTransform = true;
@@ -243,6 +249,8 @@ public:
         std::string subtitle;
         std::vector<std::string> options;
         int selectedOption = -1;
+        int editingRow = -1;
+        int cursorPos = 0;
         std::string renameBuffer;
     };
     void setActionMenu(const ActionMenuData& data) { actionMenu_ = data; }
@@ -543,6 +551,7 @@ private:
     std::vector<BrowserItem> browserItems_;
     int browserSidebarHovered_ = -1;
     int browserPageBtnHovered_ = -1;
+    int browserQuickFilter_ = 0;  // 0=Local, 1=Videos, 2=SMB, 3=Downloads, 4=Bookmarks, 5=Vault
     int downloadsFilter_ = 0;  // 0=All, 1=Active, 2=Completed
     int activeDownloadCount_ = 0;
     int settingsSection_ = 0;

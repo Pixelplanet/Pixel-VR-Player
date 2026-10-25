@@ -34,6 +34,7 @@ extern "C" {
 #ifdef PIXELVR_HAVE_PULSE
 #include <pulse/error.h>
 #include <pulse/simple.h>
+#include <pulse/sample.h>
 #endif
 
 #ifdef PIXELVR_HAVE_SMB
@@ -333,6 +334,15 @@ struct MediaEngine::Impl {
     std::atomic<double> masterClock{0.0};
 #ifdef PIXELVR_HAVE_PULSE
     pa_simple* pa = nullptr;
+    struct AudioChunk {
+        std::vector<uint8_t> pcm;
+        double pts = -1.0;
+        double duration = 0.0;
+    };
+    std::mutex audioMutex;
+    std::condition_variable audioCv;
+    std::deque<AudioChunk> audioQueue;
+    std::thread audioThread;
 #endif
 
     std::thread thread;
@@ -363,6 +373,14 @@ struct MediaEngine::Impl {
 
     void teardown() {
 #ifdef PIXELVR_HAVE_PULSE
+        {
+            std::lock_guard<std::mutex> lk(audioMutex);
+            audioQueue.clear();
+        }
+        audioCv.notify_all();
+        if (audioThread.joinable()) {
+            audioThread.join();
+        }
         if (pa) {
             pa_simple_free(pa);
             pa = nullptr;
@@ -421,18 +439,13 @@ struct MediaEngine::Impl {
         std::unique_lock<std::mutex> lock(mutex);
         // Back-pressure: wait for the consumer to free a slot rather than dropping
         // frames, so the decoder is paced by presentation and cannot race ahead of
-        // the playback clock. An unpaced decode burst (post-seek audio mute, or the
-        // initial burst on a fresh video) otherwise outran the clock and froze the
-        // picture permanently.
-        queueCv.wait_for(lock, std::chrono::milliseconds(100), [&] {
-            return swQueue.size() < maxQueue || !running.load() ||
-                   seekTarget.load() >= 0.0;
-        });
+        // the playback clock.
+        while (swQueue.size() >= maxQueue && running.load() &&
+               seekTarget.load() < 0.0) {
+            queueCv.wait_for(lock, std::chrono::milliseconds(50));
+        }
         if (!running.load() || seekTarget.load() >= 0.0) {
             return;  // a stop/seek is pending: drop this stale frame
-        }
-        while (swQueue.size() >= maxQueue) {
-            swQueue.pop_front();  // consumer stalled past the timeout: stay live
         }
         VideoFrame f;
         f.width = w;
@@ -449,18 +462,15 @@ struct MediaEngine::Impl {
     void pushDrm(const DrmVideoFrame& f) {
         std::unique_lock<std::mutex> lock(mutex);
         // Back-pressure (see pushFrame): pace the decoder to the consumer so a
-        // post-seek or startup decode burst can't outrun the playback clock.
-        queueCv.wait_for(lock, std::chrono::milliseconds(100), [&] {
-            return drmQueue.size() < maxQueue || !running.load() ||
-                   seekTarget.load() >= 0.0;
-        });
+        // post-seek or startup decode burst can't outrun the playback clock and
+        // we never drop decoded hardware frames from the queue.
+        while (drmQueue.size() >= maxQueue && running.load() &&
+               seekTarget.load() < 0.0) {
+            queueCv.wait_for(lock, std::chrono::milliseconds(50));
+        }
         if (!running.load() || seekTarget.load() >= 0.0) {
             if (f.fd >= 0) ::close(f.fd);  // stop/seek pending: drop; we own the fd
             return;
-        }
-        while (drmQueue.size() >= maxQueue) {
-            if (drmQueue.front().fd >= 0) ::close(drmQueue.front().fd);
-            drmQueue.pop_front();  // consumer stalled past the timeout: stay live
         }
         DrmVideoFrame queued = f;
         queued.serial = ++serial;
@@ -496,6 +506,7 @@ struct MediaEngine::Impl {
     }
 
     void decodeLoop();
+    void audioThreadLoop();
 };
 
 void MediaEngine::Impl::decodeLoop() {
@@ -513,6 +524,7 @@ void MediaEngine::Impl::decodeLoop() {
     double startPts = 0.0;
     bool haveClock = false;
     bool eofFlushed = false;
+    bool wasPaused = false;
     auto lastSeekWall = clock::now() - std::chrono::seconds(1);
 
     auto process_video = [&]() {
@@ -644,14 +656,13 @@ void MediaEngine::Impl::decodeLoop() {
     };
 
 #ifdef PIXELVR_HAVE_PULSE
-    std::vector<uint8_t> audioBuf;
     auto process_audio = [&]() {
         const int maxOut = swr_get_out_samples(swr, frame->nb_samples);
         if (maxOut <= 0) {
             return;
         }
-        audioBuf.resize(static_cast<std::size_t>(maxOut) * kOutChannels * 2);
-        uint8_t* out[1] = {audioBuf.data()};
+        std::vector<uint8_t> pcm(static_cast<std::size_t>(maxOut) * kOutChannels * 2);
+        uint8_t* out[1] = {pcm.data()};
         const int got =
             swr_convert(swr, out, maxOut,
                         const_cast<const uint8_t**>(frame->extended_data),
@@ -660,21 +671,32 @@ void MediaEngine::Impl::decodeLoop() {
             return;
         }
         const std::size_t bytes = static_cast<std::size_t>(got) * kOutChannels * 2;
+        pcm.resize(bytes);
         // Mute while actively scrubbing so audio writes don't block video previews
         // and the sound doesn't stutter across seek positions.
         if (std::chrono::duration<double>(clock::now() - lastSeekWall).count() < 0.25) {
             return;
         }
-        int err = 0;
-        pa_simple_write(pa, audioBuf.data(), bytes, &err);
+        if (!pa) {
+            return;
+        }
 
         int64_t ts = frame->best_effort_timestamp;
         if (ts == AV_NOPTS_VALUE) {
             ts = frame->pts;
         }
-        if (ts != AV_NOPTS_VALUE) {
-            masterClock.store(ts * av_q2d(audioTimeBase));
+        const double pts = (ts != AV_NOPTS_VALUE) ? (ts * av_q2d(audioTimeBase)) : -1.0;
+        const double dur = static_cast<double>(got) / static_cast<double>(kOutSampleRate);
+
+        {
+            std::lock_guard<std::mutex> lk(audioMutex);
+            // Keep up to ~5s of decoded audio in RAM; never block the video decode loop.
+            while (audioQueue.size() >= 250) {
+                audioQueue.pop_front();
+            }
+            audioQueue.push_back(AudioChunk{std::move(pcm), pts, dur});
         }
+        audioCv.notify_one();
     };
 #endif
 
@@ -732,6 +754,17 @@ void MediaEngine::Impl::decodeLoop() {
             if (audioCodec != nullptr) {
                 avcodec_flush_buffers(audioCodec);
             }
+#ifdef PIXELVR_HAVE_PULSE
+            {
+                std::lock_guard<std::mutex> lk(audioMutex);
+                audioQueue.clear();
+            }
+            if (pa) {
+                int pErr = 0;
+                pa_simple_flush(pa, &pErr);
+            }
+            audioCv.notify_all();
+#endif
             haveClock = false;
             masterClock.store(seekTo);
             playClock.reset();  // the next presented frame re-anchors the clock
@@ -739,10 +772,26 @@ void MediaEngine::Impl::decodeLoop() {
             eof.store(false);
         }
         if (paused.load()) {
+            if (!wasPaused) {
+#ifdef PIXELVR_HAVE_PULSE
+                if (pa) {
+                    int pErr = 0;
+                    pa_simple_flush(pa, &pErr);
+                }
+                audioCv.notify_all();
+#endif
+                wasPaused = true;
+            }
             haveClock = false;  // re-establish the wall clock on resume
             playClock.freeze();  // hold the clock so video doesn't advance
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
+        }
+        if (wasPaused) {
+            wasPaused = false;
+#ifdef PIXELVR_HAVE_PULSE
+            audioCv.notify_all();
+#endif
         }
         playClock.resume();  // no-op unless resuming from pause
         const int readResult = av_read_frame(format, packet);
@@ -781,6 +830,66 @@ void MediaEngine::Impl::decodeLoop() {
 
     av_packet_free(&packet);
     av_frame_free(&frame);
+}
+
+void MediaEngine::Impl::audioThreadLoop() {
+#ifdef PIXELVR_HAVE_PULSE
+    // Pre-write lead time (~45ms) matching the PulseAudio buffer so samples
+    // written now emerge from the speakers when playClock reaches chunk.pts.
+    constexpr double kAudioLeadSec = 0.045;
+
+    while (running.load()) {
+        if (paused.load() || !playClock.running.load(std::memory_order_relaxed)) {
+            std::unique_lock<std::mutex> lk(audioMutex);
+            audioCv.wait_for(lk, std::chrono::milliseconds(10));
+            continue;
+        }
+
+        AudioChunk chunk;
+        bool haveChunk = false;
+        double waitSec = 0.0;
+        {
+            std::unique_lock<std::mutex> lk(audioMutex);
+            if (audioQueue.empty()) {
+                audioCv.wait_for(lk, std::chrono::milliseconds(10));
+                continue;
+            }
+
+            const double vClock = playClock.now();
+            // Drop any chunks that are already late (> 80ms behind current video clock)
+            // so post-startup or post-seek audio snaps into sync with video immediately.
+            while (!audioQueue.empty() && audioQueue.front().pts >= 0.0 &&
+                   (audioQueue.front().pts + audioQueue.front().duration) < (vClock - 0.080)) {
+                audioQueue.pop_front();
+            }
+            if (audioQueue.empty()) {
+                continue;
+            }
+
+            const double targetPlayTime = vClock + kAudioLeadSec;
+            if (audioQueue.front().pts >= 0.0 &&
+                audioQueue.front().pts > targetPlayTime + 0.015) {
+                // Audio is ahead of the video presentation clock (because video frames
+                // are buffered in the V4L2 decoder + drmQueue). Hold until due.
+                waitSec = std::min(0.015, audioQueue.front().pts - targetPlayTime);
+            } else {
+                chunk = std::move(audioQueue.front());
+                audioQueue.pop_front();
+                haveChunk = true;
+            }
+        }
+
+        if (waitSec > 0.0) {
+            std::this_thread::sleep_for(std::chrono::duration<double>(waitSec));
+            continue;
+        }
+
+        if (haveChunk && pa != nullptr && !chunk.pcm.empty()) {
+            int err = 0;
+            pa_simple_write(pa, chunk.pcm.data(), chunk.pcm.size(), &err);
+        }
+    }
+#endif
 }
 
 MediaEngine::MediaEngine() : impl_(std::make_unique<Impl>()) {
@@ -890,8 +999,13 @@ bool MediaEngine::open(const std::string& path) {
 
     const int wantVideo =
         (impl_->preferredVideoStream >= 0) ? impl_->preferredVideoStream : -1;
-    impl_->videoStream = av_find_best_stream(impl_->format, AVMEDIA_TYPE_VIDEO,
-                                             wantVideo, -1, nullptr, 0);
+    if (wantVideo >= 0 && wantVideo < static_cast<int>(impl_->format->nb_streams) &&
+        impl_->format->streams[wantVideo]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
+        impl_->videoStream = wantVideo;
+    } else {
+        impl_->videoStream = av_find_best_stream(impl_->format, AVMEDIA_TYPE_VIDEO,
+                                                 wantVideo, -1, nullptr, 0);
+    }
     if (impl_->videoStream < 0) {
         PIXELVR_LOG_ERROR("MediaEngine: no video stream in %s", path.c_str());
         close();
@@ -1019,8 +1133,14 @@ bool MediaEngine::open(const std::string& path) {
             }
         }
     }
-    impl_->audioStream = av_find_best_stream(impl_->format, AVMEDIA_TYPE_AUDIO,
-                                             wantAudio, -1, &adec, 0);
+    if (wantAudio >= 0 && wantAudio < static_cast<int>(impl_->format->nb_streams) &&
+        impl_->format->streams[wantAudio]->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+        impl_->audioStream = wantAudio;
+        adec = avcodec_find_decoder(impl_->format->streams[wantAudio]->codecpar->codec_id);
+    } else {
+        impl_->audioStream = av_find_best_stream(impl_->format, AVMEDIA_TYPE_AUDIO,
+                                                 wantAudio, -1, &adec, 0);
+    }
     if (impl_->audioStream >= 0 && adec != nullptr) {
         AVStream* as = impl_->format->streams[impl_->audioStream];
         impl_->audioTimeBase = as->time_base;
@@ -1040,9 +1160,15 @@ bool MediaEngine::open(const std::string& path) {
                 spec.format = PA_SAMPLE_S16LE;
                 spec.rate = MediaEngine::Impl::kOutSampleRate;
                 spec.channels = MediaEngine::Impl::kOutChannels;
+                pa_buffer_attr ba;
+                std::memset(&ba, 0xff, sizeof(ba));
+                ba.tlength = static_cast<uint32_t>(pa_usec_to_bytes(60000, &spec));
+                ba.minreq = static_cast<uint32_t>(pa_usec_to_bytes(20000, &spec));
+                ba.prebuf = static_cast<uint32_t>(-1);
+                ba.maxlength = static_cast<uint32_t>(-1);
                 impl_->pa =
                     pa_simple_new(nullptr, "PixelVRPlayer", PA_STREAM_PLAYBACK,
-                                  nullptr, "video", &spec, nullptr, nullptr, nullptr);
+                                  nullptr, "video", &spec, nullptr, &ba, nullptr);
                 impl_->audioEnabled = (impl_->pa != nullptr);
             }
             av_channel_layout_uninit(&outLayout);
@@ -1059,6 +1185,11 @@ bool MediaEngine::open(const std::string& path) {
     impl_->eof.store(false);
     impl_->running.store(true);
     impl_->thread = std::thread([this] { impl_->decodeLoop(); });
+#ifdef PIXELVR_HAVE_PULSE
+    if (impl_->audioEnabled) {
+        impl_->audioThread = std::thread([this] { impl_->audioThreadLoop(); });
+    }
+#endif
     return true;
 }
 
@@ -1073,6 +1204,12 @@ void MediaEngine::close() {
         impl_->releaseCv.notify_all();
         impl_->queueCv.notify_all();     // wake a back-pressured decoder to exit
     }
+#ifdef PIXELVR_HAVE_PULSE
+    impl_->audioCv.notify_all();
+    if (impl_->audioThread.joinable()) {
+        impl_->audioThread.join();
+    }
+#endif
 #ifdef PIXELVR_HAVE_SMB
     impl_->smbReader.abort();  // unblock a decode thread stalled in smb_read
 #endif
@@ -1217,7 +1354,13 @@ bool MediaEngine::latestFrame(VideoFrame& out) {
     out = std::move(q.front());
     q.pop_front();
     impl_->primed = true;
-    if (firstFrame) impl_->playClock.start(out.pts);  // anchor to the first frame
+    impl_->masterClock.store(out.pts, std::memory_order_relaxed);
+    if (firstFrame) {
+        impl_->playClock.start(out.pts);  // anchor to the first frame
+#ifdef PIXELVR_HAVE_PULSE
+        impl_->audioCv.notify_all();
+#endif
+    }
     impl_->queueCv.notify_one();  // slot freed: wake a back-pressured decoder
     return true;
 }
@@ -1258,8 +1401,12 @@ bool MediaEngine::latestDrmFrame(DrmVideoFrame& out) {
     out = std::move(q.front());  // transfers fd + keepAlive ownership to caller
     q.pop_front();
     impl_->primed = true;
+    impl_->masterClock.store(out.pts, std::memory_order_relaxed);
     if (firstFrame) {
         impl_->playClock.start(out.pts);  // anchor to the first frame
+#ifdef PIXELVR_HAVE_PULSE
+        impl_->audioCv.notify_all();
+#endif
         PIXELVR_LOG_INFO("MediaEngine: prime pts=%.2f clock=%.2f", out.pts, clock);
     }
     impl_->queueCv.notify_one();  // slot freed: wake a back-pressured decoder

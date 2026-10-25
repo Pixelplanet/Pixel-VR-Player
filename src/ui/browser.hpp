@@ -6,6 +6,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace pixelvr {
@@ -90,6 +91,14 @@ public:
         const int n = static_cast<int>(entries_.size());
         selected_ = (n <= 0) ? 0 : (index < 0 ? 0 : (index >= n ? n - 1 : index));
     }
+    void setFirst(int first) { first_ = first < 0 ? 0 : first; }
+    int first() const { return first_; }
+    bool consumeRestoredFirst(int& outFirst) {
+        if (!hasPendingRestoreFirst_) return false;
+        outFirst = pendingRestoreFirst_;
+        hasPendingRestoreFirst_ = false;
+        return true;
+    }
 
     // Activates the current selection. On Result::Play, `playPath` receives the
     // path or smb:// URI for the media engine (SMB files stream in place).
@@ -109,6 +118,7 @@ public:
 
     // True while browsing an SMB share (as opposed to local storage).
     bool onNetwork() const { return inSmb_; }
+    int activeFilter() const { return activeFilter_; }
 
     // Advances any in-progress SMB download. Returns Result::Play with a LOCAL
     // playPath when a download finishes; otherwise Result::None.
@@ -174,12 +184,19 @@ private:
         std::string location;
         bool inSmb = false;
     };
-    void beginScan(const std::string& location, bool isSmb);  // async navigate
+    void beginScan(const std::string& location, bool isSmb,
+                   bool restoreView = false,
+                   const std::string& childPath = "");        // async navigate
     void runScan(std::string location, bool isSmb);           // worker body
+    void saveCurrentFolderState();
+    void updateActiveFilterFor(const std::string& loc, bool isSmb);
+    int activeFilter_ = 0;
     // Navigation requested while a scan was already running (deferred so the
     // main thread never blocks joining a scan stuck on the SMB lock).
     std::string pendingScanLoc_;
     bool pendingScanSmb_ = false;
+    bool pendingScanRestore_ = false;
+    std::string pendingScanChildPath_;
     bool hasPendingScan_ = false;
     void scanLocalInto(const std::string& dir, ScanResult& out);
     void scanSmbInto(const std::string& uri, ScanResult& out);
@@ -187,6 +204,18 @@ private:
     void startDownloadFile(const std::string& uri, const std::string& local);
     void startDownloadFolder(const std::string& uri, const std::string& name);
     void startNextQueued();
+
+    struct FolderViewState {
+        int selected = 0;
+        int first = 0;
+        std::string selectedPath;
+    };
+    std::unordered_map<std::string, FolderViewState> folderHistory_;
+    int first_ = 0;
+    bool restoreViewOnScan_ = false;
+    std::string restoreChildPath_;
+    int pendingRestoreFirst_ = 0;
+    bool hasPendingRestoreFirst_ = false;
 
     bool open_ = false;
     bool inSmb_ = false;

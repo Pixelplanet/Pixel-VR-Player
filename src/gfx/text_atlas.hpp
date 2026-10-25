@@ -13,12 +13,13 @@ struct Glyph {
     float advance = 0.0f;
 };
 
-// An R8 coverage atlas of ASCII 32..126 plus per-glyph metrics.
+// An R8 coverage atlas of ASCII 32..126 + Latin-1 Supplement (160..255, e.g. ß/ä/ö/ü)
+// plus per-glyph metrics.
 struct FontAtlas {
     int width = 0;
     int height = 0;
     std::vector<uint8_t> pixels;  // single channel (SDF, or coverage fallback)
-    Glyph glyphs[128];            // indexed by ASCII code
+    Glyph glyphs[256];            // indexed by codepoint / slot (0..255)
     float lineHeight = 0.0f;
     float ascent = 0.0f;
     bool sdf = false;             // true = signed-distance field (crisp at scale)

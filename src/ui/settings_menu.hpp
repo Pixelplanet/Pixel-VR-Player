@@ -126,6 +126,7 @@ public:
                     int currentVideo, int currentAudio);
     int selectedVideoStream() const;
     int selectedAudioStream() const;
+    void setSelectedAudioStream(int containerIndex);
     std::string audioLanguage() const;  // ISO code of the preferred language, ""
 
     void loadConfig();

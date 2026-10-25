@@ -70,8 +70,49 @@ static void clearOrSetShmKeyboardBuffer(const std::string& text) {
     }
     closedir(dir);
 }
+
+// Reads the live keyboard buffer the GamepadUI keyboard maintains in shared memory
+// (same segment/offset written by clearOrSetShmKeyboardBuffer). Returns true if a valid
+// keyboard shm segment was found, writing the current full text (possibly empty) to out.
+// This is the reliable source of the complete typed string: GetKeyboardText() on this
+// keyboard only returns the latest single keystroke, not the accumulated buffer.
+static bool readShmKeyboardBuffer(std::string& out) {
+    out.clear();
+    DIR* dir = opendir("/dev/shm");
+    if (!dir) return false;
+
+    bool found = false;
+    struct dirent* entry;
+    while ((entry = readdir(dir)) != nullptr) {
+        if (std::strstr(entry->d_name, "Shm_") != nullptr) {
+            std::string path = std::string("/dev/shm/") + entry->d_name;
+            struct stat st{};
+            if (stat(path.c_str(), &st) == 0 && st.st_size == 0x40cc0) {
+                int fd = open(path.c_str(), O_RDONLY);
+                if (fd >= 0) {
+                    void* ptr = mmap(nullptr, 0x40cc0, PROT_READ, MAP_SHARED, fd, 0);
+                    close(fd);
+                    if (ptr != MAP_FAILED) {
+                        const char* kbBuf = reinterpret_cast<const char*>(ptr) + 0x3fe60;
+                        std::size_t len = strnlen(kbBuf, 1023);
+                        found = true;
+                        // Multiple segments can exist; prefer the one that actually holds
+                        // text (the active keyboard's buffer may not be the first found).
+                        if (len > 0 && out.empty()) {
+                            out.assign(kbBuf, len);
+                        }
+                        munmap(ptr, 0x40cc0);
+                    }
+                }
+            }
+        }
+    }
+    closedir(dir);
+    return found;
+}
 #else
 static void clearOrSetShmKeyboardBuffer(const std::string&) {}
+static bool readShmKeyboardBuffer(std::string& out) { out.clear(); return false; }
 #endif
 
 } // namespace
@@ -154,16 +195,92 @@ bool VrKeyboard::init() {
         return false;
     }
 
+    vr::IVRSettings* settings = reinterpret_cast<vr::IVRSettings*>(
+        g_VR_GetGenericInterface(vr::IVRSettings_Version, &err));
+
+    vr::EVRInitError propErr = vr::VRInitError_None;
+    void* props = reinterpret_cast<void*>(
+        g_VR_GetGenericInterface("IVRProperties_001", &propErr));
+
+    vr::EVRInitError focusErr = vr::VRInitError_None;
+    void* inputFocus = reinterpret_cast<void*>(
+        g_VR_GetGenericInterface("IVRInputFocusInternal_XXX", &focusErr));
+
     vrSystem_ = sys;
     vrOverlay_ = ov;
+    vrSettings_ = settings;
+    vrProperties_ = props;
+    vrInputFocus_ = inputFocus;
     available_ = true;
 
     // Clear any stale shared memory keyboard buffer left by previous sessions
     clearOrSetShmKeyboardBuffer("");
 
-    PIXELVR_LOG_INFO("VrKeyboard: Successfully initialized SteamVR overlay interface (sys=%p, ov=%p)",
-                     reinterpret_cast<void*>(sys), reinterpret_cast<void*>(ov));
+    PIXELVR_LOG_INFO("VrKeyboard: Successfully initialized SteamVR overlay interface (sys=%p, ov=%p, settings=%p, props=%p, focus=%p)",
+                     reinterpret_cast<void*>(sys), reinterpret_cast<void*>(ov),
+                     reinterpret_cast<void*>(settings), props, inputFocus);
     return true;
+}
+
+void VrKeyboard::setLaserPointerActive(bool active) {
+    // 1. Update dashboard.preferGamepadMode setting
+    if (auto* settings = reinterpret_cast<vr::IVRSettings*>(vrSettings_)) {
+        vr::EVRSettingsError sErr = vr::VRSettingsError_None;
+        settings->SetBool("dashboard", "preferGamepadMode", !active, &sErr);
+    }
+
+    // 2. Clear or restore controller property 0x845 (2117, k_unBoolPropertyTag = 4) via IVRProperties_001.
+    // On Steam Frame standalone, vrcompositor checks property 0x845 on each controller every frame;
+    // when true, it zeroes m_ulActiveLaserHand and switches SystemPanelInteractionMode back to Gamepad (2)
+    // unless the user manually presses the Grip laser-toggle button. Setting property 0x845 to false (0)
+    // while the keyboard is open allows vrcompositor to activate system.pointer automatically.
+    if (vrProperties_) {
+        struct PropertyWrite {
+            uint32_t prop;
+            uint32_t writeType;
+            uint32_t eSetError;
+            void* pvBuffer;
+            uint32_t unBufferSize;
+            uint32_t unTag;
+            uint32_t eError;
+        };
+        using FnWritePropertyBatch = uint32_t (*)(void*, uint64_t, PropertyWrite*, uint32_t);
+        using FnTrackedDeviceToPropertyContainer = uint64_t (*)(void*, uint32_t);
+
+        void** vtable = *reinterpret_cast<void***>(vrProperties_);
+        auto writeBatch = reinterpret_cast<FnWritePropertyBatch>(vtable[1]);
+        auto devToContainer = reinterpret_cast<FnTrackedDeviceToPropertyContainer>(vtable[3]);
+        auto* sys = reinterpret_cast<vr::IVRSystem*>(vrSystem_);
+
+        uint8_t val = active ? 0 : 1;
+        for (uint32_t dev = 1; dev < 16; ++dev) {
+            if (!active && sys && sys->GetTrackedDeviceClass(dev) != vr::TrackedDeviceClass_Controller) {
+                continue;
+            }
+            uint64_t container = devToContainer(vrProperties_, dev);
+            if (container != 0) {
+                PropertyWrite pw{};
+                pw.prop = 0x845;      // 2117: controller prefer-gamepad-over-laser property
+                pw.writeType = 0;     // PropertyWrite_Set
+                pw.eSetError = 0;
+                pw.pvBuffer = &val;
+                pw.unBufferSize = sizeof(val);
+                pw.unTag = 4;         // k_unBoolPropertyTag
+                pw.eError = 0;
+                writeBatch(vrProperties_, container, &pw, 1);
+            }
+        }
+    }
+
+    // 3. Switch FocusState SystemPanelInteractionMode to LaserMouse (1) via IVRInputFocusInternal_XXX
+    // vtable[12] (SetSystemPanelInteractionMode) so the laser pointer is immediately active even if
+    // more than 10 seconds have elapsed since the dashboard last had focus.
+    if (active && vrInputFocus_) {
+        using FnSetSystemPanelInteractionMode = void (*)(void*, int);
+        void** vtable = *reinterpret_cast<void***>(vrInputFocus_);
+        auto setMode = reinterpret_cast<FnSetSystemPanelInteractionMode>(vtable[12]);
+        setMode(vrInputFocus_, 1); // 1 = LaserMouse, 2 = Gamepad
+    }
 }
 
 void VrKeyboard::shutdown() {
@@ -172,6 +289,7 @@ void VrKeyboard::shutdown() {
     if (isOpen_) {
         hide();
     }
+    setLaserPointerActive(false);
     if (g_VR_ShutdownInternal) {
         auto fn = g_VR_ShutdownInternal;
         g_VR_ShutdownInternal = nullptr;
@@ -179,6 +297,9 @@ void VrKeyboard::shutdown() {
     }
     vrSystem_ = nullptr;
     vrOverlay_ = nullptr;
+    vrSettings_ = nullptr;
+    vrProperties_ = nullptr;
+    vrInputFocus_ = nullptr;
     if (libHandle_) {
 #if defined(__linux__) || defined(__APPLE__)
         dlclose(libHandle_);
@@ -215,17 +336,19 @@ bool VrKeyboard::configureKeyboardOverlay() {
         ov->SetOverlayFlag(h, vr::VROverlayFlags_SendVRDiscreteScrollEvents, true);
         ov->ShowOverlay(h);
         foundAny = true;
-        PIXELVR_LOG_INFO("VrKeyboard: Configured keyboard overlay %llu ('%s') with interactive laser mouse at standing pos (%.2f, %.2f, %.2f)",
-                         static_cast<unsigned long long>(h), name ? name : "unknown",
-                         mat.m[0][3], mat.m[1][3], mat.m[2][3]);
+        if (!kbConfigured_) {
+            PIXELVR_LOG_INFO("VrKeyboard: Configured keyboard overlay %llu ('%s') with interactive laser mouse at standing pos (%.2f, %.2f, %.2f)",
+                             static_cast<unsigned long long>(h), name ? name : "unknown",
+                             mat.m[0][3], mat.m[1][3], mat.m[2][3]);
+        }
     };
 
-    // 1. Check known specific overlay keys
+    // 1. Check known specific VR keyboard overlay keys (exclude valve.steam.gamepadui.keyboard
+    // which is the 2D gamescope overlay and would collide with system.keyboard in 3D space)
     const char* kbOverlayNames[] = {
         "VRKeyboard_uid0",
         "VRKeyboard_uid1",
         "VRKeyboard",
-        "valve.steam.gamepadui.keyboard",
         "system.keyboard"
     };
     for (const char* name : kbOverlayNames) {
@@ -241,6 +364,9 @@ bool VrKeyboard::configureKeyboardOverlay() {
         vr::EVROverlayError kErr = vr::VROverlayError_None;
         uint32_t len = ov->GetOverlayKey(h, keyBuf, sizeof(keyBuf), &kErr);
         if (kErr == vr::VROverlayError_None && len > 0) {
+            if (std::strcmp(keyBuf, "valve.steam.gamepadui.keyboard") == 0) {
+                continue;
+            }
             if (std::strstr(keyBuf, "keyboard") != nullptr ||
                 std::strstr(keyBuf, "Keyboard") != nullptr ||
                 std::strstr(keyBuf, "VRKeyboard") != nullptr) {
@@ -252,6 +378,7 @@ bool VrKeyboard::configureKeyboardOverlay() {
     if (foundAny) {
         kbConfigured_ = true;
     }
+    setLaserPointerActive(true);
     return foundAny;
 }
 
@@ -282,6 +409,9 @@ bool VrKeyboard::show(const std::string& description,
     description_ = description;
     existingText_ = existingText;
     currentText_ = existingText;
+    cursorPos_ = currentText_.size();
+    escState_ = 0;
+    escParams_.clear();
     isPassword_ = isPassword;
     maxChars_ = maxChars;
     doneSubmitted_ = false;
@@ -395,6 +525,10 @@ bool VrKeyboard::show(const std::string& description,
     }
     kbConfigured_ = false;
 
+    // 0. Activate SteamVR's laser pointer (system.pointer) on the keyboard overlay immediately
+    // without requiring the user to press the Grip button first.
+    setLaserPointerActive(true);
+
     // 1. Set keyboard transform in standing universe BEFORE ShowKeyboard
     ov->SetKeyboardTransformAbsolute(vr::TrackingUniverseStanding, &kbMatStage);
 
@@ -402,7 +536,7 @@ bool VrKeyboard::show(const std::string& description,
     vr::EVROverlayError err = ov->ShowKeyboard(
         mode,
         vr::k_EGamepadTextInputLineModeSingleLine,
-        vr::KeyboardFlag_Modal | vr::KeyboardFlag_Minimal,
+        vr::KeyboardFlag_Modal,
         description.c_str(),
         static_cast<uint32_t>(maxChars),
         existingText.c_str(),
@@ -410,6 +544,7 @@ bool VrKeyboard::show(const std::string& description,
 
     if (err != vr::VROverlayError_None) {
         PIXELVR_LOG_WARN("VrKeyboard: ShowKeyboard failed with error %d", static_cast<int>(err));
+        setLaserPointerActive(false);
         return false;
     }
 
@@ -436,6 +571,7 @@ void VrKeyboard::hide() {
     if (ov) {
         ov->HideKeyboard();
     }
+    setLaserPointerActive(false);
     clearOrSetShmKeyboardBuffer("");
     isOpen_ = false;
     kbConfigured_ = false;
@@ -444,7 +580,37 @@ void VrKeyboard::hide() {
     currentNonce_ = 0;
     currentText_.clear();
     existingText_.clear();
+    cursorPos_ = 0;
+    escState_ = 0;
+    escParams_.clear();
     PIXELVR_LOG_INFO("VrKeyboard: Hidden virtual keyboard");
+}
+
+void VrKeyboard::moveCursor(int delta) {
+    if (!isOpen_) return;
+    if (cursorPos_ > currentText_.size()) {
+        cursorPos_ = currentText_.size();
+    }
+    if (delta < 0) {
+        int steps = -delta;
+        while (steps > 0 && cursorPos_ > 0) {
+            --cursorPos_;
+            while (cursorPos_ > 0 && (static_cast<unsigned char>(currentText_[cursorPos_]) & 0xC0) == 0x80) {
+                --cursorPos_;
+            }
+            --steps;
+        }
+    } else if (delta > 0) {
+        int steps = delta;
+        while (steps > 0 && cursorPos_ < currentText_.size()) {
+            ++cursorPos_;
+            while (cursorPos_ < currentText_.size() &&
+                   (static_cast<unsigned char>(currentText_[cursorPos_]) & 0xC0) == 0x80) {
+                ++cursorPos_;
+            }
+            --steps;
+        }
+    }
 }
 
 void VrKeyboard::poll(std::function<void(const std::string&)> onDone,
@@ -454,64 +620,179 @@ void VrKeyboard::poll(std::function<void(const std::string&)> onDone,
     auto* ov = reinterpret_cast<vr::IVROverlay*>(vrOverlay_);
     if (!sys || !ov) return;
 
+    // Tears down the current session state and clears any lingering draft buffer so that
+    // text can never persist into the next field or session.
+    auto resetSession = [&]() {
+        isOpen_ = false;
+        kbConfigured_ = false;
+        ov->HideKeyboard();
+        setLaserPointerActive(false);
+        clearOrSetShmKeyboardBuffer("");
+        currentText_.clear();
+        existingText_.clear();
+        cursorPos_ = 0;
+        escState_ = 0;
+        escParams_.clear();
+        userTyped_ = false;
+        currentNonce_ = 0;
+    };
+
+    auto deleteBeforeCursor = [&]() {
+        if (cursorPos_ > currentText_.size()) cursorPos_ = currentText_.size();
+        if (cursorPos_ == 0 || currentText_.empty()) return;
+        std::size_t p = cursorPos_;
+        while (p > 0) {
+            --p;
+            if ((static_cast<unsigned char>(currentText_[p]) & 0xC0) != 0x80) {
+                break;
+            }
+        }
+        currentText_.erase(p, cursorPos_ - p);
+        cursorPos_ = p;
+    };
+
+    auto deleteAtCursor = [&]() {
+        if (cursorPos_ > currentText_.size()) cursorPos_ = currentText_.size();
+        if (cursorPos_ >= currentText_.size() || currentText_.empty()) return;
+        std::size_t p = cursorPos_ + 1;
+        while (p < currentText_.size() &&
+               (static_cast<unsigned char>(currentText_[p]) & 0xC0) == 0x80) {
+            ++p;
+        }
+        currentText_.erase(cursorPos_, p - cursorPos_);
+    };
+
+    auto handleCsiCommand = [&](char finalChar, const std::string& params) {
+        if (finalChar == 'D') {
+            moveCursor(-1);
+        } else if (finalChar == 'C') {
+            moveCursor(1);
+        } else if (finalChar == 'A' || finalChar == 'H') {
+            cursorPos_ = 0;
+        } else if (finalChar == 'B' || finalChar == 'F') {
+            cursorPos_ = currentText_.size();
+        } else if (finalChar == '~') {
+            if (params == "3") {
+                deleteAtCursor();
+            } else if (params == "1" || params == "7") {
+                cursorPos_ = 0;
+            } else if (params == "4" || params == "8") {
+                cursorPos_ = currentText_.size();
+            }
+        }
+    };
+
     vr::VREvent_t event{};
     while (sys->PollNextEvent(&event, sizeof(event))) {
+        const bool isKeyboardEvent =
+            event.eventType == vr::VREvent_KeyboardCharInput ||
+            event.eventType == vr::VREvent_KeyboardDone ||
+            event.eventType == vr::VREvent_KeyboardClosed ||
+            event.eventType == vr::VREvent_KeyboardClosed_Global;
+
+        // Discard events belonging to an old or stale keyboard session. This guard must cover
+        // every keyboard event (not just CharInput): a stale Done/Closed would otherwise leak
+        // the previous field's text into the field currently being edited.
+        if (isKeyboardEvent &&
+            event.data.keyboard.uUserValue != 0 &&
+            event.data.keyboard.uUserValue != currentNonce_) {
+            PIXELVR_LOG_INFO("VrKeyboard: Ignored stale keyboard event (type %u, nonce %llu != current %llu)",
+                             event.eventType,
+                             static_cast<unsigned long long>(event.data.keyboard.uUserValue),
+                             static_cast<unsigned long long>(currentNonce_));
+            continue;
+        }
+
         if (event.eventType == vr::VREvent_KeyboardCharInput) {
-            // Discard any events from old or stale keyboard sessions
-            if (event.data.keyboard.uUserValue != 0 && event.data.keyboard.uUserValue != currentNonce_) {
-                PIXELVR_LOG_INFO("VrKeyboard: Ignored stale CharInput (nonce %llu != current %llu)",
-                                 static_cast<unsigned long long>(event.data.keyboard.uUserValue),
-                                 static_cast<unsigned long long>(currentNonce_));
-                continue;
+            const char* inStr = event.data.keyboard.cNewInput;
+            char apiBuf[1024] = {0};
+            uint32_t apiLen = ov->GetKeyboardText(apiBuf, sizeof(apiBuf));
+
+            // Determine the keystroke payload: SteamVR's system.keyboard sends each
+            // key press as a single-character delta via cNewInput (and mirrors that
+            // single character in GetKeyboardText / shm 0x3fe60).
+            std::string key;
+            std::string shmKey;
+            if (inStr && inStr[0] != '\0') {
+                key.assign(inStr, strnlen(inStr, sizeof(event.data.keyboard.cNewInput)));
+            } else if (apiLen > 0 && apiBuf[0] != '\0') {
+                key.assign(apiBuf, strnlen(apiBuf, sizeof(apiBuf) - 1));
+            } else if (readShmKeyboardBuffer(shmKey) && !shmKey.empty()) {
+                key = shmKey;
             }
 
-            const char* inStr = event.data.keyboard.cNewInput;
-            if (inStr && inStr[0] != 0) {
-                userTyped_ = true;
-                const unsigned char firstByte = static_cast<unsigned char>(inStr[0]);
-                if (firstByte == '\b' || firstByte == 0x7F || firstByte == 8) {
-                    // Backspace: pop last UTF-8 character
-                    while (!currentText_.empty() && (static_cast<unsigned char>(currentText_.back()) & 0xC0) == 0x80) {
-                        currentText_.pop_back();
+            if (!key.empty() && (key[0] == '\n' || key[0] == '\r')) {
+                // Enter key submits the accumulated buffer.
+                const std::string text = currentText_;
+                doneSubmitted_ = true;
+                resetSession();
+                PIXELVR_LOG_INFO("VrKeyboard: User submitted text via Return key: '%s'", text.c_str());
+                if (onDone) {
+                    onDone(text);
+                }
+                return;
+            }
+
+            // SteamVR's virtual keyboard sends ANSI escape sequences (either "\x1b[D"/"\x1b[C"
+            // or bare "[D"/"[C") when clicking its Left / Right cursor buttons.
+            if (escState_ == 0 && (key == "[D" || key == "[C" || key == "[A" || key == "[B" ||
+                                   key == "[H" || key == "[F" || key == "[3~")) {
+                if (key == "[3~") {
+                    deleteAtCursor();
+                } else {
+                    handleCsiCommand(key[1], "");
+                }
+            } else if (!key.empty() && (key[0] == '\b' || static_cast<unsigned char>(key[0]) == 0x7f) && key.size() == 1 && escState_ == 0) {
+                deleteBeforeCursor();
+            } else if (!key.empty()) {
+                for (char c : key) {
+                    const unsigned char uc = static_cast<unsigned char>(c);
+                    if (escState_ == 1) {
+                        if (c == '[' || c == 'O') {
+                            escState_ = 2;
+                            escParams_.clear();
+                            continue;
+                        }
+                        escState_ = 0;
+                        escParams_.clear();
+                    } else if (escState_ == 2) {
+                        if (uc >= 0x30 && uc <= 0x3F) {
+                            escParams_.push_back(c);
+                            continue;
+                        }
+                        if (uc >= 0x20 && uc <= 0x2F) {
+                            continue;
+                        }
+                        if (uc >= 0x40 && uc <= 0x7E) {
+                            handleCsiCommand(c, escParams_);
+                        }
+                        escState_ = 0;
+                        escParams_.clear();
+                        continue;
                     }
-                    if (!currentText_.empty()) {
-                        currentText_.pop_back();
+
+                    if (c == '\x1b') {
+                        escState_ = 1;
+                        escParams_.clear();
+                    } else if (c == '\b' || uc == 0x7f) {
+                        deleteBeforeCursor();
+                    } else if (uc >= 32) {
+                        if (currentText_.length() < static_cast<std::size_t>(maxChars_)) {
+                            if (cursorPos_ > currentText_.size()) cursorPos_ = currentText_.size();
+                            currentText_.insert(cursorPos_, 1, c);
+                            ++cursorPos_;
+                        }
                     }
-                    PIXELVR_LOG_INFO("VrKeyboard: Backspace pressed, text now: '%s'", currentText_.c_str());
-                } else if (firstByte == '\n' || firstByte == '\r') {
-                    isOpen_ = false;
-                    kbConfigured_ = false;
-                    doneSubmitted_ = true;
-                    std::string text = currentText_;
-                    ov->HideKeyboard();
-                    clearOrSetShmKeyboardBuffer("");
-                    currentText_.clear();
-                    existingText_.clear();
-                    userTyped_ = false;
-                    currentNonce_ = 0;
-                    PIXELVR_LOG_INFO("VrKeyboard: User submitted text via Return key: '%s'", text.c_str());
-                    if (onDone) {
-                        onDone(text);
-                    }
-                    return;
-                } else if (firstByte >= 32) {
-                    if (currentText_.length() + std::strlen(inStr) <= static_cast<size_t>(maxChars_)) {
-                        currentText_ += inStr;
-                    }
-                    PIXELVR_LOG_INFO("VrKeyboard: Input '%s', text now: '%s'", inStr, currentText_.c_str());
                 }
             }
+
+            userTyped_ = true;
+            PIXELVR_LOG_INFO("VrKeyboard: CharInput key='%s' api(len=%u)='%s' -> currentText='%s' cursor=%zu",
+                             key.c_str(), apiLen, apiBuf, currentText_.c_str(), cursorPos_);
         } else if (event.eventType == vr::VREvent_KeyboardDone) {
-            isOpen_ = false;
-            kbConfigured_ = false;
+            const std::string text = currentText_;
             doneSubmitted_ = true;
-            std::string text = currentText_;
-            ov->HideKeyboard();
-            clearOrSetShmKeyboardBuffer("");
-            currentText_.clear();
-            existingText_.clear();
-            userTyped_ = false;
-            currentNonce_ = 0;
+            resetSession();
             PIXELVR_LOG_INFO("VrKeyboard: User submitted text via KeyboardDone: '%s'", text.c_str());
             if (onDone) {
                 onDone(text);
@@ -519,16 +800,11 @@ void VrKeyboard::poll(std::function<void(const std::string&)> onDone,
             return;
         } else if (event.eventType == vr::VREvent_KeyboardClosed ||
                    event.eventType == vr::VREvent_KeyboardClosed_Global) {
-            isOpen_ = false;
-            kbConfigured_ = false;
-            ov->HideKeyboard();
-            clearOrSetShmKeyboardBuffer("");
-            PIXELVR_LOG_INFO("VrKeyboard: Keyboard closed (doneSubmitted=%d)", doneSubmitted_ ? 1 : 0);
-            if (!doneSubmitted_) {
-                currentText_.clear();
-                existingText_.clear();
-                userTyped_ = false;
-                currentNonce_ = 0;
+            const bool wasSubmitted = doneSubmitted_;
+            resetSession();
+            doneSubmitted_ = false;
+            PIXELVR_LOG_INFO("VrKeyboard: Keyboard closed (doneSubmitted=%d)", wasSubmitted ? 1 : 0);
+            if (!wasSubmitted) {
                 PIXELVR_LOG_INFO("VrKeyboard: Discarded input on KeyboardClosed");
                 if (onCancel) {
                     onCancel();
@@ -540,9 +816,10 @@ void VrKeyboard::poll(std::function<void(const std::string&)> onDone,
 
     if (isOpen_) {
         pollFramesSinceOpen_++;
-        // Maintain and reinforce keyboard overlay configuration across the first 90 frames (~1 sec)
-        // until successfully configured
-        if (!kbConfigured_ && pollFramesSinceOpen_ < 90) {
+        // Maintain and reinforce keyboard overlay configuration across the first 90 frames (~1.2 sec)
+        // so that even if vrwebhelper spawns system.keyboard ~100ms after ShowKeyboard(), it gets
+        // positioned and configured for laser mouse interaction.
+        if (!kbConfigured_ || pollFramesSinceOpen_ < 90) {
             configureKeyboardOverlay();
         }
     }
