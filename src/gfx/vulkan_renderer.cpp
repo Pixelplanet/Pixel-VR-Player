@@ -2435,14 +2435,16 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
     // =========================================================================
     if (controlBarVisible_ && !hubOpen && !modalOpen && uiPipeline_ != VK_NULL_HANDLE) {
         vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipeline_);
-        const float dockBg[4] = {0.024f, 0.035f, 0.058f, 0.94f};
-        const float dockBorder[4] = {0.20f, 0.32f, 0.50f, 0.75f};
+        const float dockBg[4] = {0.065f, 0.090f, 0.140f, 0.95f};
+        const float dockBorder[4] = {
+            themeAccentCol[0] * 0.70f, themeAccentCol[1] * 0.70f,
+            themeAccentCol[2] * 0.85f, 0.90f};
         drawUiElement(vpPanel, 0.0f, kBarY, kDockHalfW, kDockHalfH,
                       UiShape::RoundedBox, dockBg, 0.14f, 0.012f, dockBorder);
 
         // Top scrubber groove capsule
-        const float grooveBg[4] = {0.014f, 0.020f, 0.034f, 0.92f};
-        const float grooveBorder[4] = {0.14f, 0.22f, 0.36f, 0.55f};
+        const float grooveBg[4] = {0.035f, 0.050f, 0.080f, 0.95f};
+        const float grooveBorder[4] = {0.24f, 0.34f, 0.50f, 0.75f};
         drawUiElement(vpPanel, 0.0f, kBarY + 0.125f, kDockHalfW - 0.045f, 0.052f,
                       UiShape::RoundedBox, grooveBg, 0.35f, 0.015f, grooveBorder);
 
@@ -2455,10 +2457,10 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         const float btnBgHover[4] = {
             themeAccentCol[0] * 0.45f, themeAccentCol[1] * 0.45f,
             themeAccentCol[2] * 0.55f, 0.95f};
-        const float btnBgNormal[4] = {0.07f, 0.10f, 0.16f, 0.88f};
+        const float btnBgNormal[4] = {0.095f, 0.135f, 0.210f, 0.90f};
         const float btnBorderHover[4] = {
             themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 1.0f};
-        const float btnBorderNormal[4] = {0.22f, 0.32f, 0.48f, 0.60f};
+        const float btnBorderNormal[4] = {0.28f, 0.38f, 0.55f, 0.75f};
 
         for (int b = 0; b < kBtnCount; ++b) {
             const auto cb = static_cast<CtrlButton>(b);
@@ -2635,18 +2637,18 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
     if (hubOpen && textReady_ && uiPipeline_ != VK_NULL_HANDLE) {
         vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipeline_);
 
-        const float panelBg[4] = {0.024f, 0.035f, 0.059f, 0.95f};
+        const float panelBg[4] = {0.052f, 0.075f, 0.120f, 0.94f};
         const float panelBorder[4] = {
-            themeAccentCol[0] * 0.55f, themeAccentCol[1] * 0.55f,
-            themeAccentCol[2] * 0.65f, 0.80f};
+            themeAccentCol[0] * 0.70f, themeAccentCol[1] * 0.70f,
+            themeAccentCol[2] * 0.82f, 0.90f};
         drawUiElement(vpPanel, 0.0f, 0.0f, kPanelW, kPanelTop,
                       UiShape::RoundedBox, panelBg, 0.045f, 0.014f, panelBorder);
 
         // Left navigation rail background & vertical separator
-        const float railBg[4] = {0.016f, 0.024f, 0.043f, 0.97f};
+        const float railBg[4] = {0.038f, 0.052f, 0.082f, 0.97f};
         drawUiElement(vpPanel, -0.695f, 0.0f, 0.190f, kPanelTop - 0.02f,
                       UiShape::RoundedBox, railBg, 0.038f);
-        const float divCol[4] = {0.22f, 0.32f, 0.46f, 0.65f};
+        const float divCol[4] = {0.26f, 0.36f, 0.50f, 0.75f};
         drawUiElement(vpPanel, kRailRight, 0.0f, 0.002f, kPanelTop - 0.025f,
                       UiShape::RoundedBox, divCol, 0.0f);
 
@@ -2663,14 +2665,14 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         const UiShape mainIcons[3] = {UiShape::Files, UiShape::Download, UiShape::Settings};
 
         const float tabActiveBg[4] = {
-            themeAccentCol[0] * 0.48f, themeAccentCol[1] * 0.48f,
-            themeAccentCol[2] * 0.58f, 0.95f};
+            themeAccentCol[0] * 0.40f, themeAccentCol[1] * 0.40f,
+            themeAccentCol[2] * 0.52f, 0.96f};
         const float tabActiveBord[4] = {
             themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 1.0f};
-        const float tabHovBg[4] = {0.10f, 0.15f, 0.24f, 0.78f};
-        const float tabHovBord[4] = {0.35f, 0.48f, 0.65f, 0.72f};
-        const float tabNormBg[4] = {0.05f, 0.08f, 0.14f, 0.70f};
-        const float tabNormBord[4] = {0.20f, 0.28f, 0.42f, 0.55f};
+        const float tabHovBg[4] = {0.14f, 0.20f, 0.32f, 0.90f};
+        const float tabHovBord[4] = {0.45f, 0.60f, 0.82f, 0.90f};
+        const float tabNormBg[4] = {0.075f, 0.105f, 0.165f, 0.85f};
+        const float tabNormBord[4] = {0.25f, 0.35f, 0.50f, 0.75f};
 
         for (int s = 0; s < 3; ++s) {
             const bool act = (s == activeMainTab);
@@ -2867,14 +2869,22 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                               0.40f, 0.025f, phov ? tabHovBord : tabNormBord);
             }
 
-            const float normCardBg[4] = {0.035f, 0.048f, 0.078f, 0.90f};
-            const float normCardBorder[4] = {0.18f, 0.26f, 0.40f, 0.70f};
-            const float selCardBg[4] = {0.06f, 0.10f, 0.18f, 0.94f};
-            const float hovCardBg[4] = {0.08f, 0.14f, 0.24f, 0.97f};
+            // Header breadcrumb capsule
+            const float breadCapX = canGoUp ? (-0.375f + 0.220f) : (-0.460f + 0.260f);
+            const float breadCapHalfW = canGoUp ? 0.225f : 0.265f;
+            const float breadCapBg[4] = {0.055f, 0.078f, 0.125f, 0.85f};
+            const float breadCapBord[4] = {0.22f, 0.32f, 0.48f, 0.70f};
+            drawUiElement(vpPanel, breadCapX, 0.455f, breadCapHalfW, 0.026f,
+                          UiShape::RoundedBox, breadCapBg, 0.40f, 0.020f, breadCapBord);
+
+            const float normCardBg[4] = {0.080f, 0.110f, 0.170f, 0.92f};
+            const float normCardBorder[4] = {0.28f, 0.38f, 0.54f, 0.85f};
+            const float selCardBg[4] = {0.12f, 0.18f, 0.28f, 0.95f};
+            const float hovCardBg[4] = {0.16f, 0.24f, 0.38f, 0.98f};
             const float glowCol[4] = {
-                themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.32f};
-            const float thumbBg[4] = {0.018f, 0.026f, 0.044f, 0.95f};
-            const float thumbBorder[4] = {0.16f, 0.22f, 0.34f, 0.75f};
+                themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.55f};
+            const float thumbBg[4] = {0.035f, 0.050f, 0.080f, 0.98f};
+            const float thumbBorder[4] = {0.22f, 0.32f, 0.48f, 0.80f};
 
             for (int i = 0; i < perPage; ++i) {
                 const int entryIdx = first + i;
@@ -2960,8 +2970,10 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
 
             // Draw overlaid format badge and duration pill
             vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipeline_);
-            const float badgeBg[4] = {0.02f, 0.04f, 0.08f, 0.92f};
-            const float durBg[4] = {0.015f, 0.025f, 0.045f, 0.92f};
+            const float badgeBg[4] = {
+                themeAccentCol[0] * 0.25f, themeAccentCol[1] * 0.25f,
+                themeAccentCol[2] * 0.35f, 0.95f};
+            const float durBg[4] = {0.050f, 0.075f, 0.120f, 0.95f};
             for (int i = 0; i < perPage; ++i) {
                 const int entryIdx = first + i;
                 if (entryIdx >= total) break;
@@ -3301,9 +3313,9 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         // ---------------------------------------------------------------------
         else if (settingsVisible_) {
             const int total = static_cast<int>(settingsRows_.size());
-            const float cardBg[4] = {0.035f, 0.048f, 0.078f, 0.90f};
-            const float cardBord[4] = {0.16f, 0.24f, 0.36f, 0.70f};
-            const float cardHovBg[4] = {0.075f, 0.130f, 0.220f, 0.96f};
+            const float cardBg[4] = {0.080f, 0.110f, 0.170f, 0.92f};
+            const float cardBord[4] = {0.26f, 0.36f, 0.52f, 0.85f};
+            const float cardHovBg[4] = {0.15f, 0.24f, 0.38f, 0.98f};
 
             // Version pill in top-right header
             drawUiElement(vpPanel, 0.64f, 0.455f, 0.22f, 0.028f,

@@ -185,20 +185,21 @@ void main() {
 
     vec4 fillLin = vec4(pow(max(pc.color.rgb, vec3(0.0)), vec3(2.2)), pc.color.a);
     if (shape == 0) {
-        // Subtle vertical luminance gradient across panels/pills (lit from top)
-        float topLight = mix(0.92, 1.10, clamp(0.5 * (vCoord.y + 1.0), 0.0, 1.0));
+        // Spatial frosted glass top-to-bottom luminance gradient (lit from above)
+        float topLight = mix(0.80, 1.35, clamp(0.5 * (vCoord.y + 1.0), 0.0, 1.0));
         fillLin.rgb *= topLight;
     }
     vec4 finalColor = fillLin;
     if (hasBorder) {
-        // Crisp, razor-sharp border highlight line matching requested thickness
-        float borderWidth = pc.params.z;
+        // Enforce at least 2.2 screen pixels for razor-sharp, visible borders at any distance in VR
+        float minBorder = gradLen * 2.2;
+        float borderWidth = max(pc.params.z, minBorder);
         float innerD = d + borderWidth;
         float borderAlpha = 1.0 - smoothstep(-aa, aa, innerD);
         vec4 bordLin = vec4(pow(max(pc.borderColor.rgb, vec3(0.0)), vec3(2.2)), pc.borderColor.a);
         if (shape == 0) {
             // Specular catchlight on upper chamfer/rim
-            float rimLight = mix(0.85, 1.38, smoothstep(-0.2, 0.95, vCoord.y));
+            float rimLight = mix(0.70, 1.70, smoothstep(-0.2, 0.95, vCoord.y));
             bordLin.rgb *= rimLight;
         }
         finalColor = mix(bordLin, fillLin, borderAlpha);
