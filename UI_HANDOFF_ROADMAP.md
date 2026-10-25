@@ -136,11 +136,19 @@ In `shaders/thumb.frag`, thumbnails are drawn without scrims, causing white dura
 ### 4.5. Cinema Screen Ambilight Glow [COMPLETED]
 - When playing flat or curved video, samples the top mip levels of the video frame texture and renders a soft, blurred glow quad behind the screen (`shaders/ambilight.frag` and `shaders/ambilight_nv12.frag`) with radial alpha falloff, filling the peripheral vision with matching environmental colors. Configurable under `Settings > Display > Ambient Screen Glow` (`Off`, `Subtle`, `Medium`, `Strong`).
 
-### 4.6. OpenXR Swapchain Supersampling & Dynamic Resolution Scaling [COMPLETED]
-- Multi-tier resolution scale setting in `Settings > Display > Render Resolution` (`1.00x Native`, `1.25x Balanced`, `1.40x Sharp`, `1.50x Crisp`, `1.75x Ultra`).
-- Recreates OpenXR swapchains and Vulkan render targets (MSAA color resolve + depth targets) on-the-fly at runtime without app restarts.
-- Eliminates compositor magnification blur and dramatically enhances FreeType SDF text readability and high-frequency cinema screen fidelity in VR.
-- Real-time render resolution and supersampling multiplier displayed in `Settings > System > Performance Stats`.
+### 4.6. OpenXR Swapchain Supersampling & Panel-Native Resolution Anchoring [COMPLETED]
+- Anchored baseline resolution directly to the headset's physical panel dimensions (**2160×2160 per eye**), preventing SteamVR's conservative runtime default (1728×1728) from downsampling and degrading text and video clarity.
+- 5 tuned presets in `Settings > Display > Render Resolution`:
+  - `1.00x (Panel 2160p)`: Exactly 2160×2160 physical panel 1:1 pixel grid.
+  - `1.15x (Enhanced 2484p)`: 2484×2484 per eye.
+  - `1.25x (Balanced 2700p)`: 2700×2700 per eye.
+  - `1.40x (Ultra 3024p, Default)`: 3024×3024 per eye (optical fovea 1:1 match after lens barrel distortion warp).
+  - `1.50x (Extreme 3240p)`: 3240×3240 per eye for extreme edge clarity.
+- Tightened FreeType SDF font shader kernel in `shaders/text.frag` (`smoothstep(-0.45, 0.45, ...)` + `0.18px` stem darkening bias) for crisp, printed-type clarity.
+
+### 4.7. OpenXR Composition Layer Quad Migration [IN PROGRESS]
+- Architectural migration to separate the 2D planar elements (Flat Cinema Screen and Spatial UI) from the 3D projection eye swapchain into dedicated OpenXR Composition Layer Quads (`XrCompositionLayerQuad`).
+- By submitting quads directly to the OpenXR compositor in `xrEndFrame()`, the SteamVR runtime distortion scanout pass samples the video and UI textures with single-pass high-order anisotropic/bicubic filtering, completely bypassing projection layer downsampling and geometric perspective blur.
 
 ---
 
