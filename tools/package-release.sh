@@ -46,6 +46,12 @@ fi
 if [[ -f "tools/Update Pixel VR Player.desktop" ]]; then
     cp "tools/Update Pixel VR Player.desktop" "${stage}/PixelVRPlayer/Update Pixel VR Player.desktop"
 fi
+if [[ -f "LICENSE" ]]; then
+    cp "LICENSE" "${stage}/PixelVRPlayer/LICENSE"
+fi
+if [[ -f "THIRD_PARTY_LICENSES.md" ]]; then
+    cp "THIRD_PARTY_LICENSES.md" "${stage}/PixelVRPlayer/THIRD_PARTY_LICENSES.md"
+fi
 for asset in icon.png hero.png capsule.png header.png logo.png; do
     if [[ -f "assets/${asset}" ]]; then
         cp "assets/${asset}" "${stage}/PixelVRPlayer/${asset}"

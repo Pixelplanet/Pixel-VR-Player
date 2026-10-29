@@ -29,6 +29,10 @@ compile_commands.json
 /matineevr/
 /matineevr*.zip
 
+# Python bytecode
+__pycache__/
+*.pyc
+
 # Editor / IDE
 .vscode/
 .idea/

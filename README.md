@@ -375,6 +375,10 @@ Requirements and tips:
 - `PIXELVR_FORCE_SW=1` forces software decode (useful for debugging).
 - `PIXELVR_LOG=debug` raises log verbosity.
 
-## License
+## License & Acknowledgements
 
-TBD.
+Pixel VR Player is free and open-source software licensed under the **[MIT License](LICENSE)**.
+
+You are welcome to clone, build, inspect, and contribute to the source code on GitHub. To support ongoing development, maintenance, and headset optimizations, Pixel VR Player will also be available on **Steam** for a small fee, offering automatic updates and out-of-the-box convenience.
+
+For full license texts and credits for third-party libraries (OpenXR, cgltf, stb, OpenVR, FreeType, FFmpeg, PulseAudio, Samba), please see **[THIRD_PARTY_LICENSES.md](THIRD_PARTY_LICENSES.md)**.
