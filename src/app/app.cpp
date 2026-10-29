@@ -387,6 +387,7 @@ void App::loadMedia(const std::string& path) {
         PIXELVR_LOG_WARN("Failed to open %s", path.c_str());
         return;
     }
+    media_.setPaused(false);
     hudDismissed_ = false;
     lastControllerActivity_ = std::chrono::steady_clock::now();
     VrKeyboard::instance().hide();

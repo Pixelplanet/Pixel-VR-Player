@@ -1219,6 +1219,7 @@ bool MediaEngine::open(const std::string& path) {
 #endif
 
     impl_->eof.store(false);
+    impl_->paused.store(false);
     impl_->running.store(true);
     impl_->thread = std::thread([this] { impl_->decodeLoop(); });
 #ifdef PIXELVR_HAVE_PULSE
@@ -1257,6 +1258,7 @@ void MediaEngine::close() {
     impl_->width = impl_->height = 0;
     impl_->duration = 0.0;
     impl_->eof.store(false);
+    impl_->paused.store(false);
 }
 
 int MediaEngine::width() const { return impl_->width; }
