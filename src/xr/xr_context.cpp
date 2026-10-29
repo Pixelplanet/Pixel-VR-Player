@@ -900,6 +900,16 @@ bool XrContext::pollEvents(bool& exitRequested) {
     return true;
 }
 
+bool XrContext::userPresent() const {
+    if (!sessionRunning_) return false;
+    if (sessionState_ == XR_SESSION_STATE_STOPPING ||
+        sessionState_ == XR_SESSION_STATE_IDLE ||
+        sessionState_ == XR_SESSION_STATE_SYNCHRONIZED) {
+        return false;
+    }
+    return true;
+}
+
 bool XrContext::locateViews(XrTime displayTime, std::vector<XrView>& views,
                             bool& shouldRender) {
     XrViewState viewState{XR_TYPE_VIEW_STATE};
@@ -912,12 +922,48 @@ bool XrContext::locateViews(XrTime displayTime, std::vector<XrView>& views,
     XrResult res = xrLocateViews(session_, &locateInfo, &viewState, count, &count,
                                  views.data());
     if (XR_FAILED(res)) {
+        if (!lastValidViews_.empty() && lastValidViewsTime_ > 0 &&
+            displayTime > lastValidViewsTime_ &&
+            (displayTime - lastValidViewsTime_) < 250000000LL) {
+            views = lastValidViews_;
+            ++viewFallbackStats_.poseFullFallbackFrames;
+            shouldRender = true;
+            return true;
+        }
         shouldRender = false;
         return false;
     }
 
-    shouldRender = (viewState.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT) &&
-                   (viewState.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT);
+    const bool orientValid = (viewState.viewStateFlags & XR_VIEW_STATE_ORIENTATION_VALID_BIT) != 0;
+    const bool posValid = (viewState.viewStateFlags & XR_VIEW_STATE_POSITION_VALID_BIT) != 0;
+
+    if (orientValid && posValid) {
+        lastValidViews_ = views;
+        lastValidViewsTime_ = displayTime;
+        shouldRender = true;
+        return true;
+    }
+
+    if (orientValid && !posValid && !lastValidViews_.empty()) {
+        // Keep fresh orientation and fov, but borrow position from last valid pose
+        for (size_t i = 0; i < views.size() && i < lastValidViews_.size(); ++i) {
+            views[i].pose.position = lastValidViews_[i].pose.position;
+        }
+        ++viewFallbackStats_.posePartialFrames;
+        shouldRender = true;
+        return true;
+    }
+
+    if (!lastValidViews_.empty() && lastValidViewsTime_ > 0 &&
+        displayTime > lastValidViewsTime_ &&
+        (displayTime - lastValidViewsTime_) < 250000000LL) {
+        views = lastValidViews_;
+        ++viewFallbackStats_.poseFullFallbackFrames;
+        shouldRender = true;
+        return true;
+    }
+
+    shouldRender = false;
     return true;
 }
 
@@ -1080,6 +1126,10 @@ bool XrContext::renderFrame(const RenderViewFn& renderView) {
     endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
     endInfo.layerCount = viewsValid ? 1u : 0u;
     endInfo.layers = viewsValid ? layers.data() : nullptr;
+
+    if (!viewsValid && frameState.shouldRender == XR_TRUE) {
+        ++viewFallbackStats_.zeroLayerFrames;
+    }
 
     PIXELVR_XR_CHECK(instance_, xrEndFrame(session_, &endInfo));
     return true;

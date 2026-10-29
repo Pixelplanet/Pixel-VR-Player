@@ -527,13 +527,49 @@ void MediaEngine::Impl::decodeLoop() {
     bool wasPaused = false;
     auto lastSeekWall = clock::now() - std::chrono::seconds(1);
 
+    int resolvedColorspace = -1;
+    int resolvedFullRange = -1;
+    AVStream* vStream = (format && videoStream >= 0) ? format->streams[videoStream] : nullptr;
+    if (vStream && vStream->codecpar) {
+        if (vStream->codecpar->color_space != AVCOL_SPC_UNSPECIFIED &&
+            vStream->codecpar->color_space != AVCOL_SPC_RESERVED) {
+            resolvedColorspace = static_cast<int>(vStream->codecpar->color_space);
+        }
+        if (vStream->codecpar->color_range != AVCOL_RANGE_UNSPECIFIED) {
+            resolvedFullRange = (vStream->codecpar->color_range == AVCOL_RANGE_JPEG) ? 1 : 0;
+        }
+    }
+
     auto process_video = [&]() {
         decodedCount.fetch_add(1, std::memory_order_relaxed);
         const int w = frame->width;
         const int h = frame->height;
         const auto srcFmt = static_cast<AVPixelFormat>(frame->format);
-        const int colorspace = static_cast<int>(frame->colorspace);
-        const bool fullRange = frame->color_range == AVCOL_RANGE_JPEG;
+
+        if (resolvedColorspace < 0) {
+            if (frame->colorspace != AVCOL_SPC_UNSPECIFIED && frame->colorspace != AVCOL_SPC_RESERVED) {
+                resolvedColorspace = static_cast<int>(frame->colorspace);
+            } else {
+                resolvedColorspace = (frame->width >= 3840 || frame->height >= 2160)
+                    ? static_cast<int>(AVCOL_SPC_BT2020_NCL)
+                    : static_cast<int>(AVCOL_SPC_BT709);
+            }
+        }
+        if (resolvedFullRange < 0) {
+            if (frame->color_range != AVCOL_RANGE_UNSPECIFIED) {
+                resolvedFullRange = (frame->color_range == AVCOL_RANGE_JPEG) ? 1 : 0;
+            } else {
+                resolvedFullRange = 0;
+            }
+        }
+
+        const int colorspace = (frame->colorspace != AVCOL_SPC_UNSPECIFIED &&
+                                frame->colorspace != AVCOL_SPC_RESERVED)
+            ? static_cast<int>(frame->colorspace)
+            : resolvedColorspace;
+        const bool fullRange = (frame->color_range != AVCOL_RANGE_UNSPECIFIED)
+            ? (frame->color_range == AVCOL_RANGE_JPEG)
+            : (resolvedFullRange == 1);
 
         int64_t ts = frame->best_effort_timestamp;
         if (ts == AV_NOPTS_VALUE) {

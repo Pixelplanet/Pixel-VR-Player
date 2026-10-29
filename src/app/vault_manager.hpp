@@ -24,6 +24,11 @@ public:
     void lock();
     void unlock();
 
+    bool isComboEntryActive(std::chrono::steady_clock::time_point now) const {
+        using namespace std::chrono_literals;
+        return comboIndex_ > 0 && (now - lastComboInput_) < 2500ms;
+    }
+
     // Process button input during frame loop.
     // If gripFullPressHeld is true, face buttons are consumed for the combo and
     // caller should suppress them from normal UI.

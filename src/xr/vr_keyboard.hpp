@@ -31,6 +31,10 @@ public:
     // Closes the virtual keyboard if open.
     void hide();
 
+    // Queries OpenVR HMD activity level (k_EDeviceActivityLevel_UserInteraction = worn).
+    // Returns true if worn, or true if OpenVR is not available / indeterminate.
+    bool isUserPresent() const;
+
     // Call once per frame in the main event loop to poll OpenVR keyboard events.
     void poll(std::function<void(const std::string&)> onDone,
               std::function<void()> onCancel);

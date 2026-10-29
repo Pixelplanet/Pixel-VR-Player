@@ -136,6 +136,14 @@ public:
     const std::vector<XrViewConfigurationView>& configViews() const { return configViews_; }
     const std::vector<ViewSwapchain>& swapchains() const { return swapchains_; }
 
+    struct ViewFallbackStats {
+        uint64_t zeroLayerFrames = 0;
+        uint64_t posePartialFrames = 0;
+        uint64_t poseFullFallbackFrames = 0;
+    };
+    ViewFallbackStats viewFallbackStats() const { return viewFallbackStats_; }
+    bool userPresent() const;
+
 private:
     bool loadVulkanEnable2Functions();
     bool locateViews(XrTime displayTime, std::vector<XrView>& views, bool& shouldRender);
@@ -164,6 +172,9 @@ private:
     std::vector<XrViewConfigurationView> configViews_;
     std::vector<ViewSwapchain> swapchains_;
     std::vector<XrView> views_;
+    std::vector<XrView> lastValidViews_;
+    XrTime lastValidViewsTime_ = 0;
+    ViewFallbackStats viewFallbackStats_;
 
     // Controller input.
     XrActionSet actionSet_ = XR_NULL_HANDLE;

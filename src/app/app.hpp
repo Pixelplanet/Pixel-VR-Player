@@ -15,9 +15,11 @@
 
 #include "ui/settings_menu.hpp"
 
+#include <atomic>
 #include <chrono>
 #include <functional>
 #include <string>
+#include <thread>
 
 namespace pixelvr {
 
@@ -25,6 +27,8 @@ namespace pixelvr {
 // scene, UI, and media sources here.
 class App {
 public:
+    App();
+    ~App();
     bool init(const std::string& mediaPath = "");
     int run();
     void requestExit() { exitRequested_ = true; }
@@ -150,6 +154,13 @@ private:
     void loadMedia(const std::string& path);
     void switchTracks(bool byLanguage);  // reload current media at its position
 #endif
+
+    std::atomic<bool> watchdogRunning_{false};
+    std::thread watchdogThread_;
+    std::atomic<int64_t> lastFrameHeartbeatMs_{0};
+    std::atomic<bool> pendingAutoLock_{false};
+    std::chrono::steady_clock::time_point lastGripFullRelease_{};
+    void watchdogLoop();
 };
 
 } // namespace pixelvr

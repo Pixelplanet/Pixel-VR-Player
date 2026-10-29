@@ -171,6 +171,9 @@ public:
     void setSettingsSection(int s) { settingsSection_ = s; }
     void setVaultUnlocked(bool u) { vaultUnlocked_ = u; }
     bool vaultUnlocked() const { return vaultUnlocked_; }
+    void setPointerSuppressed(bool s) { pointerSuppressed_ = s; }
+    bool pointerSuppressed() const { return pointerSuppressed_; }
+    uint64_t ycbcrRebuildCount() const { return ycbcrRebuildCount_; }
     void setUiAppearance(float textScale, int textColorIdx, int accentColorIdx,
                          float uiDistance) {
         uiTextScale_ = textScale;
@@ -596,6 +599,7 @@ private:
     float pointerHit_[3] = {0.0f, 0.0f, 0.0f};
     bool controlBarVisible_ = false;
     bool vaultUnlocked_ = false;
+    bool pointerSuppressed_ = false;
     int pointerButton_ = -1;
     bool pointerOnTimeline_ = false;
     float pointerScrub_ = 0.0f;
@@ -673,6 +677,7 @@ private:
     uint32_t ycbcrKeyFourcc_ = 0;
     int ycbcrKeyColorspace_ = -1;
     bool ycbcrKeyFullRange_ = false;
+    uint64_t ycbcrRebuildCount_ = 0;
     VkImage drmImage_ = VK_NULL_HANDLE;
     VkDeviceMemory drmMemory_ = VK_NULL_HANDLE;
     VkImageView drmView_ = VK_NULL_HANDLE;

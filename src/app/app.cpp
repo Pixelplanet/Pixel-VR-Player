@@ -230,6 +230,65 @@ void detect_format(const std::string& path, VulkanRenderer::ProjectionMode& proj
 
 } // namespace
 
+App::App() = default;
+
+App::~App() {
+    watchdogRunning_.store(false);
+    if (watchdogThread_.joinable()) {
+        watchdogThread_.join();
+    }
+}
+
+void App::watchdogLoop() {
+    using namespace std::chrono_literals;
+    auto lastPresentTime = std::chrono::steady_clock::now();
+    bool prevAbsent = false;
+
+    while (watchdogRunning_.load(std::memory_order_relaxed)) {
+        std::this_thread::sleep_for(250ms);
+        if (!watchdogRunning_.load(std::memory_order_relaxed)) break;
+
+        const auto now = std::chrono::steady_clock::now();
+        const int64_t nowMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+            now.time_since_epoch()).count();
+
+        const int64_t lastHeartbeat = lastFrameHeartbeatMs_.load(std::memory_order_relaxed);
+        const bool heartbeatStalled = (lastHeartbeat > 0) && ((nowMs - lastHeartbeat) > 2000);
+
+        const bool vrPresent = VrKeyboard::instance().isUserPresent();
+        const bool xrPresent = xr_.userPresent();
+        const bool userPresent = vrPresent && xrPresent;
+
+        const bool isAbsent = !userPresent || heartbeatStalled;
+
+        if (!isAbsent) {
+            lastPresentTime = now;
+            if (prevAbsent) {
+                PIXELVR_LOG_INFO("Watchdog: user returned / frame loop resumed (vrPresent=%d xrPresent=%d hbDelta=%lldms)",
+                                 (int)vrPresent, (int)xrPresent, static_cast<long long>(nowMs - lastHeartbeat));
+                prevAbsent = false;
+            }
+        } else {
+            const auto absentElapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - lastPresentTime).count();
+            if (!prevAbsent && absentElapsedMs >= 3000) {
+                prevAbsent = true;
+                PIXELVR_LOG_INFO("Watchdog: user absent for %lld ms (vrPresent=%d xrPresent=%d stalled=%d) -> triggering auto-lock & pause",
+                                 static_cast<long long>(absentElapsedMs), (int)vrPresent, (int)xrPresent, (int)heartbeatStalled);
+
+#ifdef PIXELVR_HAVE_MEDIA
+                if (mediaOpen_) {
+                    media_.setPaused(true);
+                }
+#endif
+                if (VaultManager::instance().isUnlocked()) {
+                    pendingAutoLock_.store(true, std::memory_order_release);
+                }
+            }
+        }
+    }
+}
+
 bool App::init(const std::string& mediaPath) {
     if (!xr_.createInstanceAndSystem("Pixel VR Player")) {
         return false;
@@ -508,6 +567,20 @@ void App::updateStats() {
     if (memTotalKb > 0) {
         std::snprintf(buf, sizeof(buf), "RAM %ld / %ld MB",
                       (memTotalKb - memAvailKb) / 1024, memTotalKb / 1024);
+        statsLines_.emplace_back(buf);
+    }
+    const auto fbStats = xr_.viewFallbackStats();
+    if (fbStats.zeroLayerFrames > 0 || fbStats.posePartialFrames > 0 || fbStats.poseFullFallbackFrames > 0) {
+        std::snprintf(buf, sizeof(buf), "Fallback: 0-layer %llu, partial %llu, full %llu",
+                      static_cast<unsigned long long>(fbStats.zeroLayerFrames),
+                      static_cast<unsigned long long>(fbStats.posePartialFrames),
+                      static_cast<unsigned long long>(fbStats.poseFullFallbackFrames));
+        statsLines_.emplace_back(buf);
+    }
+    const uint64_t ycbcrRebuilds = renderer_.ycbcrRebuildCount();
+    if (ycbcrRebuilds > 0) {
+        std::snprintf(buf, sizeof(buf), "YCbCr Rebuilds: %llu",
+                      static_cast<unsigned long long>(ycbcrRebuilds));
         statsLines_.emplace_back(buf);
     }
 }
@@ -830,14 +903,30 @@ void App::openActionMenu() {
 int App::run() {
     using namespace std::chrono_literals;
 
+    lastFrameHeartbeatMs_.store(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count(),
+        std::memory_order_relaxed);
+    watchdogRunning_.store(true);
+    watchdogThread_ = std::thread(&App::watchdogLoop, this);
+
     while (!exitRequested_) {
+        if (pendingAutoLock_.exchange(false, std::memory_order_acquire)) {
+            PIXELVR_LOG_INFO("App: applying pending auto-lock");
+            performVaultLock();
+        }
+
         if (!xr_.pollEvents(exitRequested_) || exitRequested_) {
             break;
         }
 
         if (xr_.sessionRunning()) {
-            // Compute frame delta-time for continuous seek (F4).
             const auto now = std::chrono::steady_clock::now();
+            lastFrameHeartbeatMs_.store(
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now.time_since_epoch()).count(),
+                std::memory_order_relaxed);
+            // Compute frame delta-time for continuous seek (F4).
             float dt = 0.0f;
             if (lastFrameTime_.time_since_epoch().count() > 0) {
                 dt = std::chrono::duration<float>(now - lastFrameTime_).count();
@@ -964,16 +1053,27 @@ int App::run() {
             const bool gripFullHeld = in.gripFullPressHeld[0] || in.gripFullPressHeld[1];
             static bool sPrevGripFullHeld = false;
             if (gripFullHeld != sPrevGripFullHeld) {
+                if (!gripFullHeld && sPrevGripFullHeld) {
+                    lastGripFullRelease_ = nowT;
+                }
                 sPrevGripFullHeld = gripFullHeld;
                 PIXELVR_LOG_INFO("Grip full press state changed: %s (L val: %.2f, R val: %.2f)",
                                  gripFullHeld ? "HELD" : "RELEASED",
                                  in.gripValue[0], in.gripValue[1]);
             }
 
+            const bool gripGracePeriod = (lastGripFullRelease_.time_since_epoch().count() > 0) &&
+                                         ((nowT - lastGripFullRelease_) < 300ms);
+            const bool comboActive = VaultManager::instance().isComboEntryActive(nowT);
+            const bool comboGate = gripFullHeld || comboActive || gripGracePeriod;
+
+            // Suppress laser pointer hovering, clicking, and dim the laser beam during combo entry
+            renderer_.setPointerSuppressed(comboGate);
+
             // Whirligig-style Quick Path controller button shortcut
             const int qpBtn = settings_.bindQuickPath();
             const bool quickPathPressed =
-                !settings_.isListening() && !gripFullHeld &&
+                !settings_.isListening() && !comboGate &&
                 !VaultManager::instance().isRecordingCombo() && !kbOpen &&
                 qpBtn >= 0 && qpBtn < XrInputState::BtnCount && in.buttonDown[qpBtn];
             if (quickPathPressed) {
@@ -984,7 +1084,7 @@ int App::run() {
                 xr_.triggerHaptic(1, 0.040f, 0.0f, 0.6f);
             }
 
-            if (gripFullHeld && !settings_.isListening() && !VaultManager::instance().isRecordingCombo()) {
+            if (comboGate && !settings_.isListening() && !VaultManager::instance().isRecordingCombo()) {
                 const int h = in.gripFullPressHeld[1] ? 1 : 0;
                 for (int b : {XrInputState::BtnA, XrInputState::BtnB, XrInputState::BtnX, XrInputState::BtnY}) {
                     if (in.buttonDown[b]) {
@@ -1018,22 +1118,30 @@ int App::run() {
                         break;
                     }
                 }
-                // Suppress normal button functions while grip is bottomed out
+                // Suppress normal button, trigger, and thumbstick functions while combo is active
+                in.select = false;
+                in.selectHeld = false;
                 in.togglePlay = false;
                 in.browserToggle = false;
                 in.recenter = false;
+                in.thumbstickX = 0.0f;
+                in.thumbstickY = 0.0f;
+                in.thumbstickLX = 0.0f;
+                in.thumbstickLY = 0.0f;
+                in.thumbstickRX = 0.0f;
+                in.thumbstickRY = 0.0f;
             }
 
             // X is the dedicated download button: it downloads the highlighted SMB entry.
             // Y (or configured move button) is the dedicated File Actions Submenu button.
             const bool downloadPressed =
-                !settings_.isListening() && !settings_.isOpen() && !gripFullHeld &&
+                !settings_.isListening() && !settings_.isOpen() && !comboGate &&
                 !VaultManager::instance().isRecordingCombo() &&
                 in.buttonDown[XrInputState::BtnX];
 
             const int configuredMoveBtn = VaultManager::instance().moveButton();
             const bool actionBtnPressed =
-                !settings_.isListening() && !settings_.isOpen() && !gripFullHeld &&
+                !settings_.isListening() && !settings_.isOpen() && !comboGate &&
                 !VaultManager::instance().isRecordingCombo() &&
                 (in.buttonDown[XrInputState::BtnY] ||
                  (configuredMoveBtn >= 0 && configuredMoveBtn < XrInputState::BtnCount &&
@@ -1041,7 +1149,7 @@ int App::run() {
 
             // Grip full-press click: activate laser pointer on this hand.
             // Exactly one controller has an active laser pointer at any time.
-            if (!settings_.isListening() && !VaultManager::instance().isRecordingCombo()) {
+            if (!settings_.isListening() && !comboGate && !VaultManager::instance().isRecordingCombo()) {
                 for (int h = 0; h < 2; ++h) {
                     if (in.gripFullPressDown[h]) {
                         if (!renderer_.laserOn(h)) {
@@ -2666,6 +2774,10 @@ int App::run() {
 
     if (renderer_.device() != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(renderer_.device());
+    }
+    watchdogRunning_.store(false);
+    if (watchdogThread_.joinable()) {
+        watchdogThread_.join();
     }
     VrKeyboard::instance().shutdown();
     renderModels_.shutdown();  // destroy XR model handles before the session

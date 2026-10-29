@@ -316,6 +316,18 @@ void VrKeyboard::shutdown() {
     currentNonce_ = 0;
 }
 
+bool VrKeyboard::isUserPresent() const {
+    auto* sys = reinterpret_cast<vr::IVRSystem*>(vrSystem_);
+    if (!sys) return true;
+    vr::EDeviceActivityLevel act = sys->GetTrackedDeviceActivityLevel(vr::k_unTrackedDeviceIndex_Hmd);
+    if (act == vr::k_EDeviceActivityLevel_Idle ||
+        act == vr::k_EDeviceActivityLevel_UserInteraction_Timeout ||
+        act == vr::k_EDeviceActivityLevel_Standby) {
+        return false;
+    }
+    return true;
+}
+
 bool VrKeyboard::configureKeyboardOverlay() {
     auto* ov = reinterpret_cast<vr::IVROverlay*>(vrOverlay_);
     if (!ov) return false;

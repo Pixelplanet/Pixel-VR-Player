@@ -1310,6 +1310,10 @@ void VulkanRenderer::updatePointer() {
     actionMenuBtnHovered_ = -1;
     actionMenuKeyHovered_ = -1;
 
+    if (pointerSuppressed_) {
+        return;
+    }
+
     const bool actionMenuOpen = actionMenu_.visible;
     const bool kbOpen = keyboardModal_.visible;
     const bool hubOpen = (browserVisible_ || settingsVisible_ ||
@@ -4127,7 +4131,10 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
         };
 
-        const float rayCol[4] = {0.25f, 0.60f, 1.0f, 0.85f};
+        const float rayCol[4] = {pointerSuppressed_ ? 0.15f : 0.25f,
+                                 pointerSuppressed_ ? 0.25f : 0.60f,
+                                 pointerSuppressed_ ? 0.40f : 1.0f,
+                                 pointerSuppressed_ ? 0.25f : 0.85f};
         const float cursorCol[4] = {1.0f, 1.0f, 1.0f, 0.95f};
         for (int h = 0; h < 2; ++h) {
             if (!controllers_[h].active || !laserOn_[h]) {
@@ -5737,6 +5744,11 @@ void VulkanRenderer::updateVideoDmabuf(DrmVideoFrame& frame) {
     if (ycbcrConversion_ == VK_NULL_HANDLE || frame.fourcc != ycbcrKeyFourcc_ ||
         frame.colorspace != ycbcrKeyColorspace_ ||
         frame.fullRange != ycbcrKeyFullRange_) {
+        PIXELVR_LOG_INFO("YCbCr pipeline rebuild #%llu: fourcc=%u colorspace=%d fullRange=%d (prev: fourcc=%u colorspace=%d fullRange=%d)",
+                         static_cast<unsigned long long>(ycbcrRebuildCount_ + 1),
+                         frame.fourcc, frame.colorspace, static_cast<int>(frame.fullRange),
+                         ycbcrKeyFourcc_, ycbcrKeyColorspace_, static_cast<int>(ycbcrKeyFullRange_));
+        ++ycbcrRebuildCount_;
         vkDeviceWaitIdle(device_);
         destroyYcbcr();
         if (!createYcbcrPipeline(frame.fourcc, frame.colorspace, frame.fullRange)) {
