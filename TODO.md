@@ -7,6 +7,122 @@
 
 ---
 
+## Next major features (planned 2026-11-01, after v1.8.0)
+
+Order: **Multi-screen first**, then **YouTube streaming** (priority one after
+multi-screen), then other streaming sources and a general web browser.
+
+### Facts gathered (2026-11-01, on the Steam Frame)
+- Hardware decoder `qcom-iris-decoder` (`/dev/video22`) accepts **H.264, HEVC and VP9** only
+  (no AV1 in hardware). FFmpeg exposes `h264_v4l2m2m`, `hevc_v4l2m2m`, `vp9_v4l2m2m`;
+  `MediaEngine` already picks them (`media_engine.cpp`, codec→decoder map).
+- AV1 only in software (`libdav1d`) — fine for ≤1080p, too slow for 4K+.
+- `MediaEngine` has **no global state** and opens its own PulseAudio stream per instance,
+  so several engines can run in one process.
+- Coupling to break for multi-screen: `App` has a single `media_` (≈60 call sites) and
+  `VulkanRenderer` has exactly one set of video resources (NV12/dma-buf images, YCbCr
+  conversion + pipelines, resolve/mip target, screen pose, projection/stereo, ambilight).
+- `python3` 3.12 and `curl` exist on the device; `yt-dlp` is **not** installed.
+- **StreamXR** (github.com/FauxxYT/StreamXR, MIT) is a **Chrome extension** (plain JS +
+  WebXR) that drives YouTube's own web player inside the browser. Its code cannot be dropped
+  into our native C++/Vulkan app; reuse means reading its YouTube data handling, UI flows and
+  format handling (VR180 / 360 / YouTube "mesh"/cubemap). Its Steam Frame controller models
+  are CC BY-NC-SA 4.0 — do not bundle them.
+
+### M. Multi-screen playback (up to 3 screens)
+Scope: flat 2D and every 3D format (SBS / half-SBS / TB) on flat or curved screens.
+180°/360° are immersive and always play alone.
+
+- [ ] **M0. Settings & defaults**
+  - Settings › Display: **Multiple Screens** (Off / On, default Off). Off = exactly today's
+    single-screen behaviour.
+  - **Max screens** 2 / 3 (default 3, hard cap 3).
+  - **Audio**: *Selected screen only* (default) / *Mix all screens*.
+- [ ] **M1. Renderer: per-screen video state**
+  - Extract a `VideoScreen` struct: video images (CPU NV12 + dma-buf import), YCbCr
+    conversion/pipelines, resolve image + mips, pose (pivot, yaw/pitch, distance), size,
+    curvature, projection/stereo, swap eyes, ambilight.
+  - `std::vector<VideoScreen>` (≤3); draw far→near; one resolve pass per screen per frame.
+  - Ambilight: only for the selected screen (or off) when more than one screen is open.
+  - Keep the single-screen path identical when Multiple Screens is Off.
+- [ ] **M2. App: per-screen engines**
+  - `Screen { MediaEngine engine; ScrubPreview preview; path; muted; volume; ... }` replaces the
+    single `media_`; route the ≈60 `media_` call sites through "the selected screen".
+  - Resume/format memory already works per file; reuse it per screen.
+  - Vault lock closes only screens playing vault files.
+- [ ] **M3. Selecting & controlling screens**
+  - One shared transport dock controls the **selected** screen (decided: simpler than one
+    dock per screen). Point at a screen + trigger to select it; selected screen gets an accent
+    outline; dock shows a "Screen 1/2/3" pill and per-screen **mute** toggle.
+  - Optional later: "Pause all / Play all" on the dock.
+- [ ] **M4. Adding & placing screens**
+  - Hub: **Add Screen** (Files tab header or a "Screens" quick filter) → pick a file → screen
+    spawns where you are looking, offset from existing screens.
+  - **Move mode**: grip on a screen (or "Move" in its menu) → it follows the laser at its
+    current distance; thumbstick Y = distance, thumbstick X = size; trigger drops it.
+  - Per-screen menu (Y on a screen): Move, Resize, Curvature, Format, Mute, Close.
+  - Optional: remember the layout between sessions.
+- [ ] **M5. Decoder capacity / admission control**
+  - Measure on device: how many concurrent `*_v4l2m2m` sessions open, and the aggregate
+    pixel-rate budget (e.g. 3× 4K30 HEVC, 2× 4K60, 8K + 1080p…). Record results here.
+  - Before opening another screen, estimate width × height × fps against the measured budget;
+    if it doesn't fit, show "Not enough decoder capacity" and suggest closing a screen.
+  - Opening a 180°/360° file while several screens are open: ask "Play immersive (pauses other
+    screens)?".
+  - Watch GPU cost: one resolve + mip pass per screen per frame at 1.5× supersampling.
+- [ ] **M6. Test matrix** — 2 and 3 screens with mixed H.264/HEVC/VP9, 1080p/4K, SBS/TB;
+  audio modes; vault lock; recenter (should recenter the whole arrangement around the user).
+
+### Y. YouTube streaming (priority one after multi-screen)
+Approach: native, no embedded browser for video. **yt-dlp** resolves stream URLs, FFmpeg
+streams them (hardware VP9/H.264), our own UI does search and browsing.
+
+- [ ] **Y0. Decide & document legal/ToS stance** — third-party YouTube clients violate
+  YouTube's ToS; keep it personal-use, no downloading of YouTube content by default, no
+  ad-blocking claims. Mention in README.
+- [ ] **Y1. Play a YouTube URL** (first milestone)
+  - Ship the standalone `yt-dlp_linux_aarch64` binary (Unlicense) via the installer into the
+    app dir; self-update with `yt-dlp -U` (YouTube changes break old versions often).
+  - `yt-dlp -J <url>` → pick formats: VP9 or H.264 video only (never AV1 for >1080p), up to the
+    chosen quality; Opus/AAC audio; pass yt-dlp's `http_headers` to FFmpeg.
+  - `MediaEngine`: support **separate video and audio inputs** (two demuxers, one clock) —
+    adaptive streams are split above 720p. Alternative: generate a local DASH MPD and let
+    FFmpeg's dash demuxer handle it. Network options: reconnect, timeouts, buffering
+    indicator, seeking over HTTP.
+  - "Open URL" field in the hub (uses the in-app keyboard).
+- [ ] **Y2. Search** — first version via `yt-dlp "ytsearch20:<query>" --flat-playlist -J`;
+  later the InnerTube API (`youtubei/v1/search`) over libcurl + a JSON library (e.g.
+  nlohmann/json, MIT) for speed. Results reuse the card grid (thumbnail from i.ytimg.com via
+  stb_image, title, channel, duration, views, VR180/360/3D badge).
+- [ ] **Y3. Browse** — Trending/Explore, channel pages, playlists, related videos ("Up next").
+- [ ] **Y4. VR formats** — VR180 (equirect 180 + SBS), 360 equirect mono/TB, and YouTube's
+  **EAC cubemap / "mesh"** projection (new sphere shader path). Read FFmpeg spherical /
+  stereo3d side data and yt-dlp metadata to auto-select; check StreamXR's format handling.
+- [ ] **Y5. Player features** — quality picker in the HUD (warn when a quality needs software
+  decode), captions (WebVTT → text overlay), chapters on the timeline, playback speed.
+- [ ] **Y6. Account (optional)** — subscriptions/history/likes via YouTube TV device-code OAuth
+  or imported cookies; tokens in `~/.config/pixelvr` with 0600 permissions; easy sign-out.
+- [ ] **Y7. Hub integration** — a "Streaming" main tab (YouTube first, more providers later)
+  with Home / Search / Subscriptions / History; works with multi-screen (any screen can
+  play a stream).
+
+### S. Other streaming sources (after YouTube)
+- [ ] **S1. yt-dlp generic** — the same Open URL path works for many sites yt-dlp supports
+  (Vimeo, Twitch VODs, …); live streams (HLS) via FFmpeg.
+- [ ] **S2. Jellyfin / Plex** — their HTTP APIs give direct-play URLs FFmpeg can open; library
+  browsing in the Streaming tab.
+- [ ] DRM services (Netflix, Disney+, …) are out of scope (Widevine).
+
+### W. General web browser (last, needs evaluation)
+- [ ] **W1. Evaluate engines**: **WPE WebKit** (the fdo backend exports dma-buf frames →
+  zero-copy Vulkan import, lighter) vs **CEF** offscreen rendering (Chromium, heavy, CPU copy).
+  Check aarch64 SteamOS packaging, memory use and input injection (laser → mouse, in-app
+  keyboard → key events).
+- [ ] **W2. Browser panel** — URL bar, back/forward/reload, tabs (max 2–3), shown on a hub-like
+  glass panel; video inside pages plays in the page (no hardware decode guarantee).
+
+---
+
 ## Active backlog (2026-10-20 — Completed)
 
 - [x] **Virtual Keyboard Tilt Inversion, Raycast Auto-Focus & UI Hide Refinements**
