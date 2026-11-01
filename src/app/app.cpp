@@ -1227,16 +1227,44 @@ void App::openPlayTargetMenu(const std::string& path) {
     }
     actionMenu_.options.push_back("Cancel");
     actionMenu_.selectedOption = selectedScreen_;
-    // With a layout in use, show the screens where they are arranged.
-    const bool spatial = arrangementActive_ && !(screens_[0].open && screens_[0].projection != 0);
-    if (spatial) {
-        VulkanRenderer::ScreenPlacement pls[VulkanRenderer::kMaxVideoSlots];
-        for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
-            const VulkanRenderer::ScreenPlacement& pl = renderer_.screenPlacement(slot);
-            if (screens_[slot].open && pl.active) pls[slot] = pl;
+    // Show the screens where they are (arranged or freely placed), seen from
+    // the view. Only while all of them are reasonably in front: a screen far
+    // to the side or behind would squeeze the preview, so the plain row of
+    // tiles is used instead.
+    constexpr float kMaxYawOff = 1.22f;    // ~70 degrees
+    constexpr float kMaxPitchOff = 0.87f;  // ~50 degrees
+    const float* pivot = renderer_.screenPivot();
+    const float anchorYaw = arrangementActive_ ? arrangement_.yaw : renderer_.screenYaw();
+    const float anchorPitch = arrangementActive_ ? arrangement_.pitch : renderer_.recenterPitch();
+    bool spatial = !(screens_[0].open && screens_[0].projection != 0);
+    VulkanRenderer::ScreenPlacement pls[VulkanRenderer::kMaxVideoSlots];
+    for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots && spatial; ++slot) {
+        if (!screens_[slot].open) continue;
+        VulkanRenderer::ScreenPlacement pl = renderer_.screenPlacement(slot);
+        if (!pl.active) {
+            if (slot > 0) continue;  // not placed (should not happen for an open screen)
+            // Main screen on its recenter-anchored pose.
+            const float* fw = renderer_.screenForward();
+            const float d = renderer_.screenDistance();
+            for (int k = 0; k < 3; ++k) pl.center[k] = pivot[k] + fw[k] * d;
+            pl.yaw = renderer_.screenYaw();
+            pl.pitch = renderer_.recenterPitch();
+            pl.scale = 1.0f;
+            pl.curvature = renderer_.screenCurvature();
+            pl.stereo = static_cast<VulkanRenderer::StereoMode>(screens_[slot].stereo);
+            pl.active = true;
         }
-        renderer_.setArrangePreview(pls, renderer_.screenPivot(), arrangement_.yaw, arrangement_.pitch, -1,
-                                    arrangement_.snap);
+        const float dx = pl.center[0] - pivot[0];
+        const float dy = pl.center[1] - pivot[1];
+        const float dz = pl.center[2] - pivot[2];
+        const float len = std::max(std::sqrt(dx * dx + dy * dy + dz * dz), 1e-3f);
+        const float yawOff = wrapAngle(std::atan2(-dx, -dz) - anchorYaw);
+        const float pitchOff = std::asin(std::clamp(dy / len, -1.0f, 1.0f)) - anchorPitch;
+        if (std::fabs(yawOff) > kMaxYawOff || std::fabs(pitchOff) > kMaxPitchOff) spatial = false;
+        pls[slot] = pl;
+    }
+    if (spatial) {
+        renderer_.setArrangePreview(pls, pivot, anchorYaw, anchorPitch, -1, arrangementActive_ && arrangement_.snap);
     }
     renderer_.setPickerSpatial(spatial);
 }
