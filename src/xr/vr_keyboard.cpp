@@ -223,6 +223,11 @@ bool VrKeyboard::init() {
 }
 
 void VrKeyboard::setLaserPointerActive(bool active) {
+    // Never touch SteamVR state unless this process switched the laser hooks on:
+    // writing the "prefer gamepad" controller property on every app shutdown
+    // left the SteamVR dashboard without laser focus.
+    if (!active && !laserHooksActive_) return;
+    laserHooksActive_ = active;
     // 1. Update dashboard.preferGamepadMode setting
     if (auto* settings = reinterpret_cast<vr::IVRSettings*>(vrSettings_)) {
         vr::EVRSettingsError sErr = vr::VRSettingsError_None;
@@ -275,6 +280,9 @@ void VrKeyboard::setLaserPointerActive(bool active) {
     // 3. Switch FocusState SystemPanelInteractionMode to LaserMouse (1) via IVRInputFocusInternal_XXX
     // vtable[12] (SetSystemPanelInteractionMode) so the laser pointer is immediately active even if
     // more than 10 seconds have elapsed since the dashboard last had focus.
+    // Only ever switch *to* LaserMouse here. Forcing Gamepad (2) on deactivate
+    // makes vrcompositor's system panel keep controller focus for the rest of
+    // the SteamVR session, so no app receives input until SteamVR restarts.
     if (active && vrInputFocus_) {
         using FnSetSystemPanelInteractionMode = void (*)(void*, int);
         void** vtable = *reinterpret_cast<void***>(vrInputFocus_);

@@ -35,6 +35,11 @@ trap 'rm -rf "${stage}"' EXIT
 mkdir -p "${stage}/PixelVRPlayer/shaders"
 cp "${bin}" "${stage}/PixelVRPlayer/pixelvr"
 cp "${BUILD_DIR}/shaders/"*.spv "${stage}/PixelVRPlayer/shaders/"
+if compgen -G "${BUILD_DIR}/fonts/*.ttf" >/dev/null; then
+    mkdir -p "${stage}/PixelVRPlayer/fonts"
+    cp "${BUILD_DIR}/fonts/"*.ttf "${stage}/PixelVRPlayer/fonts/"
+    cp assets/fonts/Inter-LICENSE.txt "${stage}/PixelVRPlayer/fonts/" 2>/dev/null || true
+fi
 cp tools/run.sh "${stage}/PixelVRPlayer/run.sh"
 cp tools/install.sh "${stage}/PixelVRPlayer/install.sh"
 if [[ -f "tools/update.sh" ]]; then

@@ -2,14 +2,8 @@
 
 layout(binding = 0) uniform sampler2D fontAtlas;
 
-layout(push_constant) uniform Push {
-    mat4 mvp;
-    vec4 color;
-    vec4 rect;
-    vec4 uv;
-} pc;
-
 layout(location = 0) in vec2 vUV;
+layout(location = 1) in vec4 vColor;  // per-glyph colour from the instance buffer
 layout(location = 0) out vec4 outColor;
 
 vec3 toLinear(vec3 srgb) {
@@ -38,9 +32,14 @@ void main() {
 
     // Crisp Hermite anti-aliasing across 0.9 screen pixels (tighter edge transition for razor-sharp text in VR)
     float a = smoothstep(-0.45, 0.45, distInScreenPixels);
-    if (a <= 0.002) {
+    // Soft dark halo ~1.5 px around each glyph keeps text legible over bright
+    // video seen through translucent glass panels (invisible on dark panels).
+    float halo = smoothstep(-1.9, -0.3, distInScreenPixels) * 0.45;
+    float alpha = a + (1.0 - a) * halo;
+    if (alpha <= 0.002) {
         discard;
     }
 
-    outColor = vec4(toLinear(pc.color.rgb), pc.color.a * a);
+    // Halo is black, so it only contributes coverage; colour comes from the glyph.
+    outColor = vec4(toLinear(vColor.rgb) * (a / alpha), vColor.a * alpha);
 }

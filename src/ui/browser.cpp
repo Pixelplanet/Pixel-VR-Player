@@ -98,17 +98,27 @@ std::string smb_parent(const std::string& uri) {
     return "smb://" + rest.substr(0, slash);
 }
 
+// Seconds since the filesystem clock's epoch; only used to order entries.
+long long mtime_of(const fs::path& p) {
+    std::error_code ec;
+    const auto t = fs::last_write_time(p, ec);
+    if (ec) return 0;
+    return std::chrono::duration_cast<std::chrono::seconds>(t.time_since_epoch()).count();
+}
+
 void sort_and_append(std::vector<Browser::Entry>& out,
                      std::vector<Browser::Entry>& dirs,
-                     std::vector<Browser::Entry>& files) {
-    auto by_media_then_label = [](const Browser::Entry& a, const Browser::Entry& b) {
+                     std::vector<Browser::Entry>& files, int mode = 0) {
+    auto order = [mode](const Browser::Entry& a, const Browser::Entry& b) {
         const bool aHasMedia = a.isVideo || !a.previewPath.empty();
         const bool bHasMedia = b.isVideo || !b.previewPath.empty();
         if (aHasMedia != bHasMedia) return aHasMedia > bHasMedia;
+        if (mode == 1 && a.mtime != b.mtime) return a.mtime > b.mtime;
+        if (mode == 2 && a.size != b.size) return a.size > b.size;
         return a.label < b.label;
     };
-    std::sort(dirs.begin(), dirs.end(), by_media_then_label);
-    std::sort(files.begin(), files.end(), by_media_then_label);
+    std::stable_sort(dirs.begin(), dirs.end(), order);
+    std::stable_sort(files.begin(), files.end(), order);
     out.insert(out.end(), dirs.begin(), dirs.end());
     out.insert(out.end(), files.begin(), files.end());
 }
@@ -162,6 +172,28 @@ std::string format_size(long long bytes) {
     else if (bytes >= kb) std::snprintf(buf, sizeof(buf), "%.0f KB", bytes / kb);
     else std::snprintf(buf, sizeof(buf), "%lld B", bytes);
     return buf;
+}
+
+void Browser::setSortMode(int mode) {
+    mode = ((mode % 3) + 3) % 3;
+    if (sortMode_.exchange(mode) == mode) return;
+    // Re-sort the current listing in place: navigation/action rows stay at the
+    // top, then folders, then files.
+    std::size_t firstItem = 0;
+    while (firstItem < entries_.size() &&
+           (entries_[firstItem].isBack || entries_[firstItem].isNetwork ||
+            entries_[firstItem].path.empty())) {
+        ++firstItem;
+    }
+    std::vector<Entry> head(entries_.begin(), entries_.begin() + static_cast<std::ptrdiff_t>(firstItem));
+    std::vector<Entry> dirs, files;
+    for (std::size_t i = firstItem; i < entries_.size(); ++i) {
+        (entries_[i].isDir ? dirs : files).push_back(entries_[i]);
+    }
+    sort_and_append(head, dirs, files, mode);
+    entries_ = std::move(head);
+    selected_ = 0;
+    first_ = 0;
 }
 
 void Browser::scanLocalInto(const std::string& dir, ScanResult& out) {
@@ -241,17 +273,18 @@ void Browser::scanLocalInto(const std::string& dir, ScanResult& out) {
                    (bestPreviewSize > 0 ? "  \xB7  " + format_size(bestPreviewSize) : ""))
                 : "Folder";
             dirs.push_back({name + "/", p.string(), true, false, false, false, detail,
-                            bestPreviewSize > 0 ? bestPreviewSize : 0, preview});
+                            bestPreviewSize > 0 ? bestPreviewSize : 0, preview, mtime_of(p)});
         } else {
             const bool isVid = is_video(name);
             if (dir == homeDir_ && !isVid) continue;  // hide log/tarball files in home root
             std::error_code sec;
             const long long sz = static_cast<long long>(fs::file_size(p, sec));
             files.push_back({name, p.string(), false, isVid, false, false,
-                             format_size(sec ? 0 : sz), sec ? 0 : sz, isVid ? p.string() : ""});
+                             format_size(sec ? 0 : sz), sec ? 0 : sz, isVid ? p.string() : "",
+                             mtime_of(p)});
         }
     }
-    sort_and_append(out.entries, dirs, files);
+    sort_and_append(out.entries, dirs, files, sortMode_.load());
 }
 
 void Browser::scanSmbInto(const std::string& uri, ScanResult& out) {
@@ -294,11 +327,13 @@ void Browser::scanSmbInto(const std::string& uri, ScanResult& out) {
                     case SMBC_FILE: {
                         struct stat st{};
                         long long sz = 0;
+                        long long mt = 0;
                         if (smbc_stat(child.c_str(), &st) == 0) {
                             sz = static_cast<long long>(st.st_size);
+                            mt = static_cast<long long>(st.st_mtime);
                         }
                         files.push_back({name, child, false, is_video(name), false,
-                                         false, format_size(sz), sz});
+                                         false, format_size(sz), sz, "", mt});
                         break;
                     }
                     default:
@@ -368,7 +403,7 @@ void Browser::scanSmbInto(const std::string& uri, ScanResult& out) {
         out.status = "Cannot browse " + uri;
         return;
     }
-    sort_and_append(out.entries, dirs, files);
+    sort_and_append(out.entries, dirs, files, sortMode_.load());
     out.status = std::to_string(out.entries.size() - 1) + " items";
 #else
     out.status = "SMB support not built";
@@ -1336,6 +1371,26 @@ void Browser::clearFinished() {
         if (dlJobs_[i].state == 0) dlActiveJob_ = static_cast<int>(i);
     }
     status_ = "Cleared finished downloads";
+}
+
+void Browser::removeJob(int index) {
+    if (index < 0 || index >= static_cast<int>(dlJobs_.size())) return;
+    const DownloadJob j = dlJobs_[static_cast<std::size_t>(index)];
+    if (j.state == 0) return;  // the active job is stopped, not removed
+    if (j.state == 4) {
+        cancelQueued(j.uri);
+        return;
+    }
+    if (j.state != 1 && !j.isDir && !j.localPath.empty()) {
+        std::error_code ec;
+        std::filesystem::remove(j.localPath, ec);
+    }
+    dlJobs_.erase(dlJobs_.begin() + index);
+    dlActiveJob_ = -1;
+    for (std::size_t i = 0; i < dlJobs_.size(); ++i) {
+        if (dlJobs_[i].state == 0) dlActiveJob_ = static_cast<int>(i);
+    }
+    status_ = "Removed " + j.name;
 }
 
 void Browser::cancelQueued(const std::string& uri) {

@@ -11,10 +11,15 @@
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <fstream>
 #include <vector>
 
 #include <unistd.h>
+
+#ifndef PIXELVR_VERSION_STRING
+#define PIXELVR_VERSION_STRING "dev"
+#endif
 
 namespace pixelvr {
 
@@ -36,18 +41,30 @@ struct SpherePush {
 };
 
 struct UiPush {
-    float mvp[16];
+    float mvp[16];          // panel (or world) space -> clip
     float color[4];
-    float params[4];        // x: shapeType, y: radius, z: borderWidth, w: extra
+    float params[4];        // x: shapeType, y: radius, z: borderWidth, w: bend radius
     float borderColor[4];
+    float rect[4];          // centre x, y + half-size; all zero = unit quad
 };
+static_assert(sizeof(UiPush) <= 128, "UiPush exceeds the guaranteed push-constant size");
 
 struct TextPush {
     float mvp[16];
     float color[4];
-    float rect[4];  // x, y, w, h in panel-local metres
+    float rect[4];  // x, y, w, h in panel-local metres (thumbnails)
     float uv[4];    // u0, v0, u1, v1
+    float bend[4];  // x: bend radius (0 = flat), y: vertical strips
 };
+static_assert(sizeof(TextPush) <= 128, "TextPush exceeds the guaranteed push-constant size");
+
+// One batched glyph (instance data for text.vert).
+struct GlyphInstance {
+    float rect[4];   // x, y (bottom-left), w, h in panel / view units
+    float uv[4];     // u0, v0, u1, v1
+    float color[4];
+};
+constexpr uint32_t kMaxGlyphsPerView = 16384;
 
 // Shared Unified Spatial Hub layout (panel-local metres), used by both render
 // and pointer raycast so the cursor and highlight line up exactly.
@@ -55,13 +72,23 @@ constexpr float kPanelW = 0.90f;      // Total width 1.80m (-0.90 to +0.90)
 constexpr float kPanelTop = 0.56f;    // Total height 1.12m (-0.56 to +0.56)
 constexpr float kRailRight = -0.49f;  // Left nav rail spans [-0.90, -0.49] (0.41m)
 constexpr float kContentCx = 0.205f;  // Content area center ((-0.49 + 0.90) / 2)
-constexpr float kRowH = 0.105f;
 // Downloads-window action buttons (content-sized, along the bottom edge).
 constexpr float kDlBtnH = 0.072f;
 constexpr float kDlBtnGap = 0.035f;
 constexpr float kDlBtnPadX = 0.048f;
-constexpr int kMaxRows = 13;
-constexpr float kFirstRowY = kPanelTop - 0.2f;
+
+// Shared glass palette (sRGB). Surfaces are neutral slate glass with faint
+// light rims; the theme accent is reserved for focus, selection and progress.
+constexpr float kGlassPanel[4]      = {0.078f, 0.092f, 0.115f, 0.93f};
+constexpr float kGlassRail[4]       = {0.050f, 0.060f, 0.078f, 0.60f};
+constexpr float kGlassCard[4]       = {0.112f, 0.130f, 0.160f, 0.90f};
+constexpr float kGlassCardHover[4]  = {0.150f, 0.175f, 0.220f, 0.97f};
+constexpr float kGlassControl[4]    = {0.135f, 0.155f, 0.195f, 0.92f};
+constexpr float kGlassWell[4]       = {0.035f, 0.042f, 0.058f, 0.92f};
+constexpr float kGlassVeil[4]       = {0.85f, 0.90f, 1.00f, 0.09f};   // neutral selection
+constexpr float kGlassRim[4]        = {0.70f, 0.78f, 0.90f, 0.42f};
+constexpr float kGlassRimFaint[4]   = {0.70f, 0.78f, 0.90f, 0.16f};
+constexpr float kGlassDivider[4]    = {0.70f, 0.78f, 0.90f, 0.14f};
 
 // Media control dock (panel-local metres, floating below the video).
 struct CtrlButtonRect {
@@ -74,7 +101,7 @@ struct CtrlButtonRect {
 constexpr float kBarY = -0.86f;
 constexpr float kDockHalfW = 0.92f;
 constexpr float kDockHalfH = 0.23f;
-constexpr int kBtnCount = 13;
+constexpr int kBtnCount = static_cast<int>(VulkanRenderer::CtrlButton::Count);
 
 inline CtrlButtonRect get_ctrl_button_rect(int b) {
     using Btn = VulkanRenderer::CtrlButton;
@@ -88,9 +115,6 @@ inline CtrlButtonRect get_ctrl_button_rect(int b) {
 
         // Left flank pills: HUB (top), RECENTER (bottom)
         case Btn::Files:        return {-0.62f, kBarY - 0.005f, 0.185f, 0.040f};
-        case Btn::Downloads:    return {-0.62f, kBarY - 0.005f, 0.185f, 0.040f}; // alias to HUB
-        case Btn::Settings:     return {-0.62f, kBarY - 0.005f, 0.185f, 0.040f}; // alias to HUB
-        case Btn::Download:     return {-0.62f, kBarY - 0.005f, 0.185f, 0.040f}; // alias
         case Btn::Recenter:     return {-0.62f, kBarY - 0.098f, 0.185f, 0.040f};
 
         // Right flank pills: Projection/Format, Audio, Screen
@@ -100,6 +124,289 @@ inline CtrlButtonRect get_ctrl_button_rect(int b) {
         default: return {0.0f, 0.0f, 0.0f, 0.0f};
     }
 }
+
+// ---------------------------------------------------------------------------
+// Hub layout (panel-local metres). Single source of truth for both drawing in
+// renderView() and laser hit-testing in updatePointer().
+// ---------------------------------------------------------------------------
+struct UiRect {
+    float cx = 0.0f;
+    float cy = 0.0f;
+    float hw = 0.0f;
+    float hh = 0.0f;
+    bool contains(float x, float y, float pad = 0.0f) const {
+        return std::fabs(x - cx) <= hw + pad && std::fabs(y - cy) <= hh + pad;
+    }
+};
+
+namespace hub {
+constexpr float kRailCx = -0.695f;
+constexpr float kRailItemHalfW = 0.172f;
+constexpr float kMainTabY[3] = {0.32f, 0.22f, 0.12f};  // Files, Downloads, Settings
+constexpr float kMainTabHalfH = 0.038f;
+constexpr float kSettingsSubY[5] = {0.02f, -0.07f, -0.16f, -0.25f, -0.34f};
+constexpr float kDownloadsSubY[3] = {-0.05f, -0.14f, -0.23f};
+constexpr float kFilesSubY[6] = {-0.04f, -0.11f, -0.18f, -0.25f, -0.32f, -0.39f};
+constexpr float kHitPad = 0.004f;  // laser targets are slightly larger than drawn
+
+inline UiRect mainTab(int s) { return {kRailCx, kMainTabY[s], kRailItemHalfW, kMainTabHalfH}; }
+// page: 0 = Files, 1 = Downloads, 2 = Settings
+inline UiRect subTab(int page, int sub) {
+    if (page == 2) return {kRailCx, kSettingsSubY[sub], kRailItemHalfW, 0.030f};
+    if (page == 1) return {kRailCx, kDownloadsSubY[sub], kRailItemHalfW, 0.032f};
+    return {kRailCx, kFilesSubY[sub], kRailItemHalfW, 0.032f};
+}
+inline UiRect lockVaultButton(int page) {
+    return {kRailCx, page == 2 ? -0.46f : -0.47f, kRailItemHalfW, 0.030f};
+}
+
+// File browser header: 0 = prev page, 1 = next page, 2 = view mode,
+// 3 = bookmark, 4 = up to parent, 5 = sort order.
+constexpr float kHeaderY = 0.455f;
+inline UiRect headerButton(int id) {
+    switch (id) {
+        case 0: return {0.52f, kHeaderY, 0.035f, 0.028f};
+        case 1: return {0.74f, kHeaderY, 0.035f, 0.028f};
+        case 2: return {0.355f, kHeaderY, 0.075f, 0.028f};
+        case 3: return {0.175f, kHeaderY, 0.090f, 0.028f};
+        case 5: return {-0.005f, kHeaderY, 0.075f, 0.028f};
+        default: return {-0.43f, kHeaderY, 0.038f, 0.028f};
+    }
+}
+
+struct CardLayout {
+    float cx = 0.0f;
+    float cy = 0.0f;
+    float cardHalfW = 0.0f;
+    float cardHalfH = 0.0f;
+    float thumbCx = 0.0f;
+    float thumbCy = 0.0f;
+    float thumbHalfW = 0.0f;
+    float thumbHalfH = 0.0f;
+};
+inline int cardsPerPage(VulkanRenderer::BrowserViewMode m) {
+    return m == VulkanRenderer::BrowserViewMode::BigCards ? 6
+         : m == VulkanRenderer::BrowserViewMode::MiniCards ? 12 : 8;
+}
+inline int cardColumns(VulkanRenderer::BrowserViewMode m) {
+    return m == VulkanRenderer::BrowserViewMode::BigCards ? 3
+         : m == VulkanRenderer::BrowserViewMode::MiniCards ? 4 : 1;
+}
+inline CardLayout browserCard(VulkanRenderer::BrowserViewMode mode, int slot) {
+    CardLayout lay;
+    if (mode == VulkanRenderer::BrowserViewMode::BigCards) {
+        const float colX[3] = {-0.25f, 0.20f, 0.65f};
+        const float rowY[2] = {0.16f, -0.24f};
+        lay.cx = colX[slot % 3];
+        lay.cy = rowY[(slot / 3) % 2];
+        lay.cardHalfW = 0.205f;
+        lay.cardHalfH = 0.180f;
+        lay.thumbCx = lay.cx;
+        lay.thumbCy = lay.cy + 0.056f;
+        lay.thumbHalfW = lay.cardHalfW - 0.015f;
+        lay.thumbHalfH = 0.104f;
+    } else if (mode == VulkanRenderer::BrowserViewMode::MiniCards) {
+        const float colX[4] = {-0.285f, 0.045f, 0.375f, 0.705f};
+        const float rowY[3] = {0.20f, -0.06f, -0.32f};
+        lay.cx = colX[slot % 4];
+        lay.cy = rowY[(slot / 4) % 3];
+        lay.cardHalfW = 0.150f;
+        lay.cardHalfH = 0.115f;
+        lay.thumbCx = lay.cx;
+        lay.thumbCy = lay.cy + 0.030f;
+        lay.thumbHalfW = lay.cardHalfW - 0.010f;
+        lay.thumbHalfH = 0.075f;
+    } else {  // CompactList (1 col x 8 rows)
+        lay.cx = 0.20f;
+        lay.cy = 0.300f - 0.090f * static_cast<float>(slot % 8);
+        lay.cardHalfW = 0.65f;
+        lay.cardHalfH = 0.038f;
+        lay.thumbCx = -0.385f;
+        lay.thumbCy = lay.cy;
+        lay.thumbHalfW = 0.050f;
+        lay.thumbHalfH = 0.028f;
+    }
+    return lay;
+}
+
+// Downloads job cards and footer buttons.
+constexpr int kMaxDownloadCards = 4;
+inline UiRect downloadCard(int visIdx) {
+    return {0.205f, 0.24f - 0.175f * static_cast<float>(visIdx), 0.65f, 0.075f};
+}
+// Per-job buttons on the right of a card: 0 = pause/resume (or Play when
+// done), 1 = cancel/remove.
+inline UiRect downloadJobButton(int visIdx, int which) {
+    const UiRect c = downloadCard(visIdx);
+    // Covers the round button plus its caption underneath.
+    return {which == 0 ? 0.665f : 0.790f, c.cy, which == 0 ? 0.060f : 0.050f, 0.062f};
+}
+constexpr float kDownloadsFooterY = -0.44f;
+
+// Settings cards (2-column grid; denser when there are more rows).
+struct SettingsCard {
+    float cx, cy, halfW, halfH, labelY, ctrlY, ctrlHalfW, ctrlHalfH, textScale;
+};
+inline SettingsCard settingsCard(int i, int total) {
+    SettingsCard L{};
+    L.cx = (i % 2 == 0) ? -0.135f : 0.535f;
+    L.halfW = 0.315f;
+    L.ctrlHalfW = 0.275f;
+    const float r = static_cast<float>(i / 2);
+    if (total <= 6) {
+        L.cy = 0.22f - r * 0.24f;
+        L.halfH = 0.098f;
+        L.labelY = L.cy + 0.044f;
+        L.ctrlY = L.cy - 0.030f;
+        L.ctrlHalfH = 0.032f;
+        L.textScale = 1.0f;
+    } else if (total <= 8) {
+        L.cy = 0.26f - r * 0.185f;
+        L.halfH = 0.078f;
+        L.labelY = L.cy + 0.034f;
+        L.ctrlY = L.cy - 0.024f;
+        L.ctrlHalfH = 0.027f;
+        L.textScale = 0.95f;
+    } else {
+        L.cy = 0.28f - r * 0.152f;
+        L.halfH = 0.066f;
+        L.labelY = L.cy + 0.028f;
+        L.ctrlY = L.cy - 0.020f;
+        L.ctrlHalfH = 0.023f;
+        L.textScale = 0.90f;
+    }
+    return L;
+}
+inline int settingsMaxVisible(int total) { return total > 8 ? 10 : 8; }
+// Segment `s` of `n` inside a settings control well (segmented choices).
+inline UiRect settingsSegment(const SettingsCard& L, int s, int n) {
+    const float left = L.cx - L.ctrlHalfW + 0.006f;
+    const float right = L.cx + L.ctrlHalfW - 0.006f;
+    const float w = (right - left) / static_cast<float>(n);
+    return {left + w * (static_cast<float>(s) + 0.5f), L.ctrlY, w * 0.5f - 0.003f, L.ctrlHalfH - 0.005f};
+}
+
+// Modals.
+inline UiRect confirmModalButton(int i) { return {i == 0 ? -0.15f : 0.15f, -0.15f, 0.13f, 0.046f}; }
+constexpr float kActionMenuStepY = 0.068f;
+inline UiRect actionMenuOption(int i, int count) {
+    const float span = static_cast<float>(std::max(0, count - 1)) * kActionMenuStepY;
+    const float startY = -0.040f + 0.5f * span;
+    return {0.0f, startY - static_cast<float>(i) * kActionMenuStepY, 0.38f, 0.028f};
+}
+inline UiRect deleteConfirmButton(int i) { return {i == 0 ? -0.15f : 0.15f, -0.12f, 0.13f, 0.042f}; }
+// SMB share editor form (action menu page 4). Option ids: 0 host, 1 share,
+// 2 authentication, 3 username, 4 password, 5 workgroup, 6 nickname,
+// 7 save, 8 cancel, 9 delete (existing shares only).
+constexpr float kSmbHalfW = 0.60f;
+constexpr float kSmbHalfH = 0.43f;
+constexpr float kSmbColCx = 0.2775f;    // half-width columns at -/+ this
+constexpr float kSmbColHalfW = 0.2625f;
+constexpr float kSmbWellHalfH = 0.028f;
+constexpr float kSmbLabelLift = 0.047f; // label baseline above the well centre
+inline UiRect smbFieldWell(int i) {
+    switch (i) {
+        case 0: return {0.0f, 0.188f, 0.54f, kSmbWellHalfH};
+        case 1: return {-kSmbColCx, 0.073f, kSmbColHalfW, kSmbWellHalfH};
+        case 6: return {kSmbColCx, 0.073f, kSmbColHalfW, kSmbWellHalfH};
+        case 2: return {0.0f, -0.042f, 0.54f, kSmbWellHalfH};
+        case 3: return {-kSmbColCx, -0.157f, kSmbColHalfW, kSmbWellHalfH};
+        case 4: return {kSmbColCx, -0.157f, kSmbColHalfW, kSmbWellHalfH};
+        default: return {-kSmbColCx, -0.272f, kSmbColHalfW, kSmbWellHalfH};  // 5 workgroup
+    }
+}
+// Laser target for a field: the well plus its label above it.
+inline UiRect smbFieldHit(int i) {
+    const UiRect w = smbFieldWell(i);
+    return {w.cx, w.cy + 0.020f, w.hw, w.hh + 0.024f};
+}
+// Authentication segments inside field 2: 0 = guest, 1 = username & password.
+inline UiRect smbAuthSegment(int seg) {
+    const UiRect w = smbFieldWell(2);
+    const float segHalfW = w.hw * 0.5f - 0.004f;
+    return {w.cx + (seg == 0 ? -1.0f : 1.0f) * (segHalfW + 0.002f), w.cy, segHalfW, w.hh - 0.004f};
+}
+// Footer / header buttons by option id (7 save, 8 cancel, 9 delete); id 10 is
+// the header close button, which also cancels.
+inline UiRect smbButton(int id) {
+    switch (id) {
+        case 7: return {0.445f, -0.362f, 0.105f, 0.034f};
+        case 8: return {0.235f, -0.362f, 0.085f, 0.034f};
+        case 9: return {-0.455f, -0.362f, 0.090f, 0.034f};
+        default: return {0.545f, 0.362f, 0.026f, 0.026f};
+    }
+}
+// In-app keyboard (text entry for SMB fields, rename): a glass sheet over the
+// lower part of the panel with the input field above it.
+enum KbCode { kKbChar = 0, kKbBackspace, kKbShift, kKbSymbols, kKbSpace, kKbLeft, kKbRight,
+              kKbDone, kKbCancel };
+struct KbKey {
+    UiRect r;
+    int code = kKbChar;
+    char lower = 0;   // character in letter mode
+    char upper = 0;   // with Shift
+    char sym = 0;     // in symbols mode
+};
+constexpr float kKbFieldY = 0.095f;      // input field centre
+constexpr float kKbFieldHalfW = 0.62f;
+constexpr float kKbFieldHalfH = 0.046f;
+constexpr float kKbSheetY = -0.272f;     // key sheet centre
+constexpr float kKbSheetHalfW = 0.68f;
+constexpr float kKbSheetHalfH = 0.250f;
+inline const std::vector<KbKey>& keyboardKeys() {
+    static const std::vector<KbKey> keys = [] {
+        struct Spec { int code; char lower, upper, sym; float units; };
+        const float pitch = 0.107f;
+        const float keyHalfH = 0.040f;
+        const float gap = 0.010f;
+        const float rowY[5] = {-0.080f, -0.174f, -0.268f, -0.362f, -0.456f};
+        auto chars = [](const char* lo, const char* sy) {
+            std::vector<Spec> out;
+            for (std::size_t i = 0; lo[i]; ++i) {
+                const char c = lo[i];
+                const char up = (c >= 'a' && c <= 'z') ? static_cast<char>(c - 'a' + 'A') : c;
+                out.push_back({kKbChar, c, up, sy[i], 1.0f});
+            }
+            return out;
+        };
+        std::vector<std::vector<Spec>> rows(5);
+        rows[0] = chars("1234567890", "1234567890");
+        rows[0].push_back({kKbBackspace, 0, 0, 0, 1.5f});
+        rows[1] = chars("qwertyuiop-", "!@#$%^&*()~");
+        rows[1].back().upper = '_';
+        rows[2] = chars("asdfghjkl.", "-=+[]{};:'");
+        rows[3].push_back({kKbShift, 0, 0, 0, 1.5f});
+        for (const Spec& sp : chars("zxcvbnm/@", "<>?,\\|`/\"")) rows[3].push_back(sp);
+        rows[4] = {{kKbSymbols, 0, 0, 0, 1.5f}, {kKbLeft, 0, 0, 0, 1.0f},
+                   {kKbSpace, ' ', ' ', ' ', 5.0f}, {kKbRight, 0, 0, 0, 1.0f},
+                   {kKbDone, 0, 0, 0, 2.5f}};
+        std::vector<KbKey> out;
+        for (int r = 0; r < 5; ++r) {
+            float units = 0.0f;
+            for (const Spec& sp : rows[r]) units += sp.units;
+            float x = -0.5f * units * pitch;
+            for (const Spec& sp : rows[r]) {
+                const float w = sp.units * pitch;
+                KbKey k;
+                k.r = {x + 0.5f * w, rowY[r], 0.5f * w - 0.5f * gap, keyHalfH};
+                k.code = sp.code;
+                k.lower = sp.lower;
+                k.upper = sp.upper;
+                k.sym = sp.sym;
+                out.push_back(k);
+                x += w;
+            }
+        }
+        // Cancel button at the right end of the prompt line.
+        KbKey cancel;
+        cancel.r = {kKbFieldHalfW - 0.07f, kKbFieldY + 0.088f, 0.07f, 0.026f};
+        cancel.code = kKbCancel;
+        out.push_back(cancel);
+        return out;
+    }();
+    return keys;
+}
+}  // namespace hub
 
 // Seconds -> "M:SS" or "H:MM:SS" for the transport time readout.
 inline std::string format_time(double sec) {
@@ -122,6 +429,45 @@ math::Mat4 orientFromYawPitch(float yaw, float pitch) {
     return multiply(fromQuat(Quat{0.0f, std::sin(hy), 0.0f, std::cos(hy)}),
                     fromQuat(Quat{std::sin(hp), 0.0f, 0.0f, std::cos(hp)}));
 }
+
+// Pose of the UI panel plane (hub, modals, transport dock) plus the distance
+// it sits from the viewer, shared by rendering and pointer hit-testing.
+struct PanelPlacement {
+    math::Mat4 base;
+    float dist = 1.9f;
+};
+PanelPlacement computePanelPlacement(float uiDistance, bool flatContent, int followMode,
+                                     const float pivot[3], const float forward[3],
+                                     float screenYaw, float recenterPitch, float followYaw) {
+    using namespace math;
+    PanelPlacement out;
+    const float uiDist = std::clamp(uiDistance, 1.2f, 3.5f);
+    if (followMode == 0 || flatContent) {
+        // World lock: in front of the recentered view (zero drift/tilt).
+        out.dist = flatContent ? uiDist : std::min(uiDist, 2.0f);
+        const Vec3 center{pivot[0] + forward[0] * out.dist,
+                          pivot[1] + forward[1] * out.dist,
+                          pivot[2] + forward[2] * out.dist};
+        const Mat4 orient = orientFromYawPitch(screenYaw, recenterPitch);
+        out.base = flatContent ? multiply(translation(center), orient)
+                               : multiply(translation(center), multiply(orient, rotationX(-0.22f)));
+    } else {
+        // Smooth gaze follow (360/180 only): yaw convention matches screenYaw,
+        // i.e. forward = (-sin, 0, -cos).
+        out.dist = std::min(uiDist, 2.0f);
+        const Vec3 fwd{-std::sin(followYaw), 0.0f, -std::cos(followYaw)};
+        const Vec3 center{pivot[0] + fwd.x * out.dist, pivot[1] + fwd.y * out.dist,
+                          pivot[2] + fwd.z * out.dist};
+        const Mat4 orient = orientFromYawPitch(followYaw, recenterPitch);
+        out.base = multiply(translation(center), multiply(orient, rotationX(-0.22f)));
+    }
+    return out;
+}
+
+// Vertical strips used to tessellate UI quads on the curved panel; must match
+// kBendSegments in ui.vert. Thumbnails use fewer (thumb.vert reads the count).
+constexpr int kUiBendSegments = 24;
+constexpr int kThumbBendSegments = 8;
 
 #define PIXELVR_VK_CHECK(expr)                                        \
     do {                                                              \
@@ -231,10 +577,15 @@ VulkanRenderer::~VulkanRenderer() {
         if (modelSetLayout_ != VK_NULL_HANDLE)
             vkDestroyDescriptorSetLayout(device_, modelSetLayout_, nullptr);
         clearCardThumbnails();
+        releaseThumbSlot(kScrubThumbSlot);
         if (thumbPipeline_ != VK_NULL_HANDLE)
             vkDestroyPipeline(device_, thumbPipeline_, nullptr);
         if (textPipeline_ != VK_NULL_HANDLE)
             vkDestroyPipeline(device_, textPipeline_, nullptr);
+        for (int v = 0; v < 2; ++v) {
+            if (glyphBuffer_[v] != VK_NULL_HANDLE) vkDestroyBuffer(device_, glyphBuffer_[v], nullptr);
+            if (glyphMemory_[v] != VK_NULL_HANDLE) vkFreeMemory(device_, glyphMemory_[v], nullptr);
+        }
         if (textPipelineLayout_ != VK_NULL_HANDLE)
             vkDestroyPipelineLayout(device_, textPipelineLayout_, nullptr);
         if (textPool_ != VK_NULL_HANDLE)
@@ -243,6 +594,12 @@ VulkanRenderer::~VulkanRenderer() {
             vkDestroyDescriptorSetLayout(device_, textSetLayout_, nullptr);
         if (fontView_ != VK_NULL_HANDLE)
             vkDestroyImageView(device_, fontView_, nullptr);
+        if (fontViewBold_ != VK_NULL_HANDLE)
+            vkDestroyImageView(device_, fontViewBold_, nullptr);
+        if (fontImageBold_ != VK_NULL_HANDLE)
+            vkDestroyImage(device_, fontImageBold_, nullptr);
+        if (fontMemoryBold_ != VK_NULL_HANDLE)
+            vkFreeMemory(device_, fontMemoryBold_, nullptr);
         if (fontSampler_ != VK_NULL_HANDLE)
             vkDestroySampler(device_, fontSampler_, nullptr);
         if (fontImage_ != VK_NULL_HANDLE)
@@ -251,7 +608,9 @@ VulkanRenderer::~VulkanRenderer() {
             vkFreeMemory(device_, fontMemory_, nullptr);
         if (renderPass_ != VK_NULL_HANDLE)
             vkDestroyRenderPass(device_, renderPass_, nullptr);
-        if (fence_ != VK_NULL_HANDLE) vkDestroyFence(device_, fence_, nullptr);
+        for (VkFence f : viewFences_) {
+            if (f != VK_NULL_HANDLE) vkDestroyFence(device_, f, nullptr);
+        }
         if (uploadFence_ != VK_NULL_HANDLE)
             vkDestroyFence(device_, uploadFence_, nullptr);
         if (commandPool_ != VK_NULL_HANDLE)
@@ -483,12 +842,19 @@ bool VulkanRenderer::createRenderPass(VkFormat format) {
     VkSubpassDependency dependency{};
     dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
     dependency.dstSubpass = 0;
+    // Both eyes share the MSAA and depth targets and may now be in flight
+    // together, so order this pass's writes after the previous pass's writes.
     dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-                              VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
+                              VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                              VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
     dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT |
-                              VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT;
-    dependency.srcAccessMask = 0;
-    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                              VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT |
+                              VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT;
+    dependency.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                               VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT |
+                               VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT |
+                               VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
                                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
 
     VkRenderPassCreateInfo info{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
@@ -657,7 +1023,8 @@ bool VulkanRenderer::buildPipeline(const std::string& vertName,
                                    const std::string& fragName,
                                    VkPipelineLayout layout, VkPipeline& out,
                                    bool blend, VkRenderPass pass,
-                                   VkSampleCountFlagBits samples) {
+                                   VkSampleCountFlagBits samples,
+                                   const VkPipelineVertexInputStateCreateInfo* vertexInputOverride) {
     const VkRenderPass rp = (pass != VK_NULL_HANDLE) ? pass : renderPass_;
     const VkSampleCountFlagBits sc =
         (samples != VK_SAMPLE_COUNT_FLAG_BITS_MAX_ENUM) ? samples : sampleCount_;
@@ -738,7 +1105,7 @@ bool VulkanRenderer::buildPipeline(const std::string& vertName,
         VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
     pipelineInfo.stageCount = static_cast<uint32_t>(stages.size());
     pipelineInfo.pStages = stages.data();
-    pipelineInfo.pVertexInputState = &vertexInput;
+    pipelineInfo.pVertexInputState = vertexInputOverride ? vertexInputOverride : &vertexInput;
     pipelineInfo.pInputAssemblyState = &inputAssembly;
     pipelineInfo.pViewportState = &viewport;
     pipelineInfo.pRasterizationState = &raster;
@@ -957,12 +1324,15 @@ bool VulkanRenderer::createRenderResources(
         VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
     allocInfo.commandPool = commandPool_;
     allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    allocInfo.commandBufferCount = 1;
+    allocInfo.commandBufferCount = 2;
     PIXELVR_VK_CHECK(
-        vkAllocateCommandBuffers(device_, &allocInfo, &commandBuffer_));
+        vkAllocateCommandBuffers(device_, &allocInfo, viewCommandBuffers_));
+    commandBuffer_ = viewCommandBuffers_[0];
 
     VkFenceCreateInfo fenceInfo{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
-    PIXELVR_VK_CHECK(vkCreateFence(device_, &fenceInfo, nullptr, &fence_));
+    for (VkFence& f : viewFences_) {
+        PIXELVR_VK_CHECK(vkCreateFence(device_, &fenceInfo, nullptr, &f));
+    }
 
     // A second command buffer + fence dedicated to video texture uploads.
     PIXELVR_VK_CHECK(vkAllocateCommandBuffers(device_, &allocInfo, &uploadCmd_));
@@ -1013,7 +1383,8 @@ void VulkanRenderer::recenterScreen(const float headPos[3],
         screenYaw_ = std::atan2(-fx, -fz);
         sphereYaw_ = std::atan2(fx, -fz);
     }
-    screenDistance_ = 3.0f;
+    // Distance is deliberately kept: recenter only re-aims the screen, so a
+    // distance the viewer set with the thumbstick survives.
 }
 
 void VulkanRenderer::adjustScreenDistance(float delta) {
@@ -1028,12 +1399,6 @@ void VulkanRenderer::setBrowserItems(bool visible, const std::string& title,
     browserItems_ = items;
     browserSelected_ = selected;
     browserStatus_ = status;
-
-    browserRows_.clear();
-    browserRows_.reserve(items.size());
-    for (const auto& it : items) {
-        browserRows_.push_back(it.name);
-    }
 
     const int total = static_cast<int>(browserItems_.size());
     const int kCardsPerPage = (browserViewMode_ == BrowserViewMode::BigCards) ? 6 :
@@ -1051,51 +1416,8 @@ void VulkanRenderer::setBrowserItems(bool visible, const std::string& title,
     }
 }
 
-void VulkanRenderer::setBrowser(bool visible, const std::string& title,
-                                const std::vector<std::string>& rows, int selected,
-                                const std::string& status) {
-    browserVisible_ = visible;
-    browserTitle_ = title;
-    browserRows_ = rows;
-    browserSelected_ = selected;
-    browserStatus_ = status;
-
-    browserItems_.clear();
-    browserItems_.reserve(rows.size());
-    for (const auto& r : rows) {
-        BrowserItem item;
-        item.name = r;
-        if (r.find("..") != std::string::npos) {
-            item.isBack = true;
-            item.tag = "UP";
-        } else if (r.back() == '/') {
-            item.isDir = true;
-            item.tag = "DIR";
-        } else {
-            item.isVideo = true;
-            item.tag = "VIDEO";
-        }
-        browserItems_.push_back(std::move(item));
-    }
-
-    const int total = static_cast<int>(browserRows_.size());
-    const int kCardsPerPage = (browserViewMode_ == BrowserViewMode::BigCards) ? 6 :
-                              (browserViewMode_ == BrowserViewMode::MiniCards ? 12 : 8);
-    const int rowStep = (browserViewMode_ == BrowserViewMode::BigCards) ? 3 :
-                        (browserViewMode_ == BrowserViewMode::MiniCards ? 4 : 1);
-    const int maxFirst = std::max(0, ((total + rowStep - 1) / rowStep * rowStep) - kCardsPerPage);
-    if (browserFirst_ > maxFirst) {
-        browserFirst_ = maxFirst;
-    }
-    if (browserSelected_ < browserFirst_) {
-        browserFirst_ = (browserSelected_ / rowStep) * rowStep;
-    } else if (browserSelected_ >= browserFirst_ + kCardsPerPage) {
-        browserFirst_ = ((browserSelected_ - kCardsPerPage + rowStep) / rowStep) * rowStep;
-    }
-}
-
 void VulkanRenderer::scrollBrowser(int deltaRows) {
-    const int total = static_cast<int>(browserItems_.empty() ? browserRows_.size() : browserItems_.size());
+    const int total = static_cast<int>(browserItems_.size());
     const int kCardsPerPage = (browserViewMode_ == BrowserViewMode::BigCards) ? 6 :
                               (browserViewMode_ == BrowserViewMode::MiniCards ? 12 : 8);
     const int rowStep = (browserViewMode_ == BrowserViewMode::BigCards) ? 3 :
@@ -1104,29 +1426,42 @@ void VulkanRenderer::scrollBrowser(int deltaRows) {
     browserFirst_ = std::clamp(browserFirst_ + deltaRows * rowStep, 0, maxFirst);
 }
 
-void VulkanRenderer::clearCardThumbnails() {
-    for (int i = 0; i < 12; ++i) {
-        if (cardThumbs_[i].view != VK_NULL_HANDLE) {
-            vkDestroyImageView(device_, cardThumbs_[i].view, nullptr);
-            cardThumbs_[i].view = VK_NULL_HANDLE;
-        }
-        if (cardThumbs_[i].image != VK_NULL_HANDLE) {
-            vkDestroyImage(device_, cardThumbs_[i].image, nullptr);
-            cardThumbs_[i].image = VK_NULL_HANDLE;
-        }
-        if (cardThumbs_[i].memory != VK_NULL_HANDLE) {
-            vkFreeMemory(device_, cardThumbs_[i].memory, nullptr);
-            cardThumbs_[i].memory = VK_NULL_HANDLE;
-        }
-        // Retain cardThumbs_[i].set allocated from pool so it can be reused without pool leaks
-        cardThumbs_[i].path.clear();
-        cardThumbs_[i].ready = false;
+void VulkanRenderer::releaseThumbSlot(int i) {
+    if (cardThumbs_[i].view != VK_NULL_HANDLE) {
+        vkDestroyImageView(device_, cardThumbs_[i].view, nullptr);
+        cardThumbs_[i].view = VK_NULL_HANDLE;
     }
+    if (cardThumbs_[i].image != VK_NULL_HANDLE) {
+        vkDestroyImage(device_, cardThumbs_[i].image, nullptr);
+        cardThumbs_[i].image = VK_NULL_HANDLE;
+    }
+    if (cardThumbs_[i].memory != VK_NULL_HANDLE) {
+        vkFreeMemory(device_, cardThumbs_[i].memory, nullptr);
+        cardThumbs_[i].memory = VK_NULL_HANDLE;
+    }
+    // Retain cardThumbs_[i].set allocated from pool so it can be reused without pool leaks
+    cardThumbs_[i].path.clear();
+    cardThumbs_[i].ready = false;
+}
+
+void VulkanRenderer::clearCardThumbnails() {
+    for (int i = 0; i < kCardThumbSlots; ++i) {
+        releaseThumbSlot(i);
+    }
+}
+
+void VulkanRenderer::updateScrubPreview(const uint8_t* rgba, int width, int height,
+                                        double seconds) {
+    updateCardThumbnail(kScrubThumbSlot, "scrub@" + std::to_string(seconds), rgba, width, height);
+}
+
+void VulkanRenderer::clearScrubPreview() {
+    if (device_ != VK_NULL_HANDLE) releaseThumbSlot(kScrubThumbSlot);
 }
 
 void VulkanRenderer::updateCardThumbnail(int slot, const std::string& path,
                                          const uint8_t* rgba, int width, int height) {
-    if (slot < 0 || slot >= 12 || !rgba || width <= 0 || height <= 0 ||
+    if (slot < 0 || slot > kScrubThumbSlot || !rgba || width <= 0 || height <= 0 ||
         textPool_ == VK_NULL_HANDLE || textSetLayout_ == VK_NULL_HANDLE) {
         return;
     }
@@ -1270,16 +1605,40 @@ void VulkanRenderer::updateCardThumbnail(int slot, const std::string& path,
     PIXELVR_LOG_INFO("VulkanRenderer: uploaded card thumbnail slot %d -> %s", slot, path.c_str());
 }
 
+int VulkanRenderer::keyboardKeyCode(int index) {
+    const auto& keys = hub::keyboardKeys();
+    return (index >= 0 && index < static_cast<int>(keys.size())) ? keys[index].code : -1;
+}
+
+int VulkanRenderer::keyboardCursorAtPointer() const {
+    if (!keyboardFieldHovered_ || kbCaretStops_.empty()) return -1;
+    int best = kbCaretStops_.front().second;
+    float bestD = 1e9f;
+    for (const auto& [x, byteIdx] : kbCaretStops_) {
+        const float d = std::fabs(x - keyboardFieldHitX_);
+        if (d < bestD) {
+            bestD = d;
+            best = byteIdx;
+        }
+    }
+    return best;
+}
+
+char VulkanRenderer::keyboardKeyChar(int index, bool shift, bool symbols) {
+    const auto& keys = hub::keyboardKeys();
+    if (index < 0 || index >= static_cast<int>(keys.size())) return 0;
+    const hub::KbKey& k = keys[static_cast<std::size_t>(index)];
+    return symbols ? k.sym : (shift ? k.upper : k.lower);
+}
+
 void VulkanRenderer::setSettings(bool visible, const std::string& title,
-                                 const std::vector<std::string>& rows, int selected,
-                                 const std::string& status,
-                                 const std::vector<uint8_t>& enabled) {
+                                 const std::vector<SettingsRowVis>& rows, int selected,
+                                 const std::string& status) {
     settingsVisible_ = visible;
     settingsTitle_ = title;
     settingsRows_ = rows;
     settingsSelected_ = selected;
     settingsStatus_ = status;
-    settingsEnabled_ = enabled;
 }
 
 void VulkanRenderer::setStats(bool visible, const std::vector<std::string>& lines) {
@@ -1305,10 +1664,14 @@ void VulkanRenderer::updatePointer() {
     browserPageBtnHovered_ = -1;
     settingsHovered_ = -1;
     settingsRow_ = -1;
+    settingsSegmentHovered_ = -1;
     downloadsHovered_ = -1;
     downloadsBtnHovered_ = -1;
+    downloadsJobBtnHovered_ = -1;
     actionMenuBtnHovered_ = -1;
     actionMenuKeyHovered_ = -1;
+    keyboardKeyHovered_ = -1;
+    keyboardFieldHovered_ = false;
 
     if (pointerSuppressed_) {
         return;
@@ -1325,32 +1688,12 @@ void VulkanRenderer::updatePointer() {
     }
 
     using namespace math;
-    Mat4 panelBase;
-    const float uiDist = std::clamp(uiDistance_, 1.2f, 3.5f);
-    if (uiFollowMode_ == 0 || projectionMode_ == ProjectionMode::Flat) {
-        // Mode 0: Rock-solid World Lock (Default, zero drift/tilt)
-        const float dist = (projectionMode_ == ProjectionMode::Flat) ? uiDist : std::min(uiDist, 2.0f);
-        const Vec3 center{screenPivot_[0] + screenForward_[0] * dist,
-                          screenPivot_[1] + screenForward_[1] * dist,
-                          screenPivot_[2] + screenForward_[2] * dist};
-        const Mat4 orient = orientFromYawPitch(screenYaw_, recenterPitch_);
-        if (projectionMode_ == ProjectionMode::Flat) {
-            panelBase = multiply(translation(center), orient);
-        } else {
-            panelBase = multiply(translation(center), multiply(orient, rotationX(-0.22f)));
-        }
-    } else {
-        // Mode 1: Smooth Gaze Follow in spherical mode
-        const float sphereDist = std::min(uiDist, 2.0f);
-        const float followYaw = sphereFollowInit_ ? sphereFollowYaw_ : screenYaw_;
-        const Vec3 forward{std::sin(followYaw), 0.0f, -std::cos(followYaw)};
-        const Vec3 center{screenPivot_[0] + forward.x * sphereDist,
-                          screenPivot_[1] + forward.y * sphereDist,
-                          screenPivot_[2] + forward.z * sphereDist};
-        const Mat4 orient = orientFromYawPitch(followYaw, recenterPitch_);
-        panelBase = multiply(translation(center), multiply(orient, rotationX(-0.22f)));
-    }
-    const Mat4 inv = rigidInverse(panelBase);
+    const PanelPlacement placement = computePanelPlacement(
+        uiDistance_, projectionMode_ == ProjectionMode::Flat, uiFollowMode_, screenPivot_,
+        screenForward_, screenYaw_, recenterPitch_,
+        sphereFollowInit_ ? sphereFollowYaw_ : screenYaw_);
+    const Mat4 inv = rigidInverse(placement.base);
+    const float bendR = (panelCurve_ > 0.01f) ? placement.dist / panelCurve_ : 0.0f;
 
     // Prefer the right hand; fall back to the left. A hand whose laser is off
     // takes no part in the raycast.
@@ -1365,116 +1708,114 @@ void VulkanRenderer::updatePointer() {
         const Vec3 dir = normalize(rotate(q, Vec3{0.0f, 0.0f, -1.0f}));
         const Vec3 oL = transformPoint(inv, origin);
         const Vec3 dL = transformDir(inv, dir);
-        if (dL.z > -1e-4f) {
-            continue;  // Ray must travel toward the panel's front (local -Z).
-        }
-        const float t = -oL.z / dL.z;
-        if (t <= 0.0f) {
-            continue;
-        }
-        const float hx = oL.x + t * dL.x;
-        const float hyy = oL.y + t * dL.y;
-        const Vec3 world = origin + dir * t;
 
-        // 0. Virtual Keyboard takes top focus priority
-        if (kbOpen) {
-            // First priority: Check if pointing directly at the virtual keyboard overlay keys
-            if (keyboardModal_.hasTransform) {
-                const auto& m = keyboardModal_.transform;
-                // Column 0: Local X axis (right)
-                const Vec3 kbRight{m[0][0], m[1][0], m[2][0]};
-                // Column 1: Local Y axis (up)
-                const Vec3 kbUp{m[0][1], m[1][1], m[2][1]};
-                // Column 2: Local Z axis (face normal pointing toward viewer)
-                const Vec3 kbNormal{m[0][2], m[1][2], m[2][2]};
-                // Column 3: Translation (center)
-                const Vec3 kbCenter{m[0][3], m[1][3], m[2][3]};
-
-                const float denom = dot(dir, kbNormal);
-                if (denom < -1e-4f) { // Ray points into front of keyboard
-                    const float tKb = dot(kbCenter - origin, kbNormal) / denom;
-                    if (tKb > 0.05f && tKb < 3.5f) {
-                        const Vec3 hitP = origin + dir * tKb;
-                        const Vec3 rel = hitP - kbCenter;
-                        const float localX = dot(rel, kbRight);
-                        const float localY = dot(rel, kbUp);
-                        // Overlay width is 1.05m (halfW = 0.525m). Height is ~0.40m (halfH = 0.20m).
-                        // Allow generous interactive margin (0.58m x 0.26m)
-                        if (std::fabs(localX) <= 0.58f && std::fabs(localY) <= 0.26f) {
-                            pointerActive_ = true;
-                            pointerHand_ = h;
-                            pointerHit_[0] = hitP.x;
-                            pointerHit_[1] = hitP.y;
-                            pointerHit_[2] = hitP.z;
+        // Hit on the panel surface, in panel coordinates (hx = arc length along
+        // the panel when curved, so all layout rects stay in flat units).
+        bool panelHit = false;
+        float hx = 0.0f;
+        float hyy = 0.0f;
+        Vec3 world{0.0f, 0.0f, 0.0f};
+        if (bendR > 0.0f) {
+            // Vertical cylinder of radius bendR with its axis at local (0, *, bendR).
+            const float ox = oL.x;
+            const float oz = oL.z - bendR;
+            const float a = dL.x * dL.x + dL.z * dL.z;
+            if (a > 1e-8f) {
+                const float b = 2.0f * (ox * dL.x + oz * dL.z);
+                const float c = ox * ox + oz * oz - bendR * bendR;
+                const float disc = b * b - 4.0f * a * c;
+                if (disc >= 0.0f) {
+                    const float sq = std::sqrt(disc);
+                    const float roots[2] = {(-b - sq) / (2.0f * a), (-b + sq) / (2.0f * a)};
+                    for (float t : roots) {
+                        const float pz = oL.z + t * dL.z;
+                        if (t > 0.0f && pz < bendR) {  // front half, toward the panel
+                            const float px = oL.x + t * dL.x;
+                            hx = bendR * std::atan2(px, bendR - pz);
+                            hyy = oL.y + t * dL.y;
+                            world = origin + dir * t;
+                            panelHit = true;
                             break;
                         }
                     }
                 }
             }
-            // Second priority: Check if pointing at the floating modal text box directly above the keyboard
-            // Modal box center is cy = 0.16f, half-width 0.23f, half-height 0.13f
-            if (std::fabs(hx) <= 0.25f && std::fabs(hyy - 0.16f) <= 0.14f) {
-                pointerActive_ = true;
-                pointerHand_ = h;
-                pointerHit_[0] = world.x;
-                pointerHit_[1] = world.y;
-                pointerHit_[2] = world.z;
+        } else if (dL.z < -1e-4f) {  // ray travels toward the panel's front (local -Z)
+            const float t = -oL.z / dL.z;
+            if (t > 0.0f) {
+                hx = oL.x + t * dL.x;
+                hyy = oL.y + t * dL.y;
+                world = origin + dir * t;
+                panelHit = true;
+            }
+        }
+        auto hitHere = [&](float px, float py, float pz) {
+            pointerActive_ = true;
+            pointerHand_ = h;
+            pointerHit_[0] = px;
+            pointerHit_[1] = py;
+            pointerHit_[2] = pz;
+        };
+        const bool inPanel = panelHit && std::fabs(hx) <= kPanelW && std::fabs(hyy) <= kPanelTop;
+
+        // 0. In-app keyboard takes top priority: it covers the whole panel.
+        if (kbOpen) {
+            if (inPanel) {
+                hitHere(world.x, world.y, world.z);
+                const auto& keys = hub::keyboardKeys();
+                for (std::size_t k = 0; k < keys.size(); ++k) {
+                    if (keys[k].r.contains(hx, hyy, 0.004f)) {
+                        keyboardKeyHovered_ = static_cast<int>(k);
+                        break;
+                    }
+                }
+                if (keyboardKeyHovered_ < 0 &&
+                    UiRect{0.0f, hub::kKbFieldY, hub::kKbFieldHalfW, hub::kKbFieldHalfH}
+                        .contains(hx, hyy, 0.006f)) {
+                    keyboardFieldHovered_ = true;
+                    keyboardFieldHitX_ = hx;
+                }
                 break;
             }
             continue;
         }
 
-        // 1. File Action Submenu Modal takes next priority
+        // 1. File Action Submenu Modal
         if (actionMenuOpen) {
-            if (hx >= -kPanelW && hx <= kPanelW && hyy >= -kPanelTop && hyy <= kPanelTop) {
-                pointerActive_ = true;
-                pointerHand_ = h;
-                pointerHit_[0] = world.x;
-                pointerHit_[1] = world.y;
-                pointerHit_[2] = world.z;
-
+            if (inPanel) {
+                hitHere(world.x, world.y, world.z);
+                const int optCount = static_cast<int>(actionMenu_.options.size());
                 if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5) {
-                    const int optCount = static_cast<int>(actionMenu_.options.size());
-                    const float stepY = 0.068f;
-                    const float spanY = static_cast<float>(std::max(0, optCount - 1)) * stepY;
-                    const float startY = -0.040f + 0.5f * spanY;
-                    const float btnHalfW = 0.38f;
-                    const float btnHalfH = 0.030f;
                     for (int i = 0; i < optCount; ++i) {
-                        const float cy = startY - static_cast<float>(i) * stepY;
-                        if (std::fabs(hx) <= btnHalfW && std::fabs(hyy - cy) <= btnHalfH) {
+                        if (hub::actionMenuOption(i, optCount).contains(hx, hyy, 0.002f)) {
                             actionMenuBtnHovered_ = i;
                             break;
                         }
                     }
                 } else if (actionMenu_.page == 2) {
-                    // Delete confirmation: Confirm (0) vs Cancel (1)
-                    const float cy = -0.12f;
-                    const float btnHalfW = 0.13f;
-                    const float btnHalfH = 0.042f;
-                    if (std::fabs(hyy - cy) <= btnHalfH) {
-                        if (std::fabs(hx - (-0.15f)) <= btnHalfW) actionMenuBtnHovered_ = 0;
-                        else if (std::fabs(hx - 0.15f) <= btnHalfW) actionMenuBtnHovered_ = 1;
+                    for (int i = 0; i < 2; ++i) {
+                        if (hub::deleteConfirmButton(i).contains(hx, hyy)) actionMenuBtnHovered_ = i;
                     }
                 } else if (actionMenu_.page == 4) {
-                    // SMB Share Editor Modal: Top fields 0..6: cy = 0.19f - i * 0.054f
-                    const int optCount = static_cast<int>(actionMenu_.options.size());
-                    const int fieldCount = std::min(optCount, 7);
-                    for (int i = 0; i < fieldCount; ++i) {
-                        const float cy = 0.19f - static_cast<float>(i) * 0.054f;
-                        if (std::fabs(hx) <= 0.42f && std::fabs(hyy - cy) <= 0.024f) {
+                    // SMB share editor form (fixed option ids, see hub::smbFieldWell)
+                    for (int i = 0; i < 7 && i < optCount; ++i) {
+                        if (hub::smbFieldHit(i).contains(hx, hyy)) {
                             actionMenuBtnHovered_ = i;
                             break;
                         }
                     }
-                    if (actionMenuBtnHovered_ < 0 && std::fabs(hyy - (-0.25f)) <= 0.028f) {
-                        if (optCount == 8) {
-                            if (std::fabs(hx - (-0.15f)) <= 0.13f) actionMenuBtnHovered_ = 7; // Save
-                            else if (std::fabs(hx - 0.15f) <= 0.13f) actionMenuBtnHovered_ = 8; // Cancel
-                        } else if (optCount >= 9) {
-                            if (std::fabs(hx - (-0.24f)) <= 0.11f) actionMenuBtnHovered_ = 7; // Save
-                            else if (std::fabs(hx) <= 0.10f) actionMenuBtnHovered_ = 8; // Delete
-                            else if (std::fabs(hx - 0.24f) <= 0.10f) actionMenuBtnHovered_ = 9; // Cancel
+                    if (actionMenuBtnHovered_ == 2) {
+                        for (int seg = 0; seg < 2; ++seg) {
+                            if (hub::smbAuthSegment(seg).contains(hx, hyy, 0.004f)) actionMenuKeyHovered_ = seg;
+                        }
+                    }
+                    if (actionMenuBtnHovered_ < 0) {
+                        for (int id : {7, 8, 9, 10}) {
+                            if (id == 9 && optCount < 10) continue;  // no Delete for a new share
+                            if (hub::smbButton(id).contains(hx, hyy, 0.004f)) {
+                                actionMenuBtnHovered_ = (id == 10) ? 8 : id;  // close X = cancel
+                                break;
+                            }
                         }
                     }
                 }
@@ -1482,171 +1823,75 @@ void VulkanRenderer::updatePointer() {
             }
         }
 
-        // 1. Folder Download Confirmation Modal takes top priority
+        // 2. Folder Download Confirmation Modal
         if (modalOpen) {
-            if (hx >= -kPanelW && hx <= kPanelW && hyy >= -kPanelTop && hyy <= kPanelTop) {
-                pointerActive_ = true;
-                pointerHand_ = h;
-                pointerHit_[0] = world.x;
-                pointerHit_[1] = world.y;
-                pointerHit_[2] = world.z;
-                // Two action buttons at cy = -0.14f inside modal
-                if (std::fabs(hyy - (-0.14f)) <= 0.045f) {
-                    if (std::fabs(hx - (-0.14f)) <= 0.12f) downloadsBtnHovered_ = 0;
-                    else if (std::fabs(hx - 0.14f) <= 0.12f) downloadsBtnHovered_ = 1;
+            if (inPanel) {
+                hitHere(world.x, world.y, world.z);
+                for (int i = 0; i < 2; ++i) {
+                    if (hub::confirmModalButton(i).contains(hx, hyy)) downloadsBtnHovered_ = i;
                 }
                 break;
             }
         }
 
-        // 2. Unified Spatial Hub (1.80m x 1.12m, hx in [-0.90, 0.90], hyy in [-0.56, 0.56])
-        if (hubOpen && hx >= -kPanelW && hx <= kPanelW &&
-            hyy >= -kPanelTop && hyy <= kPanelTop) {
-            pointerActive_ = true;
-            pointerHand_ = h;
-            pointerHit_[0] = world.x;
-            pointerHit_[1] = world.y;
-            pointerHit_[2] = world.z;
+        // 3. Unified Spatial Hub
+        if (hubOpen && inPanel) {
+            hitHere(world.x, world.y, world.z);
+            const int page = settingsVisible_ ? 2 : (downloadsVisible_ ? 1 : 0);
 
-            // Left Navigation Rail: hx in [-0.90, -0.52]
-            if (hx >= -kPanelW && hx <= kRailRight) {
-                // Top 3 primary section tabs: Files (0), Downloads (1), Settings (2)
-                const float mainTabY[3] = {0.32f, 0.22f, 0.12f};
+            // Left navigation rail
+            if (hx <= kRailRight) {
                 for (int s = 0; s < 3; ++s) {
-                    if (std::fabs(hyy - mainTabY[s]) <= 0.042f) {
+                    if (hub::mainTab(s).contains(hx, hyy, hub::kHitPad)) {
                         browserSidebarHovered_ = s;
                         break;
                     }
                 }
-                // Sub-navigation items (indices 3..8, and 9 if vaultUnlocked_)
                 if (browserSidebarHovered_ < 0) {
-                    const int activeMainTab = settingsVisible_ ? 2 : (downloadsVisible_ ? 1 : 0);
-                    if (activeMainTab == 2) {
-                        const float setSubY[5] = {0.02f, -0.07f, -0.16f, -0.25f, -0.34f};
-                        const int numSub = vaultUnlocked_ ? 5 : 4;
-                        for (int sub = 0; sub < numSub; ++sub) {
-                            if (std::fabs(hyy - setSubY[sub]) <= 0.038f) {
-                                browserSidebarHovered_ = 3 + sub;
-                                break;
-                            }
+                    const int numSub = (page == 1) ? 3 : (page == 2 ? (vaultUnlocked_ ? 5 : 4)
+                                                                    : (vaultUnlocked_ ? 6 : 5));
+                    for (int sub = 0; sub < numSub; ++sub) {
+                        if (hub::subTab(page, sub).contains(hx, hyy, hub::kHitPad)) {
+                            browserSidebarHovered_ = 3 + sub;
+                            break;
                         }
-                        if (browserSidebarHovered_ < 0 && vaultUnlocked_) {
-                            if (std::fabs(hyy - (-0.46f)) <= 0.030f) {
-                                browserSidebarHovered_ = 9; // Lock Vault button
-                            }
-                        }
-                    } else if (activeMainTab == 1) { // Downloads
-                        const float dlSubY[3] = {-0.05f, -0.14f, -0.23f};
-                        for (int sub = 0; sub < 3; ++sub) {
-                            if (std::fabs(hyy - dlSubY[sub]) <= 0.038f) {
-                                browserSidebarHovered_ = 3 + sub;
-                                break;
-                            }
-                        }
-                    } else { // Files
-                        const float subTabY[6] = {-0.04f, -0.11f, -0.18f, -0.25f, -0.32f, -0.39f};
-                        const int numSubTabs = vaultUnlocked_ ? 6 : 5;
-                        for (int sub = 0; sub < numSubTabs; ++sub) {
-                            if (std::fabs(hyy - subTabY[sub]) <= 0.032f) {
-                                browserSidebarHovered_ = 3 + sub;
-                                break;
-                            }
-                        }
-                        if (browserSidebarHovered_ < 0 && vaultUnlocked_) {
-                            if (std::fabs(hyy - (-0.47f)) <= 0.030f) {
-                                browserSidebarHovered_ = 9; // Lock Vault button
-                            }
-                        }
+                    }
+                    if (browserSidebarHovered_ < 0 && vaultUnlocked_ &&
+                        hub::lockVaultButton(page).contains(hx, hyy)) {
+                        browserSidebarHovered_ = 9;  // Lock Vault button
                     }
                 }
                 break;
             }
 
-            // Top Content Area: hx in [-0.49, +0.90]
             if (browserVisible_) {
-                // Top header buttons: [<] at cx=0.52, [>] at cx=0.74, [View] at cx=0.35, [QuickPath] at cx=0.14, [Up] at cx=-0.43, cy=0.455
-                if (std::fabs(hyy - 0.455f) <= 0.036f) {
-                    const bool canGoUp = (!browserItems_.empty() && browserItems_[0].isBack);
-                    if (canGoUp && std::fabs(hx - (-0.43f)) <= 0.042f) {
-                        browserPageBtnHovered_ = 4; // Up to parent folder
-                        break;
-                    } else if (std::fabs(hx - 0.52f) <= 0.040f) {
-                        browserPageBtnHovered_ = 0;
-                        break;
-                    } else if (std::fabs(hx - 0.74f) <= 0.040f) {
-                        browserPageBtnHovered_ = 1;
-                        break;
-                    } else if (std::fabs(hx - 0.35f) <= 0.085f) {
-                        browserPageBtnHovered_ = 2; // View Mode cycle
-                        break;
-                    } else if (std::fabs(hx - 0.14f) <= 0.090f) {
-                        browserPageBtnHovered_ = 3; // Quick Path bookmark
+                const bool canGoUp = (!browserItems_.empty() && browserItems_[0].isBack);
+                for (int id : {4, 0, 1, 2, 3, 5}) {
+                    if (id == 4 && !canGoUp) continue;
+                    if (hub::headerButton(id).contains(hx, hyy, hub::kHitPad)) {
+                        browserPageBtnHovered_ = id;
                         break;
                     }
                 }
+                if (browserPageBtnHovered_ >= 0) break;
 
-                // Media Card Grid / List based on browserViewMode_
-                const int total = static_cast<int>(browserItems_.empty() ? browserRows_.size() : browserItems_.size());
-                if (total > 0) {
-                    if (browserViewMode_ == BrowserViewMode::BigCards) {
-                        const float colX[3] = {-0.25f, 0.20f, 0.65f};
-                        const float rowY[2] = {0.16f, -0.24f};
-                        int col = -1;
-                        for (int c = 0; c < 3; ++c) {
-                            if (std::fabs(hx - colX[c]) <= 0.21f) { col = c; break; }
+                const int total = static_cast<int>(browserItems_.size());
+                const int perPage = hub::cardsPerPage(browserViewMode_);
+                for (int slot = 0; slot < perPage; ++slot) {
+                    const hub::CardLayout lay = hub::browserCard(browserViewMode_, slot);
+                    const UiRect card{lay.cx, lay.cy, lay.cardHalfW, lay.cardHalfH};
+                    if (card.contains(hx, hyy, hub::kHitPad)) {
+                        const int targetIdx = browserFirst_ + slot;
+                        if (targetIdx >= 0 && targetIdx < total) {
+                            pointerRow_ = targetIdx;
+                            browserHovered_ = targetIdx;
                         }
-                        int row = -1;
-                        for (int r = 0; r < 2; ++r) {
-                            if (std::fabs(hyy - rowY[r]) <= 0.185f) { row = r; break; }
-                        }
-                        if (col >= 0 && row >= 0) {
-                            const int idxInPage = row * 3 + col;
-                            const int targetIdx = browserFirst_ + idxInPage;
-                            if (targetIdx >= 0 && targetIdx < total) {
-                                pointerRow_ = targetIdx;
-                                browserHovered_ = targetIdx;
-                            }
-                        }
-                    } else if (browserViewMode_ == BrowserViewMode::MiniCards) {
-                        const float colX[4] = {-0.285f, 0.045f, 0.375f, 0.705f};
-                        const float rowY[3] = {0.20f, -0.06f, -0.32f};
-                        int col = -1;
-                        for (int c = 0; c < 4; ++c) {
-                            if (std::fabs(hx - colX[c]) <= 0.155f) { col = c; break; }
-                        }
-                        int row = -1;
-                        for (int r = 0; r < 3; ++r) {
-                            if (std::fabs(hyy - rowY[r]) <= 0.120f) { row = r; break; }
-                        }
-                        if (col >= 0 && row >= 0) {
-                            const int idxInPage = row * 4 + col;
-                            const int targetIdx = browserFirst_ + idxInPage;
-                            if (targetIdx >= 0 && targetIdx < total) {
-                                pointerRow_ = targetIdx;
-                                browserHovered_ = targetIdx;
-                            }
-                        }
-                    } else { // CompactList (1 column x 8 rows)
-                        if (std::fabs(hx - 0.20f) <= 0.65f) {
-                            const float rowY[8] = {0.300f, 0.210f, 0.120f, 0.030f, -0.060f, -0.150f, -0.240f, -0.330f};
-                            int row = -1;
-                            for (int r = 0; r < 8; ++r) {
-                                if (std::fabs(hyy - rowY[r]) <= 0.042f) { row = r; break; }
-                            }
-                            if (row >= 0) {
-                                const int targetIdx = browserFirst_ + row;
-                                if (targetIdx >= 0 && targetIdx < total) {
-                                    pointerRow_ = targetIdx;
-                                    browserHovered_ = targetIdx;
-                                }
-                            }
-                        }
+                        break;
                     }
                 }
             } else if (downloadsVisible_) {
-                // Bottom action buttons at cy = -0.44f
-                const float dbtnCy = -0.44f;
-                if (!downloadsButtons_.empty() && std::fabs(hyy - dbtnCy) <= 0.042f) {
+                if (!downloadsButtons_.empty() &&
+                    std::fabs(hyy - hub::kDownloadsFooterY) <= kDlBtnH * 0.5f + hub::kHitPad) {
                     std::vector<float> cx, halfW;
                     downloadsButtonLayout(cx, halfW);
                     for (std::size_t i = 0; i < cx.size(); ++i) {
@@ -1656,47 +1901,44 @@ void VulkanRenderer::updatePointer() {
                         }
                     }
                 } else {
-                    // Up to 4 wide job cards in content area
-                    const int total = static_cast<int>(downloadJobs_.empty() ? downloadsRows_.size() : downloadJobs_.size());
+                    const int total = static_cast<int>(downloadJobs_.empty() ? downloadsRows_.size()
+                                                                             : downloadJobs_.size());
                     int visIdx = 0;
-                    for (int i = 0; i < total && visIdx < 4; ++i) {
-                        if (!downloadJobs_.empty()) {
-                            const int st = downloadJobs_[i].state;
-                            if (downloadsFilter_ == 1 && st != 0 && st != 3 && st != 4) continue;
-                            if (downloadsFilter_ == 2 && st != 1) continue;
+                    for (int i = 0; i < total && visIdx < hub::kMaxDownloadCards; ++i) {
+                        if (!downloadJobs_.empty() && !downloadJobVisible(downloadJobs_[i].state)) {
+                            continue;
                         }
-                        const float ry = 0.24f - static_cast<float>(visIdx) * 0.175f;
-                        if (std::fabs(hyy - ry) <= 0.075f && hx >= -0.46f && hx <= 0.86f) {
+                        if (hub::downloadCard(visIdx).contains(hx, hyy, hub::kHitPad)) {
                             downloadsHovered_ = i;
+                            if (!downloadJobs_.empty()) {
+                                for (int b = 0; b < 2; ++b) {
+                                    if (hub::downloadJobButton(visIdx, b).contains(hx, hyy, 0.004f)) {
+                                        downloadsJobBtnHovered_ = b;
+                                    }
+                                }
+                            }
                             break;
                         }
                         ++visIdx;
                     }
                 }
             } else if (settingsVisible_) {
-                // Settings cards in 2-column grid
                 const int total = static_cast<int>(settingsRows_.size());
-                const int maxVis = (total > 8) ? 10 : 8;
+                const int maxVis = hub::settingsMaxVisible(total);
                 for (int i = 0; i < total && i < maxVis; ++i) {
-                    const int c = i % 2;
-                    const int r = i / 2;
-                    const float cx = (c == 0) ? -0.135f : 0.535f;
-                    float ry = 0.0f;
-                    float cardHalfH = 0.0f;
-                    if (total <= 6) {
-                        ry = 0.22f - static_cast<float>(r) * 0.24f;
-                        cardHalfH = 0.098f;
-                    } else if (total <= 8) {
-                        ry = 0.26f - static_cast<float>(r) * 0.185f;
-                        cardHalfH = 0.078f;
-                    } else {
-                        ry = 0.28f - static_cast<float>(r) * 0.152f;
-                        cardHalfH = 0.066f;
-                    }
-                    if (std::fabs(hx - cx) <= 0.315f &&
-                        std::fabs(hyy - ry) <= cardHalfH) {
+                    const hub::SettingsCard L = hub::settingsCard(i, total);
+                    if (UiRect{L.cx, L.cy, L.halfW, L.halfH}.contains(hx, hyy)) {
                         settingsRow_ = i;
                         settingsHovered_ = i;
+                        const SettingsRowVis& row = settingsRows_[static_cast<std::size_t>(i)];
+                        if (row.kind == kSettingsKindSegmented && !row.options.empty()) {
+                            const int n = static_cast<int>(row.options.size());
+                            for (int s = 0; s < n; ++s) {
+                                if (hub::settingsSegment(L, s, n).contains(hx, hyy, 0.003f)) {
+                                    settingsSegmentHovered_ = s;
+                                }
+                            }
+                        }
                         break;
                     }
                 }
@@ -1704,21 +1946,17 @@ void VulkanRenderer::updatePointer() {
             break;
         }
 
-        // 3. In-Playback Floating Cinema Transport Dock (only when Hub is closed)
-        if (!controlBar) continue;
+        // 4. In-Playback Floating Cinema Transport Dock (only when Hub is closed)
+        if (!controlBar || !panelHit) continue;
 
         // Draggable timeline track (top band of dock)
         {
             const float trackY = kBarY + 0.125f;
             if (hyy >= trackY - 0.045f && hyy <= trackY + 0.045f &&
                 hx >= -0.58f && hx <= 0.58f) {
-                pointerActive_ = true;
-                pointerHand_ = h;
+                hitHere(world.x, world.y, world.z);
                 pointerOnTimeline_ = true;
                 pointerScrub_ = std::clamp((hx + 0.56f) / 1.12f, 0.0f, 1.0f);
-                pointerHit_[0] = world.x;
-                pointerHit_[1] = world.y;
-                pointerHit_[2] = world.z;
                 break;
             }
         }
@@ -1726,30 +1964,22 @@ void VulkanRenderer::updatePointer() {
         // Clickable total/remaining time readout (right of scrubber)
         if (transportDuration_ > 0.0 && hx >= 0.58f && hx <= 0.82f &&
             hyy >= kBarY + 0.080f && hyy <= kBarY + 0.170f) {
-            pointerActive_ = true;
-            pointerHand_ = h;
+            hitHere(world.x, world.y, world.z);
             pointerOnTimeToggle_ = true;
-            pointerHit_[0] = world.x;
-            pointerHit_[1] = world.y;
-            pointerHit_[2] = world.z;
             break;
         }
 
-        // Control dock buttons: test all buttons.
+        // Control dock buttons
         for (int b = 0; b < kBtnCount; ++b) {
             const auto cb = static_cast<CtrlButton>(b);
-            if (cb == CtrlButton::Downloads || cb == CtrlButton::Settings || cb == CtrlButton::Download) continue;
             if (cb == CtrlButton::AudioToggle && !hudAudioEnabled_) continue;
             if (cb == CtrlButton::FormatToggle && !hudFormatEnabled_) continue;
             const CtrlButtonRect r = get_ctrl_button_rect(b);
+            if (r.hw <= 0.0f) continue;
             if (hx >= r.cx - r.hw && hx <= r.cx + r.hw &&
                 hyy >= r.cy - r.hh && hyy <= r.cy + r.hh) {
-                pointerActive_ = true;
-                pointerHand_ = h;
+                hitHere(world.x, world.y, world.z);
                 pointerButton_ = b;
-                pointerHit_[0] = world.x;
-                pointerHit_[1] = world.y;
-                pointerHit_[2] = world.z;
                 break;
             }
         }
@@ -1757,47 +1987,26 @@ void VulkanRenderer::updatePointer() {
             break;
         }
 
-        // Catch laser ray on dock background plate so beam never shoots to infinity
+        // Catch the laser on the dock background plate so the beam never shoots to infinity
         if (hx >= -kDockHalfW && hx <= kDockHalfW &&
             hyy >= kBarY - kDockHalfH && hyy <= kBarY + kDockHalfH) {
-            pointerActive_ = true;
-            pointerHand_ = h;
+            hitHere(world.x, world.y, world.z);
             pointerButton_ = -1;
-            pointerHit_[0] = world.x;
-            pointerHit_[1] = world.y;
-            pointerHit_[2] = world.z;
             break;
         }
     }
 }
 
-bool VulkanRenderer::initText() {
-    static const char* const kFonts[] = {
-        "/usr/share/fonts/noto/NotoSans-Medium.ttf",
-        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
-        "/usr/share/fonts/gnu-free/FreeSans.otf",
-        "/usr/share/fonts/TTF/Hack-Regular.ttf",
-        "/usr/share/fonts/truetype/hack/Hack-Regular.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-        "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
-    };
-    for (const char* path : kFonts) {
-        fontAtlas_ = buildFontAtlas(path, 96);
-        if (fontAtlas_.ok) break;
-    }
-    if (!fontAtlas_.ok) {
-        PIXELVR_LOG_WARN("No usable font found; text and browser disabled");
-        return false;
-    }
-
+bool VulkanRenderer::uploadFontAtlas(const FontAtlas& atlas, VkImage& image,
+                                     VkDeviceMemory& memory, VkImageView& view) {
     // R8 SDF atlas. Signed-distance text is scale-independent (the shader does
     // screen-space AA), so one level stays crisp without any mip blur.
     const uint32_t mipLevels = 1;
     VkImageCreateInfo img{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     img.imageType = VK_IMAGE_TYPE_2D;
     img.format = VK_FORMAT_R8_UNORM;
-    img.extent = {static_cast<uint32_t>(fontAtlas_.width),
-                  static_cast<uint32_t>(fontAtlas_.height), 1};
+    img.extent = {static_cast<uint32_t>(atlas.width),
+                  static_cast<uint32_t>(atlas.height), 1};
     img.mipLevels = mipLevels;
     img.arrayLayers = 1;
     img.samples = VK_SAMPLE_COUNT_1_BIT;
@@ -1805,29 +2014,29 @@ bool VulkanRenderer::initText() {
     img.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
                 VK_IMAGE_USAGE_SAMPLED_BIT;
     img.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    PIXELVR_VK_CHECK(vkCreateImage(device_, &img, nullptr, &fontImage_));
+    PIXELVR_VK_CHECK(vkCreateImage(device_, &img, nullptr, &image));
 
     VkMemoryRequirements req{};
-    vkGetImageMemoryRequirements(device_, fontImage_, &req);
+    vkGetImageMemoryRequirements(device_, image, &req);
     VkMemoryAllocateInfo alloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     alloc.allocationSize = req.size;
     alloc.memoryTypeIndex =
         findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    PIXELVR_VK_CHECK(vkAllocateMemory(device_, &alloc, nullptr, &fontMemory_));
-    PIXELVR_VK_CHECK(vkBindImageMemory(device_, fontImage_, fontMemory_, 0));
+    PIXELVR_VK_CHECK(vkAllocateMemory(device_, &alloc, nullptr, &memory));
+    PIXELVR_VK_CHECK(vkBindImageMemory(device_, image, memory, 0));
 
     VkImageViewCreateInfo iv{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-    iv.image = fontImage_;
+    iv.image = image;
     iv.viewType = VK_IMAGE_VIEW_TYPE_2D;
     iv.format = VK_FORMAT_R8_UNORM;
     iv.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     iv.subresourceRange.levelCount = mipLevels;
     iv.subresourceRange.layerCount = 1;
-    PIXELVR_VK_CHECK(vkCreateImageView(device_, &iv, nullptr, &fontView_));
+    PIXELVR_VK_CHECK(vkCreateImageView(device_, &iv, nullptr, &view));
 
     // Upload the atlas through a temporary staging buffer.
     const VkDeviceSize sz =
-        static_cast<VkDeviceSize>(fontAtlas_.width) * fontAtlas_.height;
+        static_cast<VkDeviceSize>(atlas.width) * atlas.height;
     VkBuffer staging = VK_NULL_HANDLE;
     VkDeviceMemory stagingMem = VK_NULL_HANDLE;
     VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
@@ -1846,7 +2055,7 @@ bool VulkanRenderer::initText() {
     vkBindBufferMemory(device_, staging, stagingMem, 0);
     void* mapped = nullptr;
     vkMapMemory(device_, stagingMem, 0, sz, 0, &mapped);
-    std::memcpy(mapped, fontAtlas_.pixels.data(), static_cast<std::size_t>(sz));
+    std::memcpy(mapped, atlas.pixels.data(), static_cast<std::size_t>(sz));
     vkUnmapMemory(device_, stagingMem);
 
     vkResetCommandBuffer(uploadCmd_, 0);
@@ -1861,7 +2070,7 @@ bool VulkanRenderer::initText() {
         b.newLayout = to;
         b.srcAccessMask = src;
         b.dstAccessMask = dst;
-        b.image = fontImage_;
+        b.image = image;
         b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, baseMip, count, 0, 1};
         b.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
@@ -1872,9 +2081,9 @@ bool VulkanRenderer::initText() {
                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT);
     VkBufferImageCopy region{};
     region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    region.imageExtent = {static_cast<uint32_t>(fontAtlas_.width),
-                          static_cast<uint32_t>(fontAtlas_.height), 1};
-    vkCmdCopyBufferToImage(uploadCmd_, staging, fontImage_,
+    region.imageExtent = {static_cast<uint32_t>(atlas.width),
+                          static_cast<uint32_t>(atlas.height), 1};
+    vkCmdCopyBufferToImage(uploadCmd_, staging, image,
                            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
     imgBarrier(0, 1, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_ACCESS_TRANSFER_WRITE_BIT,
@@ -1889,6 +2098,71 @@ bool VulkanRenderer::initText() {
     vkResetFences(device_, 1, &uploadFence_);
     vkDestroyBuffer(device_, staging, nullptr);
     vkFreeMemory(device_, stagingMem, nullptr);
+    return true;
+}
+
+bool VulkanRenderer::initText() {
+    // Bundled Inter (assets/fonts, installed next to the binary) first, then
+    // system fonts. Bold headings use a second atlas when its file is present.
+    std::vector<std::string> fontDirs;
+    if (const char* dir = std::getenv("PIXELVR_FONT_DIR")) fontDirs.emplace_back(dir);
+    if (const char* dir = std::getenv("PIXELVR_SHADER_DIR")) fontDirs.push_back(std::string(dir) + "/../fonts");
+    {
+        std::error_code ec;
+        const std::filesystem::path exe = std::filesystem::read_symlink("/proc/self/exe", ec);
+        if (!ec) fontDirs.push_back((exe.parent_path() / "fonts").string());
+    }
+    fontDirs.emplace_back("fonts");
+#ifdef PIXELVR_FONT_DIR
+    fontDirs.emplace_back(PIXELVR_FONT_DIR);
+#endif
+    auto findFont = [&](const char* file) -> std::string {
+        for (const std::string& d : fontDirs) {
+            std::error_code ec;
+            const std::string path = d + "/" + file;
+            if (std::filesystem::is_regular_file(path, ec)) return path;
+        }
+        return {};
+    };
+    static const char* const kSystemFonts[] = {
+        "/usr/share/fonts/noto/NotoSans-Medium.ttf",
+        "/usr/share/fonts/noto/NotoSans-Regular.ttf",
+        "/usr/share/fonts/gnu-free/FreeSans.otf",
+        "/usr/share/fonts/TTF/Hack-Regular.ttf",
+        "/usr/share/fonts/truetype/hack/Hack-Regular.ttf",
+        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+        "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
+    };
+    std::vector<std::string> regularCandidates;
+    if (std::string f = findFont("Inter-Medium.ttf"); !f.empty()) regularCandidates.push_back(f);
+    for (const char* f : kSystemFonts) regularCandidates.emplace_back(f);
+    for (const std::string& path : regularCandidates) {
+        fontAtlas_ = buildFontAtlas(path.c_str(), 96);
+        if (fontAtlas_.ok) {
+            PIXELVR_LOG_INFO("UI font: %s", path.c_str());
+            break;
+        }
+    }
+    if (!fontAtlas_.ok) {
+        PIXELVR_LOG_WARN("No usable font found; text and browser disabled");
+        return false;
+    }
+    if (!uploadFontAtlas(fontAtlas_, fontImage_, fontMemory_, fontView_)) {
+        return false;
+    }
+    std::vector<std::string> boldCandidates;
+    if (std::string f = findFont("Inter-SemiBold.ttf"); !f.empty()) boldCandidates.push_back(f);
+    boldCandidates.emplace_back("/usr/share/fonts/noto/NotoSans-SemiBold.ttf");
+    boldCandidates.emplace_back("/usr/share/fonts/noto/NotoSans-Bold.ttf");
+    for (const std::string& path : boldCandidates) {
+        fontAtlasBold_ = buildFontAtlas(path.c_str(), 96);
+        if (fontAtlasBold_.ok &&
+            uploadFontAtlas(fontAtlasBold_, fontImageBold_, fontMemoryBold_, fontViewBold_)) {
+            PIXELVR_LOG_INFO("UI heading font: %s", path.c_str());
+            break;
+        }
+        fontAtlasBold_.ok = false;
+    }
 
     // Descriptor set: the font atlas at binding 0.
     VkDescriptorSetLayoutBinding lb{};
@@ -1944,6 +2218,17 @@ bool VulkanRenderer::initText() {
     w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     w.pImageInfo = &dii;
     vkUpdateDescriptorSets(device_, 1, &w, 0, nullptr);
+    // Heading font set (falls back to the regular atlas when no bold font).
+    if (fontAtlasBold_.ok && vkAllocateDescriptorSets(device_, &da, &textSetBold_) == VK_SUCCESS) {
+        VkDescriptorImageInfo bii = dii;
+        bii.imageView = fontViewBold_;
+        VkWriteDescriptorSet wb = w;
+        wb.dstSet = textSetBold_;
+        wb.pImageInfo = &bii;
+        vkUpdateDescriptorSets(device_, 1, &wb, 0, nullptr);
+    } else {
+        textSetBold_ = textSet_;
+    }
 
     // Pre-allocate descriptor sets for the 12 card thumbnail slots
     for (int i = 0; i < 12; ++i) {
@@ -1972,14 +2257,52 @@ bool VulkanRenderer::initText() {
     pl.pPushConstantRanges = &pr;
     PIXELVR_VK_CHECK(
         vkCreatePipelineLayout(device_, &pl, nullptr, &textPipelineLayout_));
+    // Glyphs are instanced: one GlyphInstance (rect, uv, colour) per glyph.
+    VkVertexInputBindingDescription glyphBinding{};
+    glyphBinding.binding = 0;
+    glyphBinding.stride = sizeof(GlyphInstance);
+    glyphBinding.inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+    VkVertexInputAttributeDescription glyphAttrs[3]{};
+    for (uint32_t a = 0; a < 3; ++a) {
+        glyphAttrs[a].location = a;
+        glyphAttrs[a].binding = 0;
+        glyphAttrs[a].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+        glyphAttrs[a].offset = a * 4u * sizeof(float);
+    }
+    VkPipelineVertexInputStateCreateInfo glyphInput{
+        VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    glyphInput.vertexBindingDescriptionCount = 1;
+    glyphInput.pVertexBindingDescriptions = &glyphBinding;
+    glyphInput.vertexAttributeDescriptionCount = 3;
+    glyphInput.pVertexAttributeDescriptions = glyphAttrs;
     if (!buildPipeline("text.vert.spv", "text.frag.spv", textPipelineLayout_,
-                       textPipeline_, true)) {
+                       textPipeline_, true, VK_NULL_HANDLE,
+                       VK_SAMPLE_COUNT_FLAG_BITS_MAX_ENUM, &glyphInput)) {
         return false;
     }
     // Thumbnail pipeline with rounded corner SDF masking
-    if (!buildPipeline("text.vert.spv", "thumb.frag.spv", textPipelineLayout_,
+    if (!buildPipeline("thumb.vert.spv", "thumb.frag.spv", textPipelineLayout_,
                        thumbPipeline_, true)) {
         PIXELVR_LOG_WARN("Failed to build thumb pipeline");
+    }
+
+    // Per-eye glyph instance buffers, persistently mapped.
+    for (int v = 0; v < 2; ++v) {
+        VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        bi.size = sizeof(GlyphInstance) * kMaxGlyphsPerView;
+        bi.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
+        bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        PIXELVR_VK_CHECK(vkCreateBuffer(device_, &bi, nullptr, &glyphBuffer_[v]));
+        VkMemoryRequirements req{};
+        vkGetBufferMemoryRequirements(device_, glyphBuffer_[v], &req);
+        VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        ai.allocationSize = req.size;
+        ai.memoryTypeIndex = findMemoryType(req.memoryTypeBits,
+                                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        PIXELVR_VK_CHECK(vkAllocateMemory(device_, &ai, nullptr, &glyphMemory_[v]));
+        PIXELVR_VK_CHECK(vkBindBufferMemory(device_, glyphBuffer_[v], glyphMemory_[v], 0));
+        PIXELVR_VK_CHECK(vkMapMemory(device_, glyphMemory_[v], 0, VK_WHOLE_SIZE, 0, &glyphMapped_[v]));
     }
 
     textReady_ = true;
@@ -1990,6 +2313,15 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                                 const XrView& view, const ViewSwapchain& swapchain) {
     const ViewTargets& vt = viewTargets_[viewIndex];
 
+    // Per-eye command buffer; its previous submission was waited for at the end
+    // of the last frame, but guard anyway in case a frame was cut short.
+    const uint32_t slot = viewIndex % 2;
+    if (viewFenceInFlight_[slot]) {
+        vkWaitForFences(device_, 1, &viewFences_[slot], VK_TRUE, UINT64_MAX);
+        vkResetFences(device_, 1, &viewFences_[slot]);
+        viewFenceInFlight_[slot] = false;
+    }
+    commandBuffer_ = viewCommandBuffers_[slot];
     vkResetCommandBuffer(commandBuffer_, 0);
 
     VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -2190,57 +2522,66 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         std::tan(view.fov.angleLeft), std::tan(view.fov.angleRight),
         std::tan(view.fov.angleUp), std::tan(view.fov.angleDown), 0.05f, 100.0f);
 
-    Mat4 panelBase;
-    const float uiDist = std::clamp(uiDistance_, 1.2f, 3.5f);
-    if (uiFollowMode_ == 0 || projectionMode_ == ProjectionMode::Flat) {
-        // Mode 0: Rock-solid World Lock (Default, zero drift/tilt).
-        const float dist = (projectionMode_ == ProjectionMode::Flat) ? uiDist : std::min(uiDist, 2.0f);
-        const Vec3 center{screenPivot_[0] + screenForward_[0] * dist,
-                          screenPivot_[1] + screenForward_[1] * dist,
-                          screenPivot_[2] + screenForward_[2] * dist};
-        const Mat4 orient = orientFromYawPitch(screenYaw_, recenterPitch_);
-        if (projectionMode_ == ProjectionMode::Flat) {
-            panelBase = multiply(translation(center), orient);
-        } else {
-            panelBase = multiply(translation(center), multiply(orient, rotationX(-0.22f)));
-        }
-    } else {
-        // Mode 1: Smooth Gaze Follow in spherical video mode (no deadband, smooth spring)
+    const bool followActive = (uiFollowMode_ == 1 && projectionMode_ != ProjectionMode::Flat);
+    if (followActive && viewIndex == 0) {
+        // Smooth Gaze Follow (360/180): spring the panel yaw toward the head yaw
+        // once per frame. Same convention as screenYaw_: forward = (-sin, 0, -cos).
         const Quat hq{view.pose.orientation.x, view.pose.orientation.y,
                       view.pose.orientation.z, view.pose.orientation.w};
-        const float headYaw = std::atan2(2.0f * (hq.w * hq.y + hq.x * hq.z),
-                                         1.0f - 2.0f * (hq.y * hq.y + hq.z * hq.z));
-        if (!sphereFollowInit_) {
-            sphereFollowYaw_ = headYaw;
-            sphereFollowInit_ = true;
+        const Vec3 headFwd = rotate(hq, Vec3{0.0f, 0.0f, -1.0f});
+        if (headFwd.x * headFwd.x + headFwd.z * headFwd.z > 1e-4f) {
+            const float headYaw = std::atan2(-headFwd.x, -headFwd.z);
+            static auto sLastFollowT = std::chrono::steady_clock::now();
+            const auto nowFollowT = std::chrono::steady_clock::now();
+            float dtF = std::chrono::duration<float>(nowFollowT - sLastFollowT).count();
+            sLastFollowT = nowFollowT;
+            if (dtF <= 0.0f || dtF > 0.1f) dtF = 0.011f;
+            if (!sphereFollowInit_) {
+                sphereFollowYaw_ = headYaw;
+                sphereFollowInit_ = true;
+            }
+            float dyaw = headYaw - sphereFollowYaw_;
+            while (dyaw > 3.14159f) dyaw -= 6.28318f;
+            while (dyaw < -3.14159f) dyaw += 6.28318f;
+            sphereFollowYaw_ += dyaw * std::clamp(4.0f * dtF, 0.0f, 1.0f);
         }
-        float dyaw = headYaw - sphereFollowYaw_;
-        while (dyaw > 3.14159f) dyaw -= 6.28318f;
-        while (dyaw < -3.14159f) dyaw += 6.28318f;
-        sphereFollowYaw_ += dyaw * 0.08f;
-
-        const float sphereDist = std::min(uiDist, 2.0f);
-        const Vec3 forward{std::sin(sphereFollowYaw_), 0.0f, -std::cos(sphereFollowYaw_)};
-        const Vec3 center{screenPivot_[0] + forward.x * sphereDist,
-                          screenPivot_[1] + forward.y * sphereDist,
-                          screenPivot_[2] + forward.z * sphereDist};
-        const Mat4 orient = orientFromYawPitch(sphereFollowYaw_, recenterPitch_);
-        panelBase = multiply(translation(center), multiply(orient, rotationX(-0.22f)));
+    } else if (!followActive) {
+        sphereFollowInit_ = false;  // re-seed from the head the next time follow starts
     }
+    const PanelPlacement placement = computePanelPlacement(
+        uiDistance_, projectionMode_ == ProjectionMode::Flat, uiFollowMode_, screenPivot_,
+        screenForward_, screenYaw_, recenterPitch_, sphereFollowYaw_);
+    const Mat4& panelBase = placement.base;
+    // Curved main panel: a cylinder whose radius is the panel distance divided by
+    // the curve amount (1.0 = wraps around the viewer, 0 = flat).
+    const float bendR = (panelCurve_ > 0.01f) ? placement.dist / panelCurve_ : 0.0f;
     const Mat4 vpPanel = multiply(multiply(proj, viewMat), panelBase);
+    // Glass sheen phase for this eye: the reflection band follows the eye's
+    // horizontal position in panel space (encoded into borderColor.a, 4 m range).
+    float glassPhase = 0.5f;
+    {
+        const Vec3 eyeLocal = transformPoint(
+            rigidInverse(panelBase),
+            Vec3{view.pose.position.x, view.pose.position.y, view.pose.position.z});
+        glassPhase = std::clamp((eyeLocal.x - 0.35f) / 4.0f + 0.5f, 0.0f, 1.0f);
+    }
 
     auto drawUiElement = [&](const Mat4& vp, float cx, float cy, float hw, float hh,
                              UiShape shape, const float col[4], float radius = 0.0f,
                              float borderWidth = 0.0f, const float borderCol[4] = nullptr) {
-        const Mat4 mvp = multiply(vp, multiply(translation(Vec3{cx, cy, 0.0f}),
-                                               scaling(Vec3{hw, hh, 1.0f})));
         UiPush push{};
-        std::memcpy(push.mvp, mvp.m, sizeof(push.mvp));
+        std::memcpy(push.mvp, vp.m, sizeof(push.mvp));
         std::memcpy(push.color, col, sizeof(push.color));
+        // Radius and border are in units of the shorter half-extent (the shader
+        // corrects for aspect), so radius 1.0 is a full capsule / circle.
         push.params[0] = static_cast<float>(shape);
         push.params[1] = radius;
         push.params[2] = borderWidth;
-        push.params[3] = 0.0f;
+        push.params[3] = bendR;
+        push.rect[0] = cx;
+        push.rect[1] = cy;
+        push.rect[2] = hw;
+        push.rect[3] = hh;
         if (borderCol) {
             std::memcpy(push.borderColor, borderCol, sizeof(push.borderColor));
         } else {
@@ -2249,7 +2590,25 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         vkCmdPushConstants(commandBuffer_, uiPipelineLayout_,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(UiPush), &push);
-        vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
+        vkCmdDraw(commandBuffer_, bendR > 0.0f ? 6 * kUiBendSegments : 6, 1, 0, 0);
+    };
+    // Large glass surfaces (hub panel, dock, modals): bevel + reflection sheen.
+    auto drawGlass = [&](float cx, float cy, float hw, float hh, const float col[4],
+                         float radius, float borderWidth, const float rimCol[4]) {
+        const float rim[4] = {rimCol[0], rimCol[1], rimCol[2], glassPhase};
+        drawUiElement(vpPanel, cx, cy, hw, hh, UiShape::GlassPanel, col, radius, borderWidth, rim);
+    };
+    // Soft halo around an element of half-size (hw, hh): `spread` metres of
+    // smooth falloff beyond its edge. Draw it before the element itself.
+    auto drawGlow = [&](const Mat4& vp, float cx, float cy, float hw, float hh,
+                        float spread, const float col[4], float radius = 1.0f,
+                        bool hollow = false) {
+        const float qhw = hw + spread;
+        const float qhh = hh + spread;
+        // Hollow halos (negative radius) stay outside the element: used for
+        // shadows behind translucent panels.
+        drawUiElement(vp, cx, cy, qhw, qhh, UiShape::SoftGlow, col, hollow ? -radius : radius,
+                      spread / std::min(qhw, qhh));
     };
 
     // Standardized typography helpers (never shrink font dynamically across buttons;
@@ -2315,31 +2674,69 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         if (cp == 0x2122) return 136; // ™
         return '?';
     };
+    // Batched text: drawString appends glyph instances to this eye's buffer and
+    // a run is drawn with one instanced call when the pipeline changes (see
+    // bindPipe) or when the transform / bend / font of the text changes.
+    GlyphInstance* const glyphOut = static_cast<GlyphInstance*>(glyphMapped_[viewIndex % 2]);
+    const VkBuffer glyphBuf = glyphBuffer_[viewIndex % 2];
+    uint32_t glyphCount = 0;
+    uint32_t glyphBatchStart = 0;
+    Mat4 glyphBatchMvp{};          // copied: curTextVp may point at a loop-local
+    bool glyphBatchValid = false;
+    float glyphBatchBend = 0.0f;
+    VkDescriptorSet glyphBatchSet = VK_NULL_HANDLE;
     const Mat4* curTextVp = &vpPanel;
+    float curTextBend = bendR;               // hub text follows the curved panel
+    const FontAtlas* curFont = &fontAtlas_;  // switched to the bold atlas for headings
+    VkDescriptorSet curTextSet = textSet_;
+    auto flushText = [&]() {
+        if (glyphCount > glyphBatchStart && glyphBatchValid) {
+            vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline_);
+            vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    textPipelineLayout_, 0, 1, &glyphBatchSet, 0, nullptr);
+            const VkDeviceSize off = 0;
+            vkCmdBindVertexBuffers(commandBuffer_, 0, 1, &glyphBuf, &off);
+            TextPush push{};
+            std::memcpy(push.mvp, glyphBatchMvp.m, sizeof(push.mvp));
+            push.bend[0] = glyphBatchBend;
+            vkCmdPushConstants(commandBuffer_, textPipelineLayout_,
+                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                               0, sizeof(TextPush), &push);
+            vkCmdDraw(commandBuffer_, 6, glyphCount - glyphBatchStart, 0, glyphBatchStart);
+        }
+        glyphBatchStart = glyphCount;
+    };
+    auto bindPipe = [&](VkPipeline pipe) {
+        flushText();
+        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    };
     auto drawString = [&](float x, float baseline, float scale, const float col[4],
                           const std::string& s) {
+        if (glyphOut == nullptr) return;
+        if (!glyphBatchValid || glyphBatchBend != curTextBend || glyphBatchSet != curTextSet ||
+            std::memcmp(glyphBatchMvp.m, curTextVp->m, sizeof(glyphBatchMvp.m)) != 0) {
+            flushText();
+            glyphBatchMvp = *curTextVp;
+            glyphBatchValid = true;
+            glyphBatchBend = curTextBend;
+            glyphBatchSet = curTextSet;
+        }
         float penX = x;
         std::size_t idx = 0;
         while (idx < s.size()) {
             unsigned char c = nextGlyphIndex(s, idx);
-            const Glyph& g = fontAtlas_.glyphs[c];
-            if (g.width > 0.0f && g.height > 0.0f) {
-                TextPush push{};
-                std::memcpy(push.mvp, curTextVp->m, sizeof(push.mvp));
-                std::memcpy(push.color, col, sizeof(push.color));
-                push.rect[0] = penX + g.bearingX * scale;
-                push.rect[1] = baseline - (g.height - g.bearingY) * scale;
-                push.rect[2] = g.width * scale;
-                push.rect[3] = g.height * scale;
-                push.uv[0] = g.u0;
-                push.uv[1] = g.v0;
-                push.uv[2] = g.u1;
-                push.uv[3] = g.v1;
-                vkCmdPushConstants(commandBuffer_, textPipelineLayout_,
-                                   VK_SHADER_STAGE_VERTEX_BIT |
-                                       VK_SHADER_STAGE_FRAGMENT_BIT,
-                                   0, sizeof(TextPush), &push);
-                vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
+            const Glyph& g = curFont->glyphs[c];
+            if (g.width > 0.0f && g.height > 0.0f && glyphCount < kMaxGlyphsPerView) {
+                GlyphInstance& gi = glyphOut[glyphCount++];
+                gi.rect[0] = penX + g.bearingX * scale;
+                gi.rect[1] = baseline - (g.height - g.bearingY) * scale;
+                gi.rect[2] = g.width * scale;
+                gi.rect[3] = g.height * scale;
+                gi.uv[0] = g.u0;
+                gi.uv[1] = g.v0;
+                gi.uv[2] = g.u1;
+                gi.uv[3] = g.v1;
+                std::memcpy(gi.color, col, sizeof(gi.color));
             }
             penX += g.advance * scale;
         }
@@ -2349,7 +2746,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         std::size_t idx = 0;
         while (idx < s.size()) {
             unsigned char c = nextGlyphIndex(s, idx);
-            tw += fontAtlas_.glyphs[c].advance * scale;
+            tw += curFont->glyphs[c].advance * scale;
         }
         return tw;
     };
@@ -2384,10 +2781,27 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         drawString(cx - finalW * 0.5f, baseline, fixedScale, col, out);
     };
 
+    // Runs `fn` with the heading (SemiBold) font active for drawString/measure.
+    auto withHeadingFont = [&](auto&& fn) {
+        const FontAtlas* prevFont = curFont;
+        const VkDescriptorSet prevSet = curTextSet;
+        if (fontAtlasBold_.ok) {
+            curFont = &fontAtlasBold_;
+            curTextSet = textSetBold_;
+        }
+        fn();
+        curFont = prevFont;
+        curTextSet = prevSet;
+    };
+
     struct TextFieldLayout {
         std::string visibleStr;
         float startX = 0.0f;
         float cursorX = 0.0f;
+        int visStart = 0;      // byte range of the text shown (after "..." prefix)
+        int visEnd = 0;
+        std::string prefix;    // "..." when the start is scrolled out of view
+        std::string dispText;  // text as displayed (passwords masked)
     };
     auto layoutTextField = [&](float fieldLeft, float fieldRight, float scale,
                                const std::string& rawText, int cursorPos,
@@ -2467,7 +2881,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         const std::string beforeCursor =
             prefix + dispText.substr(visStart, std::clamp(c, visStart, visEnd) - visStart);
         const float cursorX = startX + measureString(scale, beforeCursor);
-        return {visibleStr, startX, cursorX};
+        return {visibleStr, startX, cursorX, visStart, visEnd, prefix, dispText};
     };
 
     auto formatBreadcrumbs = [](const std::string& path) -> std::string {
@@ -2528,6 +2942,19 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         {0.68f, 0.42f, 1.00f, 1.0f}, // 3: Royal Purple
         {0.96f, 0.28f, 0.36f, 1.0f}, // 4: Crimson Red
     };
+    // Glass palette scaled by the Panel Transparency setting. Large surfaces take
+    // the full factor; cards, controls and wells keep more opacity so content
+    // on them stays readable over bright video.
+    const float op = std::clamp(uiOpacity_, 0.3f, 1.0f);
+    auto tinted = [](const float* c, float k) {
+        return std::array<float, 4>{c[0], c[1], c[2], std::clamp(c[3] * k, 0.0f, 1.0f)};
+    };
+    const auto glassPanelT = tinted(kGlassPanel, op);
+    const auto glassRailT = tinted(kGlassRail, 0.5f + 0.5f * op);
+    const auto glassCardT = tinted(kGlassCard, 0.55f + 0.45f * op);
+    const auto glassCardHoverT = tinted(kGlassCardHover, 0.65f + 0.35f * op);
+    const auto glassControlT = tinted(kGlassControl, 0.60f + 0.40f * op);
+    const auto glassWellT = tinted(kGlassWell, 0.60f + 0.40f * op);
     const int tcIdx = std::clamp(uiTextColorIdx_, 0, 4);
     const int acIdx = std::clamp(uiAccentColorIdx_, 0, 4);
     const float* themeTextCol = kTextPalettes[tcIdx];
@@ -2538,59 +2965,51 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
     // Shown only during playback / when Unified Spatial Hub is closed.
     // =========================================================================
     if (controlBarVisible_ && !hubOpen && !modalOpen && uiPipeline_ != VK_NULL_HANDLE) {
-        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipeline_);
-        const float dockBg[4] = {0.065f, 0.090f, 0.140f, 0.95f};
-        const float dockBorder[4] = {
-            themeAccentCol[0] * 0.70f, themeAccentCol[1] * 0.70f,
-            themeAccentCol[2] * 0.85f, 0.90f};
-        drawUiElement(vpPanel, 0.0f, kBarY, kDockHalfW, kDockHalfH,
-                      UiShape::RoundedBox, dockBg, 0.14f, 0.012f, dockBorder);
+        bindPipe(uiPipeline_);
+        const float dockShadow[4] = {0.0f, 0.0f, 0.0f, 0.55f};
+        drawGlow(vpPanel, 0.0f, kBarY - 0.01f, kDockHalfW, kDockHalfH, 0.06f, dockShadow, 0.14f, true);
+        drawGlass(0.0f, kBarY, kDockHalfW, kDockHalfH, glassPanelT.data(), 0.16f, 0.010f, kGlassRim);
 
-        // Top scrubber groove capsule
-        const float grooveBg[4] = {0.035f, 0.050f, 0.080f, 0.95f};
-        const float grooveBorder[4] = {0.24f, 0.34f, 0.50f, 0.75f};
+        // Top scrubber groove
         drawUiElement(vpPanel, 0.0f, kBarY + 0.125f, kDockHalfW - 0.045f, 0.052f,
-                      UiShape::RoundedBox, grooveBg, 0.35f, 0.015f, grooveBorder);
+                      UiShape::RoundedBox, glassWellT.data(), 0.55f, 0.012f, kGlassRimFaint);
 
         // Center transport recessed island: centered at 0.0f, symmetrically
         // enclosing [Stop] (-0.26), [Seek -10] (-0.13), (Play/Pause) (0.00),
         // [Seek +10] (+0.13), and [Hide UI] (+0.26).
         drawUiElement(vpPanel, 0.0f, kBarY - 0.045f, 0.34f, 0.098f,
-                      UiShape::RoundedBox, grooveBg, 0.50f, 0.015f, grooveBorder);
+                      UiShape::RoundedBox, glassWellT.data(), 1.0f, 0.012f, kGlassRimFaint);
 
         const float btnBgHover[4] = {
-            themeAccentCol[0] * 0.45f, themeAccentCol[1] * 0.45f,
-            themeAccentCol[2] * 0.55f, 0.95f};
-        const float btnBgNormal[4] = {0.095f, 0.135f, 0.210f, 0.90f};
+            themeAccentCol[0] * 0.38f, themeAccentCol[1] * 0.38f,
+            themeAccentCol[2] * 0.46f, 0.96f};
         const float btnBorderHover[4] = {
             themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 1.0f};
-        const float btnBorderNormal[4] = {0.28f, 0.38f, 0.55f, 0.75f};
+        const float hoverGlow[4] = {
+            themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.22f};
 
         for (int b = 0; b < kBtnCount; ++b) {
             const auto cb = static_cast<CtrlButton>(b);
-            if (cb == CtrlButton::Downloads || cb == CtrlButton::Settings || cb == CtrlButton::Download) {
-                continue; // Consolidated into HUB button
-            }
             const CtrlButtonRect r = get_ctrl_button_rect(b);
             const bool hovered = (pointerButton_ == b);
-            const float* bg = hovered ? btnBgHover : btnBgNormal;
-            const float* border = hovered ? btnBorderHover : btnBorderNormal;
+            const float* bg = hovered ? btnBgHover : glassControlT.data();
+            const float* border = hovered ? btnBorderHover : kGlassRimFaint;
 
             if (cb == CtrlButton::PlayPause) {
                 // Hero glowing circular Play/Pause button
                 const float heroBgNormal[4] = {
-                    themeAccentCol[0] * 0.72f, themeAccentCol[1] * 0.72f,
-                    themeAccentCol[2] * 0.85f, 0.96f};
+                    themeAccentCol[0] * 0.80f, themeAccentCol[1] * 0.80f,
+                    themeAccentCol[2] * 0.88f, 0.98f};
                 const float heroBgHover[4] = {
                     themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 1.0f};
+                const float heroGlow[4] = {
+                    themeAccentCol[0], themeAccentCol[1], themeAccentCol[2],
+                    hovered ? 0.50f : 0.32f};
+                drawGlow(vpPanel, r.cx, r.cy, r.hw, r.hh, hovered ? 0.022f : 0.016f, heroGlow);
+                const float heroRim[4] = {1.0f, 1.0f, 1.0f, 0.35f};
                 drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh,
                               UiShape::RoundedBox, hovered ? heroBgHover : heroBgNormal,
-                              1.0f, 0.04f, btnBorderHover);
-                const float glowRingCol[4] = {
-                    themeAccentCol[0], themeAccentCol[1], themeAccentCol[2],
-                    hovered ? 1.0f : 0.75f};
-                drawUiElement(vpPanel, r.cx, r.cy, r.hw * 1.18f, r.hh * 1.18f,
-                              UiShape::GlowRing, glowRingCol);
+                              1.0f, 0.03f, heroRim);
                 const UiShape iconShape = transportPaused_ ? UiShape::Play : UiShape::Pause;
                 const float darkIcon[4] = {0.04f, 0.07f, 0.12f, 0.98f};
                 drawUiElement(vpPanel, r.cx, r.cy, r.hw * 0.40f, r.hh * 0.40f,
@@ -2598,14 +3017,19 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             } else if (cb == CtrlButton::FormatToggle || cb == CtrlButton::AudioToggle || cb == CtrlButton::ScreenToggle) {
                 const bool enabled = (cb == CtrlButton::FormatToggle) ? hudFormatEnabled_ :
                                      (cb == CtrlButton::AudioToggle)  ? hudAudioEnabled_ : true;
-                const float disabledBg[4] = {0.04f, 0.05f, 0.08f, 0.50f};
-                const float disabledBorder[4] = {0.12f, 0.16f, 0.22f, 0.40f};
+                const float disabledBg[4] = {0.05f, 0.06f, 0.09f, 0.45f};
+                if (hovered && enabled) {
+                    drawGlow(vpPanel, r.cx, r.cy, r.hw, r.hh, 0.014f, hoverGlow);
+                }
                 drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh,
                               UiShape::RoundedBox, enabled ? bg : disabledBg,
-                              0.50f, 0.03f, enabled ? border : disabledBorder);
+                              1.0f, 0.03f, enabled ? border : kGlassRimFaint);
             } else if (cb == CtrlButton::Files || cb == CtrlButton::Recenter) {
+                if (hovered) {
+                    drawGlow(vpPanel, r.cx, r.cy, r.hw, r.hh, 0.014f, hoverGlow);
+                }
                 drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh,
-                              UiShape::RoundedBox, bg, 0.50f, 0.03f, border);
+                              UiShape::RoundedBox, bg, 1.0f, 0.03f, border);
                 UiShape iconShape = (cb == CtrlButton::Recenter) ? UiShape::Recenter : UiShape::Files;
                 drawUiElement(vpPanel, r.cx - r.hw + 0.034f, r.cy, 0.017f, 0.017f,
                               iconShape, themeAccentCol);
@@ -2616,6 +3040,9 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 }
             } else {
                 // Stop, Seek -10s, Seek +10s circular buttons
+                if (hovered) {
+                    drawGlow(vpPanel, r.cx, r.cy, r.hw, r.hh, 0.014f, hoverGlow);
+                }
                 drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh,
                               UiShape::RoundedBox, bg, 1.0f, 0.035f, border);
                 UiShape iconShape = UiShape::RoundedBox;
@@ -2632,12 +3059,12 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         const float trackHalfW = 0.56f;
         const float trackHalfH = 0.009f;
         const float trackY = kBarY + 0.130f;
-        const float trackBg[4] = {0.06f, 0.09f, 0.14f, 0.95f};
+        const float trackBg[4] = {0.16f, 0.19f, 0.25f, 0.95f};
         const float thumbCol[4] = {0.95f, 0.97f, 1.0f, 1.0f};
-        const float tickCol[4] = {0.28f, 0.38f, 0.52f, 0.65f};
+        const float tickCol[4] = {0.45f, 0.52f, 0.62f, 0.45f};
 
         drawUiElement(vpPanel, 0.0f, trackY, trackHalfW, trackHalfH,
-                      UiShape::RoundedBox, trackBg, 0.5f);
+                      UiShape::RoundedBox, trackBg, 1.0f);
 
         // Subtle timeline ruler ticks below track
         for (int t = 0; t <= 16; ++t) {
@@ -2651,41 +3078,73 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         if (p > 0.002f) {
             const float fillW = trackHalfW * p;
             const float fillCx = -trackHalfW + fillW;
+            const float fillGlow[4] = {
+                themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.25f};
+            drawGlow(vpPanel, fillCx, trackY, fillW, trackHalfH, 0.009f, fillGlow);
             drawUiElement(vpPanel, fillCx, trackY, fillW, trackHalfH,
-                          UiShape::RoundedBox, themeAccentCol, 0.5f);
+                          UiShape::RoundedBox, themeAccentCol, 1.0f);
         }
         const float thumbX = -trackHalfW + 2.0f * trackHalfW * p;
         drawUiElement(vpPanel, thumbX, trackY, 0.011f, 0.024f,
-                      UiShape::RoundedBox, thumbCol, 0.45f, 0.03f, themeAccentCol);
+                      UiShape::RoundedBox, thumbCol, 1.0f, 0.18f, kGlassRim);
 
         // Floating scrub hover tooltip speech bubble
         if (pointerOnTimeline_ && transportDuration_ > 0.0) {
             const float rawScrubX = -trackHalfW + 2.0f * trackHalfW * pointerScrub_;
             const float bubbleX = std::clamp(rawScrubX, -trackHalfW + 0.09f, trackHalfW - 0.09f);
-            const float tipBg[4] = {0.04f, 0.07f, 0.13f, 0.98f};
+            // Stem notch connecting bubble to timeline track
+            drawUiElement(vpPanel, rawScrubX, trackY + 0.032f, 0.0035f, 0.010f,
+                          UiShape::RoundedBox, kGlassRim, 1.0f);
             // Main bubble capsule
             drawUiElement(vpPanel, bubbleX, trackY + 0.062f, 0.086f, 0.028f,
-                          UiShape::RoundedBox, tipBg, 0.45f, 0.025f, themeAccentCol);
-            // Stem notch connecting bubble to timeline track
-            drawUiElement(vpPanel, rawScrubX, trackY + 0.032f, 0.005f, 0.008f,
-                          UiShape::RoundedBox, themeAccentCol, 0.30f);
+                          UiShape::RoundedBox, glassControlT.data(), 1.0f, 0.06f, kGlassRim);
+
+            // Keyframe preview above the bubble (mockup #4), once decoded
+            const CardThumbnail& scrub = cardThumbs_[kScrubThumbSlot];
+            if (scrub.ready && scrub.set != VK_NULL_HANDLE && thumbPipeline_ != VK_NULL_HANDLE) {
+                const float pvHalfW = 0.100f;
+                const float pvHalfH = pvHalfW * 9.0f / 16.0f;
+                const float pvX = std::clamp(rawScrubX, -trackHalfW + pvHalfW, trackHalfW - pvHalfW);
+                const float pvY = trackY + 0.062f + 0.028f + 0.012f + pvHalfH;
+                drawUiElement(vpPanel, pvX, pvY, pvHalfW + 0.006f, pvHalfH + 0.006f,
+                              UiShape::RoundedBox, glassControlT.data(), 0.024f / (pvHalfH + 0.006f),
+                              0.004f / (pvHalfH + 0.006f), kGlassRim);
+                bindPipe(thumbPipeline_);
+                vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        textPipelineLayout_, 0, 1, &scrub.set, 0, nullptr);
+                TextPush push{};
+                std::memcpy(push.mvp, vpPanel.m, sizeof(push.mvp));
+                const float white4[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+                std::memcpy(push.color, white4, sizeof(push.color));
+                push.rect[0] = pvX - pvHalfW;
+                push.rect[1] = pvY - pvHalfH;
+                push.rect[2] = pvHalfW * 2.0f;
+                push.rect[3] = pvHalfH * 2.0f;
+                push.uv[2] = 1.0f;
+                push.uv[3] = 1.0f;
+                push.bend[0] = bendR;
+                push.bend[1] = static_cast<float>(kThumbBendSegments);
+                vkCmdPushConstants(commandBuffer_, textPipelineLayout_,
+                                   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                   0, sizeof(TextPush), &push);
+                vkCmdDraw(commandBuffer_, bendR > 0.0f ? 6 * kThumbBendSegments : 6, 1, 0, 0);
+                bindPipe(uiPipeline_);
+            }
         }
 
         // Button hover tooltip pills
         if (pointerButton_ == static_cast<int>(CtrlButton::HideHud)) {
             const CtrlButtonRect rH = get_ctrl_button_rect(static_cast<int>(CtrlButton::HideHud));
-            const float tipBg[4] = {0.04f, 0.07f, 0.12f, 0.96f};
-            drawUiElement(vpPanel, rH.cx, rH.cy + 0.065f, 0.068f, 0.024f,
-                          UiShape::RoundedBox, tipBg, 0.35f, 0.025f, themeAccentCol);
+            drawUiElement(vpPanel, rH.cx, rH.cy + 0.075f, 0.068f, 0.024f,
+                          UiShape::RoundedBox, glassControlT.data(), 1.0f, 0.06f, kGlassRim);
         } else if (pointerButton_ == static_cast<int>(CtrlButton::Stop)) {
             const CtrlButtonRect rSt = get_ctrl_button_rect(static_cast<int>(CtrlButton::Stop));
-            const float tipBg[4] = {0.04f, 0.07f, 0.12f, 0.96f};
-            drawUiElement(vpPanel, rSt.cx, rSt.cy + 0.065f, 0.052f, 0.024f,
-                          UiShape::RoundedBox, tipBg, 0.35f, 0.025f, themeAccentCol);
+            drawUiElement(vpPanel, rSt.cx, rSt.cy + 0.075f, 0.052f, 0.024f,
+                          UiShape::RoundedBox, glassControlT.data(), 1.0f, 0.06f, kGlassRim);
         }
 
         if (textReady_) {
-            vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline_);
+            bindPipe(textPipeline_);
             vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                     textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
             const float timeSc = (0.038f * tScale) / fontAtlas_.lineHeight;
@@ -2694,8 +3153,10 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
 
             if (transportDuration_ > 0.0) {
                 const std::string leftStr = format_time(transportElapsed_);
-                drawFit(-trackHalfW - 0.026f - measureString(timeSc, leftStr),
-                        trackY, 0.25f, timeSc, themeTextCol, leftStr);
+                withHeadingFont([&] {
+                    drawFit(-trackHalfW - 0.026f - measureString(timeSc, leftStr),
+                            trackY, 0.25f, timeSc, themeTextCol, leftStr);
+                });
                 const std::string rightStr = timeShowRemaining_
                     ? "-" + format_time(transportDuration_ - transportElapsed_)
                     : format_time(transportDuration_);
@@ -2732,10 +3193,10 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             // Tooltip text for button hover
             if (pointerButton_ == static_cast<int>(CtrlButton::HideHud)) {
                 const CtrlButtonRect rH = get_ctrl_button_rect(static_cast<int>(CtrlButton::HideHud));
-                drawFitCentered(rH.cx, rH.cy + 0.065f, 0.12f, pillSc * 0.90f, themeTextCol, "Hide UI");
+                drawFitCentered(rH.cx, rH.cy + 0.075f, 0.12f, pillSc * 0.90f, themeTextCol, "Hide UI");
             } else if (pointerButton_ == static_cast<int>(CtrlButton::Stop)) {
                 const CtrlButtonRect rSt = get_ctrl_button_rect(static_cast<int>(CtrlButton::Stop));
-                drawFitCentered(rSt.cx, rSt.cy + 0.065f, 0.09f, pillSc * 0.90f, themeTextCol, "Stop");
+                drawFitCentered(rSt.cx, rSt.cy + 0.075f, 0.09f, pillSc * 0.90f, themeTextCol, "Stop");
             }
         }
     }
@@ -2745,53 +3206,63 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
     // Shared shell for Files (Mockup #1), Downloads (Mockup #2), Settings (Mockup #3)
     // =========================================================================
     if (hubOpen && textReady_ && uiPipeline_ != VK_NULL_HANDLE) {
-        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipeline_);
+        bindPipe(uiPipeline_);
 
-        const float panelBg[4] = {0.052f, 0.075f, 0.120f, 0.94f};
-        const float panelBorder[4] = {
-            themeAccentCol[0] * 0.70f, themeAccentCol[1] * 0.70f,
-            themeAccentCol[2] * 0.82f, 0.90f};
-        drawUiElement(vpPanel, 0.0f, 0.0f, kPanelW, kPanelTop,
-                      UiShape::RoundedBox, panelBg, 0.045f, 0.014f, panelBorder);
+        // Depth shadow + faint accent edge light behind the glass panel
+        const float panelShadow[4] = {0.0f, 0.0f, 0.0f, 0.60f};
+        drawGlow(vpPanel, 0.0f, -0.015f, kPanelW, kPanelTop, 0.08f, panelShadow, 0.09f, true);
+        const float edgeLight[4] = {
+            themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.045f};
+        drawGlow(vpPanel, 0.0f, 0.0f, kPanelW, kPanelTop, 0.022f, edgeLight, 0.09f, true);
+        drawGlass(0.0f, 0.0f, kPanelW, kPanelTop, glassPanelT.data(), 0.09f, 0.006f, kGlassRim);
 
         // Left navigation rail background & vertical separator
-        const float railBg[4] = {0.038f, 0.052f, 0.082f, 0.97f};
         drawUiElement(vpPanel, -0.695f, 0.0f, 0.190f, kPanelTop - 0.02f,
-                      UiShape::RoundedBox, railBg, 0.038f);
-        const float divCol[4] = {0.26f, 0.36f, 0.50f, 0.75f};
-        drawUiElement(vpPanel, kRailRight, 0.0f, 0.002f, kPanelTop - 0.025f,
-                      UiShape::RoundedBox, divCol, 0.0f);
+                      UiShape::RoundedBox, glassRailT.data(), 0.075f);
+        drawUiElement(vpPanel, kRailRight, 0.0f, 0.0012f, kPanelTop - 0.04f,
+                      UiShape::RoundedBox, kGlassDivider, 1.0f);
 
         // Top header horizontal separator in content area
-        drawUiElement(vpPanel, kContentCx, 0.39f, 0.66f, 0.002f,
-                      UiShape::RoundedBox, divCol, 0.0f);
+        drawUiElement(vpPanel, kContentCx, 0.39f, 0.66f, 0.0012f,
+                      UiShape::RoundedBox, kGlassDivider, 1.0f);
 
         // Brand emblem in top-left of rail
         drawUiElement(vpPanel, -0.835f, 0.455f, 0.024f, 0.024f, UiShape::Headset, themeAccentCol);
 
         // Active primary section: 0=Files, 1=Downloads, 2=Settings
         const int activeMainTab = settingsVisible_ ? 2 : (downloadsVisible_ ? 1 : 0);
-        const float mainTabY[3] = {0.32f, 0.22f, 0.12f};
+        const float* mainTabY = hub::kMainTabY;
         const UiShape mainIcons[3] = {UiShape::Files, UiShape::Download, UiShape::Settings};
 
         const float tabActiveBg[4] = {
-            themeAccentCol[0] * 0.40f, themeAccentCol[1] * 0.40f,
-            themeAccentCol[2] * 0.52f, 0.96f};
+            themeAccentCol[0] * 0.30f, themeAccentCol[1] * 0.30f,
+            themeAccentCol[2] * 0.38f, 0.96f};
         const float tabActiveBord[4] = {
             themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 1.0f};
-        const float tabHovBg[4] = {0.14f, 0.20f, 0.32f, 0.90f};
-        const float tabHovBord[4] = {0.45f, 0.60f, 0.82f, 0.90f};
-        const float tabNormBg[4] = {0.075f, 0.105f, 0.165f, 0.85f};
-        const float tabNormBord[4] = {0.25f, 0.35f, 0.50f, 0.75f};
+        const float tabActiveGlow[4] = {
+            themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.18f};
+        const float* tabHovBg = glassCardHoverT.data();
+        const float* tabHovBord = kGlassRim;
+        const float* tabNormBg = glassControlT.data();
+        const float* tabNormBord = kGlassRimFaint;
 
         for (int s = 0; s < 3; ++s) {
             const bool act = (s == activeMainTab);
             const bool hov = (browserSidebarHovered_ == s);
-            const float* bg = act ? tabActiveBg : (hov ? tabHovBg : tabNormBg);
-            const float* bord = act ? tabActiveBord : (hov ? tabHovBord : tabNormBord);
-            drawUiElement(vpPanel, -0.695f, mainTabY[s], 0.172f, 0.038f,
-                          UiShape::RoundedBox, bg, 0.45f, (act || hov) ? 0.035f : 0.02f, bord);
-            drawUiElement(vpPanel, -0.825f, mainTabY[s], 0.017f, 0.017f, mainIcons[s], themeTextCol);
+            if (act) {
+                drawGlow(vpPanel, -0.695f, mainTabY[s], 0.172f, 0.038f, 0.014f,
+                         tabActiveGlow, 0.55f);
+                drawUiElement(vpPanel, -0.695f, mainTabY[s], 0.172f, 0.038f,
+                              UiShape::RoundedBox, tabActiveBg, 0.55f, 0.07f, tabActiveBord);
+            } else if (hov) {
+                drawUiElement(vpPanel, -0.695f, mainTabY[s], 0.172f, 0.038f,
+                              UiShape::RoundedBox, tabHovBg, 0.55f, 0.05f, tabHovBord);
+            } else {
+                drawUiElement(vpPanel, -0.695f, mainTabY[s], 0.172f, 0.038f,
+                              UiShape::RoundedBox, kGlassVeil, 0.55f, 0.04f, kGlassRimFaint);
+            }
+            drawUiElement(vpPanel, -0.825f, mainTabY[s], 0.017f, 0.017f, mainIcons[s],
+                          act ? themeAccentCol : themeTextCol);
 
             // Red notification badge on Downloads tab when downloads are active
             if (s == 1 && activeDownloadCount_ > 0) {
@@ -2800,11 +3271,14 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                               UiShape::RoundedBox, redBadge, 1.0f);
             }
         }
+        // Thin separator between the primary tabs and the contextual sub-navigation
+        drawUiElement(vpPanel, -0.695f, 0.060f, 0.160f, 0.0012f,
+                      UiShape::RoundedBox, kGlassDivider, 1.0f);
 
         // Sub-navigation items in rail (contextual to Files / Downloads / Settings)
-        const float setSubY[5] = {0.02f, -0.07f, -0.16f, -0.25f, -0.34f};
-        const float dlSubY[3] = {-0.05f, -0.14f, -0.23f};
-        const float fileSubY[6] = {-0.04f, -0.11f, -0.18f, -0.25f, -0.32f, -0.39f};
+        const float* setSubY = hub::kSettingsSubY;
+        const float* dlSubY = hub::kDownloadsSubY;
+        const float* fileSubY = hub::kFilesSubY;
         const bool isSet = (activeMainTab == 2);
         const bool isDl = (activeMainTab == 1);
         const int subCount = isDl ? 3 : (isSet ? (vaultUnlocked_ ? 5 : 4) : (vaultUnlocked_ ? 6 : 5));
@@ -2814,32 +3288,39 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         } else if (activeMainTab == 2) {
             activeSubTab = (settingsSection_ >= 10 && settingsSection_ <= 12) ? 2 : (settingsSection_ == 21 ? 1 : settingsSection_);
         }
-        const float subActBg[4] = {
-            themeAccentCol[0] * 0.28f, themeAccentCol[1] * 0.28f,
-            themeAccentCol[2] * 0.38f, 0.92f};
+        const float subActBg[4] = {0.85f, 0.90f, 1.00f, 0.14f};
+        const float slateIconCol[4] = {
+            themeTextCol[0] * 0.62f, themeTextCol[1] * 0.68f,
+            themeTextCol[2] * 0.78f, 0.90f};
         for (int sub = 0; sub < subCount; ++sub) {
             const float sy = isSet ? setSubY[sub] : (isDl ? dlSubY[sub] : fileSubY[sub]);
             const float sH = isSet ? 0.030f : 0.032f;
             const bool hov = (browserSidebarHovered_ == (3 + sub));
             const bool subAct = (sub == activeSubTab);
             if (subAct || hov) {
+                // Neutral veil for the current sub-section (accent stays on the main tab)
                 drawUiElement(vpPanel, -0.695f, sy, 0.172f, sH,
-                              UiShape::RoundedBox, subAct ? subActBg : tabHovBg,
-                              0.40f, 0.025f, subAct ? tabActiveBord : tabHovBord);
+                              UiShape::RoundedBox, subAct ? subActBg : kGlassVeil,
+                              0.45f, hov ? 0.05f : 0.0f, hov ? kGlassRim : nullptr);
+                if (subAct) {
+                    drawUiElement(vpPanel, -0.861f, sy, 0.0035f, sH * 0.55f,
+                                  UiShape::RoundedBox, themeAccentCol, 1.0f);
+                }
             }
             if (activeMainTab == 0) {
-                const UiShape qIcons[6] = {UiShape::Home, UiShape::CurvedDisplay, UiShape::List, UiShape::Download, UiShape::RoundedBox, UiShape::RoundedBox};
-                drawUiElement(vpPanel, -0.825f, sy, 0.015f, 0.015f, qIcons[sub], themeAccentCol);
+                const UiShape qIcons[6] = {UiShape::Home, UiShape::CurvedDisplay, UiShape::List, UiShape::Download, UiShape::Star, UiShape::Lock};
+                drawUiElement(vpPanel, -0.825f, sy, 0.015f, 0.015f, qIcons[sub],
+                              subAct ? themeAccentCol : slateIconCol);
             }
         }
 
         if (vaultUnlocked_) {
             const bool lockHov = (browserSidebarHovered_ == 9);
-            const float ly = isSet ? -0.46f : -0.47f;
-            const float lockBg[4] = {0.45f, 0.08f, 0.12f, lockHov ? 0.95f : 0.70f};
-            const float lockBord[4] = {0.85f, 0.22f, 0.28f, lockHov ? 1.0f : 0.75f};
+            const float ly = hub::lockVaultButton(activeMainTab).cy;
+            const float lockBg[4] = {0.42f, 0.08f, 0.11f, lockHov ? 0.92f : 0.55f};
+            const float lockBord[4] = {0.95f, 0.35f, 0.40f, lockHov ? 0.95f : 0.45f};
             drawUiElement(vpPanel, -0.695f, ly, 0.172f, 0.030f,
-                          UiShape::RoundedBox, lockBg, 0.35f, 0.02f, lockBord);
+                          UiShape::RoundedBox, lockBg, 0.55f, 0.05f, lockBord);
         }
 
         // Standardized, generously readable font scales across the entire Unified Spatial Hub
@@ -2857,6 +3338,100 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             themeTextCol[0] * 0.62f, themeTextCol[1] * 0.70f,
             themeTextCol[2] * 0.82f, 0.90f};
         const float emeraldCol[4] = {0.22f, 0.88f, 0.54f, 1.0f};
+
+        // Shared rail text (brand + primary tabs); call with the text pipeline bound.
+        auto drawRailText = [&]() {
+            const float brandSc = scHeader * 1.05f;
+            withHeadingFont([&] {
+                drawFit(-0.795f, 0.455f, 0.20f, brandSc, themeTextCol, "PIXEL");
+            });
+            float pixelW = 0.0f;
+            withHeadingFont([&] { pixelW = measureString(brandSc, "PIXEL "); });
+            drawFit(-0.795f + pixelW, 0.455f, 0.10f, brandSc, themeAccentCol, "VR");
+            if (vaultUnlocked_) {
+                const float lockTextCol[4] = {1.0f, 0.50f, 0.50f, 1.0f};
+                const UiRect lockR = hub::lockVaultButton(activeMainTab);
+                drawFitCentered(lockR.cx, lockR.cy, 0.28f, scSub, lockTextCol, "Lock Vault");
+            }
+            const char* mainLabels[3] = {"Files", "Downloads", "Settings"};
+            for (int s = 0; s < 3; ++s) {
+                drawFit(-0.790f, mainTabY[s], 0.23f, scStd,
+                        (s == activeMainTab) ? themeTextCol : slateCol, mainLabels[s]);
+                if (s == 1 && activeDownloadCount_ > 0) {
+                    drawFitCentered(-0.555f, mainTabY[s], 0.035f, scBadge, themeTextCol,
+                                    std::to_string(activeDownloadCount_));
+                }
+            }
+        };
+        // Breadcrumb trail: earlier segments dimmed and separated by chevrons, the
+        // current location bright. Leading segments collapse to "..." when too long.
+        // Returns the chevron centres so the caller can draw them in the UI pass.
+        struct Crumbs {
+            std::vector<std::string> parts;
+            std::vector<float> partX;
+            std::vector<float> chevronX;
+        };
+        auto layoutCrumbs = [&](const std::vector<std::string>& segs, float x, float maxW,
+                                float sc) -> Crumbs {
+            const float gap = 0.034f;
+            std::size_t start = 0;
+            auto width = [&](std::size_t from) {
+                float w = (from > 0) ? measureString(sc, "...") + gap : 0.0f;
+                for (std::size_t i = from; i < segs.size(); ++i) {
+                    w += measureString(sc, segs[i]);
+                    if (i + 1 < segs.size()) w += gap;
+                }
+                return w;
+            };
+            while (start + 1 < segs.size() && width(start) > maxW) ++start;
+            Crumbs c;
+            float pen = x;
+            if (start > 0) {
+                c.parts.push_back("...");
+                c.partX.push_back(pen);
+                pen += measureString(sc, "...");
+                c.chevronX.push_back(pen + gap * 0.5f);
+                pen += gap;
+            }
+            for (std::size_t i = start; i < segs.size(); ++i) {
+                c.parts.push_back(segs[i]);
+                c.partX.push_back(pen);
+                pen += measureString(sc, segs[i]);
+                if (i + 1 < segs.size()) {
+                    c.chevronX.push_back(pen + gap * 0.5f);
+                    pen += gap;
+                }
+            }
+            return c;
+        };
+        auto splitCrumbs = [](const std::string& s) {
+            std::vector<std::string> out;
+            std::size_t start = 0;
+            while (start <= s.size()) {
+                const std::size_t sep = s.find(" > ", start);
+                const std::string part = s.substr(start, sep == std::string::npos ? std::string::npos : sep - start);
+                if (!part.empty()) out.push_back(part);
+                if (sep == std::string::npos) break;
+                start = sep + 3;
+            }
+            return out;
+        };
+        auto drawCrumbChevrons = [&](const Crumbs& c, float cy) {
+            for (float chx : c.chevronX) {
+                drawUiElement(vpPanel, chx, cy, 0.0085f, 0.0085f, UiShape::Chevron, dimCol);
+            }
+        };
+        auto drawCrumbText = [&](const Crumbs& c, float cy, float sc, float maxRight) {
+            for (std::size_t i = 0; i < c.parts.size(); ++i) {
+                const bool last = (i + 1 == c.parts.size());
+                const float maxW = std::max(0.02f, maxRight - c.partX[i]);
+                if (last) {
+                    withHeadingFont([&] { drawFit(c.partX[i], cy, maxW, sc, themeTextCol, c.parts[i]); });
+                } else {
+                    drawFit(c.partX[i], cy, maxW, sc, slateCol, c.parts[i]);
+                }
+            }
+        };
 
         // ---------------------------------------------------------------------
         // ---------------------------------------------------------------------
@@ -2897,104 +3472,59 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 listCols.nameMaxW = std::max(0.30f, (curRight - 0.02f) - (-0.315f));
             }
 
-            struct CardLayout {
-                float cx = 0.0f;
-                float cy = 0.0f;
-                float cardHalfW = 0.0f;
-                float cardHalfH = 0.0f;
-                float thumbCx = 0.0f;
-                float thumbCy = 0.0f;
-                float thumbHalfW = 0.0f;
-                float thumbHalfH = 0.0f;
-            };
+            using CardLayout = hub::CardLayout;
+            auto getCardLayout = [&](int slot) { return hub::browserCard(browserViewMode_, slot); };
 
-            auto getCardLayout = [&](int slot) -> CardLayout {
-                CardLayout lay;
-                if (browserViewMode_ == BrowserViewMode::BigCards) {
-                    const float colX[3] = {-0.25f, 0.20f, 0.65f};
-                    const float rowY[2] = {0.16f, -0.24f};
-                    lay.cx = colX[slot % 3];
-                    lay.cy = rowY[slot / 3];
-                    lay.cardHalfW = 0.205f;
-                    lay.cardHalfH = 0.180f;
-                    lay.thumbCx = lay.cx;
-                    lay.thumbCy = lay.cy + 0.056f;
-                    lay.thumbHalfW = lay.cardHalfW - 0.015f; // 0.190m
-                    lay.thumbHalfH = 0.104f;
-                } else if (browserViewMode_ == BrowserViewMode::MiniCards) {
-                    const float colX[4] = {-0.285f, 0.045f, 0.375f, 0.705f};
-                    const float rowY[3] = {0.20f, -0.06f, -0.32f};
-                    lay.cx = colX[slot % 4];
-                    lay.cy = rowY[slot / 4];
-                    lay.cardHalfW = 0.150f;
-                    lay.cardHalfH = 0.115f;
-                    lay.thumbCx = lay.cx;
-                    lay.thumbCy = lay.cy + 0.030f;
-                    lay.thumbHalfW = lay.cardHalfW - 0.010f; // 0.140m
-                    lay.thumbHalfH = 0.075f;
-                } else { // CompactList (1 col x 8 rows)
-                    const float rowY[8] = {0.300f, 0.210f, 0.120f, 0.030f, -0.060f, -0.150f, -0.240f, -0.330f};
-                    lay.cx = 0.20f;
-                    lay.cy = (slot >= 0 && slot < 8) ? rowY[slot] : 0.0f;
-                    lay.cardHalfW = 0.65f;
-                    lay.cardHalfH = 0.038f;
-                    lay.thumbCx = -0.385f;
-                    lay.thumbCy = lay.cy;
-                    lay.thumbHalfW = 0.050f;
-                    lay.thumbHalfH = 0.028f;
+            // Header buttons (shared layout with the pointer hit-test)
+            auto headerBtn = [&](int id, bool active) {
+                const UiRect r = hub::headerButton(id);
+                const bool hov = (browserPageBtnHovered_ == id);
+                if (active) {
+                    drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh,
+                                  UiShape::RoundedBox, tabActiveBg, 1.0f, 0.07f, tabActiveBord);
+                } else {
+                    drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh,
+                                  UiShape::RoundedBox, hov ? tabHovBg : tabNormBg,
+                                  1.0f, 0.06f, hov ? tabHovBord : tabNormBord);
                 }
-                return lay;
+                return r;
             };
-
-            // Top-right pagination buttons: [<] at 0.52, [>] at 0.74, cy=0.455
+            auto headerIconX = [](const UiRect& r) { return r.cx - r.hw + 0.026f; };
             for (int pb = 0; pb < 2; ++pb) {
-                const float pbx = (pb == 0) ? 0.52f : 0.74f;
-                const bool phov = (browserPageBtnHovered_ == pb);
-                drawUiElement(vpPanel, pbx, 0.455f, 0.035f, 0.028f,
-                              UiShape::RoundedBox, phov ? tabHovBg : tabNormBg,
-                              0.40f, 0.03f, phov ? tabHovBord : tabNormBord);
+                const UiRect r = headerBtn(pb, false);
+                // Chevron icon (mirrored for "previous page")
+                const float chw = (pb == 0) ? -0.011f : 0.011f;
+                drawUiElement(vpPanel, r.cx, r.cy, chw, 0.011f, UiShape::Chevron,
+                              browserPageBtnHovered_ == pb ? themeAccentCol : themeTextCol);
             }
-            // Header button 2: View Mode toggle [ VIEW: BIG / GRID / LIST ]
             {
-                const bool phov = (browserPageBtnHovered_ == 2);
-                drawUiElement(vpPanel, 0.35f, 0.455f, 0.085f, 0.028f,
-                              UiShape::RoundedBox, phov ? tabHovBg : tabNormBg,
-                              0.40f, 0.025f, phov ? tabHovBord : tabNormBord);
+                const UiRect r = headerBtn(2, false);  // view mode
+                drawUiElement(vpPanel, headerIconX(r), r.cy, 0.012f, 0.012f, UiShape::List, slateIconCol);
             }
-            // Header button 3: Quick Path Bookmark [ ★ Quick Path ] / [ ★ Bookmark Path ]
             {
-                const bool phov = (browserPageBtnHovered_ == 3);
-                const float qpActiveBg[4] = {0.05f, 0.12f, 0.22f, 0.95f};
-                const float* bg = browserIsQuickPath_ ? qpActiveBg : (phov ? tabHovBg : tabNormBg);
-                const float* bord = browserIsQuickPath_ ? tabActiveBord : (phov ? tabHovBord : tabNormBord);
-                drawUiElement(vpPanel, 0.14f, 0.455f, 0.090f, 0.028f,
-                              UiShape::RoundedBox, bg, 0.40f, 0.025f, bord);
+                const UiRect r = headerBtn(3, browserIsQuickPath_);  // bookmark
+                drawUiElement(vpPanel, headerIconX(r), r.cy, 0.014f, 0.014f, UiShape::Star,
+                              browserIsQuickPath_ ? themeAccentCol : slateIconCol);
             }
-            // Header button 4: Dedicated Up button [ ^ Up ]
+            {
+                const UiRect r = headerBtn(5, false);  // sort order
+                drawUiElement(vpPanel, headerIconX(r), r.cy, 0.012f, 0.012f, UiShape::Sort, slateIconCol);
+            }
             const bool canGoUp = (!browserItems_.empty() && browserItems_[0].isBack);
             if (canGoUp) {
-                const bool phov = (browserPageBtnHovered_ == 4);
-                drawUiElement(vpPanel, -0.43f, 0.455f, 0.038f, 0.028f,
-                              UiShape::RoundedBox, phov ? tabHovBg : tabNormBg,
-                              0.40f, 0.025f, phov ? tabHovBord : tabNormBord);
+                const UiRect r = headerBtn(4, false);
+                drawUiElement(vpPanel, r.cx - 0.019f, r.cy, -0.009f, 0.009f, UiShape::Chevron,
+                              browserPageBtnHovered_ == 4 ? themeAccentCol : themeTextCol);
             }
 
-            // Header breadcrumb capsule
-            const float breadCapX = canGoUp ? (-0.375f + 0.220f) : (-0.460f + 0.260f);
-            const float breadCapHalfW = canGoUp ? 0.225f : 0.265f;
-            const float breadCapBg[4] = {0.055f, 0.078f, 0.125f, 0.85f};
-            const float breadCapBord[4] = {0.22f, 0.32f, 0.48f, 0.70f};
-            drawUiElement(vpPanel, breadCapX, 0.455f, breadCapHalfW, 0.026f,
-                          UiShape::RoundedBox, breadCapBg, 0.40f, 0.020f, breadCapBord);
-
-            const float normCardBg[4] = {0.080f, 0.110f, 0.170f, 0.92f};
-            const float normCardBorder[4] = {0.28f, 0.38f, 0.54f, 0.85f};
-            const float selCardBg[4] = {0.12f, 0.18f, 0.28f, 0.95f};
-            const float hovCardBg[4] = {0.16f, 0.24f, 0.38f, 0.98f};
+            const float* normCardBg = glassCardT.data();
+            const float* normCardBorder = kGlassRimFaint;
+            const float* hovCardBg = glassCardHoverT.data();
+            const float selCardBg[4] = {0.13f, 0.155f, 0.195f, 0.95f};
             const float glowCol[4] = {
-                themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.55f};
-            const float thumbBg[4] = {0.035f, 0.050f, 0.080f, 0.98f};
-            const float thumbBorder[4] = {0.22f, 0.32f, 0.48f, 0.80f};
+                themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.26f};
+            const float* thumbBg = glassWellT.data();
+            const float* thumbBorder = kGlassRimFaint;
 
             static auto sLastCardAnimT = std::chrono::steady_clock::now();
             const auto sNowCardT = std::chrono::steady_clock::now();
@@ -3018,32 +3548,36 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 const float zLift = (i < 12) ? (0.012f * cardHoverAnim_[i]) : 0.0f;
                 const Mat4 vpCard = (zLift > 0.0002f) ? multiply(vpPanel, translation(Vec3{0.0f, 0.0f, zLift})) : vpPanel;
 
+                // Corner radii in metres, converted to the shader's relative units
+                const float cardR = 0.016f / std::min(lay.cardHalfW, lay.cardHalfH);
+                const float thumbR = 0.018f / std::min(lay.thumbHalfW, lay.thumbHalfH);
+                const float cardBw = 0.0015f / std::min(lay.cardHalfW, lay.cardHalfH);
                 if (hovered) {
-                    drawUiElement(vpCard, lay.cx, lay.cy, lay.cardHalfW * 1.035f, lay.cardHalfH * 1.035f,
-                                  UiShape::RoundedBox, glowCol, 0.08f);
+                    drawGlow(vpCard, lay.cx, lay.cy, lay.cardHalfW, lay.cardHalfH, 0.018f,
+                             glowCol, cardR * 0.6f);
                     drawUiElement(vpCard, lay.cx, lay.cy, lay.cardHalfW, lay.cardHalfH,
-                                  UiShape::RoundedBox, hovCardBg, 0.06f, 0.032f, tabActiveBord);
+                                  UiShape::RoundedBox, hovCardBg, cardR, cardBw * 1.6f, tabActiveBord);
                 } else if (selected) {
                     drawUiElement(vpCard, lay.cx, lay.cy, lay.cardHalfW, lay.cardHalfH,
-                                  UiShape::RoundedBox, selCardBg, 0.06f, 0.026f, tabActiveBord);
+                                  UiShape::RoundedBox, selCardBg, cardR, cardBw * 1.3f, tabActiveBord);
                 } else {
                     drawUiElement(vpCard, lay.cx, lay.cy, lay.cardHalfW, lay.cardHalfH,
-                                  UiShape::RoundedBox, normCardBg, 0.06f, 0.018f, normCardBorder);
+                                  UiShape::RoundedBox, normCardBg, cardR, cardBw, normCardBorder);
                 }
 
                 // Thumbnail box
                 drawUiElement(vpCard, lay.thumbCx, lay.thumbCy, lay.thumbHalfW, lay.thumbHalfH,
-                              UiShape::RoundedBox, thumbBg, 0.05f, 0.018f, thumbBorder);
+                              UiShape::RoundedBox, thumbBg, thumbR, 0.0f);
 
                 // Folder tab visual cue for directory cards
                 if (item.isDir && !item.isBack) {
                     if (browserViewMode_ == BrowserViewMode::BigCards || browserViewMode_ == BrowserViewMode::MiniCards) {
-                        const float tabHalfW = lay.thumbHalfW * 0.36f;
-                        const float tabHalfH = 0.007f;
-                        const float tabCx = lay.thumbCx - lay.thumbHalfW + tabHalfW + 0.010f;
-                        const float tabCy = lay.thumbCy + lay.thumbHalfH + 0.005f;
+                        const float tabHalfW = lay.thumbHalfW * 0.30f;
+                        const float tabHalfH = 0.006f;
+                        const float tabCx = lay.thumbCx - lay.thumbHalfW + tabHalfW + 0.014f;
+                        const float tabCy = lay.thumbCy + lay.thumbHalfH + 0.004f;
                         drawUiElement(vpCard, tabCx, tabCy, tabHalfW, tabHalfH,
-                                      UiShape::RoundedBox, thumbBg, 0.40f, 0.020f, thumbBorder);
+                                      UiShape::RoundedBox, glassControlT.data(), 1.0f, 0.15f, thumbBorder);
                     }
                 }
 
@@ -3061,7 +3595,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
 
             // Render actual video thumbnail textures for ready cards
             if (thumbPipeline_ != VK_NULL_HANDLE) {
-                vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, thumbPipeline_);
+                bindPipe(thumbPipeline_);
                 for (int i = 0; i < perPage; ++i) {
                     const int entryIdx = first + i;
                     if (entryIdx >= total) break;
@@ -3075,6 +3609,8 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                         const float zLift = (i < 12) ? (0.012f * cardHoverAnim_[i]) : 0.0f;
                         const Mat4 vpCard = (zLift > 0.0002f) ? multiply(vpPanel, translation(Vec3{0.0f, 0.0f, zLift})) : vpPanel;
                         TextPush push{};
+                        push.bend[0] = bendR;
+                        push.bend[1] = static_cast<float>(kThumbBendSegments);
                         std::memcpy(push.mvp, vpCard.m, sizeof(push.mvp));
                         const float white4[4] = {1.0f, 1.0f, 1.0f, 1.0f};
                         std::memcpy(push.color, white4, sizeof(push.color));
@@ -3089,17 +3625,18 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                         vkCmdPushConstants(commandBuffer_, textPipelineLayout_,
                                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                            0, sizeof(TextPush), &push);
-                        vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
+                        vkCmdDraw(commandBuffer_, bendR > 0.0f ? 6 * kThumbBendSegments : 6, 1, 0, 0);
                     }
                 }
             }
 
             // Draw overlaid format badge and duration pill
-            vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipeline_);
-            const float badgeBg[4] = {
-                themeAccentCol[0] * 0.25f, themeAccentCol[1] * 0.25f,
-                themeAccentCol[2] * 0.35f, 0.95f};
-            const float durBg[4] = {0.050f, 0.075f, 0.120f, 0.95f};
+            bindPipe(uiPipeline_);
+            const float badgeBg[4] = {0.03f, 0.04f, 0.06f, 0.78f};
+            const float badgeRim[4] = {1.0f, 1.0f, 1.0f, 0.14f};
+            const float listBadgeBg[4] = {
+                themeAccentCol[0] * 0.22f, themeAccentCol[1] * 0.22f,
+                themeAccentCol[2] * 0.28f, 0.90f};
             for (int i = 0; i < perPage; ++i) {
                 const int entryIdx = first + i;
                 if (entryIdx >= total) break;
@@ -3110,29 +3647,28 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
 
                 if (browserViewMode_ == BrowserViewMode::BigCards) {
                     drawUiElement(vpCard, lay.cx - lay.thumbHalfW + 0.062f, lay.thumbCy + lay.thumbHalfH - 0.024f,
-                                  0.056f, 0.018f, UiShape::RoundedBox, badgeBg, 0.45f, 0.03f, tabActiveBord);
+                                  0.056f, 0.018f, UiShape::RoundedBox, badgeBg, 1.0f, 0.06f, badgeRim);
                     if (!item.durationTag.empty()) {
                         drawUiElement(vpCard, lay.cx + lay.thumbHalfW - 0.050f, lay.thumbCy - lay.thumbHalfH + 0.024f,
-                                      0.044f, 0.017f, UiShape::RoundedBox, durBg, 0.40f, 0.02f, normCardBorder);
+                                      0.044f, 0.017f, UiShape::RoundedBox, badgeBg, 1.0f, 0.06f, badgeRim);
                     }
                 } else if (browserViewMode_ == BrowserViewMode::MiniCards) {
                     drawUiElement(vpCard, lay.cx - lay.thumbHalfW + 0.046f, lay.thumbCy + lay.thumbHalfH - 0.018f,
-                                  0.042f, 0.014f, UiShape::RoundedBox, badgeBg, 0.45f, 0.025f, tabActiveBord);
+                                  0.042f, 0.014f, UiShape::RoundedBox, badgeBg, 1.0f, 0.07f, badgeRim);
                     if (!item.durationTag.empty()) {
                         drawUiElement(vpCard, lay.cx + lay.thumbHalfW - 0.038f, lay.thumbCy - lay.thumbHalfH + 0.018f,
-                                      0.034f, 0.014f, UiShape::RoundedBox, durBg, 0.40f, 0.02f, normCardBorder);
+                                      0.034f, 0.014f, UiShape::RoundedBox, badgeBg, 1.0f, 0.07f, badgeRim);
                     }
                 } else { // CompactList
                     if (listShowFormat_) {
                         drawUiElement(vpCard, listCols.fmtCx, lay.cy,
-                                      0.055f, 0.016f, UiShape::RoundedBox, badgeBg, 0.45f, 0.025f, tabActiveBord);
+                                      0.055f, 0.016f, UiShape::RoundedBox, listBadgeBg, 1.0f, 0.07f, kGlassRimFaint);
                     }
                 }
             }
 
             if (browserViewMode_ == BrowserViewMode::CompactList) {
-                const float headerLineCol[4] = {0.14f, 0.20f, 0.30f, 0.50f};
-                drawUiElement(vpPanel, 0.20f, 0.355f, 0.65f, 0.001f, UiShape::RoundedBox, headerLineCol, 0.0f);
+                drawUiElement(vpPanel, 0.20f, 0.355f, 0.65f, 0.0010f, UiShape::RoundedBox, kGlassDivider, 1.0f);
             }
 
             // Right-edge vertical scrollbar
@@ -3141,10 +3677,8 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 const float trackCy = -0.040f;
                 const float trackHalfW = 0.0035f;
                 const float trackHalfH = 0.350f;
-                const float trackBg[4] = {0.08f, 0.12f, 0.18f, 0.50f};
-                const float trackBord[4] = {0.16f, 0.24f, 0.34f, 0.60f};
                 drawUiElement(vpPanel, trackCx, trackCy, trackHalfW, trackHalfH,
-                              UiShape::RoundedBox, trackBg, 0.50f, 0.015f, trackBord);
+                              UiShape::RoundedBox, glassWellT.data(), 1.0f);
 
                 const float thumbFraction = std::clamp(static_cast<float>(perPage) / static_cast<float>(total), 0.12f, 0.90f);
                 const float thumbHalfH = trackHalfH * thumbFraction;
@@ -3153,24 +3687,24 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 const float thumbCy = (trackCy + trackHalfH - thumbHalfH) - scrollProgress * availableTravel;
                 const float thumbCol[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.85f};
                 drawUiElement(vpPanel, trackCx, thumbCy, trackHalfW * 1.4f, thumbHalfH,
-                              UiShape::RoundedBox, thumbCol, 0.80f);
+                              UiShape::RoundedBox, thumbCol, 1.0f);
             }
 
+            // Breadcrumb trail (chevrons drawn now, segment text in the text pass)
+            const float breadX = canGoUp ? -0.375f : -0.460f;
+            const float breadRight = hub::headerButton(5).cx - hub::headerButton(5).hw - 0.012f;  // clear of Sort
+            const float breadSc = scHeader * 0.90f;
+            const Crumbs crumbs = layoutCrumbs(
+                splitCrumbs(formatBreadcrumbs(browserTitle_.empty() ? "Local Storage" : browserTitle_)),
+                breadX, breadRight - breadX, breadSc);
+            drawCrumbChevrons(crumbs, 0.455f);
+
             // Text pass for Hub rail + Files content
-            vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline_);
+            bindPipe(textPipeline_);
             vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                     textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
 
-            // Rail header & buttons
-            drawFit(-0.795f, 0.455f, 0.28f, scHeader, themeTextCol, "PIXEL VR");
-            const char* mainLabels[3] = {"Files", "Downloads", "Settings"};
-            for (int s = 0; s < 3; ++s) {
-                drawFit(-0.790f, mainTabY[s], 0.23f, scStd, themeTextCol, mainLabels[s]);
-                if (s == 1 && activeDownloadCount_ > 0) {
-                    drawFitCentered(-0.555f, mainTabY[s], 0.035f, scBadge, themeTextCol,
-                                    std::to_string(activeDownloadCount_));
-                }
-            }
+            drawRailText();
             drawFit(-0.855f, 0.02f, 0.34f, scBadge, dimCol, "QUICK FILTERS");
             const char* qLabels[6] = {"Local Storage", "Videos", "SMB Shares", "Downloads", "Bookmarks", "Vault (Private)"};
             const int qCount = vaultUnlocked_ ? 6 : 5;
@@ -3178,38 +3712,33 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 const float* col = (browserQuickFilter_ == sub) ? themeTextCol : slateCol;
                 drawFit(-0.790f, fileSubY[sub], 0.28f, scSub, col, qLabels[sub]);
             }
-            if (vaultUnlocked_) {
-                const float lockTextCol[4] = {1.0f, 0.50f, 0.50f, 1.0f};
-                drawFitCentered(-0.695f, -0.47f, 0.28f, scSub, lockTextCol, "Lock Vault");
-            }
 
             // Content header: Breadcrumb + Page switcher
             if (canGoUp) {
                 const bool phov = (browserPageBtnHovered_ == 4);
-                drawFitCentered(-0.43f, 0.455f, 0.070f, scSub * 0.90f,
-                                phov ? themeAccentCol : themeTextCol, "^ Up");
+                drawFit(-0.436f, 0.455f, 0.042f, scSub * 0.90f,
+                        phov ? themeAccentCol : themeTextCol, "Up");
             }
-            std::string rawBread = browserTitle_.empty() ? "Local Storage" : browserTitle_;
-            std::string bread = formatBreadcrumbs(rawBread);
-            const float breadX = canGoUp ? -0.375f : -0.460f;
-            const float breadMaxW = canGoUp ? 0.460f : 0.540f;
-            drawFit(breadX, 0.455f, breadMaxW, scHeader * 0.90f, themeTextCol, bread);
+            drawCrumbText(crumbs, 0.455f, breadSc, breadRight);
 
             const int totalPages = std::max(1, (total + perPage - 1) / perPage);
             const int curPage = (first / perPage) + 1;
             char pageBuf[32];
             std::snprintf(pageBuf, sizeof(pageBuf), "%d / %d", curPage, totalPages);
             drawFitCentered(0.63f, 0.455f, 0.14f, scSub, slateCol, pageBuf);
-            drawFitCentered(0.52f, 0.455f, 0.06f, scStd, themeTextCol, "<");
-            drawFitCentered(0.74f, 0.455f, 0.06f, scStd, themeTextCol, ">");
 
-            // Header button labels
-            const char* vModeLabels[3] = {"VIEW: BIG", "VIEW: GRID", "VIEW: LIST"};
-            drawFitCentered(0.35f, 0.455f, 0.16f, scSub * 0.90f, themeTextCol,
-                            vModeLabels[static_cast<int>(browserViewMode_) % 3]);
-            const char* qpLabel = browserIsQuickPath_ ? "[ Bookmarked ]" : "[ + Bookmark ]";
-            drawFitCentered(0.14f, 0.455f, 0.17f, scSub * 0.90f,
+            // Header button labels (icons sit at the left edge of each pill)
+            const char* vModeLabels[3] = {"Large", "Grid", "List"};
+            const UiRect viewR = hub::headerButton(2);
+            drawFitCentered(viewR.cx + 0.014f, viewR.cy, viewR.hw * 2.0f - 0.05f, scSub * 0.90f,
+                            themeTextCol, vModeLabels[static_cast<int>(browserViewMode_) % 3]);
+            const char* qpLabel = browserIsQuickPath_ ? "Bookmarked" : "Bookmark";
+            const UiRect bmR = hub::headerButton(3);
+            drawFitCentered(bmR.cx + 0.014f, bmR.cy, bmR.hw * 2.0f - 0.05f, scSub * 0.90f,
                             browserIsQuickPath_ ? themeAccentCol : themeTextCol, qpLabel);
+            const UiRect sortR = hub::headerButton(5);
+            drawFitCentered(sortR.cx + 0.014f, sortR.cy, sortR.hw * 2.0f - 0.05f, scSub * 0.90f,
+                            themeTextCol, browserSortLabel_);
 
             if (browserViewMode_ == BrowserViewMode::CompactList) {
                 drawFit(-0.315f, 0.380f, listCols.nameMaxW, scBadge * 0.95f, dimCol, "NAME");
@@ -3245,7 +3774,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                     drawFit(textLeft, lay.cy - 0.084f, maxTextW, scSub, themeTextCol, item.name);
                     drawFit(textLeft, lay.cy - 0.136f, maxTextW, scDetail, slateCol, cardDet);
                     drawFitCentered(lay.cx - lay.thumbHalfW + 0.062f, lay.thumbCy + lay.thumbHalfH - 0.024f,
-                                    0.104f, scBadge, themeAccentCol, bTag);
+                                    0.104f, scBadge, themeTextCol, bTag);
                     if (!item.durationTag.empty()) {
                         drawFitCentered(lay.cx + lay.thumbHalfW - 0.050f, lay.thumbCy - lay.thumbHalfH + 0.024f,
                                         0.080f, scBadge, themeTextCol, item.durationTag);
@@ -3256,7 +3785,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                     drawFit(textLeft, lay.cy - 0.064f, maxTextW, scSub * 0.88f, themeTextCol, item.name);
                     drawFit(textLeft, lay.cy - 0.095f, maxTextW, scDetail * 0.88f, slateCol, cardDet);
                     drawFitCentered(lay.cx - lay.thumbHalfW + 0.046f, lay.thumbCy + lay.thumbHalfH - 0.018f,
-                                    0.080f, scBadge * 0.88f, themeAccentCol, bTag);
+                                    0.080f, scBadge * 0.88f, themeTextCol, bTag);
                     if (!item.durationTag.empty()) {
                         drawFitCentered(lay.cx + lay.thumbHalfW - 0.038f, lay.thumbCy - lay.thumbHalfH + 0.018f,
                                         0.065f, scBadge * 0.88f, themeTextCol, item.durationTag);
@@ -3298,139 +3827,165 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         // ---------------------------------------------------------------------
         else if (downloadsVisible_) {
             const int totalJobs = static_cast<int>(downloadJobs_.empty() ? downloadsRows_.size() : downloadJobs_.size());
-            const float cardHalfW = 0.65f;
-            const float cardHalfH = 0.075f;
-            const float cardBg[4] = {0.038f, 0.052f, 0.085f, 0.90f};
-            const float cardBorder[4] = {0.18f, 0.26f, 0.40f, 0.70f};
-            const float cardDoneBg[4] = {0.028f, 0.065f, 0.055f, 0.90f};
-            const float cardDoneBord[4] = {0.18f, 0.58f, 0.38f, 0.85f};
-            const float cardHovBg[4] = {0.075f, 0.130f, 0.220f, 0.96f};
-            const float trackBg[4] = {0.06f, 0.09f, 0.14f, 0.95f};
+            const float* cardBorder = kGlassRimFaint;
+            const float cardDoneBg[4] = {0.070f, 0.130f, 0.110f, 0.92f};
+            const float cardDoneBord[4] = {0.30f, 0.80f, 0.52f, 0.55f};
+            const float trackBg[4] = {0.16f, 0.19f, 0.25f, 0.95f};
             const float trackDone[4] = {0.16f, 0.78f, 0.45f, 1.0f};
+            const float playPillBg[4] = {0.14f, 0.66f, 0.40f, 0.95f};
+            const float playPillRim[4] = {0.60f, 1.0f, 0.78f, 0.45f};
+            const float playPillRimHov[4] = {0.90f, 1.0f, 0.95f, 0.95f};
+            const float dangerHov[4] = {0.62f, 0.16f, 0.20f, 0.95f};
+            const float hovGlow[4] = {
+                themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.20f};
+            constexpr float kBarLeft = -0.27f;
+            constexpr float kBarRight = 0.47f;
+            constexpr float kJobBtnR = 0.030f;     // round per-job buttons (circle radius)
+            constexpr float kJobBtnLift = 0.014f;  // circle sits above its caption
 
-            int visIdx = 0;
-            for (int i = 0; i < totalJobs && visIdx < 4; ++i) {
-                int state = 0;
-                float prog = 0.0f;
-                if (!downloadJobs_.empty()) {
-                    state = downloadJobs_[i].state;
-                    prog = std::clamp(downloadJobs_[i].progress, 0.0f, 1.0f);
-                    if (downloadsFilter_ == 1 && state != 0 && state != 3 && state != 4) continue;
-                    if (downloadsFilter_ == 2 && state != 1) continue;
-                }
-                const float ry = 0.24f - static_cast<float>(visIdx) * 0.175f;
+            // Visible jobs under the current filter, in card order.
+            std::vector<int> visJobs;
+            for (int i = 0; i < totalJobs && static_cast<int>(visJobs.size()) < hub::kMaxDownloadCards; ++i) {
+                if (!downloadJobs_.empty() && !downloadJobVisible(downloadJobs_[i].state)) continue;
+                visJobs.push_back(i);
+            }
+            // Which per-job buttons a job shows: 0 = pause/resume or Play, 1 = X.
+            auto jobHasButton = [](int state, int which) {
+                return which == 1 || state == 0 || state == 1;
+            };
+
+            for (int v = 0; v < static_cast<int>(visJobs.size()); ++v) {
+                const int i = visJobs[static_cast<std::size_t>(v)];
+                const UiRect card = hub::downloadCard(v);
+                const int state = downloadJobs_.empty() ? 0 : downloadJobs_[i].state;
+                const float prog = downloadJobs_.empty() ? 0.0f : std::clamp(downloadJobs_[i].progress, 0.0f, 1.0f);
                 const bool hov = (i == downloadsHovered_);
-                const float* cBg = hov ? cardHovBg : (state == 1 ? cardDoneBg : cardBg);
+                const float cardR = 0.016f / card.hh;
+                const float cardBw = 0.0015f / card.hh;
+                const float* cBg = hov ? glassCardHoverT.data() : (state == 1 ? cardDoneBg : glassCardT.data());
                 const float* cBord = hov ? tabActiveBord : (state == 1 ? cardDoneBord : cardBorder);
 
-                drawUiElement(vpPanel, kContentCx, ry, cardHalfW, cardHalfH,
-                              UiShape::RoundedBox, cBg, 0.12f, 0.022f, cBord);
+                if (hov) {
+                    drawGlow(vpPanel, card.cx, card.cy, card.hw, card.hh, 0.016f, hovGlow, cardR * 0.6f);
+                }
+                drawUiElement(vpPanel, card.cx, card.cy, card.hw, card.hh,
+                              UiShape::RoundedBox, cBg, cardR, hov ? cardBw * 1.6f : cardBw, cBord);
 
                 // Left media icon box inside job card
-                const float iconBoxBg[4] = {0.02f, 0.03f, 0.05f, 0.92f};
-                drawUiElement(vpPanel, -0.36f, ry, 0.060f, 0.048f,
-                              UiShape::RoundedBox, iconBoxBg, 0.15f, 0.02f, cardBorder);
-                drawUiElement(vpPanel, -0.36f, ry, 0.020f, 0.020f,
+                drawUiElement(vpPanel, -0.36f, card.cy, 0.060f, 0.048f,
+                              UiShape::RoundedBox, glassWellT.data(), 0.012f / 0.048f);
+                drawUiElement(vpPanel, -0.36f, card.cy, 0.020f, 0.020f,
                               (state == 1) ? UiShape::Play : UiShape::Download,
                               (state == 1) ? emeraldCol : themeAccentCol);
 
                 // Progress bar track
-                const float barLeft = -0.27f;
-                const float barRight = 0.54f;
-                const float barHalfW = 0.5f * (barRight - barLeft);
-                const float barCx = 0.5f * (barLeft + barRight);
-                const float barY = ry - 0.038f;
-                drawUiElement(vpPanel, barCx, barY, barHalfW, 0.008f,
-                              UiShape::RoundedBox, trackBg, 0.50f);
-
+                const float barHalfW = 0.5f * (kBarRight - kBarLeft);
+                const float barY = card.cy - 0.038f;
+                drawUiElement(vpPanel, 0.5f * (kBarLeft + kBarRight), barY, barHalfW, 0.008f,
+                              UiShape::RoundedBox, trackBg, 1.0f);
                 if (prog > 0.005f) {
                     const float fillW = barHalfW * prog;
-                    drawUiElement(vpPanel, barLeft + fillW, barY, fillW, 0.008f,
-                                  UiShape::RoundedBox, (state == 1 ? trackDone : themeAccentCol), 0.50f);
+                    drawUiElement(vpPanel, kBarLeft + fillW, barY, fillW, 0.008f,
+                                  UiShape::RoundedBox, (state == 1 ? trackDone : themeAccentCol), 1.0f);
                 }
 
-                // Right action pill inside completed card
-                if (state == 1) {
-                    const float playPillBg[4] = {0.14f, 0.72f, 0.42f, 0.95f};
-                    drawUiElement(vpPanel, 0.71f, ry, 0.105f, 0.034f,
-                                  UiShape::RoundedBox, playPillBg, 0.50f, 0.03f, emeraldCol);
+                // Per-job buttons (shared layout with the hit-test)
+                if (downloadJobs_.empty()) continue;
+                for (int b = 0; b < 2; ++b) {
+                    if (!jobHasButton(state, b)) continue;
+                    const UiRect r = hub::downloadJobButton(v, b);
+                    const bool bHov = hov && downloadsJobBtnHovered_ == b;
+                    if (b == 0 && state == 1) {
+                        drawUiElement(vpPanel, r.cx, r.cy, r.hw, 0.030f, UiShape::RoundedBox,
+                                      playPillBg, 1.0f, bHov ? 0.12f : 0.06f,
+                                      bHov ? playPillRimHov : playPillRim);
+                        continue;
+                    }
+                    const float cy = r.cy + kJobBtnLift;
+                    if (bHov) {
+                        drawGlow(vpPanel, r.cx, cy, kJobBtnR, kJobBtnR, 0.010f, hovGlow);
+                    }
+                    drawUiElement(vpPanel, r.cx, cy, kJobBtnR, kJobBtnR, UiShape::RoundedBox,
+                                  (bHov && b == 1) ? dangerHov : (bHov ? glassCardHoverT.data() : glassControlT.data()),
+                                  1.0f, 0.06f, bHov ? tabActiveBord : kGlassRim);
+                    const UiShape icon = (b == 1) ? UiShape::Close
+                                       : (downloadJobs_[i].paused ? UiShape::Play : UiShape::Pause);
+                    drawUiElement(vpPanel, r.cx, cy, kJobBtnR * 0.45f, kJobBtnR * 0.45f, icon,
+                                  themeTextCol);
                 }
-                ++visIdx;
             }
 
             // Bottom global action buttons centered in content area
-            const float dbtnCy = -0.44f;
+            const float dbtnCy = hub::kDownloadsFooterY;
             std::vector<float> btnCx, btnHalfW;
             downloadsButtonLayout(btnCx, btnHalfW);
+            drawUiElement(vpPanel, kContentCx, dbtnCy + 0.060f, 0.64f, 0.0010f,
+                          UiShape::RoundedBox, kGlassDivider, 1.0f);
             for (std::size_t i = 0; i < btnCx.size(); ++i) {
                 const bool hov = (static_cast<int>(i) == downloadsBtnHovered_);
                 drawUiElement(vpPanel, kContentCx + btnCx[i], dbtnCy, btnHalfW[i], kDlBtnH * 0.5f,
-                              UiShape::RoundedBox, hov ? tabHovBg : tabNormBg, 0.45f, 0.03f,
+                              UiShape::RoundedBox, hov ? tabHovBg : tabNormBg, 1.0f, 0.05f,
                               hov ? tabHovBord : tabNormBord);
             }
 
-            // Text pass for Hub rail + Downloads content
-            vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline_);
-            vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                    textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
+            const Crumbs dlCrumbs = layoutCrumbs({"Downloads", "Transfers"}, -0.45f, 0.60f,
+                                                 scHeader * 0.90f);
+            drawCrumbChevrons(dlCrumbs, 0.455f);
 
-            drawFit(-0.795f, 0.455f, 0.28f, scHeader, themeTextCol, "PIXEL VR");
-            const char* mainLabels[3] = {"Files", "Downloads", "Settings"};
-            for (int s = 0; s < 3; ++s) {
-                drawFit(-0.790f, mainTabY[s], 0.23f, scStd, themeTextCol, mainLabels[s]);
-                if (s == 1 && activeDownloadCount_ > 0) {
-                    drawFitCentered(-0.555f, mainTabY[s], 0.035f, scBadge, themeTextCol,
-                                    std::to_string(activeDownloadCount_));
-                }
-            }
+            // Text pass for Hub rail + Downloads content
+            bindPipe(textPipeline_);
+
+            drawRailText();
             const char* dlSubLabels[3] = {"All Tasks", "Active Transfers", "Completed"};
-            const float dlSubY[3] = {-0.05f, -0.14f, -0.23f};
             for (int sub = 0; sub < 3; ++sub) {
-                drawFit(-0.84f, dlSubY[sub], 0.30f, scSub,
+                drawFit(-0.84f, hub::kDownloadsSubY[sub], 0.30f, scSub,
                         (downloadsFilter_ == sub) ? themeTextCol : slateCol, dlSubLabels[sub]);
             }
-            if (vaultUnlocked_) {
-                const float lockTextCol[4] = {1.0f, 0.50f, 0.50f, 1.0f};
-                drawFitCentered(-0.695f, -0.485f, 0.28f, scSub, lockTextCol, "Lock Vault");
-            }
 
-            drawFit(-0.45f, 0.455f, 0.64f, scHeader * 0.90f, themeTextCol,
-                    "Downloads > Transfers");
+            drawCrumbText(dlCrumbs, 0.455f, scHeader * 0.90f, 0.15f);
             drawFit(0.20f, 0.455f, 0.66f, scDetail, slateCol, downloadsStatus_);
 
-            if (visIdx == 0) {
+            if (visJobs.empty()) {
                 drawFitCentered(kContentCx, 0.02f, 0.80f, scStd, slateCol,
                                 "No transfers in this view");
-            } else {
-                int vIdx = 0;
-                for (int i = 0; i < totalJobs && vIdx < 4; ++i) {
-                    std::string jName;
-                    std::string jDet;
-                    int state = 0;
-                    float prog = 0.0f;
-                    if (!downloadJobs_.empty()) {
-                        jName = downloadJobs_[i].label;
-                        jDet = downloadJobs_[i].detail;
-                        state = downloadJobs_[i].state;
-                        prog = std::clamp(downloadJobs_[i].progress, 0.0f, 1.0f);
-                        if (downloadsFilter_ == 1 && state != 0 && state != 3 && state != 4) continue;
-                        if (downloadsFilter_ == 2 && state != 1) continue;
-                    } else if (i < static_cast<int>(downloadsRows_.size())) {
-                        jName = downloadsRows_[i];
-                    }
-                    const float ry = 0.24f - static_cast<float>(vIdx) * 0.175f;
-                    drawFit(-0.27f, ry + 0.028f, 0.80f, scSub, themeTextCol, jName);
-                    drawFit(-0.27f, ry - 0.008f, 0.80f, scDetail,
-                            (state == 1) ? emeraldCol : slateCol, jDet);
+            }
+            for (int v = 0; v < static_cast<int>(visJobs.size()); ++v) {
+                const int i = visJobs[static_cast<std::size_t>(v)];
+                const UiRect card = hub::downloadCard(v);
+                std::string jName;
+                std::string jDet;
+                int state = 0;
+                float prog = 0.0f;
+                if (!downloadJobs_.empty()) {
+                    jName = downloadJobs_[i].label;
+                    jDet = downloadJobs_[i].detail;
+                    state = downloadJobs_[i].state;
+                    prog = std::clamp(downloadJobs_[i].progress, 0.0f, 1.0f);
+                } else if (i < static_cast<int>(downloadsRows_.size())) {
+                    jName = downloadsRows_[i];
+                }
+                const float textMaxW = 0.86f;  // stops short of the per-job buttons
+                drawFit(-0.27f, card.cy + 0.028f, textMaxW, scSub, themeTextCol, jName);
+                drawFit(-0.27f, card.cy - 0.008f, textMaxW, scDetail,
+                        (state == 1) ? emeraldCol : slateCol, jDet);
 
-                    char pctBuf[16];
-                    std::snprintf(pctBuf, sizeof(pctBuf), "%d%%", static_cast<int>(prog * 100.0f + 0.5f));
-                    drawFit(0.56f, ry - 0.038f, 0.10f, scBadge, themeTextCol, pctBuf);
+                char pctBuf[16];
+                std::snprintf(pctBuf, sizeof(pctBuf), "%d%%", static_cast<int>(prog * 100.0f + 0.5f));
+                drawFit(kBarRight + 0.015f, card.cy - 0.038f, 0.09f, scBadge, themeTextCol, pctBuf);
 
-                    if (state == 1) {
-                        drawFitCentered(0.71f, ry, 0.19f, scDetail, themeTextCol, "Play Now");
+                if (downloadJobs_.empty()) continue;
+                for (int b = 0; b < 2; ++b) {
+                    if (!jobHasButton(state, b)) continue;
+                    const UiRect r = hub::downloadJobButton(v, b);
+                    if (b == 0 && state == 1) {
+                        drawFitCentered(r.cx, r.cy, r.hw * 2.0f - 0.01f, scDetail, themeTextCol, "Play");
+                        continue;
                     }
-                    ++vIdx;
+                    const char* caption = (b == 1)
+                        ? (state == 0 ? "Cancel" : (state == 4 ? "Unqueue" : "Remove"))
+                        : (downloadJobs_[i].paused ? "Resume" : "Pause");
+                    drawFitCentered(r.cx, r.cy - 0.040f, r.hw * 2.0f + 0.02f, scBadge * 0.95f,
+                                    slateCol, caption);
                 }
             }
 
@@ -3445,121 +4000,181 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         // ---------------------------------------------------------------------
         else if (settingsVisible_) {
             const int total = static_cast<int>(settingsRows_.size());
-            const float cardBg[4] = {0.080f, 0.110f, 0.170f, 0.92f};
-            const float cardBord[4] = {0.26f, 0.36f, 0.52f, 0.85f};
-            const float cardHovBg[4] = {0.15f, 0.24f, 0.38f, 0.98f};
+            const int maxVis = hub::settingsMaxVisible(total);
+            constexpr float kSetCardHalfW = 0.315f;
+            constexpr float kSetCtrlHalfW = 0.275f;
+            enum : int { kChoice = 0, kToggle = 1, kAction = 2, kBinding = 3, kColor = 4, kOption = 5,
+                         kSegmented = kSettingsKindSegmented };
+
+            // Card geometry comes from the shared hub layout (also used by the
+            // pointer hit-test).
+            struct SetCard {
+                float cx, cy, halfH, labelY, ctrlY, ctrlHalfH, textSc;
+            };
+            auto setCard = [&](int i) -> SetCard {
+                const hub::SettingsCard c = hub::settingsCard(i, total);
+                return {c.cx, c.cy, c.halfH, c.labelY, c.ctrlY, c.ctrlHalfH, scSub * c.textScale};
+            };
+            auto isListening = [](const std::string& v) {
+                return v.rfind("Press a button", 0) == 0 || v.rfind("Recording", 0) == 0;
+            };
+            // A row with no value that is not a toggle/option is a plain navigation
+            // row ("Back to ..."), drawn as a single-line card with a back chevron.
+            auto isNavRow = [&](const SettingsRowVis& row) {
+                return row.kind == kAction && row.value.empty();
+            };
 
             // Version pill in top-right header
             drawUiElement(vpPanel, 0.64f, 0.455f, 0.22f, 0.028f,
-                          UiShape::RoundedBox, tabNormBg, 0.45f, 0.02f, tabNormBord);
+                          UiShape::RoundedBox, kGlassVeil, 1.0f, 0.05f, kGlassRimFaint);
 
-            const int maxVis = (total > 8) ? 10 : 8;
+            const float switchOffTrack[4] = {0.20f, 0.23f, 0.29f, 0.95f};
+            const float switchOffKnob[4] = {0.62f, 0.67f, 0.75f, 0.98f};
+            const float switchOnTrack[4] = {
+                themeAccentCol[0] * 0.80f, themeAccentCol[1] * 0.80f,
+                themeAccentCol[2] * 0.85f, 0.98f};
+            const float knobOn[4] = {0.97f, 0.98f, 1.0f, 1.0f};
+            const float stepOff[4] = {0.22f, 0.25f, 0.31f, 0.95f};
+            const float selBord[4] = {
+                themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.55f};
+            const float hovGlow[4] = {
+                themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.20f};
+            const float activeOptBg[4] = {
+                themeAccentCol[0] * 0.22f, themeAccentCol[1] * 0.22f,
+                themeAccentCol[2] * 0.28f, 0.95f};
+            const float chipListenBg[4] = {
+                themeAccentCol[0] * 0.45f, themeAccentCol[1] * 0.45f,
+                themeAccentCol[2] * 0.52f, 0.98f};
+
             for (int i = 0; i < total && i < maxVis; ++i) {
-                const int c = i % 2;
-                const int r = i / 2;
-                const float cx = (c == 0) ? -0.135f : 0.535f;
-                float ry = 0.0f;
-                float cardHalfH = 0.0f;
-                float pillY = 0.0f;
-                float pillHalfH = 0.0f;
-                if (total <= 6) {
-                    ry = 0.22f - static_cast<float>(r) * 0.24f;
-                    cardHalfH = 0.098f;
-                    pillY = ry - 0.028f;
-                    pillHalfH = 0.036f;
-                } else if (total <= 8) {
-                    ry = 0.26f - static_cast<float>(r) * 0.185f;
-                    cardHalfH = 0.078f;
-                    pillY = ry - 0.022f;
-                    pillHalfH = 0.029f;
-                } else {
-                    ry = 0.28f - static_cast<float>(r) * 0.152f;
-                    cardHalfH = 0.066f;
-                    pillY = ry - 0.019f;
-                    pillHalfH = 0.025f;
-                }
-                const bool en = settingsEnabled_.empty() ||
-                                (i < static_cast<int>(settingsEnabled_.size()) &&
-                                 settingsEnabled_[i] != 0);
+                const SettingsRowVis& row = settingsRows_[static_cast<std::size_t>(i)];
+                const SetCard L = setCard(i);
+                const bool en = row.enabled;
                 const bool hov = (i == settingsHovered_) && en;
                 const bool sel = (i == settingsSelected_);
+                const bool optActive = (row.kind == kOption && row.stepIdx != 0);
+                const float cardR = 0.016f / L.halfH;
+                const float cardBw = 0.0015f / L.halfH;
 
-                drawUiElement(vpPanel, cx, ry, 0.315f, cardHalfH,
-                              UiShape::RoundedBox, (hov || sel) ? cardHovBg : cardBg,
-                              0.10f, (hov || sel) ? 0.03f : 0.018f,
-                              (hov || sel) ? tabActiveBord : cardBord);
+                if (hov) {
+                    drawGlow(vpPanel, L.cx, L.cy, kSetCardHalfW, L.halfH, 0.016f, hovGlow, cardR * 0.6f);
+                }
+                const float* cBg = hov ? glassCardHoverT.data() : (optActive ? activeOptBg : glassCardT.data());
+                const float* cBord = hov ? tabActiveBord
+                                         : ((sel || optActive) ? selBord : kGlassRimFaint);
+                drawUiElement(vpPanel, L.cx, L.cy, kSetCardHalfW, L.halfH,
+                              UiShape::RoundedBox, cBg, cardR,
+                              hov ? cardBw * 1.6f : cardBw, cBord);
 
-                const std::string& fullRow = settingsRows_[static_cast<std::size_t>(i)];
-                std::string label = fullRow;
-                std::string val;
-                const auto sep = fullRow.find(" : ");
-                if (sep != std::string::npos) {
-                    label = fullRow.substr(0, sep);
-                    val = fullRow.substr(sep + 3);
+                const float ctrlRight = L.cx + kSetCtrlHalfW;
+                if (row.kind == kOption) {
+                    if (optActive) {
+                        drawUiElement(vpPanel, ctrlRight - 0.020f, L.cy, 0.016f, 0.016f,
+                                      UiShape::Checkmark, themeAccentCol);
+                    }
+                    continue;
+                }
+                if (isNavRow(row)) {
+                    drawUiElement(vpPanel, L.cx - kSetCtrlHalfW + 0.010f, L.cy, -0.011f, 0.011f,
+                                  UiShape::Chevron, en ? themeTextCol : dimCol);
+                    continue;
                 }
 
-                const bool isToggleOn = (val == "ON" || val == "Visible");
-                const bool isToggleOff = (val == "OFF" || val == "Hidden");
-                const bool isToggle = isToggleOn || isToggleOff;
+                // Recessed control well under the label
+                drawUiElement(vpPanel, L.cx, L.ctrlY, kSetCtrlHalfW, L.ctrlHalfH,
+                              UiShape::RoundedBox, glassWellT.data(), 1.0f, 0.06f, kGlassRimFaint);
 
-                // Consistent value pill inside every settings card
-                drawUiElement(vpPanel, cx, pillY, 0.275f, pillHalfH,
-                              UiShape::RoundedBox, en ? tabActiveBg : tabNormBg,
-                              0.45f, 0.03f, en ? tabActiveBord : tabNormBord);
-
-                if (isToggle) {
-                    // Graphical toggle switch capsule + sliding round knob
-                    const float swCx = cx + 0.190f;
-                    const float swHalfW = 0.038f;
-                    const float swHalfH = 0.015f;
-                    if (isToggleOn) {
-                        const float capBg[4] = {themeAccentCol[0] * 0.35f, themeAccentCol[1] * 0.35f, themeAccentCol[2] * 0.35f, 0.90f};
-                        drawUiElement(vpPanel, swCx, pillY, swHalfW, swHalfH,
-                                      UiShape::RoundedBox, capBg, 0.95f, 0.025f, themeAccentCol);
-                        drawUiElement(vpPanel, swCx + 0.020f, pillY, 0.012f, 0.012f,
-                                      UiShape::RoundedBox, themeAccentCol, 0.95f);
-                    } else {
-                        const float capBg[4] = {0.06f, 0.09f, 0.14f, 0.85f};
-                        const float capBord[4] = {0.20f, 0.28f, 0.40f, 0.70f};
-                        const float knobCol[4] = {0.45f, 0.55f, 0.65f, 0.95f};
-                        drawUiElement(vpPanel, swCx, pillY, swHalfW, swHalfH,
-                                      UiShape::RoundedBox, capBg, 0.95f, 0.020f, capBord);
-                        drawUiElement(vpPanel, swCx - 0.020f, pillY, 0.012f, 0.012f,
-                                      UiShape::RoundedBox, knobCol, 0.95f);
-                    }
-                } else if (label.find("Color") != std::string::npos || label.find("Theme") != std::string::npos) {
-                    // Color swatches preview for Text Color or Accent Theme
-                    const bool isAccent = (label.find("Accent") != std::string::npos || label.find("Theme") != std::string::npos);
-                    const int activeIdx = isAccent ? uiAccentColorIdx_ : uiTextColorIdx_;
-                    for (int p = 0; p < 5; ++p) {
-                        const float dotX = cx + 0.095f + static_cast<float>(p) * 0.034f;
-                        const float* palCol = isAccent ? kAccentPalettes[p] : kTextPalettes[p];
-                        const bool isCur = (p == activeIdx);
-                        if (isCur) {
-                            const float haloCol[4] = {1.0f, 1.0f, 1.0f, 0.95f};
-                            drawUiElement(vpPanel, dotX, pillY, 0.0125f, 0.0125f,
-                                          UiShape::RoundedBox, haloCol, 0.95f);
+                if (row.kind == kSegmented && !row.options.empty()) {
+                    const hub::SettingsCard hc = hub::settingsCard(i, total);
+                    const int n = static_cast<int>(row.options.size());
+                    for (int sg = 0; sg < n; ++sg) {
+                        const UiRect r = hub::settingsSegment(hc, sg, n);
+                        if (sg == row.stepIdx && en) {
+                            drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox,
+                                          activeOptBg, 1.0f, 0.10f, tabActiveBord);
+                        } else if (hov && sg == settingsSegmentHovered_) {
+                            drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox,
+                                          kGlassVeil, 1.0f, 0.08f, kGlassRim);
                         }
-                        drawUiElement(vpPanel, dotX, pillY, 0.010f, 0.010f,
-                                      UiShape::RoundedBox, palCol, 0.95f);
                     }
+                } else if (row.kind == kToggle) {
+                    const bool on = row.stepIdx != 0;
+                    const float swHalfW = L.ctrlHalfH * 1.45f;
+                    const float swHalfH = L.ctrlHalfH * 0.62f;
+                    const float swCx = ctrlRight - 0.018f - swHalfW;
+                    const float knobR = swHalfH * 0.78f;
+                    const float knobX = on ? (swCx + swHalfW - swHalfH) : (swCx - swHalfW + swHalfH);
+                    if (on && en) {
+                        drawGlow(vpPanel, swCx, L.ctrlY, swHalfW, swHalfH, 0.010f, hovGlow);
+                    }
+                    drawUiElement(vpPanel, swCx, L.ctrlY, swHalfW, swHalfH, UiShape::RoundedBox,
+                                  (on && en) ? switchOnTrack : switchOffTrack, 1.0f);
+                    drawUiElement(vpPanel, knobX, L.ctrlY, knobR, knobR, UiShape::RoundedBox,
+                                  (on && en) ? knobOn : switchOffKnob, 1.0f);
+                } else if (row.kind == kColor) {
+                    const bool isAccent = (row.label.find("Accent") != std::string::npos);
+                    const int n = std::min(row.steps, 5);
+                    const float dotR = L.ctrlHalfH * 0.42f;
+                    const float pitch = dotR * 3.0f;
+                    for (int p = 0; p < n; ++p) {
+                        const float dotX = ctrlRight - 0.020f - dotR - static_cast<float>(n - 1 - p) * pitch;
+                        const float* palCol = isAccent ? kAccentPalettes[p] : kTextPalettes[p];
+                        if (p == row.stepIdx) {
+                            const float haloCol[4] = {1.0f, 1.0f, 1.0f, 0.95f};
+                            drawUiElement(vpPanel, dotX, L.ctrlY, dotR * 1.38f, dotR * 1.38f,
+                                          UiShape::RoundedBox, haloCol, 1.0f);
+                            drawUiElement(vpPanel, dotX, L.ctrlY, dotR * 1.16f, dotR * 1.16f,
+                                          UiShape::RoundedBox, glassWellT.data(), 1.0f);
+                        }
+                        drawUiElement(vpPanel, dotX, L.ctrlY, dotR, dotR,
+                                      UiShape::RoundedBox, palCol, 1.0f);
+                    }
+                } else if (row.kind == kChoice && row.steps > 1 && row.steps <= 8) {
+                    // Stepped slider: one segment per option, filled up to the active one
+                    const float segRight = ctrlRight - 0.022f;
+                    const float segLeft = L.cx + 0.035f;
+                    const float gap = 0.006f;
+                    const float segW = (segRight - segLeft - gap * static_cast<float>(row.steps - 1)) /
+                                       static_cast<float>(row.steps);
+                    const float segHalfH = std::max(0.0035f, L.ctrlHalfH * 0.16f);
+                    for (int s = 0; s < row.steps; ++s) {
+                        const float sx = segLeft + segW * 0.5f + static_cast<float>(s) * (segW + gap);
+                        const bool filled = (s <= row.stepIdx);
+                        drawUiElement(vpPanel, sx, L.ctrlY, segW * 0.5f, segHalfH, UiShape::RoundedBox,
+                                      (filled && en) ? themeAccentCol : stepOff, 1.0f);
+                    }
+                    if (en) {
+                        const float kx = segLeft + segW * 0.5f +
+                                         static_cast<float>(std::clamp(row.stepIdx, 0, row.steps - 1)) * (segW + gap);
+                        drawGlow(vpPanel, kx, L.ctrlY, segHalfH * 2.2f, segHalfH * 2.2f, 0.008f, hovGlow);
+                        drawUiElement(vpPanel, kx, L.ctrlY, segHalfH * 2.2f, segHalfH * 2.2f,
+                                      UiShape::RoundedBox, knobOn, 1.0f);
+                    }
+                } else if (row.kind == kBinding) {
+                    const float chipSc = L.textSc * 0.92f;
+                    const float chipHalfW = std::min(kSetCtrlHalfW - 0.02f,
+                                                     0.5f * measureString(chipSc, row.value) + 0.022f);
+                    const float chipCx = L.cx - kSetCtrlHalfW + 0.010f + chipHalfW;
+                    const bool listening = isListening(row.value);
+                    drawUiElement(vpPanel, chipCx, L.ctrlY, chipHalfW, L.ctrlHalfH * 0.74f,
+                                  UiShape::RoundedBox, listening ? chipListenBg : glassControlT.data(),
+                                  0.45f, 0.08f, listening ? tabActiveBord : kGlassRim);
+                } else if (row.kind == kAction) {
+                    drawUiElement(vpPanel, ctrlRight - 0.026f, L.ctrlY, 0.010f, 0.010f,
+                                  UiShape::Chevron, en ? themeAccentCol : dimCol);
                 }
             }
 
+            const Crumbs setCrumbs = layoutCrumbs(splitCrumbs(settingsTitle_), -0.45f, 0.84f,
+                                                  scHeader * 0.90f);
+            drawCrumbChevrons(setCrumbs, 0.455f);
+
             // Text pass for Hub rail + Settings cards
-            vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline_);
+            bindPipe(textPipeline_);
             vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                     textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
 
-            drawFit(-0.795f, 0.455f, 0.28f, scHeader, themeTextCol, "PIXEL VR");
-            const char* mainLabels[3] = {"Files", "Downloads", "Settings"};
-            for (int s = 0; s < 3; ++s) {
-                drawFit(-0.790f, mainTabY[s], 0.23f, scStd, themeTextCol, mainLabels[s]);
-                if (s == 1 && activeDownloadCount_ > 0) {
-                    drawFitCentered(-0.555f, mainTabY[s], 0.035f, scBadge, themeTextCol,
-                                    std::to_string(activeDownloadCount_));
-                }
-            }
+            drawRailText();
             const char* setSubLabels[5] = {"Display & Cinema", "UI & Appearance",
                                            "Audio & Tracks", "Controls & Input", "Vault & Privacy"};
             const int effSec = (settingsSection_ >= 10 && settingsSection_ <= 12) ? 2 : (settingsSection_ == 21 ? 1 : settingsSection_);
@@ -3568,66 +4183,56 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 drawFit(-0.84f, setSubY[sub], 0.30f, scSub * 0.92f,
                         (effSec == sub) ? themeTextCol : slateCol, setSubLabels[sub]);
             }
-            if (vaultUnlocked_) {
-                const float lockTextCol[4] = {1.0f, 0.50f, 0.50f, 1.0f};
-                drawFitCentered(-0.695f, -0.46f, 0.28f, scSub, lockTextCol, "Lock Vault");
-            }
 
-            drawFit(-0.45f, 0.455f, 0.82f, scHeader * 0.90f, themeTextCol, settingsTitle_);
+            drawCrumbText(setCrumbs, 0.455f, scHeader * 0.90f, 0.40f);
             drawFitCentered(0.64f, 0.455f, 0.41f, scDetail, slateCol,
-                            "PixelVR v1.2 \xB7 Steam Frame");
+                            std::string("PixelVR ") + PIXELVR_VERSION_STRING + " \xB7 Steam Frame");
 
             for (int i = 0; i < total && i < maxVis; ++i) {
-                const int c = i % 2;
-                const int r = i / 2;
-                const float cx = (c == 0) ? -0.135f : 0.535f;
-                float ry = 0.0f;
-                float labelY = 0.0f;
-                float pillY = 0.0f;
-                float textSc = scSub;
-                if (total <= 6) {
-                    ry = 0.22f - static_cast<float>(r) * 0.24f;
-                    labelY = ry + 0.044f;
-                    pillY = ry - 0.028f;
-                } else if (total <= 8) {
-                    ry = 0.26f - static_cast<float>(r) * 0.185f;
-                    labelY = ry + 0.034f;
-                    pillY = ry - 0.022f;
-                    textSc = scSub * 0.95f;
-                } else {
-                    ry = 0.28f - static_cast<float>(r) * 0.152f;
-                    labelY = ry + 0.028f;
-                    pillY = ry - 0.019f;
-                    textSc = scSub * 0.90f;
-                }
-                const bool en = settingsEnabled_.empty() ||
-                                (i < static_cast<int>(settingsEnabled_.size()) &&
-                                 settingsEnabled_[i] != 0);
+                const SettingsRowVis& row = settingsRows_[static_cast<std::size_t>(i)];
+                const SetCard L = setCard(i);
+                const bool en = row.enabled;
+                const float* labelCol = en ? themeTextCol : dimCol;
+                const float* valueCol = en ? themeTextCol : dimCol;
+                const float ctrlLeft = L.cx - kSetCtrlHalfW;
 
-                const std::string& fullRow = settingsRows_[static_cast<std::size_t>(i)];
-                std::string label = fullRow;
-                std::string val;
-                const auto sep = fullRow.find(" : ");
-                if (sep != std::string::npos) {
-                    label = fullRow.substr(0, sep);
-                    val = fullRow.substr(sep + 3);
+                if (row.kind == kOption) {
+                    drawFit(ctrlLeft, L.cy, 0.50f, L.textSc,
+                            row.stepIdx != 0 ? themeTextCol : slateCol, row.label);
+                    continue;
+                }
+                if (isNavRow(row)) {
+                    drawFit(ctrlLeft + 0.030f, L.cy, 0.50f, L.textSc, labelCol, row.label);
+                    continue;
                 }
 
-                const bool isToggleOn = (val == "ON" || val == "Visible");
-                const bool isToggleOff = (val == "OFF" || val == "Hidden");
-                const bool isToggle = isToggleOn || isToggleOff;
-
-                drawFit(cx - 0.275f, labelY, 0.55f, textSc,
-                        en ? themeTextCol : dimCol, label);
-                if (isToggle) {
-                    drawFit(cx - 0.250f, pillY, 0.36f, textSc,
-                            en ? themeTextCol : dimCol, val);
-                } else if (label.find("Color") != std::string::npos || label.find("Theme") != std::string::npos) {
-                    drawFit(cx - 0.250f, pillY, 0.32f, textSc,
-                            en ? themeTextCol : dimCol, val);
+                withHeadingFont([&] { drawFit(ctrlLeft, L.labelY, 0.55f, L.textSc, labelCol, row.label); });
+                const float valSc = L.textSc * 0.92f;
+                if (row.kind == kSegmented && !row.options.empty()) {
+                    const hub::SettingsCard hc = hub::settingsCard(i, total);
+                    const int n = static_cast<int>(row.options.size());
+                    for (int sg = 0; sg < n; ++sg) {
+                        const UiRect r = hub::settingsSegment(hc, sg, n);
+                        drawFitCentered(r.cx, r.cy, r.hw * 2.0f - 0.012f, valSc,
+                                        (sg == row.stepIdx && en) ? themeTextCol : (en ? slateCol : dimCol),
+                                        row.options[static_cast<std::size_t>(sg)]);
+                    }
+                } else if (row.kind == kBinding) {
+                    const float chipHalfW = std::min(kSetCtrlHalfW - 0.02f,
+                                                     0.5f * measureString(valSc, row.value) + 0.022f);
+                    const float chipCx = ctrlLeft + 0.010f + chipHalfW;
+                    drawFitCentered(chipCx, L.ctrlY, chipHalfW * 2.0f - 0.02f, valSc, valueCol, row.value);
+                    if (i == settingsHovered_ && en && !isListening(row.value)) {
+                        drawFit(chipCx + chipHalfW + 0.020f, L.ctrlY, L.cx + kSetCtrlHalfW - (chipCx + chipHalfW + 0.030f),
+                                scDetail, dimCol, "Trigger to rebind");
+                    }
                 } else {
-                    drawFitCentered(cx, pillY, 0.51f, textSc,
-                                    en ? themeTextCol : dimCol, val.empty() ? label : val);
+                    // Value text on the left of the well; controls occupy the right side.
+                    float maxW = 0.48f;
+                    if (row.kind == kToggle) maxW = 0.36f;
+                    else if (row.kind == kColor) maxW = 0.30f;
+                    else if (row.kind == kChoice && row.steps > 1 && row.steps <= 8) maxW = 0.28f;
+                    drawFit(ctrlLeft + 0.020f, L.ctrlY, maxW, valSc, valueCol, row.value);
                 }
             }
 
@@ -3641,16 +4246,15 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
     // 3. Folder Download Confirmation Modal (centered overlay)
     // =========================================================================
     if (modalOpen && textReady_ && uiPipeline_ != VK_NULL_HANDLE) {
-        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipeline_);
+        bindPipe(uiPipeline_);
         const float mHalfW = 0.44f;
         const float mHalfH = 0.26f;
         const float backdrop[4] = {0.0f, 0.0f, 0.0f, 0.76f};
         drawUiElement(vpPanel, 0.0f, 0.0f, kPanelW, kPanelTop,
-                      UiShape::RoundedBox, backdrop, 0.045f);
+                      UiShape::RoundedBox, backdrop, 0.09f);
 
-        const float modalBg[4] = {0.032f, 0.045f, 0.075f, 0.98f};
-        drawUiElement(vpPanel, 0.0f, 0.0f, mHalfW, mHalfH,
-                      UiShape::RoundedBox, modalBg, 0.07f, 0.02f, themeAccentCol);
+        const float modalBg[4] = {0.032f, 0.045f, 0.075f, 0.98f * (0.55f + 0.45f * op)};
+        drawGlass(0.0f, 0.0f, mHalfW, mHalfH, modalBg, 0.10f, 0.010f, themeAccentCol);
 
         const float innerBg[4] = {0.018f, 0.026f, 0.046f, 0.90f};
         const float innerBorder[4] = {0.18f, 0.26f, 0.40f, 0.70f};
@@ -3671,16 +4275,18 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         const float slateBorder[4] = {0.30f, 0.42f, 0.62f, 0.85f};
 
         drawUiElement(vpPanel, -0.15f, btnCy, btnHalfW, btnHalfH,
-                      UiShape::RoundedBox, dlHov ? greenBgHov : greenBg, 0.42f, 0.03f, greenBorder);
+                      UiShape::RoundedBox, dlHov ? greenBgHov : greenBg, 1.0f, 0.05f, greenBorder);
         drawUiElement(vpPanel, 0.15f, btnCy, btnHalfW, btnHalfH,
-                      UiShape::RoundedBox, canHov ? slateBgHov : slateBg, 0.42f, 0.03f, slateBorder);
+                      UiShape::RoundedBox, canHov ? slateBgHov : slateBg, 1.0f, 0.05f, slateBorder);
 
-        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline_);
+        bindPipe(textPipeline_);
         vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
         const float sc = (0.032f * tScale) / fontAtlas_.lineHeight;
 
-        drawFitCentered(0.0f, 0.175f, mHalfW * 1.8f, sc * 1.12f, themeAccentCol, "Confirm Download");
+        withHeadingFont([&] {
+            drawFitCentered(0.0f, 0.175f, mHalfW * 1.8f, sc * 1.12f, themeAccentCol, "Confirm Download");
+        });
         const std::string fName = downloadsRows_.size() > 1 ? downloadsRows_[1] : "Folder";
         const std::string sInfo = downloadsRows_.size() > 2 ? downloadsRows_[2] : "";
         drawFitCentered(0.0f, 0.048f, (mHalfW - 0.06f) * 2.0f, sc, themeTextCol, fName);
@@ -3693,22 +4299,20 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
     // 4. File Action Submenu Modal (overlay)
     // =========================================================================
     if (actionMenu_.visible && textReady_ && uiPipeline_ != VK_NULL_HANDLE) {
-        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipeline_);
+        bindPipe(uiPipeline_);
         const float backdrop[4] = {0.0f, 0.0f, 0.0f, 0.82f};
         drawUiElement(vpPanel, 0.0f, 0.0f, kPanelW, kPanelTop,
-                      UiShape::RoundedBox, backdrop, 0.045f);
+                      UiShape::RoundedBox, backdrop, 0.09f);
 
         const int menuOptCount = static_cast<int>(actionMenu_.options.size());
-        const float menuStepY = 0.068f;
+        const float menuStepY = hub::kActionMenuStepY;
         const float menuSpanY = static_cast<float>(std::max(0, menuOptCount - 1)) * menuStepY;
-        const float menuStartY = -0.040f + 0.5f * menuSpanY;
         const float menuDynHalfH = std::max(0.22f, 0.5f * menuSpanY + 0.125f);
 
-        const float mHalfW = (actionMenu_.page == 4) ? 0.48f : 0.44f;
-        const float mHalfH = (actionMenu_.page == 4) ? 0.38f : ((actionMenu_.page == 2) ? 0.24f : menuDynHalfH);
-        const float modalBg[4] = {0.032f, 0.045f, 0.075f, 0.98f};
-        drawUiElement(vpPanel, 0.0f, 0.0f, mHalfW, mHalfH,
-                      UiShape::RoundedBox, modalBg, 0.07f, 0.02f, themeAccentCol);
+        const float mHalfW = (actionMenu_.page == 4) ? hub::kSmbHalfW : 0.44f;
+        const float mHalfH = (actionMenu_.page == 4) ? hub::kSmbHalfH : ((actionMenu_.page == 2) ? 0.24f : menuDynHalfH);
+        const float modalBg[4] = {0.032f, 0.045f, 0.075f, 0.98f * (0.55f + 0.45f * op)};
+        drawGlass(0.0f, 0.0f, mHalfW, mHalfH, modalBg, 0.10f, 0.010f, themeAccentCol);
 
         // Danger red palette for delete
         const float redBg[4] = {0.58f, 0.12f, 0.18f, 0.95f};
@@ -3734,12 +4338,14 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         const float tabActiveBord[4] = {
             themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 1.0f};
         const float slateCol[4] = {0.60f, 0.70f, 0.84f, 1.0f};
+        const float dimCol[4] = {
+            themeTextCol[0] * 0.62f, themeTextCol[1] * 0.70f, themeTextCol[2] * 0.82f, 0.90f};
 
         if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5) {
             const float btnHalfW = 0.38f;
             const float btnHalfH = 0.028f;
             for (int i = 0; i < menuOptCount; ++i) {
-                const float cy = menuStartY - static_cast<float>(i) * menuStepY;
+                const float cy = hub::actionMenuOption(i, menuOptCount).cy;
                 const bool hov = (actionMenuBtnHovered_ == i) || (actionMenu_.selectedOption == i);
                 const std::string& optStr = actionMenu_.options[i];
                 const bool isDelete = (optStr.find("Delete") != std::string::npos);
@@ -3750,7 +4356,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 const float* bord = hov ? (isDelete ? redBorder : (isVault ? goldBorder : tabActiveBord))
                                         : (isDelete ? redBorder : (isVault ? goldBorder : tabNormBord));
                 drawUiElement(vpPanel, 0.0f, cy, btnHalfW, btnHalfH,
-                              UiShape::RoundedBox, bg, 0.35f, 0.02f, bord);
+                              UiShape::RoundedBox, bg, 1.0f, 0.06f, bord);
             }
         } else if (actionMenu_.page == 2) {
             // Delete confirmation
@@ -3760,76 +4366,110 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             const bool delHov = (actionMenuBtnHovered_ == 0) || (actionMenu_.selectedOption == 0);
             const bool canHov = (actionMenuBtnHovered_ == 1) || (actionMenu_.selectedOption == 1);
             drawUiElement(vpPanel, -0.15f, cy, btnHalfW, btnHalfH,
-                          UiShape::RoundedBox, delHov ? redBgHov : redBg, 0.42f, 0.03f, redBorder);
+                          UiShape::RoundedBox, delHov ? redBgHov : redBg, 1.0f, 0.05f, redBorder);
             drawUiElement(vpPanel, 0.15f, cy, btnHalfW, btnHalfH,
-                          UiShape::RoundedBox, canHov ? slateBgHov : slateBg, 0.42f, 0.03f, slateBorder);
+                          UiShape::RoundedBox, canHov ? slateBgHov : slateBg, 1.0f, 0.05f, slateBorder);
         } else if (actionMenu_.page == 4) {
-            // SMB Share Editor Modal
+            // SMB share editor: two-column glass form (layout in hub::smbFieldWell)
             const int optCount = static_cast<int>(actionMenu_.options.size());
-            const int fieldCount = std::min(optCount, 7);
-            const float scField = ((0.032f * tScale) / fontAtlas_.lineHeight) * 0.92f;
-            const float innerFieldBg[4] = {0.010f, 0.015f, 0.026f, 0.95f};
-            const float innerFieldBord[4] = {0.16f, 0.26f, 0.42f, 0.75f};
-            for (int i = 0; i < fieldCount; ++i) {
-                const float cy = 0.19f - static_cast<float>(i) * 0.054f;
+            const bool anon = optCount > 2 && actionMenu_.options[2] == "guest";
+            const float hovGlow[4] = {
+                themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.25f};
+            const float activeSegBg[4] = {
+                themeAccentCol[0] * 0.24f, themeAccentCol[1] * 0.24f,
+                themeAccentCol[2] * 0.30f, 0.96f};
+            // Header: close button + divider
+            {
+                const UiRect cr = hub::smbButton(10);
+                const bool hov = (actionMenuBtnHovered_ == 8);  // close X and Cancel share id 8
+                drawUiElement(vpPanel, cr.cx, cr.cy, cr.hw, cr.hh, UiShape::RoundedBox,
+                              hov ? glassCardHoverT.data() : glassControlT.data(), 1.0f, 0.08f,
+                              hov ? kGlassRim : kGlassRimFaint);
+                drawUiElement(vpPanel, cr.cx, cr.cy, cr.hw * 0.42f, cr.hh * 0.42f, UiShape::Close,
+                              themeTextCol);
+                drawUiElement(vpPanel, 0.0f, 0.285f, hub::kSmbHalfW - 0.04f, 0.0012f,
+                              UiShape::RoundedBox, kGlassDivider, 1.0f);
+                drawUiElement(vpPanel, 0.0f, -0.312f, hub::kSmbHalfW - 0.04f, 0.0012f,
+                              UiShape::RoundedBox, kGlassDivider, 1.0f);
+            }
+            for (int i = 0; i < 7 && i < optCount; ++i) {
+                const UiRect w = hub::smbFieldWell(i);
                 const bool hov = (actionMenuBtnHovered_ == i) || (actionMenu_.selectedOption == i);
                 const bool editing = (actionMenu_.editingRow == i);
-                drawUiElement(vpPanel, 0.0f, cy, 0.42f, 0.024f,
-                              UiShape::RoundedBox, hov ? tabHovBg : tabNormBg, 0.35f, 0.018f,
-                              (hov || editing) ? tabActiveBord : tabNormBord);
-                if (i != 2) {
-                    drawUiElement(vpPanel, 0.13f, cy, 0.275f, 0.018f,
-                                  UiShape::RoundedBox, innerFieldBg, 0.30f, 0.015f,
-                                  editing ? tabActiveBord : innerFieldBord);
+                const bool disabled = anon && (i == 3 || i == 4);
+                if (editing) {
+                    drawGlow(vpPanel, w.cx, w.cy, w.hw, w.hh, 0.014f, hovGlow);
+                }
+                drawUiElement(vpPanel, w.cx, w.cy, w.hw, w.hh, UiShape::RoundedBox,
+                              disabled ? glassRailT.data() : glassWellT.data(), 1.0f, editing ? 0.10f : 0.07f,
+                              editing ? tabActiveBord : ((hov && !disabled) ? kGlassRim : kGlassRimFaint));
+                if (i == 2) {
+                    for (int seg = 0; seg < 2; ++seg) {
+                        const UiRect r = hub::smbAuthSegment(seg);
+                        const bool active = (seg == 0) == anon;
+                        if (active) {
+                            drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox,
+                                          activeSegBg, 1.0f, 0.10f, tabActiveBord);
+                        } else if (hov && actionMenuKeyHovered_ == seg) {
+                            drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox,
+                                          kGlassVeil, 1.0f, 0.08f, kGlassRim);
+                        }
+                    }
                 }
                 if (editing) {
-                    const std::string& opt = actionMenu_.options[i];
-                    const auto colonPos = opt.find(':');
-                    std::string val = (colonPos != std::string::npos) ? opt.substr(colonPos + 1) : opt;
-                    while (!val.empty() && val.front() == ' ') val.erase(val.begin());
-                    const TextFieldLayout rowLay =
-                        layoutTextField(-0.13f, 0.39f, scField, val, actionMenu_.cursorPos, false, false);
+                    const float valSc = ((0.030f * tScale) / fontAtlas_.lineHeight) * 0.92f;
+                    const TextFieldLayout lay = layoutTextField(
+                        w.cx - w.hw + 0.022f, w.cx + w.hw - 0.022f, valSc,
+                        actionMenu_.options[static_cast<std::size_t>(i)], actionMenu_.cursorPos,
+                        false, false);
                     const float caretCol[4] = {1.0f, 1.0f, 1.0f, 0.98f};
-                    drawUiElement(vpPanel, rowLay.cursorX + 0.002f, cy, 0.0022f, 0.013f,
-                                  UiShape::RoundedBox, caretCol, 0.45f, 0.001f, tabActiveBord);
+                    drawUiElement(vpPanel, lay.cursorX + 0.002f, w.cy, 0.0022f, w.hh * 0.55f,
+                                  UiShape::RoundedBox, caretCol, 1.0f);
                 }
             }
-            if (optCount == 8) {
-                // Save (7) and Cancel (8)
-                const bool hov7 = (actionMenuBtnHovered_ == 7) || (actionMenu_.selectedOption == 7);
-                const bool hov8 = (actionMenuBtnHovered_ == 8) || (actionMenu_.selectedOption == 8);
-                drawUiElement(vpPanel, -0.15f, -0.25f, 0.13f, 0.026f, UiShape::RoundedBox,
-                              hov7 ? tabHovBg : tabNormBg, 0.40f, 0.022f, hov7 ? tabActiveBord : tabActiveBord);
-                drawUiElement(vpPanel, 0.15f, -0.25f, 0.13f, 0.026f, UiShape::RoundedBox,
-                              hov8 ? slateBgHov : slateBg, 0.40f, 0.022f, hov8 ? slateBorder : tabNormBord);
-            } else if (optCount >= 9) {
-                // Save (7), Delete (8), Cancel (9)
-                const bool hov7 = (actionMenuBtnHovered_ == 7) || (actionMenu_.selectedOption == 7);
-                const bool hov8 = (actionMenuBtnHovered_ == 8) || (actionMenu_.selectedOption == 8);
-                const bool hov9 = (actionMenuBtnHovered_ == 9) || (actionMenu_.selectedOption == 9);
-                drawUiElement(vpPanel, -0.24f, -0.25f, 0.11f, 0.026f, UiShape::RoundedBox,
-                              hov7 ? tabHovBg : tabNormBg, 0.40f, 0.022f, hov7 ? tabActiveBord : tabActiveBord);
-                drawUiElement(vpPanel, 0.0f, -0.25f, 0.10f, 0.026f, UiShape::RoundedBox,
-                              hov8 ? redBgHov : redBg, 0.40f, 0.022f, redBorder);
-                drawUiElement(vpPanel, 0.24f, -0.25f, 0.10f, 0.026f, UiShape::RoundedBox,
-                              hov9 ? slateBgHov : slateBg, 0.40f, 0.022f, slateBorder);
+            // Footer buttons: Save (primary), Cancel, Delete (existing shares)
+            for (int id : {7, 8, 9}) {
+                if (id == 9 && optCount < 10) continue;
+                const UiRect r = hub::smbButton(id);
+                const bool hov = (actionMenuBtnHovered_ == id) || (actionMenu_.selectedOption == id);
+                if (id == 7) {
+                    const float saveBg[4] = {
+                        themeAccentCol[0] * (hov ? 1.0f : 0.85f), themeAccentCol[1] * (hov ? 1.0f : 0.85f),
+                        themeAccentCol[2] * (hov ? 1.0f : 0.90f), 0.98f};
+                    if (hov) drawGlow(vpPanel, r.cx, r.cy, r.hw, r.hh, 0.014f, hovGlow);
+                    const float saveRim[4] = {1.0f, 1.0f, 1.0f, 0.35f};
+                    drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox,
+                                  saveBg, 1.0f, 0.06f, saveRim);
+                } else if (id == 8) {
+                    drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox,
+                                  hov ? glassCardHoverT.data() : glassControlT.data(), 1.0f, 0.06f,
+                                  hov ? kGlassRim : kGlassRimFaint);
+                } else {
+                    const float delBg[4] = {0.45f, 0.08f, 0.12f, hov ? 0.85f : 0.30f};
+                    drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox,
+                                  delBg, 1.0f, 0.06f, redBorder);
+                }
             }
         }
 
         // Text pass for Action Menu
-        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline_);
+        bindPipe(textPipeline_);
         vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
         const float sc = (0.032f * tScale) / fontAtlas_.lineHeight;
 
-        drawFitCentered(0.0f, mHalfH - 0.045f, mHalfW * 1.8f, sc * 1.15f, themeAccentCol, actionMenu_.title);
-        if (!actionMenu_.subtitle.empty() && actionMenu_.page != 2) {
+        if (actionMenu_.page != 4) {  // the SMB form lays out its own header
+            withHeadingFont([&] {
+                drawFitCentered(0.0f, mHalfH - 0.045f, mHalfW * 1.8f, sc * 1.15f, themeAccentCol, actionMenu_.title);
+            });
+        }
+        if (!actionMenu_.subtitle.empty() && actionMenu_.page != 2 && actionMenu_.page != 4) {
             drawFitCentered(0.0f, mHalfH - 0.090f, mHalfW * 1.8f, sc * 0.85f, slateCol, actionMenu_.subtitle);
         }
 
         if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5) {
             for (int i = 0; i < menuOptCount; ++i) {
-                const float cy = menuStartY - static_cast<float>(i) * menuStepY;
+                const float cy = hub::actionMenuOption(i, menuOptCount).cy;
                 const bool hov = (actionMenuBtnHovered_ == i) || (actionMenu_.selectedOption == i);
                 drawFitCentered(0.0f, cy, 0.38f * 1.85f, sc, hov ? themeTextCol : slateCol, actionMenu_.options[i]);
             }
@@ -3839,123 +4479,239 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             drawFitCentered(0.15f, -0.12f, 0.13f * 1.8f, sc, themeTextCol, "Cancel");
         } else if (actionMenu_.page == 4) {
             const int optCount = static_cast<int>(actionMenu_.options.size());
-            const int fieldCount = std::min(optCount, 7);
-            const float scField = sc * 0.92f;
-            for (int i = 0; i < fieldCount; ++i) {
-                const float cy = 0.19f - static_cast<float>(i) * 0.054f;
+            const bool anon = optCount > 2 && actionMenu_.options[2] == "guest";
+            const float labelSc = ((0.021f * tScale) / fontAtlas_.lineHeight);
+            const float valSc = ((0.030f * tScale) / fontAtlas_.lineHeight) * 0.92f;
+            const float dimText[4] = {themeTextCol[0] * 0.55f, themeTextCol[1] * 0.60f,
+                                      themeTextCol[2] * 0.70f, 0.75f};
+            const float errCol[4] = {1.0f, 0.45f, 0.45f, 1.0f};
+            static const char* const kLabels[7] = {"SERVER / HOST", "SHARE", "SIGN IN",
+                                                   "USERNAME", "PASSWORD", "WORKGROUP / DOMAIN",
+                                                   "NICKNAME"};
+            static const char* const kPlaceholders[7] = {"IP address or hostname", "All shares",
+                                                         "", "Username", "Password", "WORKGROUP",
+                                                         "Optional display name"};
+            // Header: title (heading weight) + hint / error line
+            withHeadingFont([&] {
+                drawFit(-hub::kSmbHalfW + 0.055f, 0.362f, 0.95f, sc * 1.10f, themeTextCol,
+                        actionMenu_.title);
+            });
+            const bool isError = actionMenu_.subtitle.rfind("Error", 0) == 0;
+            drawFit(-hub::kSmbHalfW + 0.055f, 0.318f, 1.0f, labelSc * 1.05f,
+                    isError ? errCol : slateCol, actionMenu_.subtitle);
+
+            for (int i = 0; i < 7 && i < optCount; ++i) {
+                const UiRect w = hub::smbFieldWell(i);
                 const bool hov = (actionMenuBtnHovered_ == i) || (actionMenu_.selectedOption == i);
                 const bool editing = (actionMenu_.editingRow == i);
-                const std::string& opt = actionMenu_.options[i];
-                const auto colonPos = opt.find(':');
-                if (colonPos != std::string::npos) {
-                    std::string label = opt.substr(0, colonPos + 1);
-                    std::string val = opt.substr(colonPos + 1);
-                    while (!val.empty() && val.front() == ' ') val.erase(val.begin());
-                    drawFit(-0.39f, cy, 0.24f, sc * 0.90f, hov ? themeTextCol : slateCol, label);
-                    const int curP = editing ? actionMenu_.cursorPos : static_cast<int>(val.size());
-                    const TextFieldLayout rowLay =
-                        layoutTextField(-0.13f, 0.39f, scField, val, curP, false, false);
-                    const float baseline = cy - 0.35f * fontAtlas_.ascent * scField;
-                    drawString(rowLay.startX, baseline, scField, themeAccentCol, rowLay.visibleStr);
+                const bool disabled = anon && (i == 3 || i == 4);
+                drawFit(w.cx - w.hw + 0.010f, w.cy + hub::kSmbLabelLift, w.hw * 2.0f, labelSc,
+                        (hov && !disabled) ? themeTextCol : dimCol, kLabels[i]);
+                if (i == 2) {
+                    for (int seg = 0; seg < 2; ++seg) {
+                        const UiRect r = hub::smbAuthSegment(seg);
+                        const bool active = (seg == 0) == anon;
+                        drawFitCentered(r.cx, r.cy, r.hw * 2.0f - 0.02f, valSc,
+                                        active ? themeTextCol : slateCol,
+                                        seg == 0 ? "Guest" : "Username & Password");
+                    }
+                    continue;
+                }
+                const std::string& val = actionMenu_.options[static_cast<std::size_t>(i)];
+                const float left = w.cx - w.hw + 0.022f;
+                const float right = w.cx + w.hw - 0.022f;
+                if (editing) {
+                    const TextFieldLayout lay =
+                        layoutTextField(left, right, valSc, val, actionMenu_.cursorPos, false, false);
+                    const float baseline = w.cy - 0.35f * fontAtlas_.ascent * valSc;
+                    drawString(lay.startX, baseline, valSc, themeTextCol, lay.visibleStr);
+                } else if (disabled) {
+                    drawFit(left, w.cy, right - left, valSc, dimText, "Not needed for guest access");
+                } else if (val.empty()) {
+                    drawFit(left, w.cy, right - left, valSc, dimText, kPlaceholders[i]);
                 } else {
-                    drawFitCentered(0.0f, cy, 0.78f, sc * 0.90f, hov ? themeTextCol : slateCol, opt);
+                    drawFit(left, w.cy, right - left, valSc, themeTextCol, val);
                 }
             }
-            if (optCount == 8) {
-                const bool hov7 = (actionMenuBtnHovered_ == 7) || (actionMenu_.selectedOption == 7);
-                const bool hov8 = (actionMenuBtnHovered_ == 8) || (actionMenu_.selectedOption == 8);
-                drawFitCentered(-0.15f, -0.253f, 0.24f, sc * 0.95f, hov7 ? themeTextCol : themeAccentCol, "Save SMB Share");
-                drawFitCentered(0.15f, -0.253f, 0.24f, sc * 0.95f, hov8 ? themeTextCol : slateCol, "Cancel");
-            } else if (optCount >= 9) {
-                const bool hov7 = (actionMenuBtnHovered_ == 7) || (actionMenu_.selectedOption == 7);
-                const bool hov8 = (actionMenuBtnHovered_ == 8) || (actionMenu_.selectedOption == 8);
-                const bool hov9 = (actionMenuBtnHovered_ == 9) || (actionMenu_.selectedOption == 9);
-                const float redCol[4] = {1.0f, 0.40f, 0.40f, 1.0f};
-                drawFitCentered(-0.24f, -0.253f, 0.20f, sc * 0.95f, hov7 ? themeTextCol : themeAccentCol, "Save SMB Share");
-                drawFitCentered(0.0f, -0.253f, 0.18f, sc * 0.95f, hov8 ? themeTextCol : redCol, "Delete");
-                drawFitCentered(0.24f, -0.253f, 0.18f, sc * 0.95f, hov9 ? themeTextCol : slateCol, "Cancel");
+            // Footer
+            const float darkText[4] = {0.03f, 0.05f, 0.09f, 1.0f};
+            const float redText[4] = {1.0f, 0.55f, 0.55f, 1.0f};
+            for (int id : {7, 8, 9}) {
+                if (id == 9 && optCount < 10) continue;
+                const UiRect r = hub::smbButton(id);
+                const char* label = (id == 7) ? (actionMenu_.title.rfind("Add", 0) == 0 ? "Add Share" : "Save")
+                                  : (id == 8) ? "Cancel" : "Delete";
+                withHeadingFont([&] {
+                    drawFitCentered(r.cx, r.cy, r.hw * 2.0f - 0.02f, valSc,
+                                    id == 7 ? darkText : (id == 9 ? redText : themeTextCol), label);
+                });
             }
         }
     }
 
     // =========================================================================
-    // Floating Virtual Keyboard Live Input Preview (above SteamVR keyboard)
+    // In-app keyboard: input field + glass key sheet over the panel
     // =========================================================================
     if (keyboardModal_.visible && textReady_ && uiPipeline_ != VK_NULL_HANDLE) {
-        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipeline_);
-        // 1. Semi-translucent dimming background across viewport
-        const float dimBg[4] = {0.0f, 0.0f, 0.0f, 0.65f};
-        drawUiElement(vpPanel, 0.0f, 0.0f, 1.20f, 0.80f, UiShape::RoundedBox, dimBg, 0.05f);
+        bindPipe(uiPipeline_);
+        const float dimBg[4] = {0.0f, 0.0f, 0.0f, 0.62f};
+        drawUiElement(vpPanel, 0.0f, 0.0f, kPanelW, kPanelTop, UiShape::RoundedBox, dimBg, 0.09f);
 
-        // 2. Floating Modal Box (centered right above SteamVR keyboard at cy = 0.16f)
-        const float mBoxBg[4] = {0.024f, 0.035f, 0.060f, 0.98f};
-        const float mBorder[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.95f};
-        drawUiElement(vpPanel, 0.0f, 0.16f, 0.46f, 0.13f, UiShape::RoundedBox, mBoxBg, 0.06f, 0.016f, mBorder);
+        const float sheetBg[4] = {0.040f, 0.050f, 0.070f, 0.96f * (0.6f + 0.4f * op)};
+        const float sheetShadow[4] = {0.0f, 0.0f, 0.0f, 0.55f};
+        const float accentGlow[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.28f};
+        const float accentBord[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 1.0f};
+        const float keyHovBg[4] = {themeAccentCol[0] * 0.38f, themeAccentCol[1] * 0.38f,
+                                   themeAccentCol[2] * 0.46f, 0.97f};
+        const float keySpecialBg[4] = {0.085f, 0.100f, 0.130f, 0.95f};
+        const float keyOnBg[4] = {themeAccentCol[0] * 0.26f, themeAccentCol[1] * 0.26f,
+                                  themeAccentCol[2] * 0.32f, 0.97f};
 
-        // 3. Recessed Input Field Box
-        const float fieldBg[4] = {0.010f, 0.014f, 0.024f, 0.98f};
-        const float fieldBord[4] = {0.20f, 0.32f, 0.50f, 0.85f};
-        drawUiElement(vpPanel, 0.0f, 0.15f, 0.40f, 0.038f, UiShape::RoundedBox, fieldBg, 0.035f, 0.015f, fieldBord);
+        // Input field (prompt line + value well)
+        drawGlow(vpPanel, 0.0f, hub::kKbFieldY, hub::kKbFieldHalfW, hub::kKbFieldHalfH, 0.016f,
+                 accentGlow);
+        drawUiElement(vpPanel, 0.0f, hub::kKbFieldY, hub::kKbFieldHalfW, hub::kKbFieldHalfH,
+                      UiShape::RoundedBox, glassWellT.data(), 1.0f, 0.06f, accentBord);
 
-        const float scHeader = (0.038f * tScale) / fontAtlas_.lineHeight;
-        const float scStd    = (0.030f * tScale) / fontAtlas_.lineHeight;
-        const float scDetail = (0.022f * tScale) / fontAtlas_.lineHeight;
-        const float fieldSc  = scStd * 1.15f;
-        const float kbSlateCol[4] = {themeTextCol[0] * 0.78f, themeTextCol[1] * 0.84f, themeTextCol[2] * 0.94f, 0.95f};
+        // Key sheet
+        drawGlow(vpPanel, 0.0f, hub::kKbSheetY - 0.01f, hub::kKbSheetHalfW, hub::kKbSheetHalfH,
+                 0.05f, sheetShadow, 0.12f, true);
+        drawGlass(0.0f, hub::kKbSheetY, hub::kKbSheetHalfW, hub::kKbSheetHalfH, sheetBg,
+                  0.12f, 0.008f, kGlassRim);
 
-        // Compute scrolled text window and exact cursor position inside [-0.37f, +0.37f]
-        const TextFieldLayout kbLay = layoutTextField(
-            -0.370f, 0.370f, fieldSc, keyboardModal_.text,
-            keyboardModal_.cursorPos, keyboardModal_.isPassword, false);
-
-        // Keep cursor solid while typing/moving, and blink smoothly when idle
-        static std::string sLastText;
-        static int sLastCursor = -1;
-        static auto sLastEditT = std::chrono::steady_clock::now();
-        const auto nowT = std::chrono::steady_clock::now();
-        if (keyboardModal_.text != sLastText || keyboardModal_.cursorPos != sLastCursor) {
-            sLastText = keyboardModal_.text;
-            sLastCursor = keyboardModal_.cursorPos;
-            sLastEditT = nowT;
+        const auto& keys = hub::keyboardKeys();
+        for (std::size_t k = 0; k < keys.size(); ++k) {
+            const hub::KbKey& key = keys[k];
+            const UiRect& r = key.r;
+            const bool hov = (static_cast<int>(k) == keyboardKeyHovered_);
+            const bool toggledOn = (key.code == hub::kKbShift && keyboardModal_.shift) ||
+                                   (key.code == hub::kKbSymbols && keyboardModal_.symbols);
+            const float keyR = 0.012f / std::min(r.hw, r.hh);
+            if (key.code == hub::kKbDone) {
+                const float doneBg[4] = {themeAccentCol[0] * (hov ? 1.0f : 0.85f),
+                                         themeAccentCol[1] * (hov ? 1.0f : 0.85f),
+                                         themeAccentCol[2] * (hov ? 1.0f : 0.90f), 0.98f};
+                if (hov) drawGlow(vpPanel, r.cx, r.cy, r.hw, r.hh, 0.012f, accentGlow, keyR);
+                const float rim[4] = {1.0f, 1.0f, 1.0f, 0.35f};
+                drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox, doneBg, keyR, 0.06f, rim);
+                continue;
+            }
+            if (key.code == hub::kKbCancel) {
+                drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox,
+                              hov ? glassCardHoverT.data() : glassControlT.data(), 1.0f, 0.06f,
+                              hov ? kGlassRim : kGlassRimFaint);
+                continue;
+            }
+            if (hov) drawGlow(vpPanel, r.cx, r.cy, r.hw, r.hh, 0.010f, accentGlow, keyR);
+            const bool special = key.code != hub::kKbChar && key.code != hub::kKbSpace;
+            const float* bg = hov ? keyHovBg : (toggledOn ? keyOnBg : (special ? keySpecialBg : glassControlT.data()));
+            drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox, bg, keyR, 0.05f,
+                          (hov || toggledOn) ? accentBord : kGlassRimFaint);
+            if (key.code == hub::kKbLeft || key.code == hub::kKbRight) {
+                const float chw = (key.code == hub::kKbLeft) ? -0.010f : 0.010f;
+                drawUiElement(vpPanel, r.cx, r.cy, chw, 0.010f, UiShape::Chevron, themeTextCol);
+            } else if (key.code == hub::kKbBackspace) {
+                drawUiElement(vpPanel, r.cx, r.cy, 0.011f, 0.011f, UiShape::Close, themeTextCol);
+            }
         }
-        const auto idleMs = std::chrono::duration_cast<std::chrono::milliseconds>(nowT - sLastEditT).count();
-        const bool cursorVisible = (idleMs < 450) || (((idleMs / 480) % 2) == 0);
-        if (cursorVisible) {
-            const float caretCol[4] = {1.0f, 1.0f, 1.0f, 0.98f};
-            drawUiElement(vpPanel, kbLay.cursorX + 0.0025f, 0.15f, 0.0028f, 0.022f,
-                          UiShape::RoundedBox, caretCol, 0.45f, 0.001f, mBorder);
+
+        // Caret in the input field
+        const float fieldSc = ((0.034f * tScale) / fontAtlas_.lineHeight);
+        const float fieldLeft = -hub::kKbFieldHalfW + 0.030f;
+        const float fieldRight = hub::kKbFieldHalfW - 0.030f;
+        const TextFieldLayout kbLay = layoutTextField(
+            fieldLeft, fieldRight, fieldSc, keyboardModal_.text, keyboardModal_.cursorPos,
+            keyboardModal_.isPassword, false);
+        if (viewIndex == 0) {
+            // Caret stops at every character boundary of the visible text, so a
+            // laser click maps to exactly what is on screen (scrolling, masking).
+            kbCaretStops_.clear();
+            const std::string& disp = kbLay.dispText;
+            int i = kbLay.visStart;
+            while (true) {
+                const float x = kbLay.startX +
+                    measureString(fieldSc, kbLay.prefix + disp.substr(kbLay.visStart, i - kbLay.visStart));
+                kbCaretStops_.emplace_back(x, i);
+                if (i >= kbLay.visEnd) break;
+                do { ++i; } while (i < kbLay.visEnd &&
+                                   (static_cast<unsigned char>(disp[i]) & 0xC0) == 0x80);
+            }
+        }
+        {
+            static std::string sLastText;
+            static int sLastCursor = -1;
+            static auto sLastEditT = std::chrono::steady_clock::now();
+            const auto nowT = std::chrono::steady_clock::now();
+            if (keyboardModal_.text != sLastText || keyboardModal_.cursorPos != sLastCursor) {
+                sLastText = keyboardModal_.text;
+                sLastCursor = keyboardModal_.cursorPos;
+                sLastEditT = nowT;
+            }
+            const auto idleMs = std::chrono::duration_cast<std::chrono::milliseconds>(nowT - sLastEditT).count();
+            if (idleMs < 450 || ((idleMs / 480) % 2) == 0) {
+                const float caretCol[4] = {1.0f, 1.0f, 1.0f, 0.98f};
+                drawUiElement(vpPanel, kbLay.cursorX + 0.003f, hub::kKbFieldY, 0.0026f, 0.024f,
+                              UiShape::RoundedBox, caretCol, 1.0f);
+            }
         }
 
         // Text pass
-        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline_);
-        vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
+        bindPipe(textPipeline_);
+        const float scKey = ((0.030f * tScale) / fontAtlas_.lineHeight);
+        const float scSmall = ((0.022f * tScale) / fontAtlas_.lineHeight);
+        const float kbSlateCol[4] = {themeTextCol[0] * 0.78f, themeTextCol[1] * 0.84f,
+                                     themeTextCol[2] * 0.94f, 0.95f};
+        const float darkText[4] = {0.03f, 0.05f, 0.09f, 1.0f};
 
-        // Prompt Title
-        drawFitCentered(0.0f, 0.235f, 0.85f, scHeader * 0.85f, themeTextCol,
-                        keyboardModal_.prompt.empty() ? "Virtual Keyboard Input" : keyboardModal_.prompt);
-
-        // Live Scrolled Text Buffer
+        withHeadingFont([&] {
+            drawFit(-hub::kKbFieldHalfW + 0.010f, hub::kKbFieldY + 0.088f, 1.0f, scKey,
+                    themeTextCol,
+                    keyboardModal_.prompt.empty() ? std::string("Enter text") : keyboardModal_.prompt);
+        });
         if (!kbLay.visibleStr.empty()) {
-            const float baseline = 0.15f - 0.35f * fontAtlas_.ascent * fieldSc;
-            drawString(kbLay.startX, baseline, fieldSc, themeAccentCol, kbLay.visibleStr);
-        } else {
-            const float placeCol[4] = {kbSlateCol[0], kbSlateCol[1], kbSlateCol[2], 0.38f};
-            const float baseline = 0.15f - 0.35f * fontAtlas_.ascent * fieldSc;
-            drawString(kbLay.startX + 0.010f, baseline, fieldSc * 0.90f, placeCol, "Type here...");
+            const float baseline = hub::kKbFieldY - 0.35f * fontAtlas_.ascent * fieldSc;
+            drawString(kbLay.startX, baseline, fieldSc, themeTextCol, kbLay.visibleStr);
         }
 
-        // Instruction Subtitle
-        drawFitCentered(0.0f, 0.075f, 0.85f, scDetail * 0.95f, kbSlateCol,
-                        "Type on keyboard below  \xB7  Stick L/R: Move Cursor  \xB7  Enter/Done: Submit");
+        for (std::size_t k = 0; k < keys.size(); ++k) {
+            const hub::KbKey& key = keys[k];
+            const UiRect& r = key.r;
+            std::string label;
+            switch (key.code) {
+                case hub::kKbChar: {
+                    const char c = keyboardModal_.symbols ? key.sym
+                                 : (keyboardModal_.shift ? key.upper : key.lower);
+                    label.assign(1, c);
+                    break;
+                }
+                case hub::kKbShift: label = "Shift"; break;
+                case hub::kKbSymbols: label = keyboardModal_.symbols ? "ABC" : "?123"; break;
+                case hub::kKbSpace: label = "Space"; break;
+                case hub::kKbDone: label = "Done"; break;
+                case hub::kKbCancel: label = "Cancel"; break;
+                default: break;  // Delete / arrows use icons
+            }
+            if (label.empty()) continue;
+            const bool small = key.code != hub::kKbChar;
+            const float* col = (key.code == hub::kKbDone) ? darkText
+                             : (key.code == hub::kKbSpace ? kbSlateCol : themeTextCol);
+            if (key.code == hub::kKbDone) {
+                withHeadingFont([&] {
+                    drawFitCentered(r.cx, r.cy, r.hw * 2.0f - 0.01f, scKey, col, label);
+                });
+            } else {
+                drawFitCentered(r.cx, r.cy, r.hw * 2.0f - 0.01f, small ? scSmall * 1.1f : scKey, col, label);
+            }
+        }
+        drawFitCentered(0.0f, hub::kKbFieldY - hub::kKbFieldHalfH - 0.024f, 1.3f, scSmall * 0.95f, kbSlateCol,
+                        "Point into the text to place the cursor  \xB7  Hold arrows or stick to move  \xB7  B: cancel");
     }
 
     // Tracked controller 3D models (lit capsule), drawn before the laser/cursor.
     if (drawModels_ &&
         (controllers_[0].active || controllers_[1].active) &&
         modelPipeline_ != VK_NULL_HANDLE) {
-        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                          modelPipeline_);
+        bindPipe(modelPipeline_);
         const Mat4 vpWorld = multiply(proj, viewMat);
         for (int h = 0; h < 2; ++h) {
             if (!controllers_[h].active) continue;
@@ -4070,7 +4826,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         const Vec3 eyePos{view.pose.position.x, view.pose.position.y,
                           view.pose.position.z};
 
-        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipeline_);
+        bindPipe(uiPipeline_);
         auto uiDraw = [&](const Mat4& model, const float col[4]) {
             const Mat4 mvp = multiply(proj, multiply(viewMat, model));
             UiPush push{};
@@ -4104,7 +4860,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             uiDraw(model, col);
         };
         auto dot = [&](const Vec3& c, float halfSize, const float col[4],
-                       UiShape shape = UiShape::Cursor) {
+                       UiShape shape = UiShape::Cursor, float glowSpread = 0.0f) {
             const Vec3 toEye = normalize(eyePos - c);
             Vec3 right = cross(Vec3{0.0f, 1.0f, 0.0f}, toEye);
             if (length(right) < 1e-4f) right = Vec3{1.0f, 0.0f, 0.0f};
@@ -4125,16 +4881,19 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             std::memcpy(push.mvp, mvp.m, sizeof(push.mvp));
             std::memcpy(push.color, col, sizeof(push.color));
             push.params[0] = static_cast<float>(shape);
+            push.params[1] = 1.0f;
+            push.params[2] = glowSpread;
             vkCmdPushConstants(commandBuffer_, uiPipelineLayout_,
                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                                0, sizeof(UiPush), &push);
             vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
         };
 
-        const float rayCol[4] = {pointerSuppressed_ ? 0.15f : 0.25f,
-                                 pointerSuppressed_ ? 0.25f : 0.60f,
-                                 pointerSuppressed_ ? 0.40f : 1.0f,
-                                 pointerSuppressed_ ? 0.25f : 0.85f};
+        const float rayCol[4] = {
+            pointerSuppressed_ ? 0.15f : themeAccentCol[0],
+            pointerSuppressed_ ? 0.25f : themeAccentCol[1],
+            pointerSuppressed_ ? 0.40f : themeAccentCol[2],
+            pointerSuppressed_ ? 0.25f : 0.85f};
         const float cursorCol[4] = {1.0f, 1.0f, 1.0f, 0.95f};
         for (int h = 0; h < 2; ++h) {
             if (!controllers_[h].active || !laserOn_[h]) {
@@ -4167,15 +4926,17 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             }
         }
         if (pointerActive_) {
-            dot(Vec3{pointerHit_[0], pointerHit_[1], pointerHit_[2]}, 0.020f,
-                cursorCol, UiShape::Cursor);
+            const Vec3 hit{pointerHit_[0], pointerHit_[1], pointerHit_[2]};
+            const float cursorGlow[4] = {
+                themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.45f};
+            dot(hit, 0.040f, cursorGlow, UiShape::SoftGlow, 0.75f);
+            dot(hit, 0.020f, cursorCol, UiShape::Cursor);
         }
     }
 
     // Debug statistics overlay: head-locked text pinned to the upper-left FOV.
     if (statsVisible_ && textReady_ && !statsLines_.empty()) {
-        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                          textPipeline_);
+        bindPipe(textPipeline_);
         vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
         // Head-locked: with viewMat = inverse(eye pose), proj * (view-space offset)
@@ -4185,74 +4946,36 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             multiply(proj, translation(Vec3{-0.24f, 0.24f, -1.0f}));
         const float scale = 0.032f / fontAtlas_.lineHeight;
         const float col[4] = {0.45f, 1.0f, 0.55f, 1.0f};
+        curTextVp = &statMvp;
+        curTextBend = 0.0f;
+        curFont = &fontAtlas_;
+        curTextSet = textSet_;
         float lineY = 0.0f;
         for (const std::string& line : statsLines_) {
-            float penX = 0.0f;
-            for (char rawc : line) {
-                unsigned char c = static_cast<unsigned char>(rawc);
-                if (c < 32 || c > 126) c = '?';
-                const Glyph& g = fontAtlas_.glyphs[c];
-                if (g.width > 0.0f && g.height > 0.0f) {
-                    TextPush push{};
-                    std::memcpy(push.mvp, statMvp.m, sizeof(push.mvp));
-                    std::memcpy(push.color, col, sizeof(push.color));
-                    push.rect[0] = penX + g.bearingX * scale;
-                    push.rect[1] = lineY - (g.height - g.bearingY) * scale;
-                    push.rect[2] = g.width * scale;
-                    push.rect[3] = g.height * scale;
-                    push.uv[0] = g.u0;
-                    push.uv[1] = g.v0;
-                    push.uv[2] = g.u1;
-                    push.uv[3] = g.v1;
-                    vkCmdPushConstants(commandBuffer_, textPipelineLayout_,
-                                       VK_SHADER_STAGE_VERTEX_BIT |
-                                           VK_SHADER_STAGE_FRAGMENT_BIT,
-                                       0, sizeof(TextPush), &push);
-                    vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
-                }
-                penX += g.advance * scale;
-            }
+            drawString(0.0f, lineY, scale, col, line);
             lineY -= fontAtlas_.lineHeight * scale * 1.35f;
         }
+        flushText();  // statMvp goes out of scope
     }
 
     // Background download status: one head-locked line near the bottom edge, so
     // an in-progress download stays visible after the browser panel is closed.
     if (downloadStatusVisible_ && textReady_ && !downloadStatusText_.empty()) {
-        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                          textPipeline_);
+        bindPipe(textPipeline_);
         vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
         const Mat4 mvp = multiply(proj, translation(Vec3{-0.28f, -0.30f, -1.0f}));
         const float scale = 0.030f / fontAtlas_.lineHeight;
         const float col[4] = {0.55f, 0.85f, 1.0f, 1.0f};
-        float penX = 0.0f;
-        for (char rawc : downloadStatusText_) {
-            unsigned char c = static_cast<unsigned char>(rawc);
-            if (c < 32 || c > 126) c = '?';
-            const Glyph& g = fontAtlas_.glyphs[c];
-            if (g.width > 0.0f && g.height > 0.0f) {
-                TextPush push{};
-                std::memcpy(push.mvp, mvp.m, sizeof(push.mvp));
-                std::memcpy(push.color, col, sizeof(push.color));
-                push.rect[0] = penX + g.bearingX * scale;
-                push.rect[1] = -(g.height - g.bearingY) * scale;
-                push.rect[2] = g.width * scale;
-                push.rect[3] = g.height * scale;
-                push.uv[0] = g.u0;
-                push.uv[1] = g.v0;
-                push.uv[2] = g.u1;
-                push.uv[3] = g.v1;
-                vkCmdPushConstants(commandBuffer_, textPipelineLayout_,
-                                   VK_SHADER_STAGE_VERTEX_BIT |
-                                       VK_SHADER_STAGE_FRAGMENT_BIT,
-                                   0, sizeof(TextPush), &push);
-                vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
-            }
-            penX += g.advance * scale;
-        }
+        curTextVp = &mvp;
+        curTextBend = 0.0f;
+        curFont = &fontAtlas_;
+        curTextSet = textSet_;
+        drawString(0.0f, 0.0f, scale, col, downloadStatusText_);
+        flushText();
     }
 
+    flushText();
     vkCmdEndRenderPass(commandBuffer_);
     if (vkEndCommandBuffer(commandBuffer_) != VK_SUCCESS) {
         PIXELVR_LOG_WARN("vkEndCommandBuffer failed");
@@ -4262,12 +4985,22 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &commandBuffer_;
-    if (vkQueueSubmit(queue_, 1, &submit, fence_) != VK_SUCCESS) {
+    if (vkQueueSubmit(queue_, 1, &submit, viewFences_[slot]) != VK_SUCCESS) {
         PIXELVR_LOG_WARN("vkQueueSubmit failed");
         return;
     }
-    vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX);
-    vkResetFences(device_, 1, &fence_);
+    viewFenceInFlight_[slot] = true;
+    // Only the last eye waits: until then the first eye's GPU work overlaps the
+    // second eye's recording. Everything the app mutates between frames (video
+    // textures, dma-buf frames, thumbnails, glyph buffers) is idle afterwards.
+    if (viewIndex + 1 >= viewTargets_.size()) {
+        for (uint32_t i = 0; i < 2; ++i) {
+            if (!viewFenceInFlight_[i]) continue;
+            vkWaitForFences(device_, 1, &viewFences_[i], VK_TRUE, UINT64_MAX);
+            vkResetFences(device_, 1, &viewFences_[i]);
+            viewFenceInFlight_[i] = false;
+        }
+    }
 }
 
 bool VulkanRenderer::createSamplerAndDescriptors() {

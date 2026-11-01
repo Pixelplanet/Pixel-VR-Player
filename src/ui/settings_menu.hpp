@@ -10,17 +10,11 @@ class SettingsMenu {
 public:
     enum class Action {
         None,
-        EnterDisplay,
-        EnterControls,
-        EnterStreams,
-        EnterSystem,
         Back,
         ListenPlay,
         ListenMenu,
         ListenRecenter,
         CycleDownloadDir,
-        CycleProjection,
-        CycleStereo,
         ToggleSwapEyes,
         ToggleModels,
         ToggleStats,
@@ -31,7 +25,6 @@ public:
         CycleUiAccentColor,
         CycleUiDistance,
         CycleUiFollowMode,
-        CycleBrowserViewMode,
         ListenQuickPath,
         EnterVideoList,
         EnterAudioList,
@@ -39,12 +32,10 @@ public:
         PickVideoStream,
         PickAudioStream,
         PickLanguage,
-        RecenterScreen,
         CycleVaultAutoLockHeadset,
         CycleVaultTimeout,
         ListenVaultMoveBtn,
         RecordVaultCombo,
-        LockVaultAction,
         EnterListColsConfig,
         ToggleListColFormat,
         ToggleListColRes,
@@ -54,9 +45,17 @@ public:
         CycleHoverHapticsStrength,
         CycleAmbilight,
         CycleResScale,
+        CyclePanelCurve,
+        CycleUiOpacity,
+        CycleBrowserSort,
         BackToUI,
-        Close
     };
+
+    // How a row's value is presented: the renderer draws a stepped slider for
+    // ordered choices, a switch for toggles, swatches for colours, a key chip
+    // for bindings, a chevron for rows that open a sub-page, and one pill per
+    // option for small unordered choices (Segmented).
+    enum class Kind { Choice, Toggle, Action, Binding, Color, Option, Segmented };
 
     struct Row {
         std::string label;
@@ -64,6 +63,10 @@ public:
         Action action = Action::None;
         bool enabled = true;  // disabled rows render greyed and do nothing
         int data = -1;        // payload: stream position or language index
+        Kind kind = Kind::Action;
+        int steps = 0;        // Choice/Color/Segmented: number of options
+        int stepIdx = 0;      // Choice/Color/Segmented: active option; Toggle/Option: 1 = on
+        std::vector<std::string> options;  // Segmented: short label per option
     };
 
     SettingsMenu();
@@ -83,6 +86,9 @@ public:
 
     // Activates the currently selected row and returns the requested action.
     Action activate();
+    // For a Segmented row: activates it until option `segment` is chosen (so
+    // the app sees the same action as a normal click) and returns that action.
+    Action activateSegment(int segment);
 
     // Settings values
     int projectionMode() const { return projectionMode_; } // 0=Flat, 1=360, 2=180
@@ -110,6 +116,16 @@ public:
     float uiDistance() const;
     int uiFollowMode() const { return uiFollowMode_; }
     void setUiFollowMode(int m) { uiFollowMode_ = m; saveConfig(); refresh(); }
+    // Main panel shape: 0 = flat, 1 = gentle curve, 2 = full wrap.
+    int panelCurveIdx() const { return panelCurveIdx_; }
+    float panelCurve() const;  // renderer curve amount (0..1)
+    // Panel transparency: 0 = solid .. 3 = clear; uiOpacity() is the renderer factor.
+    int uiOpacityIdx() const { return uiOpacityIdx_; }
+    float uiOpacity() const;
+    // File browser sort order: 0 = name, 1 = newest first, 2 = largest first.
+    int browserSort() const { return browserSort_; }
+    void setBrowserSort(int s) { browserSort_ = ((s % 3) + 3) % 3; saveConfig(); refresh(); }
+    // Browser view mode is changed from the file browser header (not a settings row).
     int browserViewMode() const { return browserViewMode_; }
     void setBrowserViewMode(int m) { browserViewMode_ = m; saveConfig(); refresh(); }
     int bindQuickPath() const { return bindQuickPathBtn_; }
@@ -162,8 +178,8 @@ public:
 
 private:
     bool open_ = false;
-    std::string title_ = "Settings & Controller Remap";
-    std::string status_ = "Point + Trigger: Change Setting | Grip: Recenter | B/Y: Close";
+    std::string title_ = "Settings > Display & Cinema";
+    std::string status_ = "Point + Trigger: Change Setting  |  B: Close";
     std::vector<Row> rows_;
     int selected_ = 0;
 
@@ -188,6 +204,9 @@ private:
     int uiDistanceIdx_ = 1;    // 0=Near (1.5m), 1=Comfort (1.9m), 2=Mid (2.3m), 3=Far (2.8m)
     int uiFollowMode_ = 0;     // 0=World Lock (default, zero drift/tilt), 1=Smooth Gaze Follow
     int browserViewMode_ = 0;  // 0=Large Cards (3x2), 1=Smaller Cards (4x3), 2=Compact List (1-Col)
+    int panelCurveIdx_ = 1;    // 0=Flat, 1=Gentle (default), 2=Wrap
+    int uiOpacityIdx_ = 2;     // 0=Solid, 1=Frosted, 2=Glass (default), 3=Clear
+    int browserSort_ = 0;      // 0=Name, 1=Newest, 2=Largest
     bool listShowFormat_ = true;
     bool listShowRes_ = true;
     bool listShowSize_ = true;

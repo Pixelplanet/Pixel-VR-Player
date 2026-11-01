@@ -59,6 +59,7 @@ private:
     bool doneSubmitted_ = false;
     bool userTyped_ = false;
     bool kbConfigured_ = false;
+    bool laserHooksActive_ = false;  // setLaserPointerActive(true) applied this run
     int pollFramesSinceOpen_ = 0;
     float kbMatLocal_[3][4]{};
     float kbMatStage_[3][4]{};

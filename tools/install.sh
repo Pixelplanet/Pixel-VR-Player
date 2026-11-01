@@ -535,6 +535,11 @@ cp "$srcdir/pixelvr" "$INSTALL_DIR/pixelvr"
 chmod 0755 "$INSTALL_DIR/pixelvr"
 rm -f "$INSTALL_DIR/shaders/"*.spv
 cp "$srcdir/shaders/"*.spv "$INSTALL_DIR/shaders/"
+# Bundled UI fonts (optional: the app falls back to system fonts).
+if [ -d "$srcdir/fonts" ]; then
+    mkdir -p "$INSTALL_DIR/fonts"
+    cp "$srcdir/fonts/"* "$INSTALL_DIR/fonts/"
+fi
 cp "$srcdir/run.sh" "$INSTALL_DIR/run.sh"
 chmod 0755 "$INSTALL_DIR/run.sh"
 INSTALLED_SCRIPT=0

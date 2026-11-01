@@ -6,26 +6,37 @@ This document is a complete, implementation-ready handoff guide for **PixelVRPla
 
 ## 1. Visual Concept Mockups (Spatial VR UI Gallery)
 
-Generated 16:9 high-resolution concept mockups (stored in the artifact directory `C:\Users\tomwi\.gemini\antigravity\brain\0772bbab-53a0-49f5-b094-22a628d153cf\`):
-- **Mockup 1 — File Browser:** `mockup_ui_file_browser_1792865434894.jpg` (Glassmorphic cards, header Up button, breadcrumb pills, folder stack lip & right scrollbar)
-- **Mockup 2 — Settings View:** `mockup_ui_settings_1792865444847.jpg` (Visual toggle switches, stepped progress bars & color swatch dots)
-- **Mockup 3 — Cinema Transport Dock:** `mockup_ui_transport_dock_1792865461315.jpg` (Timeline hover timestamp bubble, icon pills & hero glow ring)
-- **Mockup 4 — Cinema Context & Options:** `pixelvrplayer_spatial_ui_mockup_1792865752605.jpg` (3D projection format pills, audio/subtitle drawer & theater ambilight)
+The reference mockups live in the repo under `docs/ui-redesign/`:
+- **File Browser:** `mockup-unified-1-files.jpg` (glass cards, breadcrumb header, quick filters, scrollbar)
+- **Downloads:** `mockup-unified-2-downloads.jpg` (job cards with per-item Pause / Cancel, Play Now)
+- **Settings:** `mockup-unified-3-settings.jpg` (segmented controls, sliders, toggle switches)
+- **Cinema HUD:** `mockup-unified-4-cinema-hud.jpg` (scrubber with preview thumbnail, hero play button, format pills)
 
 ---
 
 ## 2. Key Codebase Map
 
-| Subsystem | Files | Key Symbols / Line Ranges |
+| Subsystem | Files | Key Symbols |
 | :--- | :--- | :--- |
 | **UI & Text Renderer** | `src/gfx/vulkan_renderer.hpp`, `src/gfx/vulkan_renderer.cpp` | `VulkanRenderer::renderView`, `VulkanRenderer::updatePointer` |
-| **Procedural SDF UI Shader** | `shaders/ui.frag`, `shaders/ui.vert` | `sdRoundedBox`, `Push` constants (`params.x` = shape, `params.y` = radius, `params.z` = borderWidth) |
-| **Thumbnail Shader** | `shaders/thumb.frag` | Rounded-corner SDF mask + sRGB-to-linear conversion |
-| **SDF Font Atlas (UTF-8 / Latin-1)** | `src/gfx/text_atlas.hpp`, `src/gfx/text_atlas.cpp` | `buildFontAtlas` (`glyphs[256]`) |
-| **File Browser & SMB** | `src/ui/browser.hpp`, `src/ui/browser.cpp` | `Browser::scanLocalInto`, `Browser::scanSmbInto`, `folderHistory_` |
-| **Thumbnail & Metadata Cache** | `src/ui/thumbnail_cache.hpp`, `src/ui/thumbnail_cache.cpp` | `ThumbnailCache::extractThumbnailAndMeta` |
-| **SteamVR Virtual Keyboard** | `src/xr/vr_keyboard.hpp`, `src/xr/vr_keyboard.cpp` | `VrKeyboard::show`, `VrKeyboard::poll` |
-| **Main App Loop & Input** | `src/app/app.hpp`, `src/app/app.cpp` | `App::run` |
+| **Shared hub layout** | `src/gfx/vulkan_renderer.cpp` (`namespace hub`) | `UiRect`, `hub::browserCard`, `hub::settingsCard`, `hub::headerButton`, `hub::downloadCard`, `computePanelPlacement` - the single source of truth for drawing *and* laser hit-testing |
+| **Procedural SDF UI Shader** | `shaders/ui.vert`, `shaders/ui.frag` | Push: `mvp` (panel space), `params` = shape / radius / border / bend radius, `rect` = element centre + half-size. Radius & border are in units of the shorter half-extent (1.0 = capsule). Shape 20 = soft glow |
+| **Text** | `shaders/text.vert`, `shaders/text.frag`, `src/gfx/text_atlas.*` | Instanced glyph batches (`GlyphInstance`, per-eye buffer, `flushText` / `bindPipe`); Inter Medium + SemiBold SDF atlases (`withHeadingFont`) |
+| **Thumbnails** | `shaders/thumb.vert`, `shaders/thumb.frag` | Rounded-corner mask; split into strips on the curved panel |
+| **File Browser & SMB** | `src/ui/browser.hpp`, `src/ui/browser.cpp` | `Browser::scanLocalInto`, `Browser::scanSmbInto`, `Browser::setSortMode`, `Browser::removeJob` |
+| **Thumbnail & Metadata Cache** | `src/ui/thumbnail_cache.*` | `ThumbnailCache::extractThumbnailAndMeta` |
+| **Scrub preview** | `src/media/scrub_preview.*` | Keyframe-only software decode on a worker, latest request wins |
+| **Resume / format memory** | `src/app/playback_memory.*` | `~/.config/pixelvr/playback_state.tsv`; vault paths are never stored |
+| **Settings** | `src/ui/settings_menu.*` | `SettingsMenu::Row::Kind` (Choice / Toggle / Action / Binding / Color / Option / Segmented) |
+| **SteamVR Virtual Keyboard** | `src/xr/vr_keyboard.*` | `VrKeyboard::show`, `VrKeyboard::poll` |
+| **Main App Loop & Input** | `src/app/app.hpp`, `src/app/app.cpp` | `App::run`, `App::closeMedia` |
+
+### Curved main panel
+
+`Settings > UI & Appearance > Main Panel Shape` (Flat / Gentle / Wrap) sets a curve amount; the
+panel is bent onto a vertical cylinder of radius `panelDistance / curve` in `ui.vert`, `text.vert`
+and `thumb.vert`, and `updatePointer` intersects the laser with the same cylinder, converting the
+hit back to flat panel coordinates (arc length), so every layout rect stays in flat units.
 
 ---
 
@@ -156,7 +167,8 @@ In `shaders/thumb.frag`, thumbnails are drawn without scrims, causing white dura
 
 - **Device IP:** `192.168.178.61`
 - **SSH Key:** `$HOME\AppData\Local\steamos-devkit\steamos-devkit\devkit_rsa`
+- **Install used on the dev headset:** `~/devkit-game/PixelVRPlayer` (the Steam shortcut runs `pixelvr` -> `pixelvr.real`). The release installer's `~/PixelVRPlayer` is not used there.
 - **One-Line Remote Build & Deploy Command:**
   ```powershell
-  ssh -i "$HOME\AppData\Local\steamos-devkit\steamos-devkit\devkit_rsa" -o StrictHostKeyChecking=no steamos@192.168.178.61 "cmake --build ~/pixelvr-src/build --parallel && cp ~/pixelvr-src/build/bin/pixelvr ~/devkit-game/PixelVRPlayer/pixelvr.real && cp ~/pixelvr-src/build/bin/pixelvr ~/PixelVRPlayer/pixelvr && cp ~/pixelvr-src/build/shaders/*.spv ~/devkit-game/PixelVRPlayer/shaders/ && cp ~/pixelvr-src/build/shaders/*.spv ~/PixelVRPlayer/shaders/ && echo '=== BUILD & DEPLOY COMPLETE ==='"
+  ssh -i "$HOME\AppData\Local\steamos-devkit\steamos-devkit\devkit_rsa" -o StrictHostKeyChecking=no steamos@192.168.178.61 "cmake --build ~/pixelvr-src/build --parallel && cp ~/pixelvr-src/build/bin/pixelvr ~/devkit-game/PixelVRPlayer/pixelvr.real && cp ~/pixelvr-src/build/shaders/*.spv ~/devkit-game/PixelVRPlayer/shaders/ && mkdir -p ~/devkit-game/PixelVRPlayer/fonts && cp ~/pixelvr-src/build/fonts/* ~/devkit-game/PixelVRPlayer/fonts/ && echo '=== BUILD & DEPLOY COMPLETE ==='"
   ```

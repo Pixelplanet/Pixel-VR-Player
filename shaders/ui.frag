@@ -6,8 +6,9 @@
 layout(push_constant) uniform Push {
     mat4 mvp;
     vec4 color;
-    vec4 params;       // x: shapeType, y: radius, z: borderWidth, w: extra
+    vec4 params;       // x: shapeType, y: radius, z: borderWidth, w: bend radius (vertex stage)
     vec4 borderColor;
+    vec4 rect;         // centre x, y and half-size w, h (zero size = unit quad)
 } pc;
 
 layout(location = 0) in vec2 vCoord;
@@ -46,10 +47,43 @@ void main() {
     float d = 0.0;
     bool hasBorder = false;
 
-    if (shape == 0) {
+    // Boxes are evaluated in an aspect-correct space measured in units of the
+    // shorter half-extent, so corner radii and border widths stay uniform on
+    // wide pills and tall bars alike (radius 1.0 = full capsule / circle).
+    float aspect = (pc.rect.w != 0.0) ? max(abs(pc.rect.z / pc.rect.w), 1e-4) : 1.0;
+    float unitScale = min(aspect, 1.0);
+    vec2 pBox = vec2(p.x * aspect, p.y) / unitScale;
+    vec2 boxHalf = vec2(aspect, 1.0) / unitScale;
+
+    if (shape == 20) {
+        // Shape 20: Soft glow / shadow halo. The quad is the element grown by
+        // `spread` (params.z, in short-half-extent units); alpha falls off
+        // smoothly from the element edge to the quad edge.
+        // A negative radius makes the halo hollow (outside the element only), so
+        // drop shadows don't darken what shows through translucent panels.
+        bool hollow = pc.params.y < 0.0;
+        float spread = max(pc.params.z, 1e-3);
+        vec2 inner = max(boxHalf - vec2(spread), vec2(1e-3));
+        float r = clamp(abs(pc.params.y), 0.0, 1.0) * min(inner.x, inner.y);
+        float dg = sdRoundedBox(pBox, inner, r);
+        if (hollow && dg <= 0.0) {
+            discard;
+        }
+        float t = clamp(dg / spread, 0.0, 1.0);
+        float a = (1.0 - t) * (1.0 - t) * (1.0 - t);  // cubic: tight halo, fast fade
+        if (a <= 0.002) {
+            discard;
+        }
+        outColor = vec4(pow(max(pc.color.rgb, vec3(0.0)), vec3(2.2)), pc.color.a * a);
+        return;
+    }
+
+    // Shape 25 (glass panel) is a rounded box plus bevel + reflection sheen.
+    bool glass = (shape == 25);
+    if (shape == 0 || glass) {
         // Shape 0: Rounded rectangle (e.g. button body, panel, progress bar)
         float r = clamp(pc.params.y, 0.0, 1.0);
-        d = sdRoundedBox(p, vec2(1.0), r);
+        d = sdRoundedBox(pBox, boxHalf, r);
         hasBorder = (pc.params.z > 0.0);
     } else if (shape == 1) {
         // Shape 1: Play icon (triangle pointing right)
@@ -169,6 +203,35 @@ void main() {
         float roof = sdTriangle(p - vec2(0.0, 0.12), vec2(-0.52, 0.0), vec2(0.52, 0.0), vec2(0.0, 0.42)) - 0.04;
         float baseH = sdRoundedBox(p - vec2(0.0, -0.20), vec2(0.35, 0.26), 0.04);
         d = min(roof, baseH);
+    } else if (shape == 21) {
+        // Shape 21: Five-point star (bookmarks), Inigo Quilez sdStar5
+        const vec2 k1 = vec2(0.809016994375, -0.587785252292);
+        const vec2 k2 = vec2(-k1.x, k1.y);
+        vec2 ps = vec2(abs(p.x), p.y + 0.07);
+        float rf = 0.42;
+        float r0 = 0.72;
+        ps -= 2.0 * max(dot(k1, ps), 0.0) * k1;
+        ps -= 2.0 * max(dot(k2, ps), 0.0) * k2;
+        ps.x = abs(ps.x);
+        ps.y -= r0;
+        vec2 ba = rf * vec2(-k1.y, k1.x) - vec2(0.0, 1.0);
+        float h = clamp(dot(ps, ba) / dot(ba, ba), 0.0, r0);
+        d = length(ps - ba * h) * sign(ps.y * ba.x - ps.x * ba.y) - 0.04;
+    } else if (shape == 22) {
+        // Shape 22: Padlock (vault)
+        float body = sdRoundedBox(p - vec2(0.0, -0.22), vec2(0.50, 0.38), 0.10);
+        vec2 pq = p - vec2(0.0, 0.16);
+        float shackle = abs(length(pq) - 0.30) - 0.08;
+        shackle = max(shackle, -pq.y);
+        float legs = sdRoundedBox(vec2(abs(p.x) - 0.30, p.y - 0.10), vec2(0.08, 0.10), 0.02);
+        float keyhole = length(p - vec2(0.0, -0.18)) - 0.09;
+        d = max(min(body, min(shackle, legs)), -keyhole);
+    } else if (shape == 23) {
+        // Shape 23: Sort (three left-aligned bars of decreasing length)
+        float b1 = sdRoundedBox(p - vec2(0.00, 0.46), vec2(0.62, 0.09), 0.06);
+        float b2 = sdRoundedBox(p - vec2(-0.16, 0.00), vec2(0.46, 0.09), 0.06);
+        float b3 = sdRoundedBox(p - vec2(-0.32, -0.46), vec2(0.30, 0.09), 0.06);
+        d = min(b1, min(b2, b3));
     } else {
         d = sdRoundedBox(p, vec2(1.0), 0.0);
     }
@@ -184,23 +247,46 @@ void main() {
     }
 
     vec4 fillLin = vec4(pow(max(pc.color.rgb, vec3(0.0)), vec3(2.2)), pc.color.a);
-    if (shape == 0) {
-        // Spatial frosted glass top-to-bottom luminance gradient (lit from above)
-        float topLight = mix(0.80, 1.35, clamp(0.5 * (vCoord.y + 1.0), 0.0, 1.0));
+    if (glass) {
+        // Glass slab: distance inside the edge in metres drives a thin bevel
+        // (lit top edge, slightly shadowed bottom edge) so the panel reads as
+        // having thickness, plus a soft diagonal reflection sheen.
+        vec2 pp = pc.rect.xy + vCoord * pc.rect.zw;  // panel-space metres
+        float halfMin = min(abs(pc.rect.z), abs(pc.rect.w));
+        float inside = max(-d * halfMin, 0.0);
+        float bevel = exp(-inside / 0.009);
+        float topness = smoothstep(-0.9, 0.9, vCoord.y);
+        fillLin.rgb += vec3(0.80, 0.88, 1.00) * bevel * 0.050 * topness;
+        fillLin.rgb *= 1.0 - bevel * 0.30 * (1.0 - topness);
+        // The sheen's horizontal position follows the eye (borderColor.a encodes
+        // it), giving the parallax of a reflection of a distant light.
+        float bandX = (pc.borderColor.a - 0.5) * 4.0;
+        float sAxis = (pp.x - bandX) * 0.80 + pp.y * 0.60;
+        float broad = exp(-(sAxis * sAxis) / (2.0 * 0.11 * 0.11));
+        float fine = exp(-((sAxis - 0.20) * (sAxis - 0.20)) / (2.0 * 0.018 * 0.018));
+        fillLin.rgb += vec3(0.85, 0.92, 1.00) * (broad * 0.012 + fine * 0.010);
+    }
+    if (shape == 0 || glass) {
+        // Frosted glass: a gentle top-lit luminance gradient
+        float topLight = mix(0.92, 1.10, clamp(0.5 * (vCoord.y + 1.0), 0.0, 1.0));
         fillLin.rgb *= topLight;
     }
     vec4 finalColor = fillLin;
     if (hasBorder) {
-        // Enforce at least 2.2 screen pixels for razor-sharp, visible borders at any distance in VR
-        float minBorder = gradLen * 2.2;
+        // Hairline floor of ~1.25 screen pixels keeps thin rims visible without
+        // turning every element into a heavy outline
+        float minBorder = gradLen * 1.25;
         float borderWidth = max(pc.params.z, minBorder);
         float innerD = d + borderWidth;
         float borderAlpha = 1.0 - smoothstep(-aa, aa, innerD);
-        vec4 bordLin = vec4(pow(max(pc.borderColor.rgb, vec3(0.0)), vec3(2.2)), pc.borderColor.a);
-        if (shape == 0) {
-            // Specular catchlight on upper chamfer/rim
-            float rimLight = mix(0.70, 1.70, smoothstep(-0.2, 0.95, vCoord.y));
+        // (The glass panel uses borderColor.a for its sheen, so its rim alpha is fixed.)
+        vec4 bordLin = vec4(pow(max(pc.borderColor.rgb, vec3(0.0)), vec3(2.2)),
+                            glass ? 0.42 : pc.borderColor.a);
+        if (shape == 0 || glass) {
+            // Soft specular catchlight along the upper rim, fading toward the bottom
+            float rimLight = mix(0.55, 1.25, smoothstep(-0.6, 0.95, vCoord.y));
             bordLin.rgb *= rimLight;
+            bordLin.a *= mix(0.65, 1.0, smoothstep(-0.6, 0.95, vCoord.y));
         }
         finalColor = mix(bordLin, fillLin, borderAlpha);
     }

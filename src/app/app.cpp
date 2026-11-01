@@ -365,7 +365,14 @@ void App::applyResolutionScale(float scale) {
 #ifdef PIXELVR_HAVE_MEDIA
 void App::loadMedia(const std::string& path) {
     const bool sameFile = (path == currentMediaPath_);
+    if (!sameFile) {
+        rememberPlaybackPosition();  // the clip being replaced
+        playbackMemory_.save();
+    }
+    if (!sameFile) renderer_.clearScrubPreview();  // stale frame from the previous clip
     currentMediaPath_ = path;
+    const bool privatePath = VaultManager::instance().isVaultPath(path);
+    const PlaybackMemory::Entry* remembered = privatePath ? nullptr : playbackMemory_.find(path);
     VulkanRenderer::ProjectionMode proj = VulkanRenderer::ProjectionMode::Flat;
     VulkanRenderer::StereoMode stereo = VulkanRenderer::StereoMode::Mono;
     bool stereoFromName = false;
@@ -383,14 +390,14 @@ void App::loadMedia(const std::string& path) {
     if (!mediaOpen_) {
         // Clear stale video from the previous clip so the renderer shows black
         // instead of the last decoded frame of the old file.
-        renderer_.clearVideo();
+        closeMedia();
         PIXELVR_LOG_WARN("Failed to open %s", path.c_str());
         return;
     }
     media_.setPaused(false);
     hudDismissed_ = false;
     lastControllerActivity_ = std::chrono::steady_clock::now();
-    VrKeyboard::instance().hide();
+    if (textEntry_.active) cancelKeyboard();
     actionMenu_.visible = false;
     smbModal_.active = false;
     smbModal_.editingField = SmbModalState::Field::None;
@@ -430,10 +437,22 @@ void App::loadMedia(const std::string& path) {
         }
     }
 
+    // A format the viewer picked by hand for this file wins over detection.
+    if (remembered != nullptr && remembered->projection >= 0 && remembered->stereo >= 0) {
+        proj = static_cast<VulkanRenderer::ProjectionMode>(remembered->projection);
+        stereo = static_cast<VulkanRenderer::StereoMode>(remembered->stereo);
+    }
     renderer_.setProjectionMode(proj);
     renderer_.setStereoMode(stereo);
     settings_.setProjectionMode(static_cast<int>(proj));
     settings_.setStereoMode(static_cast<int>(stereo));
+    // Resume where this file was left (track switches reopen the same file and
+    // restore their own position).
+    if (!sameFile && remembered != nullptr && remembered->position > 0.0 &&
+        (media_.duration() <= 0.0 || remembered->position < media_.duration())) {
+        media_.seek(remembered->position);
+        PIXELVR_LOG_INFO("Resuming %s at %.1fs", path.c_str(), remembered->position);
+    }
     // Publish selectable tracks for the settings Audio/Video section.
     std::vector<std::pair<int, std::string>> vlist, alist;
     for (const auto& s : media_.videoStreams()) vlist.emplace_back(s.index, s.label);
@@ -625,6 +644,32 @@ int App::navStepX(float axisX, std::chrono::steady_clock::time_point now) {
     return 0;
 }
 
+void App::rememberPlaybackPosition() {
+#ifdef PIXELVR_HAVE_MEDIA
+    if (!mediaOpen_ || currentMediaPath_.empty() ||
+        VaultManager::instance().isVaultPath(currentMediaPath_)) {
+        return;
+    }
+    playbackMemory_.setPosition(currentMediaPath_, media_.position(), media_.duration());
+#endif
+}
+
+void App::closeMedia() {
+#ifdef PIXELVR_HAVE_MEDIA
+    rememberPlaybackPosition();
+    playbackMemory_.save();
+    scrubPreview_.setSource(std::string(), 0);
+    media_.close();
+    mediaOpen_ = false;
+#endif
+    renderer_.clearVideo();
+    renderer_.clearScrubPreview();
+    renderer_.setProjectionMode(VulkanRenderer::ProjectionMode::Flat);
+    renderer_.setStereoMode(VulkanRenderer::StereoMode::Mono);
+    settings_.setProjectionMode(0);
+    settings_.setStereoMode(0);
+}
+
 void App::performVaultLock() {
     VaultManager::instance().lock();
     renderer_.setVaultUnlocked(false);
@@ -633,9 +678,7 @@ void App::performVaultLock() {
 
 #ifdef PIXELVR_HAVE_MEDIA
     if (mediaOpen_ && VaultManager::instance().isVaultPath(currentMediaPath_)) {
-        media_.close();
-        mediaOpen_ = false;
-        renderer_.clearVideo();
+        closeMedia();
     }
 #endif
 
@@ -650,7 +693,7 @@ void App::performVaultLock() {
     thumbnailCache_.clearVaultThumbs(VaultManager::instance().vaultDir());
 #endif
 
-    if (settings_.section() == 5) {
+    if (settings_.section() == 4) {  // Vault & Privacy is hidden once locked
         settings_.setSection(0);
     }
     settings_.refresh();
@@ -673,6 +716,7 @@ void App::dismissHud(const XrInputState& in, std::chrono::steady_clock::time_poi
 }
 
 void App::openSmbModal(bool isNew, const std::string& smbPath) {
+    actionMenu_.subtitle.clear();  // no stale error from a previous edit
 #ifdef PIXELVR_HAVE_FREETYPE
     smbModal_.active = true;
     smbModal_.isNew = isNew;
@@ -726,38 +770,41 @@ void App::openSmbModal(bool isNew, const std::string& smbPath) {
 void App::updateSmbModalMenu() {
 #ifdef PIXELVR_HAVE_FREETYPE
     actionMenu_.title = smbModal_.isNew ? "Add SMB Network Share" : "Edit SMB Network Share";
-    actionMenu_.subtitle = "Point & click a field to enter text via keyboard";
+    if (actionMenu_.subtitle.rfind("Error", 0) != 0 || !smbModal_.host.empty()) {
+        actionMenu_.subtitle = "Point at a field and pull the trigger to type  \xB7  B: back";
+    }
     actionMenu_.options.clear();
     actionMenu_.editingRow = -1;
     actionMenu_.cursorPos = 0;
 
-    const bool kbActive = VrKeyboard::instance().isOpen();
-    const std::string liveText = VrKeyboard::instance().currentText();
-    const int liveCur = VrKeyboard::instance().cursorPos();
+    const bool kbActive = textEntry_.active;
+    const std::string& liveText = textEntry_.text;
+    const int liveCur = static_cast<int>(textEntry_.cursor);
 
-    auto fieldVal = [&](SmbModalState::Field f, int rowIdx, const std::string& saved, const std::string& placeholder, bool mask) {
+    // Plain values (the renderer shows placeholders for empty fields). Option
+    // ids are fixed: 0 host, 1 share, 2 auth ("guest"/"account"), 3 user,
+    // 4 password, 5 workgroup, 6 nickname, 7 save, 8 cancel, 9 delete.
+    auto fieldVal = [&](SmbModalState::Field f, int rowIdx, const std::string& saved, bool mask) {
         if (kbActive && smbModal_.editingField == f) {
             actionMenu_.editingRow = rowIdx;
             actionMenu_.cursorPos = liveCur;
             return mask ? std::string(liveText.length(), '*') : liveText;
         }
-        if (saved.empty()) return placeholder;
         return mask ? std::string(saved.length(), '*') : saved;
     };
 
-    actionMenu_.options.push_back("Server / Host: " + fieldVal(SmbModalState::Field::Host, 0, smbModal_.host, "[ Enter IP or Hostname ]", false));
-    actionMenu_.options.push_back("Share Name: " + fieldVal(SmbModalState::Field::Share, 1, smbModal_.share, "[ All Shares ]", false));
-    actionMenu_.options.push_back("Authentication: " + std::string(smbModal_.anon ? "Guest / Anonymous" : "Username & Password"));
-    actionMenu_.options.push_back("Username: " + fieldVal(SmbModalState::Field::User, 3, smbModal_.user, "[ Enter Username ]", false));
-    actionMenu_.options.push_back("Password: " + fieldVal(SmbModalState::Field::Pass, 4, smbModal_.pass, "[ Enter Password ]", true));
-    actionMenu_.options.push_back("Workgroup: " + fieldVal(SmbModalState::Field::Workgroup, 5, smbModal_.workgroup, "WORKGROUP", false));
-    actionMenu_.options.push_back("Nickname: " + fieldVal(SmbModalState::Field::Label, 6, smbModal_.label, "[ Optional Nickname ]", false));
-
-    actionMenu_.options.push_back("[ Save SMB Share ]");
+    actionMenu_.options.push_back(fieldVal(SmbModalState::Field::Host, 0, smbModal_.host, false));
+    actionMenu_.options.push_back(fieldVal(SmbModalState::Field::Share, 1, smbModal_.share, false));
+    actionMenu_.options.push_back(smbModal_.anon ? "guest" : "account");
+    actionMenu_.options.push_back(fieldVal(SmbModalState::Field::User, 3, smbModal_.user, false));
+    actionMenu_.options.push_back(fieldVal(SmbModalState::Field::Pass, 4, smbModal_.pass, true));
+    actionMenu_.options.push_back(fieldVal(SmbModalState::Field::Workgroup, 5, smbModal_.workgroup, false));
+    actionMenu_.options.push_back(fieldVal(SmbModalState::Field::Label, 6, smbModal_.label, false));
+    actionMenu_.options.push_back("Save");
+    actionMenu_.options.push_back("Cancel");
     if (!smbModal_.isNew) {
-        actionMenu_.options.push_back("[ Delete Share ]");
+        actionMenu_.options.push_back("Delete");
     }
-    actionMenu_.options.push_back("[ Cancel ]");
 #endif
 }
 
@@ -794,7 +841,7 @@ void App::saveSmbModal() {
 
     smbModal_.active = false;
     smbModal_.editingField = SmbModalState::Field::None;
-    VrKeyboard::instance().hide();
+    if (textEntry_.active) cancelKeyboard();
     actionMenu_.visible = false;
     browser_.openNetwork();
 #endif
@@ -807,7 +854,7 @@ void App::deleteSmbModal() {
     }
     smbModal_.active = false;
     smbModal_.editingField = SmbModalState::Field::None;
-    VrKeyboard::instance().hide();
+    if (textEntry_.active) cancelKeyboard();
     actionMenu_.visible = false;
     browser_.openNetwork();
 #endif
@@ -819,14 +866,94 @@ void App::openKeyboard(const std::string& prompt,
                        const XrInputState& in,
                        std::function<void(const std::string&)> onDone,
                        std::function<void()> onCancel) {
+    (void)in;
     kbOnDone_ = std::move(onDone);
     kbOnCancel_ = std::move(onCancel);
-    float stagePos[3]{0.0f, 1.65f, 0.0f};
-    float stageFwd[3]{0.0f, 0.0f, -1.0f};
-    const float* fwd = renderer_.screenForward();
-    xr_.transformToStage(in.headPos, fwd, stagePos, stageFwd);
-    VrKeyboard::instance().show(prompt, initialText, isPassword, 256,
-                                in.headPos, fwd, stagePos, stageFwd);
+    textEntry_ = {};
+    kbRepeat_ = {};
+    kbFieldDrag_ = false;
+    textEntry_.active = true;
+    textEntry_.prompt = prompt;
+    textEntry_.text = initialText;
+    textEntry_.cursor = initialText.size();
+    textEntry_.password = isPassword;
+}
+
+void App::commitKeyboard() {
+    const std::string text = textEntry_.text;
+    textEntry_ = {};
+    auto cb = std::move(kbOnDone_);
+    kbOnDone_ = nullptr;
+    kbOnCancel_ = nullptr;
+    if (cb) cb(text);
+    if (smbModal_.active) {
+        smbModal_.editingField = SmbModalState::Field::None;
+        updateSmbModalMenu();
+    }
+}
+
+void App::cancelKeyboard() {
+    textEntry_ = {};
+    auto cb = std::move(kbOnCancel_);
+    kbOnDone_ = nullptr;
+    kbOnCancel_ = nullptr;
+    if (cb) cb();
+    if (smbModal_.active) {
+        smbModal_.editingField = SmbModalState::Field::None;
+        updateSmbModalMenu();
+    }
+}
+
+std::chrono::milliseconds App::repeatInterval(std::chrono::steady_clock::duration held) {
+    using namespace std::chrono_literals;
+    // ~11 steps/s at first, ~25 steps/s after a second of holding.
+    return held < 1200ms ? 90ms : 40ms;
+}
+
+void App::moveTextCursor(int delta) {
+    std::string& t = textEntry_.text;
+    std::size_t& c = textEntry_.cursor;
+    if (c > t.size()) c = t.size();
+    for (; delta < 0 && c > 0; ++delta) {
+        do { --c; } while (c > 0 && (static_cast<unsigned char>(t[c]) & 0xC0) == 0x80);
+    }
+    for (; delta > 0 && c < t.size(); --delta) {
+        do { ++c; } while (c < t.size() && (static_cast<unsigned char>(t[c]) & 0xC0) == 0x80);
+    }
+}
+
+void App::pressKeyboardKey(int key) {
+    constexpr std::size_t kMaxChars = 256;
+    std::string& t = textEntry_.text;
+    std::size_t& c = textEntry_.cursor;
+    if (c > t.size()) c = t.size();
+    switch (VulkanRenderer::keyboardKeyCode(key)) {
+        case 0:    // character
+        case 4: {  // space
+            const char ch = VulkanRenderer::keyboardKeyChar(key, textEntry_.shift, textEntry_.symbols);
+            if (ch != 0 && t.size() < kMaxChars) {
+                t.insert(c, 1, ch);
+                ++c;
+                if (!textEntry_.symbols) textEntry_.shift = false;  // one-shot shift
+            }
+            break;
+        }
+        case 1: {  // backspace: remove the whole UTF-8 character before the cursor
+            if (c == 0) break;
+            std::size_t p = c;
+            do { --p; } while (p > 0 && (static_cast<unsigned char>(t[p]) & 0xC0) == 0x80);
+            t.erase(p, c - p);
+            c = p;
+            break;
+        }
+        case 2: textEntry_.shift = !textEntry_.shift; break;
+        case 3: textEntry_.symbols = !textEntry_.symbols; break;
+        case 5: moveTextCursor(-1); break;
+        case 6: moveTextCursor(1); break;
+        case 7: commitKeyboard(); break;
+        case 8: cancelKeyboard(); break;
+        default: break;
+    }
 }
 
 void App::openActionMenu() {
@@ -910,6 +1037,7 @@ int App::run() {
         std::memory_order_relaxed);
     watchdogRunning_.store(true);
     watchdogThread_ = std::thread(&App::watchdogLoop, this);
+    playbackMemory_.load();
 
     while (!exitRequested_) {
         if (pendingAutoLock_.exchange(false, std::memory_order_acquire)) {
@@ -962,39 +1090,72 @@ int App::run() {
             const auto nowT = std::chrono::steady_clock::now();
             XrInputState in = xr_.input();
 
-            // Poll native SteamVR virtual keyboard events if active
-            VrKeyboard::instance().poll(
-                [this](const std::string& text) {
-                    if (kbOnDone_) {
-                        auto cb = std::move(kbOnDone_);
-                        kbOnDone_ = nullptr;
-                        kbOnCancel_ = nullptr;
-                        cb(text);
-                    } else if (settings_.isOpen()) {
-                        settings_.onKeyboardSubmit(text);
+            // In-app keyboard (text entry). It owns all controller input while open:
+            // trigger / A press the key under the laser, stick left/right moves
+            // the cursor, B / menu cancels.
+            const bool kbOpen = textEntry_.active;
+            if (kbOpen) {
+                if (in.buttonDown[settings_.bindMenu()] || in.buttonDown[XrInputState::BtnB]) {
+                    cancelKeyboard();
+                } else {
+                    using namespace std::chrono_literals;
+                    const int hand = renderer_.pointerHand() == 0 ? 0 : 1;
+                    // Thumbstick left/right: step, then accelerate while held.
+                    const int stickDir = (in.thumbstickX > 0.45f) ? 1 : (in.thumbstickX < -0.45f ? -1 : 0);
+                    if (stickDir == 0) {
+                        kbRepeat_.stickDir = 0;
+                    } else if (stickDir != kbRepeat_.stickDir) {
+                        kbRepeat_.stickDir = stickDir;
+                        kbRepeat_.start = nowT;
+                        kbRepeat_.next = nowT + 380ms;
+                        moveTextCursor(stickDir);
+                    } else if (nowT >= kbRepeat_.next) {
+                        kbRepeat_.next = nowT + repeatInterval(nowT - kbRepeat_.start);
+                        moveTextCursor(stickDir);
                     }
-                },
-                [this]() {
-                    if (kbOnCancel_) {
-                        auto cb = std::move(kbOnCancel_);
-                        kbOnDone_ = nullptr;
-                        kbOnCancel_ = nullptr;
-                        cb();
-                    } else {
-                        kbOnDone_ = nullptr;
-                        if (settings_.isOpen()) {
-                            settings_.onKeyboardCancel();
+
+                    const int key = renderer_.keyboardKeyHovered();
+                    const bool pressed = in.select || in.togglePlay;
+                    if (pressed && key >= 0) {
+                        xr_.triggerHaptic(hand, 0.015f, 0.0f, 0.45f);
+                        pressKeyboardKey(key);
+                        // Cursor arrows and Delete repeat while the trigger is held.
+                        const int code = VulkanRenderer::keyboardKeyCode(key);
+                        if (textEntry_.active && (code == 1 || code == 5 || code == 6)) {
+                            kbRepeat_.key = key;
+                            kbRepeat_.start = nowT;
+                            kbRepeat_.next = nowT + 380ms;
+                        }
+                    } else if (kbRepeat_.key >= 0) {
+                        if (!in.selectHeld || key != kbRepeat_.key) {
+                            kbRepeat_.key = -1;  // released or pointer moved off the key
+                        } else if (nowT >= kbRepeat_.next) {
+                            kbRepeat_.next = nowT + repeatInterval(nowT - kbRepeat_.start);
+                            pressKeyboardKey(kbRepeat_.key);
+                            xr_.triggerHaptic(hand, 0.006f, 0.0f, 0.25f);
                         }
                     }
-                });
 
-            const bool kbOpen = VrKeyboard::instance().isOpen();
-            if (kbOpen) {
-                const int kbDx = navStepX(in.thumbstickX, nowT);
-                if (kbDx != 0) {
-                    VrKeyboard::instance().moveCursor(kbDx);
-                    xr_.triggerHaptic(0, 0.012f, 0.0f, 0.35f);
-                    xr_.triggerHaptic(1, 0.012f, 0.0f, 0.35f);
+                    // Click into the text field to place the cursor there; keep
+                    // the trigger held and sweep to drag it.
+                    if (pressed && renderer_.keyboardFieldHovered()) {
+                        const int pos = renderer_.keyboardCursorAtPointer();
+                        if (pos >= 0) {
+                            textEntry_.cursor = static_cast<std::size_t>(pos);
+                            kbFieldDrag_ = true;
+                            xr_.triggerHaptic(hand, 0.010f, 0.0f, 0.35f);
+                        }
+                    } else if (kbFieldDrag_) {
+                        if (!in.selectHeld) {
+                            kbFieldDrag_ = false;
+                        } else if (renderer_.keyboardFieldHovered()) {
+                            const int pos = renderer_.keyboardCursorAtPointer();
+                            if (pos >= 0 && static_cast<std::size_t>(pos) != textEntry_.cursor) {
+                                textEntry_.cursor = static_cast<std::size_t>(pos);
+                                xr_.triggerHaptic(hand, 0.004f, 0.0f, 0.2f);
+                            }
+                        }
+                    }
                 }
                 in.thumbstickX = 0.0f;
                 in.thumbstickY = 0.0f;
@@ -1002,17 +1163,16 @@ int App::run() {
                 in.selectHeld = false;
                 in.togglePlay = false;
                 in.browserToggle = false;
+                in.buttonDown[settings_.bindMenu()] = false;
+                in.buttonDown[XrInputState::BtnB] = false;
                 if (smbModal_.active && smbModal_.editingField != SmbModalState::Field::None) {
                     updateSmbModalMenu();
                 }
             }
-            std::string kbDisplayText = VrKeyboard::instance().currentText();
-            renderer_.setKeyboardModal(kbOpen,
-                                       VrKeyboard::instance().description(),
-                                       kbDisplayText,
-                                       VrKeyboard::instance().isPassword(),
-                                       kbOpen ? VrKeyboard::instance().transform() : nullptr,
-                                       VrKeyboard::instance().cursorPos());
+            renderer_.setKeyboardModal(textEntry_.active, textEntry_.prompt, textEntry_.text,
+                                       textEntry_.password, nullptr,
+                                       static_cast<int>(textEntry_.cursor));
+            renderer_.setKeyboardModes(textEntry_.shift, textEntry_.symbols);
 
             // Custom combo recording listener (active while recording new 6-button combo in Vault & Privacy)
             if (VaultManager::instance().isRecordingCombo()) {
@@ -1209,9 +1369,19 @@ int App::run() {
                                       settings_.uiDistance());
             renderer_.setAmbilightIntensity(settings_.ambilightIntensity());
             renderer_.setUiFollowMode(settings_.uiFollowMode());
+            renderer_.setPanelCurve(settings_.panelCurve());
+            renderer_.setUiOpacity(settings_.uiOpacity());
             renderer_.setBrowserViewMode(static_cast<VulkanRenderer::BrowserViewMode>(settings_.browserViewMode()));
             renderer_.setBrowserQuickPath(browser_.isCurrentBookmarked());
+#ifdef PIXELVR_HAVE_FREETYPE
+            {
+                static const char* kSortLabels[3] = {"Name", "Newest", "Largest"};
+                browser_.setSortMode(settings_.browserSort());  // no-op when unchanged
+                renderer_.setBrowserSortLabel(kSortLabels[settings_.browserSort() % 3]);
+            }
+#endif
             if (!didInitialRecenter_ && in.headValid) {
+                renderer_.setScreenDistance(settings_.screenDistance());
                 renderer_.recenterScreen(in.headPos, in.headForward);
                 renderer_.setScreenCurvature(settings_.screenCurvature());
                 didInitialRecenter_ = true;
@@ -1302,7 +1472,7 @@ int App::run() {
                     actionMenu_.visible = false;
                     smbModal_.active = false;
                     smbModal_.editingField = SmbModalState::Field::None;
-                    VrKeyboard::instance().hide();
+                    if (textEntry_.active) cancelKeyboard();
                 } else if (downloadsWindow_) {
                     downloadsWindow_ = false;
                 } else if (settings_.isOpen()) {
@@ -1311,7 +1481,7 @@ int App::run() {
                     browser_.setOpen(false);
                     smbModal_.active = false;
                     smbModal_.editingField = SmbModalState::Field::None;
-                    VrKeyboard::instance().hide();
+                    if (textEntry_.active) cancelKeyboard();
                 } else if (mediaOpen_ && renderer_.controlBarVisible()) {
                     // HUD is visible during playback: B/Y dismisses the HUD!
                     dismissHud(in, nowT);
@@ -1379,6 +1549,7 @@ int App::run() {
                     VulkanRenderer::DownloadItem di;
                     di.label = j.name;
                     di.state = j.state;
+                    di.paused = (j.state == 0 && browser_.downloadPaused());
                     di.progress = (j.total > 0.0) ? static_cast<float>(static_cast<double>(j.bytes) / static_cast<double>(j.total)) : (j.state == 1 ? 1.0f : 0.0f);
                     if (j.state == 0) {
                         const int pct =
@@ -1667,16 +1838,9 @@ int App::run() {
 
                 renderer_.setBrowserNetwork(browser_.onNetwork());
                 renderer_.setBrowserQuickFilter(browser_.activeFilter());
+                // Only real status messages go here; the renderer draws the
+                // controls hint itself on the right of the footer.
                 std::string status = browser_.status();
-                if (browser_.onNetwork() && !browser_.isBusy()) {
-                    if (status.empty()) {
-                        status = "A/Trigger: Stream  \xB7  X: Download to Local";
-                    }
-                } else if (!browser_.onNetwork() && !browser_.isBusy()) {
-                    if (status.empty()) {
-                        status = "A/Trigger: Play  \xB7  Y: Actions";
-                    }
-                }
                 renderer_.setListColumnVisibility(
                     settings_.listShowFormat(),
                     settings_.listShowRes(),
@@ -1721,19 +1885,22 @@ int App::run() {
 
             // Settings panel overlay
             if (settings_.isOpen()) {
-                std::vector<std::string> sRows;
-                std::vector<uint8_t> sEnabled;
+                std::vector<VulkanRenderer::SettingsRowVis> sRows;
                 sRows.reserve(settings_.rows().size());
-                sEnabled.reserve(settings_.rows().size());
                 for (const auto& r : settings_.rows()) {
-                    sRows.push_back(r.value.empty() ? r.label
-                                                    : (r.label + " : " + r.value));
-                    sEnabled.push_back(r.enabled ? 1 : 0);
+                    VulkanRenderer::SettingsRowVis v;
+                    v.label = r.label;
+                    v.value = r.value;
+                    v.kind = static_cast<int>(r.kind);
+                    v.steps = r.steps;
+                    v.stepIdx = r.stepIdx;
+                    v.enabled = r.enabled;
+                    v.options = r.options;
+                    sRows.push_back(std::move(v));
                 }
                 renderer_.setSettingsSection(settings_.section());
                 renderer_.setSettings(true, settings_.title(), sRows,
-                                      settings_.selected(), settings_.status(),
-                                      sEnabled);
+                                      settings_.selected(), settings_.status());
                 settingsOpen = true;
             } else {
                 renderer_.setSettings(false, "", {}, 0, "");
@@ -1770,45 +1937,12 @@ int App::run() {
                                         (in.controllers[0].active ||
                                          in.controllers[1].active));
                 // Keep laser active when UI panels, activity, or virtual keyboard are active!
-                const bool kbActive = VrKeyboard::instance().isOpen();
-                if (kbActive) {
-                    // Auto-focus the laser on whichever hand is actually aiming at the
-                    // keyboard, so the user never has to grip to "activate" a pointer.
-                    // The keyboard's local transform and the controller aim poses live in
-                    // the same space the renderer raycasts in, so we can score each hand by
-                    // how directly it points at the keyboard centre.
-                    const float* kb = VrKeyboard::instance().transform();
-                    const float kbCenter[3] = { kb[3], kb[7], kb[11] };
-                    float score[2] = { -2.0f, -2.0f };
-                    for (int h = 0; h < 2; ++h) {
-                        if (!in.controllers[h].active) continue;
-                        const float fwdLocal[3] = { 0.0f, 0.0f, -1.0f };
-                        float fwd[3];
-                        quatRotate(in.controllers[h].orientation, fwdLocal, fwd);
-                        float d[3] = { kbCenter[0] - in.controllers[h].position[0],
-                                       kbCenter[1] - in.controllers[h].position[1],
-                                       kbCenter[2] - in.controllers[h].position[2] };
-                        const float dl = std::sqrt(d[0]*d[0] + d[1]*d[1] + d[2]*d[2]);
-                        if (dl > 1e-4f) { d[0] /= dl; d[1] /= dl; d[2] /= dl; }
-                        score[h] = fwd[0]*d[0] + fwd[1]*d[1] + fwd[2]*d[2];
-                    }
-                    const int cur = renderer_.laserOn(1) ? 1 : (renderer_.laserOn(0) ? 0 : -1);
-                    const int best = (score[1] >= score[0]) ? 1 : 0;
-                    if (score[best] > 0.55f && in.controllers[best].active) {
-                        // A hand is pointing at the keyboard: give it the laser, but only
-                        // switch away from the current hand when it is clearly better (hysteresis).
-                        if (cur < 0 || best == cur || score[best] > score[cur] + 0.12f) {
-                            if (!renderer_.laserOn(best)) renderer_.setLaserOn(best, true);
-                        }
-                    } else if (!renderer_.laserOn(0) && !renderer_.laserOn(1)) {
-                        // Neither hand aims at the keyboard yet: make sure some laser is on.
-                        if (in.controllers[1].active) renderer_.setLaserOn(1, true);
-                        else if (in.controllers[0].active) renderer_.setLaserOn(0, true);
-                    } else if (renderer_.laserOn(1) && !in.controllers[1].active && in.controllers[0].active) {
-                        renderer_.setLaserOn(0, true);
-                    } else if (renderer_.laserOn(0) && !in.controllers[0].active && in.controllers[1].active) {
-                        renderer_.setLaserOn(1, true);
-                    }
+                // While typing on the in-app keyboard, make sure a laser is on
+                // (on whichever hand is active) so keys can always be pointed at.
+                const bool kbActive = textEntry_.active;
+                if (kbActive && !renderer_.laserOn(0) && !renderer_.laserOn(1)) {
+                    if (in.controllers[1].active) renderer_.setLaserOn(1, true);
+                    else if (in.controllers[0].active) renderer_.setLaserOn(0, true);
                 }
                 const bool showLaser = (uiPanelActive || (controllersEngaged && !hudDismissed_) || kbActive);
                 // Build each controller's render state: corrected model pose,
@@ -1906,10 +2040,8 @@ int App::run() {
                 } else if (sbHover >= 3 && sbHover <= 8) {
                     const int sub = sbHover - 3;
                     if (settings_.isOpen()) {
-                        if (sub <= 4) {
+                        if (sub <= 3 || (sub == 4 && VaultManager::instance().isUnlocked())) {
                             settings_.setSection(sub);
-                        } else if (sub == 5 && VaultManager::instance().isUnlocked()) {
-                            settings_.setSection(5);
                         }
                     } else if (downloadsWindow_) {
                         if (sub <= 2) renderer_.setDownloadsFilter(sub);
@@ -1947,7 +2079,23 @@ int App::run() {
                 } else {
                     const int hov = renderer_.downloadsHovered();
                     const auto& jobs = browser_.downloadJobs();
-                    if (hov >= 0 && hov < static_cast<int>(jobs.size())) {
+                    const int jobBtn = renderer_.downloadsJobButtonHovered();
+                    if (hov >= 0 && hov < static_cast<int>(jobs.size()) && jobBtn == 1) {
+                        // Per-job X: stop the active transfer, otherwise drop the
+                        // row (queued items leave the queue, partial files go).
+                        if (jobs[static_cast<std::size_t>(hov)].state == 0) {
+                            browser_.stopDownload();
+                        } else {
+                            browser_.removeJob(hov);
+                        }
+                        xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.020f, 0.0f, 0.4f);
+                        interacted = true;
+                    } else if (hov >= 0 && hov < static_cast<int>(jobs.size()) && jobBtn == 0 &&
+                               jobs[static_cast<std::size_t>(hov)].state == 0) {
+                        browser_.togglePause();  // per-job pause / resume
+                        xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.020f, 0.0f, 0.4f);
+                        interacted = true;
+                    } else if (hov >= 0 && hov < static_cast<int>(jobs.size())) {
                         const auto& j = jobs[static_cast<std::size_t>(hov)];
                         if (j.state == 1 && !j.localPath.empty()) {
                             if (j.isDir) {
@@ -1960,11 +2108,6 @@ int App::run() {
                                 browser_.setOpen(false);
 #endif
                             }
-                            interacted = true;
-                        } else if (j.state == 4) {
-                            browser_.cancelQueued(j.uri);
-                            xr_.triggerHaptic(0, 0.020f, 0.0f, 0.4f);
-                            xr_.triggerHaptic(1, 0.020f, 0.0f, 0.4f);
                             interacted = true;
                         }
                     }
@@ -2151,12 +2294,26 @@ int App::run() {
                                         settings_.setStereoMode(1);
                                         renderer_.setProjectionMode(VulkanRenderer::ProjectionMode::Equirect180);
                                         renderer_.setStereoMode(VulkanRenderer::StereoMode::SideBySide);
-                                    } else if (opt == "VR 360° (Equirectangular)") {
+                                    } else if (opt == "VR 360° (Mono)") {
                                         settings_.setProjectionMode(1);
                                         settings_.setStereoMode(0);
                                         renderer_.setProjectionMode(VulkanRenderer::ProjectionMode::Equirect360);
                                         renderer_.setStereoMode(VulkanRenderer::StereoMode::Mono);
+                                    } else if (opt == "VR 360° 3D (Top-Bottom)") {
+                                        settings_.setProjectionMode(1);
+                                        settings_.setStereoMode(2);
+                                        renderer_.setProjectionMode(VulkanRenderer::ProjectionMode::Equirect360);
+                                        renderer_.setStereoMode(VulkanRenderer::StereoMode::TopBottom);
                                     }
+#ifdef PIXELVR_HAVE_MEDIA
+                                    if (opt != "Cancel" && mediaOpen_ &&
+                                        !VaultManager::instance().isVaultPath(currentMediaPath_)) {
+                                        playbackMemory_.setFormat(currentMediaPath_,
+                                                                  settings_.projectionMode(),
+                                                                  settings_.stereoMode());
+                                        playbackMemory_.save();
+                                    }
+#endif
                                     xr_.triggerHaptic(0, 0.040f, 0.0f, 0.6f);
                                     xr_.triggerHaptic(1, 0.040f, 0.0f, 0.6f);
                                     actionMenu_.visible = false;
@@ -2250,8 +2407,12 @@ int App::run() {
                                 } else if (chosen == 1) {
                                     openKeyboardForField(SmbModalState::Field::Share, "SMB Share Name (empty for all)", smbModal_.share, false);
                                 } else if (chosen == 2) {
-                                    smbModal_.anon = !smbModal_.anon;
+                                    // Pointing at a segment picks it; stick + A toggles.
+                                    const int seg = renderer_.actionMenuKeyHovered();
+                                    smbModal_.anon = (seg >= 0) ? (seg == 0) : !smbModal_.anon;
                                     updateSmbModalMenu();
+                                } else if ((chosen == 3 || chosen == 4) && smbModal_.anon) {
+                                    // Guest access needs no credentials.
                                 } else if (chosen == 3) {
                                     openKeyboardForField(SmbModalState::Field::User, "SMB Username", smbModal_.user, false);
                                 } else if (chosen == 4) {
@@ -2264,22 +2425,13 @@ int App::run() {
                                     // Save SMB Share
                                     saveSmbModal();
                                 } else if (chosen == 8) {
-                                    if (smbModal_.isNew) {
-                                        // Cancel
-                                        actionMenu_.visible = false;
-                                        smbModal_.active = false;
-                                        smbModal_.editingField = SmbModalState::Field::None;
-                                        VrKeyboard::instance().hide();
-                                    } else {
-                                        // Delete Share
-                                        deleteSmbModal();
-                                    }
-                                } else if (chosen == 9) {
-                                    // Cancel
+                                    // Cancel (footer button or header X)
                                     actionMenu_.visible = false;
                                     smbModal_.active = false;
                                     smbModal_.editingField = SmbModalState::Field::None;
-                                    VrKeyboard::instance().hide();
+                                    if (textEntry_.active) cancelKeyboard();
+                                } else if (chosen == 9 && !smbModal_.isNew) {
+                                    deleteSmbModal();
                                 }
                             }
                             interacted = true;
@@ -2323,6 +2475,13 @@ int App::run() {
                         settings_.setBrowserViewMode(curMode);
                         settings_.saveConfig();
                         renderer_.setBrowserViewMode(static_cast<VulkanRenderer::BrowserViewMode>(curMode));
+                        renderer_.scrollBrowser(0);
+                        xr_.triggerHaptic(1, 0.025f, 0.0f, 0.5f);
+                    } else if (pbHover == 5) {
+                        // Cycle sort order: Name -> Newest -> Largest
+                        settings_.setBrowserSort(settings_.browserSort() + 1);
+                        browser_.setSortMode(settings_.browserSort());
+                        renderer_.setBrowserFirst(0);
                         renderer_.scrollBrowser(0);
                         xr_.triggerHaptic(1, 0.025f, 0.0f, 0.5f);
                     } else if (pbHover == 3) {
@@ -2418,29 +2577,10 @@ int App::run() {
                 }
                 // Trigger activates the selection made by the laser or the stick.
                 if (in.select && (hovered >= 0 || std::fabs(in.thumbstickY) > 0.25f)) {
-                    auto act = settings_.activate();
-                    if (act == SettingsMenu::Action::LockVaultAction) {
-                        xr_.triggerHaptic(0, 0.050f, 0.0f, 0.7f);
-                        xr_.triggerHaptic(1, 0.050f, 0.0f, 0.7f);
-                        performVaultLock();
-                    } else if (act == SettingsMenu::Action::RecenterScreen) {
-                        if (in.headValid) {
-                            renderer_.recenterScreen(in.headPos, in.headForward);
-                        }
-                        } else if (act == SettingsMenu::Action::CycleProjection) {
-                            int pm = settings_.projectionMode();
-                            renderer_.setProjectionMode(
-                                pm == 0 ? VulkanRenderer::ProjectionMode::Flat :
-                                pm == 1 ? VulkanRenderer::ProjectionMode::Equirect360 :
-                                          VulkanRenderer::ProjectionMode::Equirect180);
-                        } else if (act == SettingsMenu::Action::CycleStereo) {
-                            int sm = settings_.stereoMode();
-                            renderer_.setStereoMode(
-                                sm == 0 ? VulkanRenderer::StereoMode::Mono :
-                                sm == 1 ? VulkanRenderer::StereoMode::SideBySide :
-                                          VulkanRenderer::StereoMode::TopBottom);
-                        } else if (act == SettingsMenu::Action::CycleDistance) {
-                            renderer_.adjustScreenDistance(settings_.screenDistance() - 3.0f);
+                    const int seg = renderer_.settingsSegmentHovered();
+                    auto act = (seg >= 0) ? settings_.activateSegment(seg) : settings_.activate();
+                        if (act == SettingsMenu::Action::CycleDistance) {
+                            renderer_.setScreenDistance(settings_.screenDistance());
                         } else if (act == SettingsMenu::Action::CycleCurvature) {
                             renderer_.setScreenCurvature(settings_.screenCurvature());
                         }
@@ -2485,39 +2625,19 @@ int App::run() {
                     const auto cb = static_cast<VulkanRenderer::CtrlButton>(btn);
                     if (cb == VulkanRenderer::CtrlButton::Stop) {
 #ifdef PIXELVR_HAVE_MEDIA
-                        media_.close();
-                        mediaOpen_ = false;
-                        renderer_.clearVideo();
+                        closeMedia();
 #endif
 #ifdef PIXELVR_HAVE_FREETYPE
                         browser_.open();  // large file selection
 #endif
-                    } else if (cb == VulkanRenderer::CtrlButton::Settings) {
-                        settings_.open();
                     } else if (cb == VulkanRenderer::CtrlButton::Recenter) {
                         if (in.headValid) {
                             renderer_.recenterScreen(in.headPos, in.headForward);
                         }
-                    } else if (cb == VulkanRenderer::CtrlButton::Downloads ||
-                               cb == VulkanRenderer::CtrlButton::Files) {
+                    } else if (cb == VulkanRenderer::CtrlButton::Files) {
 #ifdef PIXELVR_HAVE_FREETYPE
                         browser_.open();
 #endif
-                    } else if (cb == VulkanRenderer::CtrlButton::Download) {
-                        // Download the entry highlighted in the file browser;
-                        // folders ask for confirmation (with the size) first.
-                        if (browser_.isOpen() && pendingDl_.empty()) {
-                            const Browser::Entry* fe = browser_.focused();
-                            if (fe != nullptr && fe->isDir && !fe->isBack &&
-                                browser_.onNetwork()) {
-                                pendingDl_ = fe->path;
-                                pendingDlName_ = fe->label;
-                                pendingDlFresh_ = true;
-                                browser_.measureFolder(fe->path);
-                            } else {
-                                browser_.downloadFocused();
-                            }
-                        }
                     }
 #ifdef PIXELVR_HAVE_MEDIA
                     else if (mediaOpen_ &&
@@ -2539,7 +2659,8 @@ int App::run() {
                         actionMenu_.options.push_back("3D Side-by-Side (SBS)");
                         actionMenu_.options.push_back("3D Top-Bottom (Over-Under)");
                         actionMenu_.options.push_back("VR 180° (Side-by-Side)");
-                        actionMenu_.options.push_back("VR 360° (Equirectangular)");
+                        actionMenu_.options.push_back("VR 360° (Mono)");
+                        actionMenu_.options.push_back("VR 360° 3D (Top-Bottom)");
                         actionMenu_.options.push_back("Cancel");
                         actionMenu_.selectedOption = 0;
                         xr_.triggerHaptic(0, 0.020f, 0.0f, 0.4f);
@@ -2740,6 +2861,27 @@ int App::run() {
             if (settings_.showStats()) {
                 updateStats();
             }
+            // Timeline hover preview: follow the current clip/stereo layout, ask
+            // for the hovered time and upload whatever the worker has finished.
+            scrubPreview_.setSource(mediaOpen_ ? currentMediaPath_ : std::string(),
+                                    settings_.stereoMode());
+            if (mediaOpen_ && renderer_.pointerOnTimeline() && media_.duration() > 0.0) {
+                scrubPreview_.request(renderer_.pointerScrub() * media_.duration());
+            }
+            {
+                std::vector<uint8_t> pv;
+                double pvSec = 0.0;
+                if (scrubPreview_.fetch(pv, pvSec)) {
+                    renderer_.updateScrubPreview(pv.data(), ScrubPreview::kWidth,
+                                                 ScrubPreview::kHeight, pvSec);
+                }
+            }
+            // Keep the resume position fresh so a crash or power-off loses little.
+            if (mediaOpen_ && nowT - lastPlaybackRemember_ > std::chrono::seconds(10)) {
+                lastPlaybackRemember_ = nowT;
+                rememberPlaybackPosition();
+                playbackMemory_.save();
+            }
             // Always-on periodic perf log so decode-bound vs render-bound stalls
             // show up in the run log even without the on-screen overlay.
             if (mediaOpen_) {
@@ -2773,6 +2915,8 @@ int App::run() {
         }
     }
 
+    rememberPlaybackPosition();
+    playbackMemory_.save();
     if (renderer_.device() != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(renderer_.device());
     }

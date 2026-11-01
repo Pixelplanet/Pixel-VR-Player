@@ -109,6 +109,7 @@ set(PIXELVR_SHADERS
     shaders/ui.frag
     shaders/text.vert
     shaders/text.frag
+    shaders/thumb.vert
     shaders/thumb.frag
     shaders/ambilight.frag
     shaders/ambilight_nv12.frag)
@@ -131,6 +132,7 @@ add_library(pixelvr_core STATIC
     src/ui/settings_menu.cpp
     src/ui/thumbnail_cache.cpp
     src/app/vault_manager.cpp
+    src/app/playback_memory.cpp
     src/app/app.cpp)
 
 target_include_directories(pixelvr_core PUBLIC
@@ -138,9 +140,40 @@ target_include_directories(pixelvr_core PUBLIC
     "${CMAKE_CURRENT_SOURCE_DIR}/third_party/openvr")
 target_include_directories(pixelvr_core PRIVATE "${cgltf_SOURCE_DIR}" "${stb_SOURCE_DIR}")
 
+# Version string shown in the UI: $PIXELVR_VERSION if set, else the nearest git
+# tag (evaluated at configure time), else the project version.
+# Release builds pass the tag explicitly (CI checks out shallowly).
+find_package(Git QUIET)
+set(PIXELVR_VERSION_STRING "v${PROJECT_VERSION}")
+if(DEFINED ENV{PIXELVR_VERSION} AND NOT "$ENV{PIXELVR_VERSION}" STREQUAL "")
+    set(PIXELVR_VERSION_STRING "$ENV{PIXELVR_VERSION}")
+elseif(GIT_FOUND)
+    execute_process(
+        COMMAND "${GIT_EXECUTABLE}" describe --tags --abbrev=0
+        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+        OUTPUT_VARIABLE _pixelvr_git_tag
+        OUTPUT_STRIP_TRAILING_WHITESPACE
+        ERROR_QUIET
+        RESULT_VARIABLE _pixelvr_git_result)
+    if(_pixelvr_git_result EQUAL 0 AND _pixelvr_git_tag)
+        set(PIXELVR_VERSION_STRING "${_pixelvr_git_tag}")
+    endif()
+endif()
+
+# Bundled UI fonts (Inter, SIL OFL) are copied next to the build output; the
+# installers ship them in fonts/ beside the binary.
+file(GLOB PIXELVR_FONT_FILES "${CMAKE_CURRENT_SOURCE_DIR}/assets/fonts/*.ttf")
+file(MAKE_DIRECTORY "${CMAKE_BINARY_DIR}/fonts")
+foreach(font ${PIXELVR_FONT_FILES})
+    get_filename_component(font_name "${font}" NAME)
+    configure_file("${font}" "${CMAKE_BINARY_DIR}/fonts/${font_name}" COPYONLY)
+endforeach()
+
 target_compile_definitions(pixelvr_core PUBLIC
     XR_USE_GRAPHICS_API_VULKAN
     PIXELVR_SHADER_DIR=\"${CMAKE_BINARY_DIR}/shaders\"
+    PIXELVR_FONT_DIR=\"${CMAKE_BINARY_DIR}/fonts\"
+    PIXELVR_VERSION_STRING=\"${PIXELVR_VERSION_STRING}\"
     $<$<AND:$<CONFIG:Debug,RelWithDebInfo>,$<BOOL:${PIXELVR_ENABLE_VALIDATION}>>:PIXELVR_USE_VALIDATION=1>)
 
 target_link_libraries(pixelvr_core PUBLIC
@@ -155,7 +188,7 @@ if(PIXELVR_ENABLE_MEDIA)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
         libavcodec libavformat libavutil libswscale libswresample)
-    target_sources(pixelvr_core PRIVATE src/media/media_engine.cpp)
+    target_sources(pixelvr_core PRIVATE src/media/media_engine.cpp src/media/scrub_preview.cpp)
     target_link_libraries(pixelvr_core PUBLIC PkgConfig::FFMPEG)
     target_compile_definitions(pixelvr_core PUBLIC PIXELVR_HAVE_MEDIA=1)
 

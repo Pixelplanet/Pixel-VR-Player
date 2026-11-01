@@ -26,7 +26,12 @@ public:
         std::string detail;       // human-readable type/size for the row
         long long size = 0;       // bytes (0 if unknown)
         std::string previewPath;  // video file inside folder or self (for thumbnail)
+        long long mtime = 0;      // last-modified time (seconds, for sorting)
     };
+    // Listing order within folders and files: 0 = name, 1 = newest first,
+    // 2 = largest first. Folders always stay ahead of files.
+    void setSortMode(int mode);
+    int sortMode() const { return sortMode_.load(); }
     enum class Result { None, Navigated, Play, AddSmbShare };
 
     Browser();
@@ -165,6 +170,10 @@ public:
     void stopDownload();  // SIGKILL the child and drop the partial file
     // Removes finished/stopped/failed jobs (deleting any partial files).
     void clearFinished();
+    // Removes one finished / failed / stopped job from the list (index into
+    // downloadJobs()). Partial files of unfinished single-file jobs are deleted;
+    // completed files are kept.
+    void removeJob(int index);
 
     // Background size probe for a folder (shown on the download confirmation).
     void measureFolder(const std::string& uri);
@@ -228,6 +237,7 @@ private:
     std::string lastLocation_;  // last folder visited (local or smb), for re-open
     bool lastInSmb_ = false;
     std::vector<Entry> entries_;
+    std::atomic<int> sortMode_{0};  // read by the background scan thread
     int selected_ = 0;
 
     // Async directory scan (SMB discovery / large dirs) off the main thread.

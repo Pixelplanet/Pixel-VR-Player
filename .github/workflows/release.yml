@@ -45,7 +45,21 @@ jobs:
           bash -n tools/build.sh
 
       - name: Build
+        env:
+          PIXELVR_VERSION: ${{ inputs.tag || github.ref_name }}
         run: bash tools/build.sh
+
+      - name: Release notes
+        run: |
+          set -eux
+          tag="${{ inputs.tag || github.ref_name }}"
+          # Hand-written notes for this version, if present; GitHub's generated
+          # change list is appended below them.
+          if [ -f "docs/release-notes/${tag}.md" ]; then
+            cp "docs/release-notes/${tag}.md" release-notes.md
+          else
+            : > release-notes.md
+          fi
 
       - name: Package
         run: |
@@ -64,6 +78,7 @@ jobs:
           tar -tzf pixelvr-linux-arm64.tar.gz | grep -q '^PixelVRPlayer/install.sh$'
           tar -tzf pixelvr-linux-arm64.tar.gz | grep -q '^PixelVRPlayer/VERSION$'
           tar -tzf pixelvr-linux-arm64.tar.gz | grep -q '/shaders/thumb.frag.spv$'
+          tar -tzf pixelvr-linux-arm64.tar.gz | grep -q '/fonts/Inter-Medium.ttf$'
           sha256sum -c pixelvr-linux-arm64.tar.gz.sha256
 
       - name: Upload build artifact
@@ -80,6 +95,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ inputs.tag || github.ref_name }}
+          body_path: release-notes.md
           generate_release_notes: true
           files: |
             pixelvr-linux-arm64.tar.gz

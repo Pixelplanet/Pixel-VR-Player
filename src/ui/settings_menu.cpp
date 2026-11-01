@@ -6,6 +6,7 @@
 #include "util/logging.hpp"
 
 #include <algorithm>
+#include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
@@ -75,6 +76,19 @@ const char* kResScaleNames[] = {
 const float kResScaleValues[] = {1.00f, 1.15f, 1.25f, 1.40f, 1.50f};
 constexpr int kResScaleCount = 5;
 
+const char* kUiOpacityNames[] = {"Solid", "Frosted", "Glass", "Clear"};
+const float kUiOpacityValues[] = {1.0f, 0.82f, 0.64f, 0.46f};
+constexpr int kUiOpacityCount = 4;
+
+const char* kPanelCurveNames[] = {"Flat", "Gentle", "Wrap"};
+const float kPanelCurveValues[] = {0.0f, 0.45f, 1.0f};
+constexpr int kPanelCurveCount = 3;
+
+// Default flat-screen distance presets: 1.5 m .. 5.0 m in 0.5 m steps.
+constexpr float kDistanceMin = 1.5f;
+constexpr float kDistanceStep = 0.5f;
+constexpr int kDistanceSteps = 8;
+
 std::string getConfigPath() {
 #ifdef _WIN32
     const char* appData = std::getenv("APPDATA");
@@ -99,7 +113,12 @@ SettingsMenu::SettingsMenu() {
 
 void SettingsMenu::open() {
     open_ = true;
-    if (section_ < 0 || (section_ > 5 && section_ != 20)) section_ = 0;
+    // Sub-pages (track lists, list columns) reopen at their parent section; the
+    // Vault section is only reachable while the vault is unlocked.
+    if (section_ < 0 || section_ > 4 ||
+        (section_ == 4 && !VaultManager::instance().isUnlocked())) {
+        section_ = 0;
+    }
     refresh();
 }
 
@@ -115,74 +134,97 @@ void SettingsMenu::move(int delta) {
 void SettingsMenu::refresh() {
     rows_.clear();
 
-    if (section_ < 0) {  // top-level section list
-        title_ = "Settings";
-        rows_.push_back({"Display & Projection", ">", Action::EnterDisplay});
-        rows_.push_back({"Controls & Bindings", ">", Action::EnterControls});
-        rows_.push_back({"Audio / Video Tracks", ">", Action::EnterStreams});
-        rows_.push_back({"System & Debug", ">", Action::EnterSystem});
-        rows_.push_back({"Recenter Screen View", "[ Trigger to Recenter ]",
-                         Action::RecenterScreen});
-        rows_.push_back({"Close Settings", "[ Back to Player ]", Action::Close});
-        return;
-    }
+    auto choice = [&](const std::string& label, const std::string& value, int steps,
+                      int idx, Action act, bool enabled = true) {
+        Row r{label, value, act, enabled};
+        r.kind = Kind::Choice;
+        r.steps = steps;
+        r.stepIdx = idx;
+        rows_.push_back(r);
+    };
+    auto toggle = [&](const std::string& label, bool on, Action act,
+                      bool enabled = true) {
+        Row r{label, on ? "On" : "Off", act, enabled};
+        r.kind = Kind::Toggle;
+        r.stepIdx = on ? 1 : 0;
+        rows_.push_back(r);
+    };
+    auto binding = [&](const std::string& label, const std::string& value, Action act) {
+        Row r{label, value, act};
+        r.kind = Kind::Binding;
+        rows_.push_back(r);
+    };
+    auto color = [&](const std::string& label, const std::string& value, int steps,
+                     int idx, Action act) {
+        Row r{label, value, act};
+        r.kind = Kind::Color;
+        r.steps = steps;
+        r.stepIdx = idx;
+        rows_.push_back(r);
+    };
+    auto segmented = [&](const std::string& label, std::vector<std::string> opts, int idx,
+                         Action act) {
+        Row r{label, opts.empty() ? std::string() : opts[static_cast<std::size_t>(idx) % opts.size()], act};
+        r.kind = Kind::Segmented;
+        r.steps = static_cast<int>(opts.size());
+        r.stepIdx = idx;
+        r.options = std::move(opts);
+        rows_.push_back(r);
+    };
+    auto option = [&](const std::string& label, bool active, Action act, int data) {
+        Row r{label, active ? "Active" : "", act};
+        r.kind = Kind::Option;
+        r.stepIdx = active ? 1 : 0;
+        r.data = data;
+        rows_.push_back(r);
+    };
+    auto pressLabel = [&](int func, int btn) -> std::string {
+        return listeningFunc_ == func ? std::string("Press a button...")
+                                      : std::string(kButtonNames[btn % kButtonCount]);
+    };
 
     if (section_ == 0) {
         title_ = "Settings > Display & Cinema";
-        const char* projNames[] = {"Flat Screen", "360 Equirectangular",
-                                   "180 Equirectangular"};
-        const char* stereoNames[] = {"2D Mono", "Side-by-Side (SBS)",
-                                     "Top-Bottom (OU)"};
+        choice("Cinema Screen Curve", kCurvatureNames[curvatureIdx_ % kCurvatureCount],
+               kCurvatureCount, curvatureIdx_ % kCurvatureCount, Action::CycleCurvature);
+        choice("Ambient Screen Glow", kAmbilightNames[ambilightIdx_ % kAmbilightCount],
+               kAmbilightCount, ambilightIdx_ % kAmbilightCount, Action::CycleAmbilight,
+               projectionMode_ == 0);
+        choice("Render Resolution", kResScaleNames[resScaleIdx_ % kResScaleCount],
+               kResScaleCount, resScaleIdx_ % kResScaleCount, Action::CycleResScale);
         std::ostringstream distStream;
         distStream << std::fixed;
         distStream.precision(1);
         distStream << screenDistance_ << " m";
-        rows_.push_back({"Projection Mode", projNames[projectionMode_ % 3],
-                         Action::CycleProjection});
-        rows_.push_back({"Stereo 3D Format", stereoNames[stereoMode_ % 3],
-                         Action::CycleStereo});
-        rows_.push_back({"Cinema Screen Curve", kCurvatureNames[curvatureIdx_ % kCurvatureCount],
-                         Action::CycleCurvature});
-        rows_.push_back({"Ambient Screen Glow", kAmbilightNames[ambilightIdx_ % kAmbilightCount],
-                         Action::CycleAmbilight, projectionMode_ == 0});
-        rows_.push_back({"Render Resolution", kResScaleNames[resScaleIdx_ % kResScaleCount],
-                         Action::CycleResScale});
-        rows_.push_back({"Screen Distance", distStream.str(),
-                         Action::CycleDistance});
-        rows_.push_back({"Swap Left/Right Eye", swapEyes_ ? "On" : "Off",
-                         Action::ToggleSwapEyes});
-        rows_.push_back({"Recenter Screen View", "Recenter Now",
-                         Action::RecenterScreen});
+        const int distIdx = std::clamp(
+            static_cast<int>(std::lround((screenDistance_ - kDistanceMin) / kDistanceStep)),
+            0, kDistanceSteps - 1);
+        choice("Default Screen Distance", distStream.str(), kDistanceSteps, distIdx,
+               Action::CycleDistance);
+        toggle("Swap Left/Right Eye", swapEyes_, Action::ToggleSwapEyes);
+        toggle("Debug Statistics", showStats_, Action::ToggleStats);
     } else if (section_ == 1) {
         title_ = "Settings > UI & Appearance";
-        rows_.push_back({"UI Text Size",
-                         kUiTextScaleNames[uiTextScaleIdx_ % kUiTextScaleCount],
-                         Action::CycleUiTextScale});
-        rows_.push_back({"UI Text Color",
-                         kUiTextColorNames[uiTextColorIdx_ % kUiTextColorCount],
-                         Action::CycleUiTextColor});
-        rows_.push_back({"UI Accent Theme",
-                         kUiAccentColorNames[uiAccentColorIdx_ % kUiAccentColorCount],
-                         Action::CycleUiAccentColor});
-        rows_.push_back({"UI Panel Distance",
-                         kUiDistanceNames[uiDistanceIdx_ % kUiDistanceCount],
-                         Action::CycleUiDistance});
-        const char* followModeNames[2] = {"World Lock (Fixed)", "Smooth Gaze Follow"};
-        rows_.push_back({"UI Follow Mode",
-                         followModeNames[uiFollowMode_ % 2],
-                         Action::CycleUiFollowMode});
-        const char* viewModeNames[3] = {"Large Cards (3x2)", "Smaller Cards (4x3)", "Compact List (1-Col)"};
-        rows_.push_back({"Browser View Mode",
-                         viewModeNames[browserViewMode_ % 3],
-                         Action::CycleBrowserViewMode});
-        rows_.push_back({"Configure List Columns",
-                         "[ Customize Columns > ]",
-                         Action::EnterListColsConfig});
-        rows_.push_back({"Download Folder",
-                         kDownloadDirs[downloadDirIdx_ % kDownloadDirCount],
-                         Action::CycleDownloadDir});
-        rows_.push_back({"Debug Statistics", showStats_ ? "On" : "Off",
-                         Action::ToggleStats});
+        choice("UI Text Size", kUiTextScaleNames[uiTextScaleIdx_ % kUiTextScaleCount],
+               kUiTextScaleCount, uiTextScaleIdx_ % kUiTextScaleCount, Action::CycleUiTextScale);
+        color("UI Text Color", kUiTextColorNames[uiTextColorIdx_ % kUiTextColorCount],
+              kUiTextColorCount, uiTextColorIdx_ % kUiTextColorCount, Action::CycleUiTextColor);
+        color("UI Accent Theme", kUiAccentColorNames[uiAccentColorIdx_ % kUiAccentColorCount],
+              kUiAccentColorCount, uiAccentColorIdx_ % kUiAccentColorCount,
+              Action::CycleUiAccentColor);
+        choice("UI Panel Distance", kUiDistanceNames[uiDistanceIdx_ % kUiDistanceCount],
+               kUiDistanceCount, uiDistanceIdx_ % kUiDistanceCount, Action::CycleUiDistance);
+        segmented("Main Panel Shape",
+                  {kPanelCurveNames[0], kPanelCurveNames[1], kPanelCurveNames[2]},
+                  panelCurveIdx_ % kPanelCurveCount, Action::CyclePanelCurve);
+        segmented("Panel Transparency",
+                  {kUiOpacityNames[0], kUiOpacityNames[1], kUiOpacityNames[2], kUiOpacityNames[3]},
+                  uiOpacityIdx_ % kUiOpacityCount, Action::CycleUiOpacity);
+        segmented("UI in 360/180 Videos", {"Fixed", "Follow Gaze"}, uiFollowMode_ % 2,
+                  Action::CycleUiFollowMode);
+        segmented("Download Folder", {kDownloadDirs[0], kDownloadDirs[1], kDownloadDirs[2]},
+                  downloadDirIdx_ % kDownloadDirCount, Action::CycleDownloadDir);
+        rows_.push_back({"List View Columns", "Customize", Action::EnterListColsConfig});
     } else if (section_ == 2) {
         title_ = "Settings > Audio & Video Tracks";
         Row v{"Video Track",
@@ -207,96 +249,69 @@ void SettingsMenu::refresh() {
                          kLangNames[audioLangIdx_ % kLangCount],
                          Action::EnterLangList});
     } else if (section_ == 3) {
-        title_ = "Settings > Controls & Bindings";
-        auto btnLabel = [&](int func, int btn) -> std::string {
-            return listeningFunc_ == func
-                       ? std::string("[ press a button ]")
-                       : std::string(kButtonNames[btn % kButtonCount]);
-        };
-        rows_.push_back({"Play / Pause", btnLabel(0, bindPlayBtn_),
-                         Action::ListenPlay});
-        rows_.push_back({"Open Menu / Browser", btnLabel(1, bindMenuBtn_),
-                         Action::ListenMenu});
-        rows_.push_back({"Recenter View", btnLabel(2, bindRecenterBtn_),
-                         Action::ListenRecenter});
-        rows_.push_back({"Bookmarks Shortcut", btnLabel(4, bindQuickPathBtn_),
-                         Action::ListenQuickPath});
-        rows_.push_back({"Controller Models", drawModels_ ? "ON" : "OFF",
-                         Action::ToggleModels});
-        rows_.push_back({"Laser Hover Rumble", hoverHapticsEnabled_ ? "ON" : "OFF",
-                         Action::ToggleHoverHaptics});
-        rows_.push_back({"Rumble Strength", hoverHapticsStrengthStr(),
-                         Action::CycleHoverHapticsStrength, hoverHapticsEnabled_});
+        title_ = "Settings > Controls & Input";
+        binding("Play / Pause", pressLabel(0, bindPlayBtn_), Action::ListenPlay);
+        binding("Open Menu / Browser", pressLabel(1, bindMenuBtn_), Action::ListenMenu);
+        binding("Recenter View", pressLabel(2, bindRecenterBtn_), Action::ListenRecenter);
+        binding("Bookmarks Shortcut", pressLabel(4, bindQuickPathBtn_), Action::ListenQuickPath);
+        toggle("Controller Models", drawModels_, Action::ToggleModels);
+        toggle("Laser Hover Rumble", hoverHapticsEnabled_, Action::ToggleHoverHaptics);
+        choice("Rumble Strength", hoverHapticsStrengthStr(), kHoverHapticsStrengthCount,
+               hoverHapticsStrengthIdx_ % kHoverHapticsStrengthCount,
+               Action::CycleHoverHapticsStrength, hoverHapticsEnabled_);
     } else if (section_ == 4) {
         title_ = "Settings > Vault & Privacy";
-        rows_.push_back({"Auto-Lock on Headset Removal",
-                         VaultManager::instance().autoLockHeadsetOff() ? "Enabled" : "Disabled",
-                         Action::CycleVaultAutoLockHeadset});
+        toggle("Auto-Lock on Headset Removal", VaultManager::instance().autoLockHeadsetOff(),
+               Action::CycleVaultAutoLockHeadset);
 
-        int toSec = VaultManager::instance().autoLockTimeoutSec();
-        std::string toStr = "Disabled";
-        if (toSec == 120) toStr = "2 Minutes";
-        else if (toSec == 300) toStr = "5 Minutes";
-        else if (toSec == 600) toStr = "10 Minutes";
-        rows_.push_back({"Inactivity Auto-Lock Timeout", toStr,
-                         Action::CycleVaultTimeout});
+        const int toSec = VaultManager::instance().autoLockTimeoutSec();
+        const int toIdx = (toSec == 120) ? 1 : (toSec == 300) ? 2 : (toSec == 600) ? 3 : 0;
+        const char* toNames[4] = {"Disabled", "2 Minutes", "5 Minutes", "10 Minutes"};
+        choice("Inactivity Auto-Lock", toNames[toIdx], 4, toIdx, Action::CycleVaultTimeout);
 
-        auto moveBtnLabel = [&]() -> std::string {
-            if (listeningFunc_ == 3) return "[ press a button ]";
-            int mb = VaultManager::instance().moveButton();
-            if (mb < 0 || mb >= kButtonCount) return "Disabled";
-            return kButtonNames[mb % kButtonCount];
-        };
-        rows_.push_back({"File Actions Button", moveBtnLabel(),
-                         Action::ListenVaultMoveBtn});
+        std::string moveLabel;
+        if (listeningFunc_ == 3) {
+            moveLabel = "Press a button...";
+        } else {
+            const int mb = VaultManager::instance().moveButton();
+            moveLabel = (mb < 0 || mb >= kButtonCount) ? "Disabled" : kButtonNames[mb];
+        }
+        binding("File Actions Button", moveLabel, Action::ListenVaultMoveBtn);
 
         std::string comboLabel;
         if (VaultManager::instance().isRecordingCombo()) {
-            comboLabel = "[ Recording: " + std::to_string(VaultManager::instance().recordedCount()) + "/6 ]";
+            comboLabel = "Recording " + std::to_string(VaultManager::instance().recordedCount()) + " / 6";
         } else {
             comboLabel = VaultManager::instance().comboString();
         }
-        rows_.push_back({"Unlock Combo Sequence", comboLabel,
-                         Action::RecordVaultCombo});
-
-        rows_.push_back({"Lock Vault Now", "[ Lock & Return Home ]",
-                         Action::LockVaultAction});
+        binding("Unlock Combo Sequence", comboLabel, Action::RecordVaultCombo);
     } else if (section_ == 21) {
-        title_ = "Settings > List Columns";
-        rows_.push_back({"Format / VR Badge", listShowFormat_ ? "Visible" : "Hidden", Action::ToggleListColFormat});
-        rows_.push_back({"Resolution & FPS", listShowRes_ ? "Visible" : "Hidden", Action::ToggleListColRes});
-        rows_.push_back({"File Size", listShowSize_ ? "Visible" : "Hidden", Action::ToggleListColSize});
-        rows_.push_back({"Video Duration", listShowDuration_ ? "Visible" : "Hidden", Action::ToggleListColDuration});
-        rows_.push_back({"< Back to UI & Appearance", "", Action::BackToUI});
+        title_ = "Settings > UI & Appearance > List Columns";
+        toggle("Format / VR Badge", listShowFormat_, Action::ToggleListColFormat);
+        toggle("Resolution & FPS", listShowRes_, Action::ToggleListColRes);
+        toggle("File Size", listShowSize_, Action::ToggleListColSize);
+        toggle("Video Duration", listShowDuration_, Action::ToggleListColDuration);
+        rows_.push_back({"Back to UI & Appearance", "", Action::BackToUI});
     } else if (section_ == 10) {
-        title_ = "Settings > Select Video Track";
+        title_ = "Settings > Tracks > Video Track";
         for (std::size_t i = 0; i < videoStreams_.size(); ++i) {
-            Row r{videoStreams_[i].second,
-                  static_cast<int>(i) == videoSel_ ? "ACTIVE" : "Select",
-                  Action::PickVideoStream};
-            r.data = static_cast<int>(i);
-            rows_.push_back(r);
+            option(videoStreams_[i].second, static_cast<int>(i) == videoSel_,
+                   Action::PickVideoStream, static_cast<int>(i));
         }
-        rows_.push_back({"< Back to Tracks", "", Action::Back});
+        rows_.push_back({"Back to Tracks", "", Action::Back});
     } else if (section_ == 11) {
-        title_ = "Settings > Select Audio Track";
+        title_ = "Settings > Tracks > Audio Track";
         for (std::size_t i = 0; i < audioStreams_.size(); ++i) {
-            Row r{audioStreams_[i].second,
-                  static_cast<int>(i) == audioSel_ ? "ACTIVE" : "Select",
-                  Action::PickAudioStream};
-            r.data = static_cast<int>(i);
-            rows_.push_back(r);
+            option(audioStreams_[i].second, static_cast<int>(i) == audioSel_,
+                   Action::PickAudioStream, static_cast<int>(i));
         }
-        rows_.push_back({"< Back to Tracks", "", Action::Back});
+        rows_.push_back({"Back to Tracks", "", Action::Back});
     } else {  // section_ == 12: preferred-language list
-        title_ = "Settings > Preferred Audio Language";
+        title_ = "Settings > Tracks > Preferred Language";
         for (int i = 0; i < kLangCount; ++i) {
-            Row r{kLangNames[i], i == audioLangIdx_ ? "ACTIVE" : "Select",
-                  Action::PickLanguage};
-            r.data = i;
-            rows_.push_back(r);
+            option(kLangNames[i], i == audioLangIdx_, Action::PickLanguage, i);
         }
-        rows_.push_back({"< Back to Tracks", "", Action::Back});
+        rows_.push_back({"Back to Tracks", "", Action::Back});
     }
 }
 
@@ -306,10 +321,6 @@ SettingsMenu::Action SettingsMenu::activate() {
     }
     const Action act = rows_[selected_].action;
     switch (act) {
-        case Action::EnterDisplay:  section_ = 0; selected_ = 0; refresh(); break;
-        case Action::EnterControls: section_ = 1; selected_ = 0; refresh(); break;
-        case Action::EnterStreams:  section_ = 2; selected_ = 0; refresh(); break;
-        case Action::EnterSystem:   section_ = 3; selected_ = 0; refresh(); break;
         case Action::EnterVideoList: section_ = 10; selected_ = 0; refresh(); break;
         case Action::EnterAudioList: section_ = 11; selected_ = 0; refresh(); break;
         case Action::EnterLangList:  section_ = 12; selected_ = 0; refresh(); break;
@@ -338,16 +349,6 @@ SettingsMenu::Action SettingsMenu::activate() {
             saveConfig();
             refresh();
             break;
-        case Action::CycleProjection:
-            projectionMode_ = (projectionMode_ + 1) % 3;
-            saveConfig();
-            refresh();
-            break;
-        case Action::CycleStereo:
-            stereoMode_ = (stereoMode_ + 1) % 3;
-            saveConfig();
-            refresh();
-            break;
         case Action::ToggleSwapEyes:
             swapEyes_ = !swapEyes_;
             saveConfig();
@@ -363,12 +364,15 @@ SettingsMenu::Action SettingsMenu::activate() {
             saveConfig();
             refresh();
             break;
-        case Action::CycleDistance:
-            screenDistance_ += 0.5f;
-            if (screenDistance_ > 5.0f) screenDistance_ = 1.5f;
+        case Action::CycleDistance: {
+            const int idx = static_cast<int>(
+                std::lround((screenDistance_ - kDistanceMin) / kDistanceStep));
+            const int next = (std::clamp(idx, 0, kDistanceSteps - 1) + 1) % kDistanceSteps;
+            screenDistance_ = kDistanceMin + kDistanceStep * static_cast<float>(next);
             saveConfig();
             refresh();
             break;
+        }
         case Action::CycleCurvature:
             curvatureIdx_ = (curvatureIdx_ + 1) % kCurvatureCount;
             saveConfig();
@@ -396,11 +400,6 @@ SettingsMenu::Action SettingsMenu::activate() {
             break;
         case Action::CycleUiFollowMode:
             uiFollowMode_ = (uiFollowMode_ + 1) % 2;
-            saveConfig();
-            refresh();
-            break;
-        case Action::CycleBrowserViewMode:
-            browserViewMode_ = (browserViewMode_ + 1) % 3;
             saveConfig();
             refresh();
             break;
@@ -477,12 +476,6 @@ SettingsMenu::Action SettingsMenu::activate() {
             }
             refresh();
             break;
-        case Action::LockVaultAction:
-            VaultManager::instance().lock();
-            section_ = 0;
-            refresh();
-            break;
-
         case Action::EnterListColsConfig:
             section_ = 21;
             selected_ = 0;
@@ -508,20 +501,47 @@ SettingsMenu::Action SettingsMenu::activate() {
             refresh();
             saveConfig();
             break;
+        case Action::CycleUiOpacity:
+            uiOpacityIdx_ = (uiOpacityIdx_ + 1) % kUiOpacityCount;
+            saveConfig();
+            refresh();
+            break;
+        case Action::CyclePanelCurve:
+            panelCurveIdx_ = (panelCurveIdx_ + 1) % kPanelCurveCount;
+            saveConfig();
+            refresh();
+            break;
         case Action::BackToUI:
             section_ = 1;
             selected_ = 0;
             refresh();
             break;
-        case Action::RecenterScreen:
-            break;
-        case Action::Close:
-            close();
-            break;
         default:
             break;
     }
     return act;
+}
+
+SettingsMenu::Action SettingsMenu::activateSegment(int segment) {
+    if (selected_ < 0 || selected_ >= static_cast<int>(rows_.size())) return Action::None;
+    const Row& row = rows_[static_cast<std::size_t>(selected_)];
+    if (row.kind != Kind::Segmented || segment < 0 || segment >= row.steps) return activate();
+    Action act = Action::None;
+    // Each activation advances by one option; stop on the requested one.
+    const int steps = row.steps;
+    for (int guard = 0; guard < steps + 1; ++guard) {
+        if (rows_[static_cast<std::size_t>(selected_)].stepIdx == segment) break;
+        act = activate();
+    }
+    return act;
+}
+
+float SettingsMenu::uiOpacity() const {
+    return kUiOpacityValues[uiOpacityIdx_ % kUiOpacityCount];
+}
+
+float SettingsMenu::panelCurve() const {
+    return kPanelCurveValues[panelCurveIdx_ % kPanelCurveCount];
 }
 
 void SettingsMenu::setStreams(
@@ -642,39 +662,48 @@ void SettingsMenu::loadConfig() {
         if (eq == std::string::npos) continue;
         std::string key = line.substr(0, eq);
         std::string val = line.substr(eq + 1);
-        if (key == "projection") projectionMode_ = std::clamp(std::stoi(val), 0, 2);
-        else if (key == "stereo") stereoMode_ = std::clamp(std::stoi(val), 0, 2);
-        else if (key == "swap_eyes") swapEyes_ = (val == "1");
-        else if (key == "draw_models") drawModels_ = (val == "1");
-        else if (key == "show_stats") showStats_ = (val == "1");
-        else if (key == "distance") screenDistance_ = std::clamp(std::stof(val), 1.0f, 10.0f);
-        else if (key == "bind_play_btn") bindPlayBtn_ = std::clamp(std::stoi(val), 0, kButtonCount - 1);
-        else if (key == "bind_menu_btn") bindMenuBtn_ = std::clamp(std::stoi(val), 0, kButtonCount - 1);
-        else if (key == "bind_recenter_btn") {
-            const int b = std::clamp(std::stoi(val), 0, kButtonCount - 1);
-            // Grip used to default to recenter; it now toggles the laser pointer,
-            // so a saved grip binding is migrated to the new default (Bumper).
-            bindRecenterBtn_ = (b == 8) ? 6 : b;
+        // A malformed value (hand edit, truncated write) must not abort startup:
+        // skip that key and keep its default.
+        try {
+            if (key == "projection") projectionMode_ = std::clamp(std::stoi(val), 0, 2);
+            else if (key == "stereo") stereoMode_ = std::clamp(std::stoi(val), 0, 2);
+            else if (key == "swap_eyes") swapEyes_ = (val == "1");
+            else if (key == "draw_models") drawModels_ = (val == "1");
+            else if (key == "show_stats") showStats_ = (val == "1");
+            else if (key == "distance") screenDistance_ = std::clamp(std::stof(val), 1.0f, 10.0f);
+            else if (key == "bind_play_btn") bindPlayBtn_ = std::clamp(std::stoi(val), 0, kButtonCount - 1);
+            else if (key == "bind_menu_btn") bindMenuBtn_ = std::clamp(std::stoi(val), 0, kButtonCount - 1);
+            else if (key == "bind_recenter_btn") {
+                const int b = std::clamp(std::stoi(val), 0, kButtonCount - 1);
+                // Grip used to default to recenter; it now toggles the laser pointer,
+                // so a saved grip binding is migrated to the new default (Bumper).
+                bindRecenterBtn_ = (b == 8) ? 6 : b;
+            }
+            else if (key == "bind_quick_path_btn") bindQuickPathBtn_ = std::clamp(std::stoi(val), 0, kButtonCount - 1);
+            else if (key == "download_dir") downloadDirIdx_ = std::clamp(std::stoi(val), 0, kDownloadDirCount - 1);
+            else if (key == "audio_lang") audioLangIdx_ = std::clamp(std::stoi(val), 0, kLangCount - 1);
+            else if (key == "curvature") curvatureIdx_ = std::clamp(std::stoi(val), 0, kCurvatureCount - 1);
+            else if (key == "ui_text_scale") uiTextScaleIdx_ = std::clamp(std::stoi(val), 0, kUiTextScaleCount - 1);
+            else if (key == "ui_text_color") uiTextColorIdx_ = std::clamp(std::stoi(val), 0, kUiTextColorCount - 1);
+            else if (key == "ui_accent_color") uiAccentColorIdx_ = std::clamp(std::stoi(val), 0, kUiAccentColorCount - 1);
+            else if (key == "ui_distance") uiDistanceIdx_ = std::clamp(std::stoi(val), 0, kUiDistanceCount - 1);
+            else if (key == "ui_follow_mode") uiFollowMode_ = std::clamp(std::stoi(val), 0, 1);
+            else if (key == "browser_view_mode") browserViewMode_ = std::clamp(std::stoi(val), 0, 2);
+            else if (key == "list_show_format") listShowFormat_ = (val == "1" || val == "true");
+            else if (key == "list_show_res") listShowRes_ = (val == "1" || val == "true");
+            else if (key == "list_show_size") listShowSize_ = (val == "1" || val == "true");
+            else if (key == "list_show_dur") listShowDuration_ = (val == "1" || val == "true");
+            else if (key == "quick_path") quickPath_ = val;
+            else if (key == "hover_haptics") hoverHapticsEnabled_ = (val == "1" || val == "true");
+            else if (key == "hover_haptics_strength") hoverHapticsStrengthIdx_ = std::clamp(std::stoi(val), 0, kHoverHapticsStrengthCount - 1);
+            else if (key == "ambilight") ambilightIdx_ = std::clamp(std::stoi(val), 0, kAmbilightCount - 1);
+            else if (key == "res_scale") resScaleIdx_ = std::clamp(std::stoi(val), 0, kResScaleCount - 1);
+            else if (key == "ui_opacity") uiOpacityIdx_ = std::clamp(std::stoi(val), 0, kUiOpacityCount - 1);
+            else if (key == "panel_curve") panelCurveIdx_ = std::clamp(std::stoi(val), 0, kPanelCurveCount - 1);
+            else if (key == "browser_sort") browserSort_ = std::clamp(std::stoi(val), 0, 2);
+        } catch (const std::exception&) {
+            PIXELVR_LOG_WARN("Ignoring malformed setting '%s' in %s", key.c_str(), path.c_str());
         }
-        else if (key == "bind_quick_path_btn") bindQuickPathBtn_ = std::clamp(std::stoi(val), 0, kButtonCount - 1);
-        else if (key == "download_dir") downloadDirIdx_ = std::clamp(std::stoi(val), 0, kDownloadDirCount - 1);
-        else if (key == "audio_lang") audioLangIdx_ = std::clamp(std::stoi(val), 0, kLangCount - 1);
-        else if (key == "curvature") curvatureIdx_ = std::clamp(std::stoi(val), 0, kCurvatureCount - 1);
-        else if (key == "ui_text_scale") uiTextScaleIdx_ = std::clamp(std::stoi(val), 0, kUiTextScaleCount - 1);
-        else if (key == "ui_text_color") uiTextColorIdx_ = std::clamp(std::stoi(val), 0, kUiTextColorCount - 1);
-        else if (key == "ui_accent_color") uiAccentColorIdx_ = std::clamp(std::stoi(val), 0, kUiAccentColorCount - 1);
-        else if (key == "ui_distance") uiDistanceIdx_ = std::clamp(std::stoi(val), 0, kUiDistanceCount - 1);
-        else if (key == "ui_follow_mode") uiFollowMode_ = std::clamp(std::stoi(val), 0, 1);
-        else if (key == "browser_view_mode") browserViewMode_ = std::clamp(std::stoi(val), 0, 2);
-        else if (key == "list_show_format") listShowFormat_ = (val == "1" || val == "true");
-        else if (key == "list_show_res") listShowRes_ = (val == "1" || val == "true");
-        else if (key == "list_show_size") listShowSize_ = (val == "1" || val == "true");
-        else if (key == "list_show_dur") listShowDuration_ = (val == "1" || val == "true");
-        else if (key == "quick_path") quickPath_ = val;
-        else if (key == "hover_haptics") hoverHapticsEnabled_ = (val == "1" || val == "true");
-        else if (key == "hover_haptics_strength") hoverHapticsStrengthIdx_ = std::clamp(std::stoi(val), 0, kHoverHapticsStrengthCount - 1);
-        else if (key == "ambilight") ambilightIdx_ = std::clamp(std::stoi(val), 0, kAmbilightCount - 1);
-        else if (key == "res_scale") resScaleIdx_ = std::clamp(std::stoi(val), 0, kResScaleCount - 1);
     }
     PIXELVR_LOG_INFO("Loaded settings from %s", path.c_str());
 }
@@ -715,6 +744,9 @@ void SettingsMenu::saveConfig() const {
             file << "hover_haptics_strength=" << hoverHapticsStrengthIdx_ << "\n";
             file << "ambilight=" << ambilightIdx_ << "\n";
             file << "res_scale=" << resScaleIdx_ << "\n";
+            file << "panel_curve=" << panelCurveIdx_ << "\n";
+            file << "ui_opacity=" << uiOpacityIdx_ << "\n";
+            file << "browser_sort=" << browserSort_ << "\n";
             if (!quickPath_.empty()) {
                 file << "quick_path=" << quickPath_ << "\n";
             }

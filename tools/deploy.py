@@ -124,7 +124,7 @@ def main() -> int:
         'if command -v fuser >/dev/null 2>&1 && fuser "$target/pixelvr" '
         ">/dev/null 2>&1; then echo 'error: pixelvr is running - stop it in Steam "
         "before deploying.' >&2; exit 1; fi; "
-        'mkdir -p "$target/shaders"; printf %s "$target"'
+        'mkdir -p "$target/shaders" "$target/fonts"; printf %s "$target"'
     )
 
     # 2. Copy binary, shaders, launcher, and icon.
@@ -133,6 +133,10 @@ def main() -> int:
     if shaders:
         print(f"Copying {len(shaders)} shader(s) ...")
         scp([str(p) for p in shaders], f"{REMOTE_DIR}/shaders/")
+    fonts = sorted((shader_dir.parent / "fonts").glob("*.ttf"))
+    if fonts:
+        print(f"Copying {len(fonts)} font(s) ...")
+        scp([str(p) for p in fonts], f"{REMOTE_DIR}/fonts/")
     launch_helper = PROJECT_ROOT / "tools" / "launch.sh"
     if launch_helper.is_file():
         scp([str(launch_helper)], f"{REMOTE_DIR}/launch.sh")

@@ -105,7 +105,7 @@ Updating Pixel VR Player is seamless, fast, and 100% non-destructive.
 
 > [!NOTE]
 > **Your data is always preserved!**  
-> All user preferences (`~/.config/pixelvr/config.json`), saved SMB network shares and credentials (`~/.config/pixelvr/smb_shares.json`), quick bookmarks (`~/.config/pixelvr/bookmarks.json`), cached video thumbnails (`~/.cache/pixelvr`), and encrypted media in the Discreet Vault (`~/.pixelvr_vault`) are stored outside the application folder and remain completely untouched across updates.
+> All user preferences (`~/.config/pixelvr/config.json`), saved SMB network shares and credentials (`~/.config/pixelvr/smb_shares.json`), quick bookmarks (`~/.config/pixelvr/bookmarks.json`), resume positions (`~/.config/pixelvr/playback_state.tsv`), cached video thumbnails (`~/.cache/pixelvr`), and encrypted media in the Discreet Vault (`~/.pixelvr_vault`) are stored outside the application folder and remain completely untouched across updates.
 
 Choose your preferred update method:
 

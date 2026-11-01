@@ -7,6 +7,7 @@
 #include <cstring>
 #include <memory>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace pixelvr {
@@ -100,12 +101,13 @@ public:
     }
 
     // Repositions the flat screen in front of the given head pose (headForward is
-    // a world-space direction); resets the viewing distance to the default.
+    // a world-space direction); the current viewing distance is kept.
     void recenterScreen(const float headPos[3], const float headForward[3]);
     const float* screenPivot() const { return screenPivot_; }
     const float* screenForward() const { return screenForward_; }
     // Moves the flat screen farther (positive) or nearer (negative), clamped.
     void adjustScreenDistance(float delta);
+    void setScreenDistance(float d) { screenDistance_ = d < 1.0f ? 1.0f : (d > 10.0f ? 10.0f : d); }
     // Parametric curvature for cinema screen: 0.0 = flat plane, 1.0 = full cylinder wrap.
     void setScreenCurvature(float c) { screenCurvature_ = c < 0.0f ? 0.0f : (c > 1.0f ? 1.0f : c); }
     float screenCurvature() const { return screenCurvature_; }
@@ -144,9 +146,10 @@ public:
 
     struct DownloadItem {
         std::string label;
-        int state = 0;          // 0=active, 1=done, 2=failed, 3=stopped
+        int state = 0;          // 0=active, 1=done, 2=failed, 3=stopped, 4=queued
         float progress = 0.0f;  // 0.0 to 1.0
         std::string detail;
+        bool paused = false;    // active job is paused
     };
 
     // File browser overlay: rich spatial card grid + sidebar navigation
@@ -158,6 +161,9 @@ public:
                     const std::string& status);
     void updateCardThumbnail(int slot, const std::string& path, const uint8_t* rgba, int width, int height);
     void clearCardThumbnails();
+    // Timeline hover preview image (RGBA), shown above the scrub time bubble.
+    void updateScrubPreview(const uint8_t* rgba, int width, int height, double seconds);
+    void clearScrubPreview();
     int browserFirst() const { return browserFirst_; }
     void setBrowserFirst(int first) { browserFirst_ = first < 0 ? 0 : first; }
     int browserSidebarHovered() const { return browserSidebarHovered_; }
@@ -212,7 +218,23 @@ public:
         int cursorPos = 0;
         bool hasTransform = false;
         float transform[3][4]{};
+        bool shift = false;    // in-app keyboard: next letter upper-case
+        bool symbols = false;  // in-app keyboard: symbols page
     };
+    void setKeyboardModes(bool shift, bool symbols) {
+        keyboardModal_.shift = shift;
+        keyboardModal_.symbols = symbols;
+    }
+    // Index into the in-app keyboard layout under the pointer, or -1.
+    int keyboardKeyHovered() const { return keyboardKeyHovered_; }
+    // True while the pointer is over the keyboard's text field.
+    bool keyboardFieldHovered() const { return keyboardFieldHovered_; }
+    // Byte offset of the caret position nearest to where the pointer hits the
+    // text field (from the last drawn frame), or -1 when not over the field.
+    int keyboardCursorAtPointer() const;
+    // Code / character a key index produces (see hub::keyboardKeys); used by the app.
+    static int keyboardKeyCode(int index);
+    static char keyboardKeyChar(int index, bool shift, bool symbols);
     void setKeyboardModal(bool visible, const std::string& prompt,
                           const std::string& text, bool isPassword = false,
                           const float* transform = nullptr,
@@ -232,6 +254,13 @@ public:
     const KeyboardModalData& keyboardModal() const { return keyboardModal_; }
 
     void setUiFollowMode(int mode) { uiFollowMode_ = mode; }
+    // Main panel curvature: 0 = flat, 1 = wraps around the viewer at the panel
+    // distance; values in between bend more gently.
+    // Panel surface opacity (1 = solid, lower = more see-through glass).
+    void setUiOpacity(float o) { uiOpacity_ = o < 0.3f ? 0.3f : (o > 1.0f ? 1.0f : o); }
+    void setPanelCurve(float amount) { panelCurve_ = amount < 0.0f ? 0.0f : (amount > 1.0f ? 1.0f : amount); }
+    // Label of the file browser's sort button (e.g. "Name", "Newest").
+    void setBrowserSortLabel(const std::string& label) { browserSortLabel_ = label; }
     int uiFollowMode() const { return uiFollowMode_; }
 
     bool pointerActive() const { return pointerActive_; }
@@ -254,6 +283,9 @@ public:
     // The downloads-window list row / button under the pointer, or -1.
     int downloadsHovered() const { return downloadsHovered_; }
     int downloadsButtonHovered() const { return downloadsBtnHovered_; }
+    // Per-job button on the hovered download card: 0 = pause/resume (Play when
+    // finished), 1 = cancel/remove; -1 when the pointer is elsewhere.
+    int downloadsJobButtonHovered() const { return downloadsJobBtnHovered_; }
 
     // File Action Submenu (opened by button Y in file browser)
     struct ActionMenuData {
@@ -329,6 +361,11 @@ public:
         CurvedDisplay = 17,
         Chevron = 18,
         Home = 19,
+        SoftGlow = 20,  // smooth halo / shadow around a rounded box
+        Star = 21,
+        Lock = 22,
+        Sort = 23,       // three bars of decreasing length
+        GlassPanel = 25, // rounded box with bevel + eye-dependent reflection sheen
     };
 
     // The browser row currently under the pointer, or -1 if none.
@@ -341,18 +378,16 @@ public:
 
     enum class CtrlButton {
         SeekBack = 0,
-        PlayPause = 1,
-        SeekFwd = 2,
-        Stop = 3,
-        Files = 4,
-        Settings = 5,
-        Downloads = 6,  // open the downloads window (list of jobs)
-        Download = 7,   // download the focused file-browser entry
-        FormatToggle = 8,
-        AudioToggle = 9,
-        ScreenToggle = 10,
-        Recenter = 11,  // recenter screen/view from HUD
-        HideHud = 12    // immediately hide player controls
+        PlayPause,
+        SeekFwd,
+        Stop,
+        Files,         // "HUB": opens the file browser / downloads / settings
+        FormatToggle,
+        AudioToggle,
+        ScreenToggle,
+        Recenter,      // recenter screen/view from HUD
+        HideHud,       // immediately hide player controls
+        Count
     };
     void setControlBar(bool visible) { controlBarVisible_ = visible; }
     bool controlBarVisible() const { return controlBarVisible_; }
@@ -394,14 +429,30 @@ public:
         downloadsFailed_ = failed;
     }
 
+    // One settings card. `kind` mirrors SettingsMenu::Kind: 0 choice (stepped
+    // slider), 1 toggle (switch), 2 action (chevron), 3 binding (key chip),
+    // 4 colour (swatches), 5 option (checkmark when active), 6 segmented
+    // (every option shown as a pill; `options` holds the labels).
+    struct SettingsRowVis {
+        std::string label;
+        std::string value;
+        int kind = 2;
+        int steps = 0;
+        int stepIdx = 0;
+        bool enabled = true;
+        std::vector<std::string> options;
+    };
+    static constexpr int kSettingsKindSegmented = 6;
+
     // Settings overlay panel (re-uses panel & pointer interaction)
     void setSettings(bool visible, const std::string& title,
-                     const std::vector<std::string>& rows, int selected,
-                     const std::string& status,
-                     const std::vector<uint8_t>& enabled = {});
+                     const std::vector<SettingsRowVis>& rows, int selected,
+                     const std::string& status);
     bool settingsVisible() const { return settingsVisible_; }
     int settingsRow() const { return settingsRow_; }
     int settingsHovered() const { return settingsHovered_; }
+    // Segment of a segmented settings row under the pointer, or -1.
+    int settingsSegmentHovered() const { return settingsSegmentHovered_; }
     void setSettingsSelected(int index) { settingsSelected_ = index; }
 
     VkDevice device() const { return device_; }
@@ -412,13 +463,16 @@ private:
     bool createMsaaTarget(int32_t width, int32_t height);
     bool createDepthTarget(int32_t width, int32_t height);
     bool initText();
+    bool uploadFontAtlas(const FontAtlas& atlas, VkImage& image, VkDeviceMemory& memory,
+                         VkImageView& view);
     bool createSamplerAndDescriptors();
     bool createPipelines();
     bool buildPipeline(const std::string& vertName, const std::string& fragName,
                        VkPipelineLayout layout, VkPipeline& out, bool blend = false,
                        VkRenderPass pass = VK_NULL_HANDLE,
                        VkSampleCountFlagBits samples =
-                           VK_SAMPLE_COUNT_FLAG_BITS_MAX_ENUM);
+                           VK_SAMPLE_COUNT_FLAG_BITS_MAX_ENUM,
+                       const VkPipelineVertexInputStateCreateInfo* vertexInput = nullptr);
     bool createVideoResources(int width, int height);
     void destroyVideoResources();
     bool createYcbcrPipeline(uint32_t fourcc, int colorspace, bool fullRange);
@@ -490,11 +544,24 @@ private:
     std::vector<DownloadItem> downloadJobs_;
     int downloadsBtnHovered_ = -1;
     int downloadsHovered_ = -1;
+    int downloadsJobBtnHovered_ = -1;
+    // Whether a job with `state` is listed under the current downloads filter
+    // (0 = all, 1 = active/paused/queued, 2 = completed).
+    bool downloadJobVisible(int state) const {
+        if (downloadsFilter_ == 1) return state == 0 || state == 3 || state == 4;
+        if (downloadsFilter_ == 2) return state == 1;
+        return true;
+    }
 
     // Action menu state
     ActionMenuData actionMenu_{};
     int actionMenuBtnHovered_ = -1;
     int actionMenuKeyHovered_ = -1;
+    int keyboardKeyHovered_ = -1;
+    bool keyboardFieldHovered_ = false;
+    float keyboardFieldHitX_ = 0.0f;  // panel-space x of the pointer on the field
+    // Caret stops of the drawn text field: (panel x, byte offset), left to right.
+    std::vector<std::pair<float, int>> kbCaretStops_;
     bool browserOnNetwork_ = false;
 
     // Flat-screen placement in the app reference space (updated by recenter and
@@ -533,7 +600,11 @@ private:
         std::string path;
         bool ready = false;
     };
-    CardThumbnail cardThumbs_[12];
+    // Slots 0..11: file browser cards; slot 12: timeline scrub preview.
+    static constexpr int kCardThumbSlots = 12;
+    static constexpr int kScrubThumbSlot = 12;
+    CardThumbnail cardThumbs_[13];
+    void releaseThumbSlot(int slot);
     float cardHoverAnim_[12]{};
     VkPipeline thumbPipeline_ = VK_NULL_HANDLE;
     VkDescriptorPool thumbPool_ = VK_NULL_HANDLE;
@@ -541,6 +612,9 @@ private:
     bool browserIsQuickPath_ = false;
     KeyboardModalData keyboardModal_{};
     int uiFollowMode_ = 0; // 0 = World Lock (Default, zero drift/tilt), 1 = Smooth Gaze Follow
+    float panelCurve_ = 0.0f;
+    float uiOpacity_ = 1.0f;
+    std::string browserSortLabel_ = "Name";
     bool listShowFormat_ = true;
     bool listShowRes_ = true;
     bool listShowSize_ = true;
@@ -555,14 +629,25 @@ private:
     VkDescriptorSetLayout textSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool textPool_ = VK_NULL_HANDLE;
     VkDescriptorSet textSet_ = VK_NULL_HANDLE;
+    // Heading weight (Inter SemiBold when bundled); textSetBold_ == textSet_
+    // when no bold font could be loaded.
+    FontAtlas fontAtlasBold_;
+    VkImage fontImageBold_ = VK_NULL_HANDLE;
+    VkDeviceMemory fontMemoryBold_ = VK_NULL_HANDLE;
+    VkImageView fontViewBold_ = VK_NULL_HANDLE;
+    VkDescriptorSet textSetBold_ = VK_NULL_HANDLE;
     VkPipelineLayout textPipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline textPipeline_ = VK_NULL_HANDLE;
     bool textReady_ = false;
+    // Per-eye glyph instance buffers (host-visible, persistently mapped): text
+    // is appended during renderView and drawn in a few instanced batches.
+    VkBuffer glyphBuffer_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkDeviceMemory glyphMemory_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    void* glyphMapped_[2] = {nullptr, nullptr};
 
     bool browserVisible_ = false;
     std::string browserTitle_;
     std::string browserStatus_;
-    std::vector<std::string> browserRows_;
     int browserSelected_ = 0;
     int browserHovered_ = -1;  // pointer hover target (independent of scroll)
     int browserFirst_ = 0;     // scroll offset for visible window
@@ -582,10 +667,10 @@ private:
     bool settingsVisible_ = false;
     std::string settingsTitle_;
     std::string settingsStatus_;
-    std::vector<std::string> settingsRows_;
-    std::vector<uint8_t> settingsEnabled_;  // per-row: 0 = greyed/disabled
+    std::vector<SettingsRowVis> settingsRows_;
     int settingsSelected_ = 0;
     int settingsHovered_ = -1;
+    int settingsSegmentHovered_ = -1;
     int settingsRow_ = -1;
 
     // Tracked controllers + pointer (raycast against UI panels).
@@ -605,8 +690,12 @@ private:
     float pointerScrub_ = 0.0f;
 
     VkCommandPool commandPool_ = VK_NULL_HANDLE;
+    // One command buffer + fence per eye so the CPU can record the second eye
+    // while the GPU renders the first; commandBuffer_ is the one being recorded.
     VkCommandBuffer commandBuffer_ = VK_NULL_HANDLE;
-    VkFence fence_ = VK_NULL_HANDLE;
+    VkCommandBuffer viewCommandBuffers_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkFence viewFences_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
+    bool viewFenceInFlight_[2] = {false, false};
 
     // Video texture sampling: descriptor set + sampler shared by both eyes.
     VkDescriptorSetLayout descriptorSetLayout_ = VK_NULL_HANDLE;

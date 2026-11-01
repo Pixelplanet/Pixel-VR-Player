@@ -102,6 +102,8 @@ Vulkan and the Vulkan logo are trademarks of the Khronos Group Inc.
 ---
 
 ## 10. Fonts
-System UI text is rendered using fonts available on the host operating system:
+- **Inter** (bundled in `assets/fonts/`, shipped in `fonts/`): Copyright (c) 2016 The Inter Project Authors (https://github.com/rsms/inter). Licensed under the SIL Open Font License, Version 1.1 (OFL); the full license text is in `assets/fonts/Inter-LICENSE.txt`.
+
+If the bundled fonts are missing, UI text falls back to fonts available on the host operating system:
 - **Noto Sans:** Licensed under the SIL Open Font License, Version 1.1 (OFL).
 - **DejaVu Sans:** Licensed under the Bitstream Vera Fonts License and Free Software Foundation public domain dedication.

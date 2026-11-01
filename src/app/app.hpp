@@ -6,6 +6,7 @@
 
 #ifdef PIXELVR_HAVE_MEDIA
 #include "media/media_engine.hpp"
+#include "media/scrub_preview.hpp"
 #endif
 
 #ifdef PIXELVR_HAVE_FREETYPE
@@ -14,6 +15,7 @@
 #endif
 
 #include "ui/settings_menu.hpp"
+#include "app/playback_memory.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -107,6 +109,11 @@ private:
     int navStep(float axisY, std::chrono::steady_clock::time_point now);
     int navStepX(float axisX, std::chrono::steady_clock::time_point now);
     void performVaultLock();
+    // Closes the current clip and returns the renderer to flat/mono so the hub
+    // panel stops behaving as if 180/360 content were still playing.
+    void closeMedia();
+    // Stores the current clip's position in playbackMemory_ (never for vault files).
+    void rememberPlaybackPosition();
     VulkanRenderer::ActionMenuData actionMenu_{};
     void openActionMenu();
 
@@ -131,6 +138,32 @@ private:
 
     std::function<void(const std::string&)> kbOnDone_;
     std::function<void()> kbOnCancel_;
+    // In-app keyboard (text entry for SMB fields and rename). Replaces the
+    // SteamVR system keyboard, which needed undocumented compositor hooks and
+    // could leave SteamVR holding controller focus.
+    struct TextEntry {
+        bool active = false;
+        std::string prompt;
+        std::string text;
+        std::size_t cursor = 0;  // byte offset (UTF-8 aware moves)
+        bool password = false;
+        bool shift = false;
+        bool symbols = false;
+    } textEntry_;
+    void commitKeyboard();
+    void cancelKeyboard();
+    void moveTextCursor(int delta);
+    void pressKeyboardKey(int key);
+    // Hold-to-repeat for keyboard keys (cursor arrows, Delete) and the stick:
+    // first repeat after a pause, then faster the longer it is held.
+    struct KeyRepeat {
+        int key = -1;  // keyboard key index being held, or -1
+        int stickDir = 0;  // thumbstick direction being held, or 0
+        std::chrono::steady_clock::time_point start{};
+        std::chrono::steady_clock::time_point next{};
+    } kbRepeat_;
+    bool kbFieldDrag_ = false;  // trigger held after clicking into the text field
+    static std::chrono::milliseconds repeatInterval(std::chrono::steady_clock::duration held);
     void openKeyboard(const std::string& prompt,
                       const std::string& initialText,
                       bool isPassword,
@@ -144,9 +177,12 @@ private:
 #endif
 
     SettingsMenu settings_;
+    PlaybackMemory playbackMemory_;  // resume position + format override per file
+    std::chrono::steady_clock::time_point lastPlaybackRemember_{};
 
 #ifdef PIXELVR_HAVE_MEDIA
     MediaEngine media_;
+    ScrubPreview scrubPreview_;  // timeline hover keyframe preview
     VideoFrame frame_;
     DrmVideoFrame drmFrame_;
     bool mediaOpen_ = false;

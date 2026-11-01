@@ -7,6 +7,7 @@ layout(push_constant) uniform Push {
     vec4 color;
     vec4 rect;  // x, y (bottom-left), w, h in panel-local units
     vec4 uv;    // u0, v0, u1, v1
+    vec4 bend;  // vertex stage only
 } pc;
 
 layout(location = 0) in vec2 vUV;

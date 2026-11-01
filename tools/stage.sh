@@ -23,6 +23,10 @@ rm -rf "${OUT_DIR}"
 mkdir -p "${OUT_DIR}/shaders"
 cp "${bin}" "${OUT_DIR}/pixelvr"
 cp "${BUILD_DIR}/shaders/"*.spv "${OUT_DIR}/shaders/"
+if ls "${BUILD_DIR}/fonts/"*.ttf >/dev/null 2>&1; then
+    mkdir -p "${OUT_DIR}/fonts"
+    cp "${BUILD_DIR}/fonts/"*.ttf "${OUT_DIR}/fonts/"
+fi
 cp tools/launch.sh "${OUT_DIR}/launch.sh"
 chmod +x "${OUT_DIR}/pixelvr" "${OUT_DIR}/launch.sh"
 

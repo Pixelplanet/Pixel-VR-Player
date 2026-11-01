@@ -850,6 +850,14 @@ void XrContext::triggerHaptic(int hand, float durationSec, float frequencyHz, fl
 void XrContext::handleSessionStateChange(const XrEventDataSessionStateChanged& ev,
                                          bool& exitRequested) {
     sessionState_ = ev.state;
+    // FOCUSED = the app receives controller input; VISIBLE = SteamVR's system
+    // layer (dashboard, keyboard, laser-mouse panel mode) holds the controllers.
+    static const char* const kStateNames[] = {"UNKNOWN", "IDLE", "READY", "SYNCHRONIZED",
+                                              "VISIBLE", "FOCUSED", "STOPPING",
+                                              "LOSS_PENDING", "EXITING"};
+    const int stateIdx = static_cast<int>(sessionState_);
+    PIXELVR_LOG_INFO("Session state: %s",
+                     (stateIdx >= 0 && stateIdx <= 8) ? kStateNames[stateIdx] : "?");
 
     switch (sessionState_) {
         case XR_SESSION_STATE_READY: {
