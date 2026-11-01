@@ -3008,8 +3008,18 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             const Vec3 d = c - Vec3{view.pose.position.x, view.pose.position.y, view.pose.position.z};
             orderDist[slot] = dot(d, d);
         }
-        std::sort(order, order + kMaxVideoSlots,
-                  [&](int a, int b) { return orderDist[a] > orderDist[b]; });
+        // Sort once per frame (left eye) and reuse it for the right eye: screens
+        // on a shared curve are nearly equidistant, and if each eye sorted on
+        // its own they could disagree about which one is on top where edges
+        // overlap. Near-ties keep a fixed slot order.
+        if (viewIndex == 0) {
+            std::stable_sort(order, order + kMaxVideoSlots, [&](int a, int b) {
+                return orderDist[a] > orderDist[b] + 0.01f;
+            });
+            std::memcpy(screenDrawOrder_, order, sizeof(order));
+        } else {
+            std::memcpy(order, screenDrawOrder_, sizeof(order));
+        }
         // Frames: always while screens are unlocked (grab mode), otherwise only
         // when more than one screen is visible.
         int visibleScreens = 0;

@@ -867,6 +867,7 @@ private:
     VideoSlot videoSlots_[kMaxVideoSlots];
     ScreenPlacement screenPlacements_[kMaxVideoSlots];
     ScreenPlacement arrangePreview_[kMaxVideoSlots];
+    int screenDrawOrder_[kMaxVideoSlots] = {0, 1, 2};  // far to near, shared by both eyes
     float arrangePivot_[3] = {0.0f, 0.0f, 0.0f};
     float arrangeYaw_ = 0.0f;
     float arrangePitch_ = 0.0f;

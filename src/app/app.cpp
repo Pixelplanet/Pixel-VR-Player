@@ -1189,7 +1189,11 @@ void App::recenterView(const XrInputState& in) {
         pl.yaw += dYaw;
         renderer_.setScreenPlacement(slot, pl);
     }
-    arrangement_.yaw += dYaw;
+    if (arrangementActive_) {
+        arrangement_.yaw = renderer_.screenYaw();
+        arrangement_.pitch = renderer_.recenterPitch();
+        applyArrangement(arrangement_);
+    }
 }
 
 bool App::decoderBudgetAllows(const std::string& path) const {
@@ -1414,7 +1418,7 @@ void App::computeArrangement(const Arrangement& a,
     }
     // Curved screens on a curved wall form one big curve: each screen bends
     // with the wall's radius (a.dist, centred on the viewer) instead of its own.
-    const bool wallCurve = !a.flat && a.curvature > 0.005f;
+    const bool wallCurve = !a.flat && a.curvature > 0.005f && n > 1;
     std::vector<float> arcHalf(static_cast<std::size_t>(n), 0.0f);
     if (wallCurve) {
         for (int i = 0; i < n; ++i) {
@@ -1551,8 +1555,24 @@ bool App::inArrangement(int slot) const {
 }
 
 void App::joinArrangement(int slot) {
-    if (!arrangementActive_ || !multiScreenEnabled()) return;
+    if (!multiScreenEnabled()) return;
     if (screens_[0].open && screens_[0].projection != 0) return;  // immersive plays alone
+    if (!arrangementActive_) {
+        if (arrangementBroken_) return;  // free placement until all screens close
+        // Start the layout (side by side, edge to edge unless the user picked
+        // another one) in front of the view with the screens already open.
+        arrangement_.order.clear();
+        int order[VulkanRenderer::kMaxVideoSlots];
+        renderer_.screenOrderLeftToRight(order);
+        for (int s : order) {
+            if (s != slot && screens_[s].open) arrangement_.order.push_back(s);
+        }
+        arrangement_.yaw = renderer_.screenYaw();
+        arrangement_.pitch = renderer_.recenterPitch();
+        arrangement_.dist = renderer_.screenDistance();
+        arrangement_.scale = 1.0f;
+        arrangement_.curvature = renderer_.screenCurvature();
+    }
     if (!inArrangement(slot)) arrangement_.order.push_back(slot);
     applyArrangement(arrangement_);
 }
@@ -1563,6 +1583,7 @@ void App::leaveArrangement(int slot) {
     o.erase(std::find(o.begin(), o.end(), slot));
     if (arrangementActive_ && !o.empty()) applyArrangement(arrangement_);
     else arrangementActive_ = false;
+    if (o.empty()) arrangementBroken_ = false;  // next screens start a fresh layout
 }
 
 void App::moveArrangementTo(int slot, const float target[3]) {
@@ -1955,6 +1976,7 @@ int App::run() {
                             if (mx * mx + my * my + mz * mz > 0.02f * 0.02f ||
                                 std::fabs(pl.scale - grabStartScale_) > 0.01f) {
                                 arrangementActive_ = false;
+                                arrangementBroken_ = true;
                             }
                         }
                         movingScreen_ = -1;
@@ -2185,6 +2207,7 @@ int App::run() {
                 }
                 movingScreen_ = -1;
                 arrangementActive_ = false;
+                arrangementBroken_ = false;
                 arrangement_.order.clear();
             }
 #ifdef PIXELVR_HAVE_MEDIA
@@ -3439,8 +3462,16 @@ int App::run() {
                     auto act = (seg >= 0) ? settings_.activateSegment(seg) : settings_.activate();
                         if (act == SettingsMenu::Action::CycleDistance) {
                             renderer_.setScreenDistance(settings_.screenDistance());
+                            if (arrangementActive_) {
+                                arrangement_.dist = renderer_.screenDistance();
+                                applyArrangement(arrangement_);
+                            }
                         } else if (act == SettingsMenu::Action::CycleCurvature) {
                             renderer_.setScreenCurvature(settings_.screenCurvature());
+                            if (arrangementActive_) {
+                                arrangement_.curvature = renderer_.screenCurvature();
+                                applyArrangement(arrangement_);
+                            }
                         }
 #ifdef PIXELVR_HAVE_MEDIA
                         else if (act == SettingsMenu::Action::PickVideoStream ||
@@ -3566,7 +3597,8 @@ int App::run() {
                             if (groupedScreen(selectedScreen_)) {
                                 // A snapped wall bends together; on a curved wall the
                                 // curve follows the wall, so it is just on / off there.
-                                arrangement_.curvature = arrangement_.flat ? pl.curvature
+                                const bool wall = !arrangement_.flat && arrangement_.order.size() > 1;
+                                arrangement_.curvature = !wall ? pl.curvature
                                                        : (arrangement_.curvature > 0.005f ? 0.0f : 1.0f);
                                 applyArrangement(arrangement_);
                             } else {

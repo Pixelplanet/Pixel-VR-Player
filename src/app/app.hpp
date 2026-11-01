@@ -250,6 +250,9 @@ private:
     // Re-anchors the whole (snapped) arrangement so `slot` lands on `target`.
     void moveArrangementTo(int slot, const float target[3]);
     bool arrangementActive_ = false;  // the last applied layout is still in place
+    // Screens start as an edge-to-edge side-by-side wall (or the last layout
+    // chosen) until the user drags one out of an unsnapped layout.
+    bool arrangementBroken_ = false;
     Arrangement arrangement_;
     // Arrange menu (action menu page 8): presets on the left, live preview of
     // the draft on the right (swap arrows between neighbours), snap / style, Apply.
