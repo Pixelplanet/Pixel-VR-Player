@@ -109,6 +109,18 @@ public:
         if (slot >= 0 && slot < kMaxVideoSlots) screenPlacements_[slot] = p;
     }
     const ScreenPlacement& screenPlacement(int slot) const { return screenPlacements_[slot]; }
+    // Arrange menu (action menu page 8): the poses the draft layout would give
+    // each screen, built around the view (pivot / yaw / pitch), drawn as a live
+    // preview. `preset` = highlighted list entry, `snap` = Snap edges toggle.
+    void setArrangePreview(const ScreenPlacement pl[kMaxVideoSlots], const float pivot[3], float yaw,
+                           float pitch, int preset, bool snap) {
+        for (int i = 0; i < kMaxVideoSlots; ++i) arrangePreview_[i] = pl[i];
+        for (int k = 0; k < 3; ++k) arrangePivot_[k] = pivot[k];
+        arrangeYaw_ = yaw;
+        arrangePitch_ = pitch;
+        arrangePreset_ = preset;
+        arrangeSnap_ = snap;
+    }
     // Multi-screen mode: outlines + "selected" highlight; ambilight follows the
     // selected screen.
     // Video screen under the laser (multi-screen mode, no UI in the way), or -1.
@@ -405,7 +417,7 @@ public:
         SpeakerMuted = 26,  // speaker with a cross
         Move = 27,          // four-way arrows
         Unlocked = 28,      // open padlock
-        Layout = 29,        // 2 x 2 grid of tiles
+        Layout = 29,        // three screens: two below, one above
         GlassPanel = 25, // rounded box with bevel + eye-dependent reflection sheen
     };
 
@@ -836,6 +848,12 @@ private:
     };
     VideoSlot videoSlots_[kMaxVideoSlots];
     ScreenPlacement screenPlacements_[kMaxVideoSlots];
+    ScreenPlacement arrangePreview_[kMaxVideoSlots];
+    float arrangePivot_[3] = {0.0f, 0.0f, 0.0f};
+    float arrangeYaw_ = 0.0f;
+    float arrangePitch_ = 0.0f;
+    int arrangePreset_ = -1;
+    bool arrangeSnap_ = true;
     bool multiScreenActive_ = false;
     int selectedScreen_ = 0;
     int pointerScreen_ = -1;

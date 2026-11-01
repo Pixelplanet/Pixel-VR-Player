@@ -228,6 +228,37 @@ void detect_format(const std::string& path, VulkanRenderer::ProjectionMode& proj
     }
 }
 
+constexpr float kArrangeGap = 0.04f;  // metres between arranged screens when not snapped
+
+// Size of a screen as quad.vert draws it: the 3.2 x 1.8 quad bent into an arc of
+// curvature * 1.75 rad, then scaled by (widthScale * scale, scale, scale).
+struct ScreenExtent {
+    float hx = 0.0f;  // half the chord width
+    float hy = 0.0f;  // half height
+    float ez = 0.0f;  // how far the side edges come toward the viewer
+};
+ScreenExtent screenExtent(float eyeAspect, float scale, float curvature) {
+    const float widthScale = eyeAspect / (16.0f / 9.0f);
+    ScreenExtent e;
+    e.hx = 1.6f * widthScale * scale;
+    e.hy = 0.9f * scale;
+    if (curvature > 0.005f) {
+        const float a = curvature * 1.75f;
+        const float r = 3.2f / a;
+        e.hx = widthScale * scale * r * std::sin(0.5f * a);
+        e.ez = scale * r * (1.0f - std::cos(0.5f * a));
+    }
+    return e;
+}
+
+float wrapAngle(float a) { return std::atan2(std::sin(a), std::cos(a)); }
+
+int factorial(int n) {
+    int f = 1;
+    for (int i = 2; i <= n; ++i) f *= i;
+    return f;
+}
+
 } // namespace
 
 App::App() = default;
@@ -484,6 +515,7 @@ void App::loadMedia(const std::string& path, int slot) {
         pl.stereo = stereo;
         renderer_.setScreenPlacement(slot, pl);
     }
+    if (proj == VulkanRenderer::ProjectionMode::Flat) joinArrangement(slot);
     // Resume where this file was left (track switches reopen the same file and
     // restore their own position).
     if (!sameFile && remembered != nullptr && remembered->position > 0.0 &&
@@ -726,6 +758,7 @@ void App::closeMedia(int slot) {
         }
         selectScreen(next);
     }
+    leaveArrangement(slot);
 }
 
 void App::performVaultLock() {
@@ -1082,12 +1115,45 @@ bool App::applyFormat(int projection, int stereo) {
 }
 
 void App::placeNewScreen(int slot) {
-    // Beside the main screen on the same arc around the viewer: screen 2 to the
-    // left, screen 3 to the right, slightly smaller so the main one stays the hero.
+    // On the same arc as the open screens, just past the outermost one on its
+    // side (screen 2 left, screen 3 right), so it is never hidden behind one.
     const float* pivot = renderer_.screenPivot();
-    const float yaw = renderer_.screenYaw() + ((slot == 1) ? 0.80f : -0.80f);
+    const float baseYaw = renderer_.screenYaw();
     const float pitch = renderer_.recenterPitch();
     const float dist = renderer_.screenDistance();
+    const float curv = renderer_.screenCurvature();
+    constexpr float kScale = 0.9f;
+    const bool left = (slot == 1);
+    float edge = 0.0f;  // outer edge yaw, relative to the view
+    bool any = false;
+    for (int s = 0; s < VulkanRenderer::kMaxVideoSlots; ++s) {
+        if (s == slot || !screens_[s].open) continue;
+        const VulkanRenderer::ScreenPlacement& o = renderer_.screenPlacement(s);
+        float yaw = baseYaw;
+        float scale = 1.0f;
+        float c = curv;
+        float d = dist;
+        if (o.active) {
+            yaw = o.yaw;
+            scale = o.scale;
+            c = o.curvature;
+            const float dx = o.center[0] - pivot[0];
+            const float dz = o.center[2] - pivot[2];
+            d = std::sqrt(dx * dx + dz * dz);
+        }
+        const ScreenExtent e = screenExtent(screenEyeAspect(s), scale, c);
+        const float half = std::atan(e.hx / std::max(d - e.ez, 0.5f));
+        const float rel = wrapAngle(yaw - baseYaw);
+        const float outer = left ? rel + half : rel - half;
+        if (!any || (left ? outer > edge : outer < edge)) edge = outer;
+        any = true;
+    }
+    const ScreenExtent me = screenExtent(screenEyeAspect(slot), kScale, curv);
+    const float myHalf = std::atan(me.hx / std::max(dist - me.ez, 0.5f));
+    const float gapA = 2.0f * kArrangeGap / dist;
+    float rel = 0.0f;
+    if (any) rel = left ? edge + gapA + myHalf : edge - gapA - myHalf;
+    const float yaw = baseYaw + std::clamp(rel, -2.6f, 2.6f);
     VulkanRenderer::ScreenPlacement pl;
     pl.active = true;
     pl.yaw = yaw;
@@ -1095,8 +1161,8 @@ void App::placeNewScreen(int slot) {
     pl.center[0] = pivot[0] - std::sin(yaw) * std::cos(pitch) * dist;
     pl.center[1] = pivot[1] + std::sin(pitch) * dist;
     pl.center[2] = pivot[2] - std::cos(yaw) * std::cos(pitch) * dist;
-    pl.scale = 0.8f;
-    pl.curvature = renderer_.screenCurvature();
+    pl.scale = kScale;
+    pl.curvature = curv;
     pl.stereo = static_cast<VulkanRenderer::StereoMode>(screens_[slot].stereo);
     renderer_.setScreenPlacement(slot, pl);
 }
@@ -1125,6 +1191,7 @@ void App::recenterView(const XrInputState& in) {
         pl.yaw += dYaw;
         renderer_.setScreenPlacement(slot, pl);
     }
+    arrangement_.yaw += dYaw;
 }
 
 bool App::decoderBudgetAllows(const std::string& path) const {
@@ -1215,7 +1282,11 @@ void App::startGrabbingScreen(int slot, const XrInputState& in) {
     // Keep the grabbed point under the laser: remember its distance along the
     // ray and the screen centre's offset from it.
     movingDistance_ = std::clamp(std::sqrt(dx * dx + dy * dy + dz * dz), 0.8f, 8.0f);
-    for (int k = 0; k < 3; ++k) grabOffset_[k] = pl.center[k] - hit[k];
+    for (int k = 0; k < 3; ++k) {
+        grabOffset_[k] = pl.center[k] - hit[k];
+        grabStart_[k] = pl.center[k];
+    }
+    grabStartScale_ = pl.scale;
     movingScreen_ = slot;
 }
 
@@ -1234,104 +1305,309 @@ float App::screenEyeAspect(int slot) const {
     return aspect;
 }
 
+void App::computeArrangement(const Arrangement& a,
+                             VulkanRenderer::ScreenPlacement out[VulkanRenderer::kMaxVideoSlots]) const {
+    for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) out[slot] = {};
+    const int n = static_cast<int>(a.order.size());
+    if (n == 0) return;
+    ArrangePreset preset = a.preset;
+    if (preset == ArrangePreset::TwoBelowOneAbove && n != 3) preset = ArrangePreset::SideBySide;
+
+    // Rows of positions (top row first, each left to right) and base sizes.
+    std::vector<std::vector<int>> rows;
+    std::vector<float> scale(static_cast<std::size_t>(n), 1.0f);
+    int anchorPos = -1;  // position centred on the view (else the middle of its row)
+    switch (preset) {
+        case ArrangePreset::SideBySide: {
+            rows.emplace_back();
+            for (int i = 0; i < n; ++i) rows.back().push_back(i);
+            std::fill(scale.begin(), scale.end(), n >= 3 ? 0.72f : (n == 2 ? 0.90f : 1.0f));
+            break;
+        }
+        case ArrangePreset::Stacked:
+            for (int i = 0; i < n; ++i) rows.push_back({i});
+            std::fill(scale.begin(), scale.end(), n >= 3 ? 0.58f : (n == 2 ? 0.75f : 1.0f));
+            break;
+        case ArrangePreset::TwoBelowOneAbove:
+            rows = {{0}, {1, 2}};
+            std::fill(scale.begin(), scale.end(), 0.66f);
+            break;
+        case ArrangePreset::Cinema:
+            // Main screen (position 0) big in front, the others smaller beside it.
+            if (n >= 3) rows = {{1, 0, 2}};
+            else if (n == 2) rows = {{1, 0}};
+            else rows = {{0}};
+            std::fill(scale.begin(), scale.end(), 0.62f);
+            scale[0] = 1.0f;
+            anchorPos = 0;
+            break;
+    }
+
+    const float gap = a.snap ? 0.0f : kArrangeGap;
+    std::vector<ScreenExtent> ext(static_cast<std::size_t>(n));
+    std::vector<float> curv(static_cast<std::size_t>(n));
+    for (int i = 0; i < n; ++i) {
+        const int slot = a.order[static_cast<std::size_t>(i)];
+        const VulkanRenderer::ScreenPlacement& pl = renderer_.screenPlacement(slot);
+        curv[i] = pl.active ? pl.curvature : renderer_.screenCurvature();
+        ext[i] = screenExtent(screenEyeAspect(slot), scale[i] * a.scale, curv[i]);
+    }
+    std::vector<float> rowHalf(rows.size(), 0.0f);
+    for (std::size_t r = 0; r < rows.size(); ++r) {
+        for (int i : rows[r]) rowHalf[r] = std::max(rowHalf[r], ext[i].hy);
+    }
+    auto biggest = [&](const std::vector<int>& row) {
+        int big = row[0];
+        for (int i : row) {
+            if (ext[i].hx > ext[big].hx) big = i;
+        }
+        return big;
+    };
+    const float* pivot = renderer_.screenPivot();
+    auto put = [&](int pos, const float c[3], float yaw, float pitch) {
+        const int slot = a.order[static_cast<std::size_t>(pos)];
+        VulkanRenderer::ScreenPlacement& pl = out[slot];
+        pl.active = true;
+        for (int k = 0; k < 3; ++k) pl.center[k] = c[k];
+        pl.yaw = yaw;
+        pl.pitch = pitch;
+        pl.scale = scale[pos] * a.scale;
+        pl.curvature = curv[pos];
+        pl.stereo = static_cast<VulkanRenderer::StereoMode>(screens_[slot].stereo);
+    };
+
+    if (!a.flat) {
+        // Curved wall: every screen faces the viewer from its own direction and
+        // neighbours sit exactly the angle apart that their edges subtend, so
+        // snapped edges touch.
+        const float d = a.dist;
+        const float gapP = gap / d;
+        std::vector<float> halfP(rows.size());
+        float totalP = gapP * static_cast<float>(rows.size() - 1);
+        for (std::size_t r = 0; r < rows.size(); ++r) {
+            halfP[r] = std::atan(rowHalf[r] / d);
+            totalP += 2.0f * halfP[r];
+        }
+        float p = a.pitch + 0.5f * totalP;
+        for (std::size_t r = 0; r < rows.size(); ++r) {
+            const float rowPitch = p - halfP[r];
+            p -= 2.0f * halfP[r] + gapP;
+            const float cp = std::max(std::cos(rowPitch), 0.2f);
+            // The row's largest screen sits at `d`; smaller ones move back so
+            // their side edges are as far out as its edges and meet them.
+            const int big = biggest(rows[r]);
+            const float bx = (d - ext[big].ez) * cp;
+            const float edgeR2 = bx * bx + ext[big].hx * ext[big].hx;
+            const std::vector<int>& row = rows[r];
+            std::vector<float> di(row.size()), yawRel(row.size());
+            const float gapY = gap / (d * cp);
+            float y = 0.0f;
+            float ref = 0.0f;
+            for (std::size_t k = 0; k < row.size(); ++k) {
+                const ScreenExtent& e = ext[row[k]];
+                di[k] = e.ez + std::sqrt(std::max(edgeR2 - e.hx * e.hx, 0.25f)) / cp;
+                const float half = std::atan(e.hx / ((di[k] - e.ez) * cp));
+                yawRel[k] = y - half;  // positive yaw = left, so walk toward negative
+                y -= 2.0f * half + gapY;
+                if (row[k] == anchorPos) ref = yawRel[k];
+            }
+            if (std::find(row.begin(), row.end(), anchorPos) == row.end()) ref = 0.5f * (y + gapY);
+            for (std::size_t k = 0; k < row.size(); ++k) {
+                const float yaw = a.yaw + yawRel[k] - ref;
+                const float c[3] = {pivot[0] - std::sin(yaw) * cp * di[k],
+                                    pivot[1] + std::sin(rowPitch) * di[k],
+                                    pivot[2] - std::cos(yaw) * cp * di[k]};
+                put(row[k], c, yaw, rowPitch);
+            }
+        }
+    } else {
+        // Flat wall: one plane facing the viewer, all screens turned alike.
+        const float cy = std::cos(a.yaw), sy = std::sin(a.yaw);
+        const float cp = std::cos(a.pitch), sp = std::sin(a.pitch);
+        const float f[3] = {-sy * cp, sp, -cy * cp};
+        const float rt[3] = {cy, 0.0f, -sy};
+        const float up[3] = {rt[1] * f[2] - rt[2] * f[1], rt[2] * f[0] - rt[0] * f[2],
+                             rt[0] * f[1] - rt[1] * f[0]};
+        float total = gap * static_cast<float>(rows.size() - 1);
+        for (float hh : rowHalf) total += 2.0f * hh;
+        float y = 0.5f * total;
+        for (std::size_t r = 0; r < rows.size(); ++r) {
+            const float rowY = y - rowHalf[r];
+            y -= 2.0f * rowHalf[r] + gap;
+            const std::vector<int>& row = rows[r];
+            const int big = biggest(row);
+            std::vector<float> xs(row.size());
+            float x = 0.0f;
+            float ref = 0.0f;
+            for (std::size_t k = 0; k < row.size(); ++k) {
+                xs[k] = x + ext[row[k]].hx;
+                x += 2.0f * ext[row[k]].hx + gap;
+                if (row[k] == anchorPos) ref = xs[k];
+            }
+            if (std::find(row.begin(), row.end(), anchorPos) == row.end()) ref = 0.5f * (x - gap);
+            for (std::size_t k = 0; k < row.size(); ++k) {
+                // Curved screens: bring smaller ones forward so the side edges
+                // of neighbours are equally near the viewer.
+                const float toward = ext[big].ez - ext[row[k]].ez;
+                const float lx = xs[k] - ref;
+                float c[3];
+                for (int j = 0; j < 3; ++j) {
+                    c[j] = pivot[j] + f[j] * (a.dist - toward) + rt[j] * lx + up[j] * rowY;
+                }
+                put(row[k], c, a.yaw, a.pitch);
+            }
+        }
+    }
+}
+
+void App::applyArrangement(const Arrangement& a) {
+    VulkanRenderer::ScreenPlacement pls[VulkanRenderer::kMaxVideoSlots];
+    computeArrangement(a, pls);
+    for (int slot : a.order) renderer_.setScreenPlacement(slot, pls[slot]);
+    arrangement_ = a;
+    arrangementActive_ = !a.order.empty();
+}
+
+bool App::inArrangement(int slot) const {
+    return std::find(arrangement_.order.begin(), arrangement_.order.end(), slot) != arrangement_.order.end();
+}
+
+void App::joinArrangement(int slot) {
+    if (!arrangementActive_ || !multiScreenEnabled()) return;
+    if (screens_[0].open && screens_[0].projection != 0) return;  // immersive plays alone
+    if (!inArrangement(slot)) arrangement_.order.push_back(slot);
+    applyArrangement(arrangement_);
+}
+
+void App::leaveArrangement(int slot) {
+    if (!inArrangement(slot)) return;
+    std::vector<int>& o = arrangement_.order;
+    o.erase(std::find(o.begin(), o.end(), slot));
+    if (arrangementActive_ && !o.empty()) applyArrangement(arrangement_);
+    else arrangementActive_ = false;
+}
+
+void App::moveArrangementTo(int slot, const float target[3]) {
+    // A few fixed-point steps: shift the anchor by the direction / distance
+    // error of the grabbed screen until it lands on the target.
+    const float* pv = renderer_.screenPivot();
+    auto polar = [&](const float p[3], float& yaw, float& pitch, float& r) {
+        const float dx = p[0] - pv[0];
+        const float dy = p[1] - pv[1];
+        const float dz = p[2] - pv[2];
+        r = std::max(std::sqrt(dx * dx + dy * dy + dz * dz), 1e-3f);
+        yaw = std::atan2(-dx, -dz);
+        pitch = std::asin(std::clamp(dy / r, -1.0f, 1.0f));
+    };
+    float ty = 0.0f, tp = 0.0f, tr = 0.0f;
+    polar(target, ty, tp, tr);
+    VulkanRenderer::ScreenPlacement pls[VulkanRenderer::kMaxVideoSlots];
+    for (int it = 0; it < 4; ++it) {
+        computeArrangement(arrangement_, pls);
+        float y = 0.0f, p = 0.0f, r = 0.0f;
+        polar(pls[slot].center, y, p, r);
+        arrangement_.yaw += wrapAngle(ty - y);
+        arrangement_.pitch = std::clamp(arrangement_.pitch + (tp - p), -1.2f, 1.2f);
+        arrangement_.dist = std::clamp(arrangement_.dist + (tr - r), 1.0f, 10.0f);
+    }
+    applyArrangement(arrangement_);
+}
+
 void App::openArrangeMenu() {
+    if (screens_[0].open && screens_[0].projection != 0) return;  // immersive plays alone
+    int order[VulkanRenderer::kMaxVideoSlots];
+    renderer_.screenOrderLeftToRight(order);
     int n = 0;
-    for (const ScreenState& sc : screens_) n += sc.open ? 1 : 0;
+    for (int slot : order) n += screens_[slot].open ? 1 : 0;
+    arrangePresets_.clear();
+    if (n >= 2) {
+        arrangePresets_.push_back(ArrangePreset::SideBySide);
+        if (n == 3) arrangePresets_.push_back(ArrangePreset::TwoBelowOneAbove);
+        arrangePresets_.push_back(ArrangePreset::Stacked);
+        arrangePresets_.push_back(ArrangePreset::Cinema);
+    }
+    // Keep the snap / style choice of the last layout; build around the view.
+    arrangeDraft_ = arrangement_;
+    arrangeDraft_.yaw = renderer_.screenYaw();
+    arrangeDraft_.pitch = renderer_.recenterPitch();
+    arrangeDraft_.dist = renderer_.screenDistance();
+    arrangeDraft_.scale = 1.0f;
+    ArrangePreset start = arrangePresets_.empty() ? ArrangePreset::SideBySide : arrangePresets_[0];
+    if (arrangementActive_ &&
+        std::find(arrangePresets_.begin(), arrangePresets_.end(), arrangement_.preset) != arrangePresets_.end()) {
+        start = arrangement_.preset;
+    }
+    selectArrangePreset(start);
     actionMenu_.visible = true;
     actionMenu_.page = 8;
     actionMenu_.title = "Arrange Screens";
-    actionMenu_.subtitle = "Lines the open screens up around you";
-    actionMenu_.options.clear();
-    if (n >= 2) actionMenu_.options.push_back("Side by side");
-    if (n == 3) actionMenu_.options.push_back("Two below, one above");
-    if (n >= 2) actionMenu_.options.push_back("Stacked");
-    if (n >= 2) actionMenu_.options.push_back("Cinema (main + sides)");
-    if (n == 1) actionMenu_.options.push_back("Center in front");
-    actionMenu_.options.push_back("Cancel");
+    actionMenu_.subtitle = n >= 2 ? "Pick a layout and order, then Apply" : "Open a second screen to use a layout";
     actionMenu_.selectedOption = 0;
+    refreshArrangeMenu();
 }
 
-void App::applyLayout(const std::string& preset) {
-    if (settings_.projectionMode() != 0 && selectedScreen_ == 0) return;  // immersive
-    // Open screens in their current left-to-right order.
+void App::selectArrangePreset(ArrangePreset preset) {
+    arrangeDraft_.preset = preset;
+    arrangePerm_ = 0;
     int order[VulkanRenderer::kMaxVideoSlots];
     renderer_.screenOrderLeftToRight(order);
-    std::vector<int> slots;
-    for (int i = 0; i < VulkanRenderer::kMaxVideoSlots; ++i) {
-        if (screens_[order[i]].open) slots.push_back(order[i]);
+    std::vector<int> lr;  // open screens, left to right as they sit now
+    for (int slot : order) {
+        if (screens_[slot].open) lr.push_back(slot);
     }
-    if (slots.empty()) return;
-    const int n = static_cast<int>(slots.size());
-    const float* pivot = renderer_.screenPivot();
-    const float baseYaw = renderer_.screenYaw();
-    const float basePitch = renderer_.recenterPitch();
-    const float dist = renderer_.screenDistance();
-    constexpr float kGap = 0.12f;  // metres between screens
-    auto width = [&](int slot, float scale) { return 3.2f * scale * screenEyeAspect(slot) / (16.0f / 9.0f); };
-    auto place = [&](int slot, float arcX, float arcY, float scale) {
-        // arcX / arcY: offsets along the viewing sphere at `dist` (metres of
-        // arc), converted to yaw (positive = left) and pitch around the view.
-        ensureScreenPlacement(slot);
-        VulkanRenderer::ScreenPlacement pl = renderer_.screenPlacement(slot);
-        pl.yaw = baseYaw - arcX / dist;
-        pl.pitch = basePitch + arcY / dist;
-        pl.scale = scale;
-        pl.center[0] = pivot[0] - std::sin(pl.yaw) * std::cos(pl.pitch) * dist;
-        pl.center[1] = pivot[1] + std::sin(pl.pitch) * dist;
-        pl.center[2] = pivot[2] - std::cos(pl.yaw) * std::cos(pl.pitch) * dist;
-        pl.active = true;
-        renderer_.setScreenPlacement(slot, pl);
-    };
-    auto row = [&](const std::vector<int>& rowSlots, float scale, float arcY) {
-        float total = -kGap;
-        for (int sl : rowSlots) total += width(sl, scale) + kGap;
-        float x = -0.5f * total;
-        for (int sl : rowSlots) {
-            const float w = width(sl, scale);
-            place(sl, x + 0.5f * w, arcY, scale);
-            x += w + kGap;
+    std::vector<int> sortedNow = lr;
+    std::vector<int> sortedArr = arrangement_.order;
+    std::sort(sortedNow.begin(), sortedNow.end());
+    std::sort(sortedArr.begin(), sortedArr.end());
+    if (arrangementActive_ && arrangement_.preset == preset && sortedNow == sortedArr) {
+        arrangeBase_ = arrangement_.order;  // start from what is on show
+    } else if ((preset == ArrangePreset::Cinema || preset == ArrangePreset::TwoBelowOneAbove) &&
+               screens_[selectedScreen_].open) {
+        // The selected screen becomes the main / top one.
+        arrangeBase_ = {selectedScreen_};
+        for (int slot : lr) {
+            if (slot != selectedScreen_) arrangeBase_.push_back(slot);
         }
-    };
+    } else {
+        arrangeBase_ = lr;
+    }
+    arrangeDraft_.order = arrangeBase_;
+}
 
-    if (preset == "Side by side") {
-        row(slots, n == 3 ? 0.62f : 0.80f, 0.0f);
-    } else if (preset == "Stacked") {
-        const float scale = (n == 3) ? 0.50f : 0.65f;
-        const float h = 1.8f * scale;
-        const float total = n * h + (n - 1) * kGap;
-        float y = 0.5f * total - 0.5f * h;  // top screen first (leftmost)
-        for (int sl : slots) {
-            place(sl, 0.0f, y, scale);
-            y -= h + kGap;
+void App::refreshArrangeMenu() {
+    // Order variants: every assignment of the screens to the layout's positions.
+    const int n = static_cast<int>(arrangeBase_.size());
+    const int variants = n >= 2 ? factorial(n) : 1;
+    arrangePerm_ %= variants;
+    std::vector<int> idx(static_cast<std::size_t>(n));
+    for (int i = 0; i < n; ++i) idx[i] = i;
+    for (int k = 0; k < arrangePerm_; ++k) std::next_permutation(idx.begin(), idx.end());
+    arrangeDraft_.order.clear();
+    for (int i : idx) arrangeDraft_.order.push_back(arrangeBase_[static_cast<std::size_t>(i)]);
+
+    // Options: one per preset, then fixed ids (see the renderer's hub::arrangeButton).
+    actionMenu_.options.clear();
+    int presetIdx = -1;
+    for (std::size_t i = 0; i < arrangePresets_.size(); ++i) {
+        switch (arrangePresets_[i]) {
+            case ArrangePreset::SideBySide: actionMenu_.options.push_back("Side by side"); break;
+            case ArrangePreset::TwoBelowOneAbove: actionMenu_.options.push_back("Two below, one above"); break;
+            case ArrangePreset::Stacked: actionMenu_.options.push_back("Stacked"); break;
+            case ArrangePreset::Cinema: actionMenu_.options.push_back("Main + sides"); break;
         }
-    } else if (preset == "Two below, one above" && n == 3) {
-        const float scale = 0.55f;
-        const float h = 1.8f * scale;
-        const int top = screens_[selectedScreen_].open ? selectedScreen_ : slots[1];
-        std::vector<int> bottom;
-        for (int sl : slots) {
-            if (sl != top) bottom.push_back(sl);
-        }
-        row({top}, scale, 0.5f * (h + kGap));
-        row(bottom, scale, -0.5f * (h + kGap));
-    } else if (preset == "Cinema (main + sides)") {
-        // Main (selected) screen big in front, the others smaller beside it.
-        const int main = screens_[selectedScreen_].open ? selectedScreen_ : slots[0];
-        const float mainScale = 0.90f;
-        const float sideScale = 0.55f;
-        place(main, 0.0f, 0.0f, mainScale);
-        const float mainHalf = 0.5f * width(main, mainScale);
-        int side = 0;
-        for (int sl : slots) {
-            if (sl == main) continue;
-            const float w = width(sl, sideScale);
-            const float x = mainHalf + kGap + 0.5f * w;
-            place(sl, side == 0 ? -x : x, 0.0f, sideScale);  // first to the left
-            ++side;
-        }
-    } else if (preset == "Center in front") {
-        place(slots[0], 0.0f, 0.0f, 1.0f);
+        if (arrangePresets_[i] == arrangeDraft_.preset) presetIdx = static_cast<int>(i);
     }
+    actionMenu_.options.push_back("Change order  " + std::to_string(arrangePerm_ + 1) + " / " +
+                                  std::to_string(variants));
+    actionMenu_.options.push_back(arrangeDraft_.snap ? "Snap edges: On" : "Snap edges: Off");
+    actionMenu_.options.push_back(arrangeDraft_.flat ? "Style: Flat wall" : "Style: Curved");
+    actionMenu_.options.push_back("Apply");
+    actionMenu_.options.push_back("Cancel");
+
+    VulkanRenderer::ScreenPlacement pls[VulkanRenderer::kMaxVideoSlots];
+    if (presetIdx >= 0) computeArrangement(arrangeDraft_, pls);
+    renderer_.setArrangePreview(pls, renderer_.screenPivot(), arrangeDraft_.yaw, arrangeDraft_.pitch,
+                                presetIdx, arrangeDraft_.snap);
 }
 
 void App::openActionMenu() {
@@ -1568,11 +1844,14 @@ int App::run() {
                     const int hand = (renderer_.laserOn(0) && !renderer_.laserOn(1)) ? 0 : 1;
                     const auto& ctl = in.controllers[hand];
                     if (ctl.active) {
+                        const bool group = groupedScreen(movingScreen_);
                         if (std::fabs(in.thumbstickY) > 0.2f) {
                             movingDistance_ = std::clamp(movingDistance_ + in.thumbstickY * dt * 1.5f, 1.0f, 8.0f);
                         }
                         if (std::fabs(in.thumbstickX) > 0.2f) {
-                            pl.scale = std::clamp(pl.scale * (1.0f + in.thumbstickX * dt * 0.8f), 0.35f, 2.5f);
+                            const float k = 1.0f + in.thumbstickX * dt * 0.8f;
+                            if (group) arrangement_.scale = std::clamp(arrangement_.scale * k, 0.4f, 2.2f);
+                            else pl.scale = std::clamp(pl.scale * k, 0.35f, 2.5f);
                         }
                         const float fwdLocal[3] = {0.0f, 0.0f, -1.0f};
                         float fwd[3];
@@ -1580,18 +1859,34 @@ int App::run() {
                         for (int k = 0; k < 3; ++k) {
                             pl.center[k] = ctl.position[k] + fwd[k] * movingDistance_ + grabOffset_[k];
                         }
+                        if (group) {
+                            // Snapped screens move as one wall, edges kept together.
+                            moveArrangementTo(movingScreen_, pl.center);
+                            pl = renderer_.screenPlacement(movingScreen_);
+                        }
                         const float d[3] = {pl.center[0] - in.headPos[0], pl.center[1] - in.headPos[1],
                                             pl.center[2] - in.headPos[2]};
                         const float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
-                        if (len > 1e-3f) {
+                        if (len > 1e-3f && !group) {
                             pl.yaw = std::atan2(-d[0], -d[2]);
                             pl.pitch = std::asin(std::clamp(d[1] / len, -1.0f, 1.0f));
                         }
-                        renderer_.setScreenPlacement(movingScreen_, pl);
+                        if (!group) renderer_.setScreenPlacement(movingScreen_, pl);
                     }
                     // Releasing the trigger drops the screen (B cancels the grab too).
                     if (!in.selectHeld || in.buttonDown[XrInputState::BtnB] ||
                         in.buttonDown[settings_.bindMenu()]) {
+                        // Moving one screen of an unsnapped layout ends that layout
+                        // (new screens then get the default placement).
+                        if (!groupedScreen(movingScreen_) && inArrangement(movingScreen_)) {
+                            const float mx = pl.center[0] - grabStart_[0];
+                            const float my = pl.center[1] - grabStart_[1];
+                            const float mz = pl.center[2] - grabStart_[2];
+                            if (mx * mx + my * my + mz * mz > 0.02f * 0.02f ||
+                                std::fabs(pl.scale - grabStartScale_) > 0.01f) {
+                                arrangementActive_ = false;
+                            }
+                        }
                         movingScreen_ = -1;
                         xr_.triggerHaptic(hand, 0.030f, 0.0f, 0.5f);
                     }
@@ -1819,6 +2114,8 @@ int App::run() {
                     renderer_.setScreenPlacement(0, pl0);
                 }
                 movingScreen_ = -1;
+                arrangementActive_ = false;
+                arrangement_.order.clear();
             }
 #ifdef PIXELVR_HAVE_MEDIA
             for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
@@ -2762,8 +3059,30 @@ int App::run() {
                                     xr_.triggerHaptic(1, 0.040f, 0.0f, 0.6f);
                                     actionMenu_.visible = false;
                                 } else if (actionMenu_.page == 8) {
-                                    if (opt != "Cancel") applyLayout(opt);
-                                    actionMenu_.visible = false;
+                                    // 0..P-1 = presets, then Order, Snap, Style, Apply, Cancel.
+                                    const int presetCount = static_cast<int>(arrangePresets_.size());
+                                    const int id = chosen - presetCount;
+                                    if (chosen < presetCount) {
+                                        selectArrangePreset(arrangePresets_[static_cast<std::size_t>(chosen)]);
+                                        refreshArrangeMenu();
+                                    } else if (id == 0) {
+                                        ++arrangePerm_;
+                                        refreshArrangeMenu();
+                                    } else if (id == 1) {
+                                        arrangeDraft_.snap = !arrangeDraft_.snap;
+                                        refreshArrangeMenu();
+                                    } else if (id == 2) {
+                                        arrangeDraft_.flat = !arrangeDraft_.flat;
+                                        refreshArrangeMenu();
+                                    } else if (id == 3) {
+                                        if (presetCount > 0) {
+                                            applyArrangement(arrangeDraft_);
+                                            xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.030f, 0.0f, 0.5f);
+                                        }
+                                        actionMenu_.visible = false;
+                                    } else {
+                                        actionMenu_.visible = false;
+                                    }
                                 } else if (actionMenu_.page == 6) {
                                     // Screen picker: 0..2 = screen slot tile, 3 = Cancel.
                                     if (chosen < VulkanRenderer::kMaxVideoSlots) {
@@ -3163,6 +3482,7 @@ int App::run() {
                             VulkanRenderer::ScreenPlacement pl = renderer_.screenPlacement(selectedScreen_);
                             pl.curvature = (pl.curvature >= 0.99f) ? 0.0f : std::min(1.0f, pl.curvature + 0.25f);
                             renderer_.setScreenPlacement(selectedScreen_, pl);
+                            if (groupedScreen(selectedScreen_)) applyArrangement(arrangement_);
                         } else if (settings_.projectionMode() == 0) {
                             settings_.setCurvatureIdx(settings_.curvatureIdx() + 1);
                             renderer_.setScreenCurvature(settings_.screenCurvature());
@@ -3209,7 +3529,11 @@ int App::run() {
                 // left/right pushes content nearer/farther (distance).
                 if (settings_.projectionMode() == 0) {
                     if (in.thumbstickY > 0.15f || in.thumbstickY < -0.15f) {
-                        if (selectedScreen_ > 0 || renderer_.screenPlacement(selectedScreen_).active) {
+                        if (groupedScreen(selectedScreen_)) {
+                            // Snapped layout: the whole wall moves nearer / farther.
+                            arrangement_.dist = std::clamp(arrangement_.dist + in.thumbstickY * 0.04f, 1.0f, 10.0f);
+                            applyArrangement(arrangement_);
+                        } else if (selectedScreen_ > 0 || renderer_.screenPlacement(selectedScreen_).active) {
                             // Free-placed screen: push it along the line from the head.
                             VulkanRenderer::ScreenPlacement pl = renderer_.screenPlacement(selectedScreen_);
                             float d[3] = {pl.center[0] - in.headPos[0], pl.center[1] - in.headPos[1],

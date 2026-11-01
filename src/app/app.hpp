@@ -205,7 +205,8 @@ private:
     // Applies a projection/stereo format to the selected screen (renderer +
     // settings mirror). Extra screens accept flat formats only.
     bool applyFormat(int projection, int stereo);
-    // Default placement for a new extra screen beside the main one.
+    // Default placement for a new extra screen: beside the open ones (left for
+    // screen 2, right for screen 3) so it never lands behind another screen.
     void placeNewScreen(int slot);
     // Recenter the view; in multi-screen mode the whole arrangement moves along.
     void recenterView(const XrInputState& in);
@@ -220,9 +221,43 @@ private:
     bool screensUnlocked_ = false;
     float grabOffset_[3] = {0.0f, 0.0f, 0.0f};  // screen centre minus grab point
     void startGrabbingScreen(int slot, const XrInputState& in);
-    // Preset arrangements ("Side by side", "Stacked", ...).
+    float grabStart_[3] = {0.0f, 0.0f, 0.0f};  // grabbed screen centre at grab start
+    float grabStartScale_ = 1.0f;
+    // Screen arrangements. A layout (preset + which screen sits in which
+    // position + snap / style) becomes screen poses in computeArrangement(),
+    // which feeds both the Arrange menu's live preview and the real screens.
+    enum class ArrangePreset { SideBySide, TwoBelowOneAbove, Stacked, Cinema };
+    struct Arrangement {
+        ArrangePreset preset = ArrangePreset::SideBySide;
+        std::vector<int> order;  // position -> screen slot
+        bool snap = true;        // edge on edge (no gap)
+        bool flat = false;       // one flat wall instead of curving around the viewer
+        float yaw = 0.0f;        // view the layout is built around
+        float pitch = 0.0f;
+        float dist = 3.0f;
+        float scale = 1.0f;      // group size (snapped screens resize together)
+    };
+    void computeArrangement(const Arrangement& a,
+                            VulkanRenderer::ScreenPlacement out[VulkanRenderer::kMaxVideoSlots]) const;
+    void applyArrangement(const Arrangement& a);
+    bool inArrangement(int slot) const;
+    bool groupedScreen(int slot) const { return arrangementActive_ && arrangement_.snap && inArrangement(slot); }
+    // A new / closed screen joins / leaves the arrangement in use.
+    void joinArrangement(int slot);
+    void leaveArrangement(int slot);
+    // Re-anchors the whole (snapped) arrangement so `slot` lands on `target`.
+    void moveArrangementTo(int slot, const float target[3]);
+    bool arrangementActive_ = false;  // the last applied layout is still in place
+    Arrangement arrangement_;
+    // Arrange menu (action menu page 8): presets on the left, live preview of
+    // the draft on the right, order / snap / style toggles, Apply.
     void openArrangeMenu();
-    void applyLayout(const std::string& preset);
+    void selectArrangePreset(ArrangePreset preset);
+    void refreshArrangeMenu();
+    Arrangement arrangeDraft_;
+    std::vector<ArrangePreset> arrangePresets_;  // presets listed in the menu
+    std::vector<int> arrangeBase_;               // default order for the draft's preset
+    int arrangePerm_ = 0;                        // order variant (permutation index)
     float screenEyeAspect(int slot) const;  // per-eye width / height of a screen's video
     // Browser 'play' entry point: asks where to play when screens are in use.
     void playFromBrowser(const std::string& path);

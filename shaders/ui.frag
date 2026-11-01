@@ -260,9 +260,11 @@ void main() {
         float keyhole = length(p - vec2(0.0, -0.18)) - 0.09;
         d = max(min(body, min(shackle, leg)), -keyhole);
     } else if (shape == 29) {
-        // Shape 29: Layout (2 x 2 tiles)
-        vec2 q = abs(p) - vec2(0.32, 0.26);
-        d = sdRoundedBox(q, vec2(0.25, 0.19), 0.05);
+        // Shape 29: Layout (three screens: two below, one centred above)
+        float top = sdRoundedBox(p - vec2(0.0, 0.25), vec2(0.30, 0.19), 0.05);
+        vec2 q = vec2(abs(p.x) - 0.35, p.y + 0.25);
+        float bottom = sdRoundedBox(q, vec2(0.30, 0.19), 0.05);
+        d = min(top, bottom);
     } else {
         d = sdRoundedBox(p, vec2(1.0), 0.0);
     }
