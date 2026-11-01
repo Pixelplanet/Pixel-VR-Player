@@ -1868,7 +1868,8 @@ void VulkanRenderer::updatePointer() {
                     }
                     if (hub::pickerAddCard().contains(hx, hyy, 0.010f)) {
                         for (int slot = kMaxVideoSlots - 1; slot >= 0; --slot) {
-                            if (slot < optCount && actionMenu_.options[static_cast<std::size_t>(slot)] == "Add") {
+                            if (slot < optCount && actionMenu_.options[static_cast<std::size_t>(slot)] == "Add" &&
+                                !arrangeTileValid_[slot]) {
                                 actionMenuBtnHovered_ = slot;
                             }
                         }
@@ -4863,27 +4864,47 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 const ArrangeTile& t = arrTiles[slot];
                 if (!t.valid) continue;
                 const Mat4 mvp = multiply(boxVp, t.model);
+                const bool ghost = slot < menuOptCount && actionMenu_.options[static_cast<std::size_t>(slot)] == "Add";
                 uiBendOverride = t.bend;
-                if (videoSlots_[slot].hasVideo) {
+                if (ghost) {
+                    // Empty slot: where a new screen would open.
+                    drawUiElement(mvp, 0.0f, 0.0f, 1.6f, 0.9f, UiShape::RoundedBox, glassWellT.data(), 0.0f);
+                } else if (videoSlots_[slot].hasVideo) {
                     drawLivePreview(slot, mvp, t.curvature);
                 } else {
                     drawUiElement(mvp, 0.0f, 0.0f, 1.6f, 0.9f, UiShape::RoundedBox, glassControlT.data(), 0.0f);
                 }
                 const bool hov = pickHov(slot);
                 drawUiElement(mvp, 0.0f, 0.0f, 1.6f, 0.9f, UiShape::RoundedBox, noFill, 0.02f, hov ? 0.08f : 0.04f,
-                              hov ? themeAccentCol : kGlassRim);
+                              hov ? themeAccentCol : (ghost ? kGlassRimFaint : kGlassRim));
                 uiBendOverride = -1.0f;
+                if (ghost) {
+                    const Vec3 c = transformPoint(t.model, Vec3{0.0f, 0.0f, 0.0f});
+                    const float* tr = arrangeTileRect_[slot];
+                    const float arm = std::min(0.026f, 0.30f * (tr[3] - tr[2]));
+                    drawUiElement(vpPanel, box.cx + c.x, box.cy + c.y, arm, arm * 0.20f, UiShape::RoundedBox,
+                                  plusCol, 1.0f);
+                    drawUiElement(vpPanel, box.cx + c.x, box.cy + c.y, arm * 0.20f, arm, UiShape::RoundedBox,
+                                  plusCol, 1.0f);
+                }
             }
             const float badgeBg[4] = {0.03f, 0.04f, 0.06f, 0.82f};
             for (int slot = 0; slot < kMaxVideoSlots; ++slot) {
                 const ArrangeTile& t = arrTiles[slot];
                 if (!t.valid) continue;
+                const bool ghost = slot < menuOptCount && actionMenu_.options[static_cast<std::size_t>(slot)] == "Add";
                 drawUiElement(vpPanel, t.badgeX + 0.026f, t.badgeY - 0.026f, 0.019f, 0.019f, UiShape::RoundedBox,
-                              badgeBg, 1.0f, 0.10f, themeAccentCol);
+                              ghost ? glassControlT.data() : badgeBg, 1.0f, 0.10f,
+                              ghost ? kGlassRimFaint : themeAccentCol);
             }
+            // "Add" card only for an empty slot without a tile of its own (a
+            // layout is in use, so where it goes depends on the re-layout).
             int freeSlot = -1;
             for (int slot = kMaxVideoSlots - 1; slot >= 0; --slot) {
-                if (slot < menuOptCount && actionMenu_.options[static_cast<std::size_t>(slot)] == "Add") freeSlot = slot;
+                if (slot < menuOptCount && actionMenu_.options[static_cast<std::size_t>(slot)] == "Add" &&
+                    !arrTiles[slot].valid) {
+                    freeSlot = slot;
+                }
             }
             if (freeSlot >= 0) {
                 const UiRect r = hub::pickerAddCard();
@@ -5143,7 +5164,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                             hovSlot >= 0 ? themeTextCol : slateCol, caption);
             bool anyFree = false;
             for (int slot = 0; slot < kMaxVideoSlots && slot < menuOptCount; ++slot) {
-                anyFree = anyFree || actionMenu_.options[static_cast<std::size_t>(slot)] == "Add";
+                anyFree = anyFree || (actionMenu_.options[static_cast<std::size_t>(slot)] == "Add" && !arrTiles[slot].valid);
             }
             if (anyFree) {
                 const UiRect r = hub::pickerAddCard();

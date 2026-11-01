@@ -208,6 +208,7 @@ private:
     // Default placement for a new extra screen: beside the open ones (left for
     // screen 2, right for screen 3) so it never lands behind another screen.
     void placeNewScreen(int slot);
+    VulkanRenderer::ScreenPlacement newScreenPlacement(int slot) const;  // where placeNewScreen puts it
     // Recenter the view; in multi-screen mode the whole arrangement moves along.
     void recenterView(const XrInputState& in);
     // Rough check that another stream fits the hardware decoder budget.

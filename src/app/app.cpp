@@ -1109,6 +1109,10 @@ bool App::applyFormat(int projection, int stereo) {
 }
 
 void App::placeNewScreen(int slot) {
+    renderer_.setScreenPlacement(slot, newScreenPlacement(slot));
+}
+
+VulkanRenderer::ScreenPlacement App::newScreenPlacement(int slot) const {
     // On the same arc as the open screens, just past the outermost one on its
     // side (screen 2 left, screen 3 right), so it is never hidden behind one.
     const float* pivot = renderer_.screenPivot();
@@ -1158,7 +1162,7 @@ void App::placeNewScreen(int slot) {
     pl.scale = kScale;
     pl.curvature = curv;
     pl.stereo = static_cast<VulkanRenderer::StereoMode>(screens_[slot].stereo);
-    renderer_.setScreenPlacement(slot, pl);
+    return pl;
 }
 
 void App::recenterView(const XrInputState& in) {
@@ -1262,6 +1266,13 @@ void App::openPlayTargetMenu(const std::string& path) {
         const float pitchOff = std::asin(std::clamp(dy / len, -1.0f, 1.0f)) - anchorPitch;
         if (std::fabs(yawOff) > kMaxYawOff || std::fabs(pitchOff) > kMaxPitchOff) spatial = false;
         pls[slot] = pl;
+    }
+    if (spatial && !arrangementActive_) {
+        // Free placement: empty slots appear as "+" tiles where a new screen
+        // would open (screen 2 left of the others, screen 3 right).
+        for (int slot = 1; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
+            if (!screens_[slot].open) pls[slot] = newScreenPlacement(slot);
+        }
     }
     if (spatial) {
         renderer_.setArrangePreview(pls, pivot, anchorYaw, anchorPitch, -1, arrangementActive_ && arrangement_.snap);
