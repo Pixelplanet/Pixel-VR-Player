@@ -213,6 +213,8 @@ private:
     bool decoderBudgetAllows(const std::string& path) const;
     void openScreenMenu(int slot);
     void openPlayTargetMenu(const std::string& path);
+    // Browser 'play' entry point: asks where to play when screens are in use.
+    void playFromBrowser(const std::string& path);
     int movingScreen_ = -1;  // screen being placed with the laser, or -1
     float movingDistance_ = 3.0f;
     std::string pendingPlayPath_;  // file waiting for the "play where?" choice

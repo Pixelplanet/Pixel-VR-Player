@@ -111,6 +111,10 @@ public:
     const ScreenPlacement& screenPlacement(int slot) const { return screenPlacements_[slot]; }
     // Multi-screen mode: outlines + "selected" highlight; ambilight follows the
     // selected screen.
+    // Video screen under the laser (multi-screen mode, no UI in the way), or -1.
+    int pointerScreen() const { return pointerScreen_; }
+    // World-space point where the laser hits that screen.
+    const float* pointerScreenHit() const { return pointerHit_; }
     void setMultiScreen(bool active, int selectedSlot) {
         multiScreenActive_ = active;
         selectedScreen_ = (selectedSlot >= 0 && selectedSlot < kMaxVideoSlots) ? selectedSlot : 0;
@@ -131,6 +135,9 @@ public:
     // a world-space direction); the current viewing distance is kept.
     void recenterScreen(const float headPos[3], const float headForward[3]);
     const float* screenPivot() const { return screenPivot_; }
+    float screenYaw() const { return screenYaw_; }
+    float recenterPitch() const { return recenterPitch_; }
+    float screenDistance() const { return screenDistance_; }
     const float* screenForward() const { return screenForward_; }
     // Moves the flat screen farther (positive) or nearer (negative), clamped.
     void adjustScreenDistance(float delta);
@@ -812,6 +819,18 @@ private:
     ScreenPlacement screenPlacements_[kMaxVideoSlots];
     bool multiScreenActive_ = false;
     int selectedScreen_ = 0;
+    int pointerScreen_ = -1;
+    // Last drawn flat-screen geometry per slot (for laser hit-testing): centre,
+    // yaw/pitch and half-size in metres; valid only while the slot is drawn.
+    struct ScreenHitInfo {
+        bool valid = false;
+        float center[3] = {0.0f, 0.0f, 0.0f};
+        float yaw = 0.0f;
+        float pitch = 0.0f;
+        float halfW = 0.0f;
+        float halfH = 0.0f;
+    };
+    ScreenHitInfo screenHit_[kMaxVideoSlots];
     uint64_t ycbcrRebuildCount_ = 0;
 
     VkCommandBuffer uploadCmd_ = VK_NULL_HANDLE;

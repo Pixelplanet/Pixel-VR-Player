@@ -202,6 +202,16 @@ void SettingsMenu::refresh() {
         choice("Default Screen Distance", distStream.str(), kDistanceSteps, distIdx,
                Action::CycleDistance);
         toggle("Swap Left/Right Eye", swapEyes_, Action::ToggleSwapEyes);
+        toggle("Multiple Screens", multiScreen_, Action::ToggleMultiScreen);
+        {
+            Row r{"Screen Audio", screenAudioMode_ ? "All screens" : "Selected screen",
+                  Action::CycleScreenAudio, multiScreen_};
+            r.kind = Kind::Segmented;
+            r.steps = 2;
+            r.stepIdx = screenAudioMode_ % 2;
+            r.options = {"Selected screen", "All screens"};
+            rows_.push_back(r);
+        }
         toggle("Debug Statistics", showStats_, Action::ToggleStats);
     } else if (section_ == 1) {
         title_ = "Settings > UI & Appearance";
@@ -501,6 +511,16 @@ SettingsMenu::Action SettingsMenu::activate() {
             refresh();
             saveConfig();
             break;
+        case Action::ToggleMultiScreen:
+            multiScreen_ = !multiScreen_;
+            saveConfig();
+            refresh();
+            break;
+        case Action::CycleScreenAudio:
+            screenAudioMode_ = (screenAudioMode_ + 1) % 2;
+            saveConfig();
+            refresh();
+            break;
         case Action::CycleUiOpacity:
             uiOpacityIdx_ = (uiOpacityIdx_ + 1) % kUiOpacityCount;
             saveConfig();
@@ -698,6 +718,8 @@ void SettingsMenu::loadConfig() {
             else if (key == "hover_haptics_strength") hoverHapticsStrengthIdx_ = std::clamp(std::stoi(val), 0, kHoverHapticsStrengthCount - 1);
             else if (key == "ambilight") ambilightIdx_ = std::clamp(std::stoi(val), 0, kAmbilightCount - 1);
             else if (key == "res_scale") resScaleIdx_ = std::clamp(std::stoi(val), 0, kResScaleCount - 1);
+            else if (key == "multi_screen") multiScreen_ = (val == "1" || val == "true");
+            else if (key == "screen_audio") screenAudioMode_ = std::clamp(std::stoi(val), 0, 1);
             else if (key == "ui_opacity") uiOpacityIdx_ = std::clamp(std::stoi(val), 0, kUiOpacityCount - 1);
             else if (key == "panel_curve") panelCurveIdx_ = std::clamp(std::stoi(val), 0, kPanelCurveCount - 1);
             else if (key == "browser_sort") browserSort_ = std::clamp(std::stoi(val), 0, 2);
@@ -746,6 +768,8 @@ void SettingsMenu::saveConfig() const {
             file << "res_scale=" << resScaleIdx_ << "\n";
             file << "panel_curve=" << panelCurveIdx_ << "\n";
             file << "ui_opacity=" << uiOpacityIdx_ << "\n";
+            file << "multi_screen=" << (multiScreen_ ? 1 : 0) << "\n";
+            file << "screen_audio=" << screenAudioMode_ << "\n";
             file << "browser_sort=" << browserSort_ << "\n";
             if (!quickPath_.empty()) {
                 file << "quick_path=" << quickPath_ << "\n";

@@ -47,6 +47,8 @@ public:
         CycleResScale,
         CyclePanelCurve,
         CycleUiOpacity,
+        ToggleMultiScreen,
+        CycleScreenAudio,
         CycleBrowserSort,
         BackToUI,
     };
@@ -119,6 +121,10 @@ public:
     // Main panel shape: 0 = flat, 1 = gentle curve, 2 = full wrap.
     int panelCurveIdx() const { return panelCurveIdx_; }
     float panelCurve() const;  // renderer curve amount (0..1)
+    // Multi-screen playback (up to 3 flat screens) and whose audio is heard:
+    // 0 = only the selected screen, 1 = all screens mixed.
+    bool multiScreen() const { return multiScreen_; }
+    int screenAudioMode() const { return screenAudioMode_; }
     // Panel transparency: 0 = solid .. 3 = clear; uiOpacity() is the renderer factor.
     int uiOpacityIdx() const { return uiOpacityIdx_; }
     float uiOpacity() const;
@@ -206,6 +212,8 @@ private:
     int browserViewMode_ = 0;  // 0=Large Cards (3x2), 1=Smaller Cards (4x3), 2=Compact List (1-Col)
     int panelCurveIdx_ = 1;    // 0=Flat, 1=Gentle (default), 2=Wrap
     int uiOpacityIdx_ = 2;     // 0=Solid, 1=Frosted, 2=Glass (default), 3=Clear
+    bool multiScreen_ = false; // off = classic single-screen player
+    int screenAudioMode_ = 0;  // 0=Selected screen only, 1=All screens
     int browserSort_ = 0;      // 0=Name, 1=Newest, 2=Largest
     bool listShowFormat_ = true;
     bool listShowRes_ = true;

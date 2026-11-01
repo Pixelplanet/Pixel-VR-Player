@@ -1674,6 +1674,7 @@ void VulkanRenderer::updatePointer() {
     actionMenuKeyHovered_ = -1;
     keyboardKeyHovered_ = -1;
     keyboardFieldHovered_ = false;
+    pointerScreen_ = -1;
 
     if (pointerSuppressed_) {
         return;
@@ -1685,7 +1686,10 @@ void VulkanRenderer::updatePointer() {
                          (downloadsVisible_ && !downloadsModal_)) && !actionMenuOpen && !kbOpen;
     const bool modalOpen = (downloadsVisible_ && downloadsModal_) && !actionMenuOpen && !kbOpen;
     const bool controlBar = controlBarVisible_ && !hubOpen && !modalOpen && !actionMenuOpen && !kbOpen;
-    if (!kbOpen && !hubOpen && !modalOpen && !controlBar && !actionMenuOpen) {
+    const bool screensPointable = multiScreenActive_ && !hubOpen && !modalOpen &&
+                                  !actionMenuOpen && !kbOpen;
+    if (!kbOpen && !hubOpen && !modalOpen && !controlBar && !actionMenuOpen &&
+        !screensPointable) {
         return;  // No UI surface to point at.
     }
 
@@ -1787,7 +1791,7 @@ void VulkanRenderer::updatePointer() {
             if (inPanel) {
                 hitHere(world.x, world.y, world.z);
                 const int optCount = static_cast<int>(actionMenu_.options.size());
-                if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5) {
+                if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5 || actionMenu_.page >= 6) {
                     for (int i = 0; i < optCount; ++i) {
                         if (hub::actionMenuOption(i, optCount).contains(hx, hyy, 0.002f)) {
                             actionMenuBtnHovered_ = i;
@@ -1948,8 +1952,48 @@ void VulkanRenderer::updatePointer() {
             break;
         }
 
-        // 4. In-Playback Floating Cinema Transport Dock (only when Hub is closed)
-        if (!controlBar || !panelHit) continue;
+        // 4. Video screens (multi-screen): nearest screen the ray hits. The dock
+        // sits in front of them, so it wins when both are hit.
+        int screenHitSlot = -1;
+        Vec3 screenHitWorld{0.0f, 0.0f, 0.0f};
+        if (screensPointable) {
+            float bestT = 1e9f;
+            for (int slot = 0; slot < kMaxVideoSlots; ++slot) {
+                const ScreenHitInfo& sh = screenHit_[slot];
+                if (!sh.valid) continue;
+                // Screen frame: forward = (-sin yaw, 0, -cos yaw) tilted by pitch;
+                // the screen faces back along -forward (toward the viewer).
+                const Mat4 rot = orientFromYawPitch(sh.yaw, sh.pitch);
+                const Vec3 c{sh.center[0], sh.center[1], sh.center[2]};
+                const Vec3 xAxis = transformDir(rot, Vec3{1.0f, 0.0f, 0.0f});
+                const Vec3 yAxis = transformDir(rot, Vec3{0.0f, 1.0f, 0.0f});
+                const Vec3 nAxis = transformDir(rot, Vec3{0.0f, 0.0f, 1.0f});
+                const float denom = dot(dir, nAxis);
+                if (std::fabs(denom) < 1e-4f) continue;
+                const float t = dot(c - origin, nAxis) / denom;
+                if (t <= 0.05f || t >= bestT) continue;
+                const Vec3 p = origin + dir * t;
+                const float lx = dot(p - c, xAxis);
+                const float ly = dot(p - c, yAxis);
+                if (std::fabs(lx) <= sh.halfW && std::fabs(ly) <= sh.halfH) {
+                    bestT = t;
+                    screenHitSlot = slot;
+                    screenHitWorld = p;
+                }
+            }
+        }
+        auto takeScreenHit = [&]() {
+            if (screenHitSlot < 0) return false;
+            hitHere(screenHitWorld.x, screenHitWorld.y, screenHitWorld.z);
+            pointerScreen_ = screenHitSlot;
+            return true;
+        };
+
+        // 5. In-Playback Floating Cinema Transport Dock (only when Hub is closed)
+        if (!controlBar || !panelHit) {
+            if (takeScreenHit()) break;
+            continue;
+        }
 
         // Draggable timeline track (top band of dock)
         {
@@ -1996,6 +2040,7 @@ void VulkanRenderer::updatePointer() {
             pointerButton_ = -1;
             break;
         }
+        if (takeScreenHit()) break;
     }
 }
 
@@ -2371,6 +2416,9 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
     // clears the eye image. Slot 0 is the main screen (recenter-anchored, also
     // 360/180); slots 1..2 are extra flat screens placed by the user. Each flat
     // screen's model matrix and half-size are kept for the selection outline.
+    if (viewIndex == 0) {
+        for (ScreenHitInfo& h : screenHit_) h.valid = false;  // refreshed below
+    }
     math::Mat4 screenModels[kMaxVideoSlots];
     float screenBend[kMaxVideoSlots] = {};
     float screenScaleX[kMaxVideoSlots] = {};
@@ -2513,6 +2561,17 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 // 3.2 / (curvature * 1.75), the same bend ui.vert applies.
                 screenModels[slot] = model;
                 screenBend[slot] = (curvature > 0.005f) ? 3.2f / (curvature * 1.75f) : 0.0f;
+                if (viewIndex == 0) {
+                    ScreenHitInfo& hit = screenHit_[slot];
+                    hit.valid = true;
+                    hit.center[0] = center.x;
+                    hit.center[1] = center.y;
+                    hit.center[2] = center.z;
+                    hit.yaw = (slot == 0 && !pl.active) ? screenYaw_ : pl.yaw;
+                    hit.pitch = (slot == 0 && !pl.active) ? recenterPitch_ : pl.pitch;
+                    hit.halfW = 1.6f * widthScale * scale;
+                    hit.halfH = 0.9f * scale;
+                }
                 screenScaleX[slot] = widthScale * scale;
                 screenDrawn[slot] = true;
             } else {
@@ -4418,7 +4477,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         const float dimCol[4] = {
             themeTextCol[0] * 0.62f, themeTextCol[1] * 0.70f, themeTextCol[2] * 0.82f, 0.90f};
 
-        if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5) {
+        if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5 || actionMenu_.page >= 6) {
             const float btnHalfW = 0.38f;
             const float btnHalfH = 0.028f;
             for (int i = 0; i < menuOptCount; ++i) {
@@ -4544,7 +4603,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             drawFitCentered(0.0f, mHalfH - 0.090f, mHalfW * 1.8f, sc * 0.85f, slateCol, actionMenu_.subtitle);
         }
 
-        if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5) {
+        if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5 || actionMenu_.page >= 6) {
             for (int i = 0; i < menuOptCount; ++i) {
                 const float cy = hub::actionMenuOption(i, menuOptCount).cy;
                 const bool hov = (actionMenuBtnHovered_ == i) || (actionMenu_.selectedOption == i);

@@ -38,36 +38,37 @@ playback + login/Premium), then other streaming sources.
 Scope: flat 2D and every 3D format (SBS / half-SBS / TB) on flat or curved screens.
 180°/360° are immersive and always play alone.
 
-- [ ] **M0. Settings & defaults**
+- [x] **M0. Settings & defaults**
   - Settings › Display: **Multiple Screens** (Off / On, default Off). Off = exactly today's
     single-screen behaviour.
   - **Max screens** 2 / 3 (default 3, hard cap 3).
   - **Audio**: *Selected screen only* (default) / *Mix all screens*.
-- [ ] **M1. Renderer: per-screen video state**
+- [x] **M1. Renderer: per-screen video state**
   - Extract a `VideoScreen` struct: video images (CPU NV12 + dma-buf import), YCbCr
     conversion/pipelines, resolve image + mips, pose (pivot, yaw/pitch, distance), size,
     curvature, projection/stereo, swap eyes, ambilight.
   - `std::vector<VideoScreen>` (≤3); draw far→near; one resolve pass per screen per frame.
   - Ambilight: only for the selected screen (or off) when more than one screen is open.
   - Keep the single-screen path identical when Multiple Screens is Off.
-- [ ] **M2. App: per-screen engines**
+- [x] **M2. App: per-screen engines**
   - `Screen { MediaEngine engine; ScrubPreview preview; path; muted; volume; ... }` replaces the
     single `media_`; route the ≈60 `media_` call sites through "the selected screen".
   - Resume/format memory already works per file; reuse it per screen.
   - Vault lock closes only screens playing vault files.
-- [ ] **M3. Selecting & controlling screens**
+- [x] **M3. Selecting & controlling screens**
   - One shared transport dock controls the **selected** screen (decided: simpler than one
     dock per screen). Point at a screen + trigger to select it; selected screen gets an accent
     outline; dock shows a "Screen 1/2/3" pill and per-screen **mute** toggle.
   - Optional later: "Pause all / Play all" on the dock.
-- [ ] **M4. Adding & placing screens**
+- [x] **M4. Adding & placing screens**
   - Hub: **Add Screen** (Files tab header or a "Screens" quick filter) → pick a file → screen
     spawns where you are looking, offset from existing screens.
   - **Move mode**: grip on a screen (or "Move" in its menu) → it follows the laser at its
     current distance; thumbstick Y = distance, thumbstick X = size; trigger drops it.
   - Per-screen menu (Y on a screen): Move, Resize, Curvature, Format, Mute, Close.
   - Optional: remember the layout between sessions.
-- [ ] **M5. Decoder capacity / admission control**
+- [ ] **M5. Decoder capacity / admission control** — a first rough budget (1000 Mpx/s,
+  logged as "Decoder budget: …") is in `App::decoderBudgetAllows`; still to calibrate.
   - Measure on device: how many concurrent `*_v4l2m2m` sessions open, and the aggregate
     pixel-rate budget (e.g. 3× 4K30 HEVC, 2× 4K60, 8K + 1080p…). Record results here.
   - Before opening another screen, estimate width × height × fps against the measured budget;
