@@ -1387,6 +1387,9 @@ void App::computeArrangement(const Arrangement& a,
             rows.emplace_back();
             for (int i = 0; i < n; ++i) rows.back().push_back(i);
             std::fill(scale.begin(), scale.end(), n >= 3 ? 0.72f : (n == 2 ? 0.90f : 1.0f));
+            // The middle screen sits dead centre (in line with the controls);
+            // wider or narrower side screens extend outward from it.
+            if (n == 3) anchorPos = 1;
             break;
         }
         case ArrangePreset::Stacked:
