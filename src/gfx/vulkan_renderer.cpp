@@ -429,7 +429,9 @@ constexpr float kPickHalfH = 0.31f;
 inline UiRect pickerTile(int i) { return {-0.42f + 0.42f * static_cast<float>(i), 0.005f, 0.18f, 0.18f * 9.0f / 16.0f}; }
 inline UiRect pickerCancel() { return {0.0f, -0.235f, 0.095f, 0.032f}; }
 // Picker while a layout is in use: arranged-screens preview + "Add" card.
-inline UiRect pickerPreview() { return {-0.12f, 0.0f, 0.50f, 0.165f}; }
+inline UiRect pickerPreview(bool withAddCard) {
+    return withAddCard ? UiRect{-0.12f, 0.0f, 0.50f, 0.165f} : UiRect{0.0f, 0.0f, 0.62f, 0.165f};
+}
 inline UiRect pickerAddCard() { return {0.52f, 0.0f, 0.115f, 0.115f}; }
 
 // Arrange screens modal (action menu page 8): preset list (left), live preview
@@ -1866,7 +1868,7 @@ void VulkanRenderer::updatePointer() {
                             actionMenuBtnHovered_ = slot;
                         }
                     }
-                    if (hub::pickerAddCard().contains(hx, hyy, 0.010f)) {
+                    if (pickerAddCardShown() && hub::pickerAddCard().contains(hx, hyy, 0.010f)) {
                         for (int slot = kMaxVideoSlots - 1; slot >= 0; --slot) {
                             if (slot < optCount && actionMenu_.options[static_cast<std::size_t>(slot)] == "Add" &&
                                 !arrangeTileValid_[slot]) {
@@ -3090,7 +3092,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                         const Vec3 ambCenter = center + fwd * 0.015f;
                         const Mat4 ambModel = multiply(
                             multiply(translation(ambCenter), rot),
-                            scaling(Vec3{widthScale * 1.55f * scale, 1.90f * scale, scale}));
+                            scaling(Vec3{widthScale * 1.55f * scale, 1.90f * scale, widthScale * scale}));
                         const Mat4 ambMvp = multiply(vpV, ambModel);
                         PushConstants ambPush{};
                         std::memcpy(ambPush.mvp, ambMvp.m, sizeof(ambPush.mvp));
@@ -3113,7 +3115,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                         layout, 0, 1, &videoSet, 0, nullptr);
                 const Mat4 model = multiply(multiply(translation(center), rot),
-                                            scaling(Vec3{widthScale * scale, scale, scale}));
+                                            scaling(Vec3{widthScale * scale, scale, widthScale * scale}));
                 const Mat4 mvp = multiply(vpV, model);
                 PushConstants push{};
                 std::memcpy(push.mvp, mvp.m, sizeof(push.mvp));
@@ -4692,7 +4694,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         ArrangeTile arrTiles[kMaxVideoSlots];
         int arrOrder[kMaxVideoSlots] = {0, 1, 2};
         if (actionMenu_.page == 8 || (actionMenu_.page == 6 && pickerSpatial_)) {
-            const UiRect box = (actionMenu_.page == 8) ? hub::arrangePreview() : hub::pickerPreview();
+            const UiRect box = (actionMenu_.page == 8) ? hub::arrangePreview() : hub::pickerPreview(pickerAddCardShown());
             const float hy = 0.5f * arrangeYaw_;
             const float hp = 0.5f * arrangePitch_;
             const Mat4 toView = multiply(
@@ -4714,7 +4716,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 const float ws = eyeAspect / (16.0f / 9.0f);
                 local[slot] = multiply(toView, multiply(multiply(translation(Vec3{pl.center[0], pl.center[1], pl.center[2]}),
                                                                  orientFromYawPitch(pl.yaw, pl.pitch)),
-                                                        scaling(Vec3{ws * pl.scale, pl.scale, pl.scale})));
+                                                        scaling(Vec3{ws * pl.scale, pl.scale, ws * pl.scale})));
                 edgeX[slot] = 1.6f;
                 if (pl.curvature > 0.005f) {  // quad.vert's arc
                     const float ang = pl.curvature * 1.75f;
@@ -4844,7 +4846,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             // they are arranged (point at one to replace it) plus an "Add" card.
             const float tileGlow[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.30f};
             const float plusCol[4] = {themeTextCol[0], themeTextCol[1], themeTextCol[2], 0.85f};
-            const UiRect box = hub::pickerPreview();
+            const UiRect box = hub::pickerPreview(pickerAddCardShown());
             drawUiElement(vpPanel, box.cx, box.cy, box.hw, box.hh, UiShape::RoundedBox, glassWellT.data(), 0.08f,
                           0.05f, kGlassRimFaint);
             auto pickHov = [&](int slot) {
@@ -5156,7 +5158,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 hovSlot = actionMenu_.selectedOption;
             const bool hovAdd = hovSlot >= 0 && hovSlot < menuOptCount &&
                                 actionMenu_.options[static_cast<std::size_t>(hovSlot)] == "Add";
-            const UiRect box = hub::pickerPreview();
+            const UiRect box = hub::pickerPreview(pickerAddCardShown());
             const std::string caption = hovSlot < 0 ? std::string("Point at a screen to replace it")
                                       : hovAdd ? ("Add as screen " + std::to_string(hovSlot + 1))
                                                : ("Replace screen " + std::to_string(hovSlot + 1));

@@ -124,6 +124,16 @@ public:
     // "Play on which screen?" (page 6): true = show the screens as arranged
     // (preview set with setArrangePreview) instead of a row of tiles.
     void setPickerSpatial(bool spatial) { pickerSpatial_ = spatial; }
+    // Picker: an empty slot with no preview tile of its own gets the "Add" card.
+    bool pickerAddCardShown() const {
+        for (int slot = 0; slot < kMaxVideoSlots; ++slot) {
+            if (slot < static_cast<int>(actionMenu_.options.size()) &&
+                actionMenu_.options[static_cast<std::size_t>(slot)] == "Add" && !arrangePreview_[slot].active) {
+                return true;
+            }
+        }
+        return false;
+    }
     // Multi-screen mode: outlines + "selected" highlight; ambilight follows the
     // selected screen.
     // Video screen under the laser (multi-screen mode, no UI in the way), or -1.

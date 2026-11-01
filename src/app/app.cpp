@@ -231,7 +231,7 @@ void detect_format(const std::string& path, VulkanRenderer::ProjectionMode& proj
 constexpr float kArrangeGap = 0.04f;  // metres between arranged screens when not snapped
 
 // Size of a screen as quad.vert draws it: the 3.2 x 1.8 quad bent into an arc of
-// curvature * 1.75 rad, then scaled by (widthScale * scale, scale, scale).
+// curvature * 1.75 rad, then scaled by (widthScale * scale, scale, widthScale * scale).
 struct ScreenExtent {
     float hx = 0.0f;  // half the chord width
     float hy = 0.0f;  // half height
@@ -246,7 +246,7 @@ ScreenExtent screenExtent(float eyeAspect, float scale, float curvature) {
         const float a = curvature * 1.75f;
         const float r = 3.2f / a;
         e.hx = widthScale * scale * r * std::sin(0.5f * a);
-        e.ez = scale * r * (1.0f - std::cos(0.5f * a));
+        e.ez = widthScale * scale * r * (1.0f - std::cos(0.5f * a));
     }
     return e;
 }
@@ -1396,6 +1396,18 @@ void App::computeArrangement(const Arrangement& a,
         curv[i] = a.curvature;
         ext[i] = screenExtent(screenEyeAspect(slot), scale[i] * a.scale, curv[i]);
     }
+    // Curved screens on a curved wall form one big curve: each screen bends
+    // with the wall's radius (a.dist, centred on the viewer) instead of its own.
+    const bool wallCurve = !a.flat && a.curvature > 0.005f;
+    std::vector<float> arcHalf(static_cast<std::size_t>(n), 0.0f);
+    if (wallCurve) {
+        for (int i = 0; i < n; ++i) {
+            const float aspect = screenEyeAspect(a.order[static_cast<std::size_t>(i)]);
+            arcHalf[i] = screenExtent(aspect, scale[i] * a.scale, 0.0f).hx;  // half the arc length
+            curv[i] = std::min(1.0f, 2.0f * arcHalf[i] / (1.75f * a.dist));
+            ext[i] = screenExtent(aspect, scale[i] * a.scale, curv[i]);
+        }
+    }
     std::vector<float> rowHalf(rows.size(), 0.0f);
     for (std::size_t r = 0; r < rows.size(); ++r) {
         for (int i : rows[r]) rowHalf[r] = std::max(rowHalf[r], ext[i].hy);
@@ -1441,14 +1453,21 @@ void App::computeArrangement(const Arrangement& a,
             const float bz = std::max((a.dist - ext[big].ez) * cp - rowY * sp, 0.3f);
             const float edgeR2 = bz * bz + ext[big].hx * ext[big].hx;
             std::vector<float> di(row.size()), yawRel(row.size());
-            const float gapY = gap / bz;
+            const float gapY = wallCurve ? gap / a.dist : gap / bz;
             float yaw = 0.0f;
             float ref = 0.0f;
             for (std::size_t k = 0; k < row.size(); ++k) {
                 const ScreenExtent& e = ext[row[k]];
-                const float depth = std::sqrt(std::max(edgeR2 - e.hx * e.hx, 0.09f));
-                di[k] = e.ez + (depth + rowY * sp) / cp;
-                const float half = std::atan(e.hx / depth);
+                float half = 0.0f;
+                if (wallCurve) {
+                    // On the wall's cylinder: arc length / radius.
+                    di[k] = a.dist;
+                    half = arcHalf[row[k]] / a.dist;
+                } else {
+                    const float depth = std::sqrt(std::max(edgeR2 - e.hx * e.hx, 0.09f));
+                    di[k] = e.ez + (depth + rowY * sp) / cp;
+                    half = std::atan(e.hx / depth);
+                }
                 yawRel[k] = yaw - half;  // positive yaw = left, so walk toward negative
                 yaw -= 2.0f * half + gapY;
                 if (row[k] == anchorPos) ref = yawRel[k];
@@ -3529,7 +3548,10 @@ int App::run() {
                             VulkanRenderer::ScreenPlacement pl = renderer_.screenPlacement(selectedScreen_);
                             pl.curvature = (pl.curvature >= 0.99f) ? 0.0f : std::min(1.0f, pl.curvature + 0.25f);
                             if (groupedScreen(selectedScreen_)) {
-                                arrangement_.curvature = pl.curvature;  // the snapped wall bends together
+                                // A snapped wall bends together; on a curved wall the
+                                // curve follows the wall, so it is just on / off there.
+                                arrangement_.curvature = arrangement_.flat ? pl.curvature
+                                                       : (arrangement_.curvature > 0.005f ? 0.0f : 1.0f);
                                 applyArrangement(arrangement_);
                             } else {
                                 renderer_.setScreenPlacement(selectedScreen_, pl);
