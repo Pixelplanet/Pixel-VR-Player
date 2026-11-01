@@ -18,21 +18,24 @@ A native VR video player for the **Valve Steam Frame**, playing flat 2D, 180°, 
 > SBS (including half-SBS) / TB stereo, auto-detected from the filename; spatial
 > audio with a master clock. In-headset UI: file browser (with file type and
 > size), transport bar, settings menu, downloads manager, bookmarks overview,
-> protected SMB network share manager with virtual keyboard laser auto-focus,
-> and an encrypted hidden vault. Native Valve
+> protected SMB network share manager with a built-in keyboard, multi-screen
+> playback (up to three videos arranged around you), and an encrypted hidden
+> vault. Native Valve
 > Steam Frame controller support (`XR_VALVE_frame_controller_interaction`) using
 > the runtime's own render model, with per-button animation on the model and
 > press-to-bind remapping.
 
 ## Screenshots
 
+Captured in the headset on a Steam Frame.
+
 <p align="center">
-  <img src="docs/ui-redesign/mockup-unified-1-files.jpg" width="49%" alt="Spatial File Browser" />
-  <img src="docs/ui-redesign/mockup-unified-2-downloads.jpg" width="49%" alt="Downloads Manager" />
+  <img src="docs/screenshots/multi-screen-wall.jpg" width="49%" alt="Three screens arranged as one wall, with the playback dock" />
+  <img src="docs/screenshots/arrange-menu.jpg" width="49%" alt="Arrange menu with a live preview of the layout" />
 </p>
 <p align="center">
-  <img src="docs/ui-redesign/mockup-unified-3-settings.jpg" width="49%" alt="Settings Panel" />
-  <img src="docs/ui-redesign/mockup-unified-4-cinema-hud.jpg" width="49%" alt="Cinema Playback HUD" />
+  <img src="docs/screenshots/playback-hud.jpg" width="49%" alt="Curved cinema screen with the glass playback dock" />
+  <img src="docs/screenshots/keyboard-smb.jpg" width="49%" alt="Built-in keyboard over the SMB share editor" />
 </p>
 
 ## Installation
