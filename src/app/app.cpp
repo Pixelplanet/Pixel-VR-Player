@@ -485,6 +485,13 @@ void App::loadMedia(const std::string& path, int slot) {
         sc.engine.close();
         sc.open = false;
         sc.path.clear();
+        sc.muted = false;
+        // Free the extra screen completely (frame, placement, layout position).
+        renderer_.clearVideo(slot);
+        VulkanRenderer::ScreenPlacement freed = renderer_.screenPlacement(slot);
+        freed.active = false;
+        renderer_.setScreenPlacement(slot, freed);
+        leaveArrangement(slot);
         loadMedia(path, 0);
         return;
     }
@@ -729,6 +736,7 @@ void App::closeMedia(int slot) {
 #endif
     sc.open = false;
     sc.path.clear();
+    sc.muted = false;  // the next clip on this screen starts audible
     sc.projection = 0;
     sc.stereo = 0;
     renderer_.clearVideo(slot);
@@ -1302,6 +1310,17 @@ void App::openPlayTargetMenu(const std::string& path) {
 
 void App::playFromBrowser(const std::string& path) {
     // With several screens available and something already playing, ask where.
+    // While a 180/360 video plays it is alone, so a new file replaces it.
+    const bool immersiveMain = screens_[0].open && screens_[0].projection != 0;
+    if (immersiveMain) {
+#ifdef PIXELVR_HAVE_MEDIA
+        loadMedia(path, 0);
+#endif
+#ifdef PIXELVR_HAVE_FREETYPE
+        browser_.setOpen(false);
+#endif
+        return;
+    }
     if (multiScreenEnabled() && openScreenCount() > 0) {
         openPlayTargetMenu(path);
         return;
@@ -2219,7 +2238,9 @@ int App::run() {
                 if (!sc.open) continue;
                 const bool audioModeMutes = multiScreenEnabled() && settings_.screenAudioMode() == 0 &&
                                             slot != selectedScreen_;
-                sc.engine.setMuted(sc.muted || audioModeMutes);
+                // Per-screen mute only exists in multi-screen mode (its button is
+                // hidden otherwise), so it never silences the single screen.
+                sc.engine.setMuted((sc.muted && multiScreenEnabled()) || audioModeMutes);
             }
 #endif
             renderer_.setMultiScreen(multiScreenEnabled() && openScreenCount() > 0, selectedScreen_);
@@ -3593,8 +3614,8 @@ int App::run() {
                             xr_.triggerHaptic(1, 0.02f, 0.0f, 0.5f);
                         }
                     } else if (cb == VulkanRenderer::CtrlButton::ScreenToggle) {
-                        if (selectedScreen_ > 0 ||
-                            renderer_.screenPlacement(selectedScreen_).active) {
+                        if (settings_.projectionMode() == 0 &&
+                            (selectedScreen_ > 0 || renderer_.screenPlacement(selectedScreen_).active)) {
                             VulkanRenderer::ScreenPlacement pl = renderer_.screenPlacement(selectedScreen_);
                             pl.curvature = (pl.curvature >= 0.99f) ? 0.0f : std::min(1.0f, pl.curvature + 0.25f);
                             if (groupedScreen(selectedScreen_)) {
