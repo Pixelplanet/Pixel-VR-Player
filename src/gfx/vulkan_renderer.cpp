@@ -428,6 +428,9 @@ constexpr float kPickHalfW = 0.68f;
 constexpr float kPickHalfH = 0.31f;
 inline UiRect pickerTile(int i) { return {-0.42f + 0.42f * static_cast<float>(i), 0.005f, 0.18f, 0.18f * 9.0f / 16.0f}; }
 inline UiRect pickerCancel() { return {0.0f, -0.235f, 0.095f, 0.032f}; }
+// Picker while a layout is in use: arranged-screens preview + "Add" card.
+inline UiRect pickerPreview() { return {-0.12f, 0.0f, 0.50f, 0.165f}; }
+inline UiRect pickerAddCard() { return {0.52f, 0.0f, 0.115f, 0.115f}; }
 
 // Arrange screens modal (action menu page 8): preset list (left), live preview
 // (right) with swap arrows, buttons: 0 Snap edges, 1 Style, 2 Apply, 3 Cancel.
@@ -1855,6 +1858,22 @@ void VulkanRenderer::updatePointer() {
                             break;
                         }
                     }
+                } else if (actionMenu_.page == 6 && pickerSpatial_) {
+                    for (int slot = 0; slot < kMaxVideoSlots; ++slot) {
+                        const float* tr = arrangeTileRect_[slot];
+                        if (arrangeTileValid_[slot] && hx >= tr[0] - 0.006f && hx <= tr[1] + 0.006f &&
+                            hyy >= tr[2] - 0.006f && hyy <= tr[3] + 0.006f) {
+                            actionMenuBtnHovered_ = slot;
+                        }
+                    }
+                    if (hub::pickerAddCard().contains(hx, hyy, 0.010f)) {
+                        for (int slot = kMaxVideoSlots - 1; slot >= 0; --slot) {
+                            if (slot < optCount && actionMenu_.options[static_cast<std::size_t>(slot)] == "Add") {
+                                actionMenuBtnHovered_ = slot;
+                            }
+                        }
+                    }
+                    if (hub::pickerCancel().contains(hx, hyy, 0.004f)) actionMenuBtnHovered_ = 3;
                 } else if (actionMenu_.page == 6) {
                     int order[kMaxVideoSlots];
                     screenOrderLeftToRight(order);
@@ -4671,8 +4690,8 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         };
         ArrangeTile arrTiles[kMaxVideoSlots];
         int arrOrder[kMaxVideoSlots] = {0, 1, 2};
-        if (actionMenu_.page == 8) {
-            const UiRect box = hub::arrangePreview();
+        if (actionMenu_.page == 8 || (actionMenu_.page == 6 && pickerSpatial_)) {
+            const UiRect box = (actionMenu_.page == 8) ? hub::arrangePreview() : hub::pickerPreview();
             const float hy = 0.5f * arrangeYaw_;
             const float hp = 0.5f * arrangePitch_;
             const Mat4 toView = multiply(
@@ -4750,7 +4769,16 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                     }
                 }
             }
+            for (int slot = 0; slot < kMaxVideoSlots; ++slot) {
+                arrangeTileValid_[slot] = arrTiles[slot].valid;
+                if (!arrTiles[slot].valid) continue;
+                arrangeTileRect_[slot][0] = tx0[slot];
+                arrangeTileRect_[slot][1] = tx1[slot];
+                arrangeTileRect_[slot][2] = ty0[slot];
+                arrangeTileRect_[slot][3] = ty1[slot];
+            }
             arrangeArrowCount_ = 0;
+            if (actionMenu_.page == 8)
             for (int a = 0; a < kMaxVideoSlots; ++a) {
                 for (int b = a + 1; b < kMaxVideoSlots; ++b) {
                     if (!arrTiles[a].valid || !arrTiles[b].valid || arrangeArrowCount_ >= 4) continue;
@@ -4810,6 +4838,67 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                           UiShape::RoundedBox, delHov ? redBgHov : redBg, 1.0f, 0.05f, redBorder);
             drawUiElement(vpPanel, 0.15f, cy, btnHalfW, btnHalfH,
                           UiShape::RoundedBox, canHov ? slateBgHov : slateBg, 1.0f, 0.05f, slateBorder);
+        } else if (actionMenu_.page == 6 && pickerSpatial_) {
+            // "Play on which screen?" while a layout is in use: the screens as
+            // they are arranged (point at one to replace it) plus an "Add" card.
+            const float tileGlow[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.30f};
+            const float plusCol[4] = {themeTextCol[0], themeTextCol[1], themeTextCol[2], 0.85f};
+            const UiRect box = hub::pickerPreview();
+            drawUiElement(vpPanel, box.cx, box.cy, box.hw, box.hh, UiShape::RoundedBox, glassWellT.data(), 0.08f,
+                          0.05f, kGlassRimFaint);
+            auto pickHov = [&](int slot) {
+                return actionMenuBtnHovered_ == slot || actionMenu_.selectedOption == slot;
+            };
+            for (int slot = 0; slot < kMaxVideoSlots; ++slot) {
+                const ArrangeTile& t = arrTiles[slot];
+                if (!t.valid || !pickHov(slot)) continue;
+                const float* tr = arrangeTileRect_[slot];
+                drawGlow(vpPanel, 0.5f * (tr[0] + tr[1]), 0.5f * (tr[2] + tr[3]), 0.5f * (tr[1] - tr[0]),
+                         0.5f * (tr[3] - tr[2]), 0.014f, tileGlow, 0.10f);
+            }
+            const Mat4 boxVp = tileVp(box);
+            const float noFill[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            for (int oi = 0; oi < kMaxVideoSlots; ++oi) {
+                const int slot = arrOrder[oi];
+                const ArrangeTile& t = arrTiles[slot];
+                if (!t.valid) continue;
+                const Mat4 mvp = multiply(boxVp, t.model);
+                uiBendOverride = t.bend;
+                if (videoSlots_[slot].hasVideo) {
+                    drawLivePreview(slot, mvp, t.curvature);
+                } else {
+                    drawUiElement(mvp, 0.0f, 0.0f, 1.6f, 0.9f, UiShape::RoundedBox, glassControlT.data(), 0.0f);
+                }
+                const bool hov = pickHov(slot);
+                drawUiElement(mvp, 0.0f, 0.0f, 1.6f, 0.9f, UiShape::RoundedBox, noFill, 0.02f, hov ? 0.08f : 0.04f,
+                              hov ? themeAccentCol : kGlassRim);
+                uiBendOverride = -1.0f;
+            }
+            const float badgeBg[4] = {0.03f, 0.04f, 0.06f, 0.82f};
+            for (int slot = 0; slot < kMaxVideoSlots; ++slot) {
+                const ArrangeTile& t = arrTiles[slot];
+                if (!t.valid) continue;
+                drawUiElement(vpPanel, t.badgeX + 0.026f, t.badgeY - 0.026f, 0.019f, 0.019f, UiShape::RoundedBox,
+                              badgeBg, 1.0f, 0.10f, themeAccentCol);
+            }
+            int freeSlot = -1;
+            for (int slot = kMaxVideoSlots - 1; slot >= 0; --slot) {
+                if (slot < menuOptCount && actionMenu_.options[static_cast<std::size_t>(slot)] == "Add") freeSlot = slot;
+            }
+            if (freeSlot >= 0) {
+                const UiRect r = hub::pickerAddCard();
+                const bool hov = pickHov(freeSlot);
+                if (hov) drawGlow(vpPanel, r.cx, r.cy, r.hw, r.hh, 0.016f, tileGlow, 0.15f);
+                drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox, glassWellT.data(), 0.14f,
+                              hov ? 0.10f : 0.05f, hov ? tabActiveBord : kGlassRimFaint);
+                drawUiElement(vpPanel, r.cx, r.cy + 0.012f, 0.030f, 0.006f, UiShape::RoundedBox, plusCol, 1.0f);
+                drawUiElement(vpPanel, r.cx, r.cy + 0.012f, 0.006f, 0.030f, UiShape::RoundedBox, plusCol, 1.0f);
+            }
+            const UiRect cr = hub::pickerCancel();
+            const bool cHov = (actionMenuBtnHovered_ == 3) || (actionMenu_.selectedOption == 3);
+            drawUiElement(vpPanel, cr.cx, cr.cy, cr.hw, cr.hh, UiShape::RoundedBox,
+                          cHov ? glassCardHoverT.data() : glassControlT.data(), 1.0f, 0.06f,
+                          cHov ? kGlassRim : kGlassRimFaint);
         } else if (actionMenu_.page == 6) {
             // "Play on which screen?" picker: live preview tiles in the order the
             // screens sit around the viewer; empty slots show a "+".
@@ -5023,6 +5112,46 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             drawFitCentered(0.0f, 0.035f, (mHalfW - 0.06f) * 2.0f, sc, themeTextCol, actionMenu_.subtitle);
             drawFitCentered(-0.15f, -0.12f, 0.13f * 1.8f, sc, themeTextCol, "Delete");
             drawFitCentered(0.15f, -0.12f, 0.13f * 1.8f, sc, themeTextCol, "Cancel");
+        } else if (actionMenu_.page == 6 && pickerSpatial_) {
+            withHeadingFont([&] {
+                drawFitCentered(0.0f, hub::kPickHalfH - 0.050f, hub::kPickHalfW * 1.8f, sc * 1.10f,
+                                themeTextCol, actionMenu_.title);
+            });
+            drawFitCentered(0.0f, hub::kPickHalfH - 0.098f, hub::kPickHalfW * 1.8f, sc * 0.80f, slateCol,
+                            actionMenu_.subtitle);
+            const float scCap = ((0.024f * tScale) / fontAtlas_.lineHeight);
+            for (int slot = 0; slot < kMaxVideoSlots; ++slot) {
+                const ArrangeTile& t = arrTiles[slot];
+                if (!t.valid) continue;
+                withHeadingFont([&] {
+                    drawFitCentered(t.badgeX + 0.026f, t.badgeY - 0.026f, 0.034f, scCap * 0.95f, themeTextCol,
+                                    std::to_string(slot + 1));
+                });
+            }
+            // Caption: what the highlighted choice does.
+            int hovSlot = -1;
+            if (actionMenuBtnHovered_ >= 0 && actionMenuBtnHovered_ < kMaxVideoSlots) hovSlot = actionMenuBtnHovered_;
+            else if (actionMenu_.selectedOption >= 0 && actionMenu_.selectedOption < kMaxVideoSlots)
+                hovSlot = actionMenu_.selectedOption;
+            const bool hovAdd = hovSlot >= 0 && hovSlot < menuOptCount &&
+                                actionMenu_.options[static_cast<std::size_t>(hovSlot)] == "Add";
+            const UiRect box = hub::pickerPreview();
+            const std::string caption = hovSlot < 0 ? std::string("Point at a screen to replace it")
+                                      : hovAdd ? ("Add as screen " + std::to_string(hovSlot + 1))
+                                               : ("Replace screen " + std::to_string(hovSlot + 1));
+            drawFitCentered(box.cx, box.cy - box.hh - 0.030f, box.hw * 2.0f, scCap,
+                            hovSlot >= 0 ? themeTextCol : slateCol, caption);
+            bool anyFree = false;
+            for (int slot = 0; slot < kMaxVideoSlots && slot < menuOptCount; ++slot) {
+                anyFree = anyFree || actionMenu_.options[static_cast<std::size_t>(slot)] == "Add";
+            }
+            if (anyFree) {
+                const UiRect r = hub::pickerAddCard();
+                drawFitCentered(r.cx, r.cy - 0.060f, r.hw * 2.0f - 0.02f, scCap * 0.90f,
+                                hovAdd ? themeTextCol : slateCol, "Add a screen");
+            }
+            const UiRect cr = hub::pickerCancel();
+            drawFitCentered(cr.cx, cr.cy, cr.hw * 2.0f - 0.02f, scCap * 1.05f, themeTextCol, "Cancel");
         } else if (actionMenu_.page == 6) {
             int order[kMaxVideoSlots];
             screenOrderLeftToRight(order);

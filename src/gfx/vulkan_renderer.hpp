@@ -121,6 +121,9 @@ public:
         arrangePreset_ = preset;
         arrangeSnap_ = snap;
     }
+    // "Play on which screen?" (page 6): true = show the screens as arranged
+    // (preview set with setArrangePreview) instead of a row of tiles.
+    void setPickerSpatial(bool spatial) { pickerSpatial_ = spatial; }
     // Multi-screen mode: outlines + "selected" highlight; ambilight follows the
     // selected screen.
     // Video screen under the laser (multi-screen mode, no UI in the way), or -1.
@@ -870,6 +873,10 @@ private:
     };
     SwapArrow arrangeArrows_[4];
     int arrangeArrowCount_ = 0;
+    // Preview tile outlines (x0, x1, y0, y1 in panel coords) for hit-testing.
+    float arrangeTileRect_[kMaxVideoSlots][4] = {};
+    bool arrangeTileValid_[kMaxVideoSlots] = {};
+    bool pickerSpatial_ = false;  // screen picker shows the arranged screens
     bool multiScreenActive_ = false;
     int selectedScreen_ = 0;
     int pointerScreen_ = -1;

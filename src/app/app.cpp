@@ -1227,6 +1227,18 @@ void App::openPlayTargetMenu(const std::string& path) {
     }
     actionMenu_.options.push_back("Cancel");
     actionMenu_.selectedOption = selectedScreen_;
+    // With a layout in use, show the screens where they are arranged.
+    const bool spatial = arrangementActive_ && !(screens_[0].open && screens_[0].projection != 0);
+    if (spatial) {
+        VulkanRenderer::ScreenPlacement pls[VulkanRenderer::kMaxVideoSlots];
+        for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
+            const VulkanRenderer::ScreenPlacement& pl = renderer_.screenPlacement(slot);
+            if (screens_[slot].open && pl.active) pls[slot] = pl;
+        }
+        renderer_.setArrangePreview(pls, renderer_.screenPivot(), arrangement_.yaw, arrangement_.pitch, -1,
+                                    arrangement_.snap);
+    }
+    renderer_.setPickerSpatial(spatial);
 }
 
 void App::playFromBrowser(const std::string& path) {
