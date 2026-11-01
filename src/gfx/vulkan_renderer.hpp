@@ -113,6 +113,9 @@ public:
     // selected screen.
     // Video screen under the laser (multi-screen mode, no UI in the way), or -1.
     int pointerScreen() const { return pointerScreen_; }
+    // Screen slots ordered left-to-right as they sit around the viewer (for the
+    // "play on which screen?" picker tiles).
+    void screenOrderLeftToRight(int out[kMaxVideoSlots]) const;
     // World-space point where the laser hits that screen.
     const float* pointerScreenHit() const { return pointerHit_; }
     void setMultiScreen(bool active, int selectedSlot) {
@@ -401,6 +404,8 @@ public:
         Sort = 23,       // three bars of decreasing length
         SpeakerMuted = 26,  // speaker with a cross
         Move = 27,          // four-way arrows
+        Unlocked = 28,      // open padlock
+        Layout = 29,        // 2 x 2 grid of tiles
         GlassPanel = 25, // rounded box with bevel + eye-dependent reflection sheen
     };
 
@@ -424,17 +429,18 @@ public:
         Recenter,      // recenter screen/view from HUD
         HideHud,       // immediately hide player controls
         ScreenMute,    // multi-screen row: mute / unmute the selected screen
-        ScreenMove,    // multi-screen row: place the selected screen with the laser
+        ScreenLock,    // multi-screen row: unlock / lock all screens for grabbing
+        ScreenLayout,  // multi-screen row: arrange screens with a preset
         ScreenClose,   // multi-screen row: close the selected screen
         Count
     };
     // Multi-screen row under the dock (shown while Multiple Screens is on and a
     // video plays): which screen the dock controls and its mute state.
-    void setScreenControls(bool visible, int screenNumber, int screenCount, bool muted) {
+    void setScreenControls(bool visible, int screenNumber, bool muted, bool unlocked) {
         screenControlsVisible_ = visible;
         screenControlsNumber_ = screenNumber;
-        screenControlsCount_ = screenCount;
         screenControlsMuted_ = muted;
+        screensUnlocked_ = unlocked;
     }
     void setControlBar(bool visible) { controlBarVisible_ = visible; }
     bool controlBarVisible() const { return controlBarVisible_; }
@@ -835,8 +841,8 @@ private:
     int pointerScreen_ = -1;
     bool screenControlsVisible_ = false;
     int screenControlsNumber_ = 1;
-    int screenControlsCount_ = 1;
     bool screenControlsMuted_ = false;
+    bool screensUnlocked_ = false;  // screens can be grabbed with the laser
     // Last drawn flat-screen geometry per slot (for laser hit-testing): centre,
     // yaw/pitch and half-size in metres; valid only while the slot is drawn.
     struct ScreenHitInfo {
@@ -848,9 +854,7 @@ private:
         float halfH = 0.0f;
     };
     ScreenHitInfo screenHit_[kMaxVideoSlots];
-    // Screen slots ordered left-to-right as they sit around the viewer (for the
-    // "play on which screen?" picker tiles).
-    void screenOrderLeftToRight(int out[kMaxVideoSlots]) const;
+
     uint64_t ycbcrRebuildCount_ = 0;
 
     VkCommandBuffer uploadCmd_ = VK_NULL_HANDLE;

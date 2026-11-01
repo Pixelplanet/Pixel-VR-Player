@@ -1203,14 +1203,135 @@ void App::ensureScreenPlacement(int slot) {
     renderer_.setScreenPlacement(slot, pl);
 }
 
-void App::startMovingScreen(int slot, const XrInputState& in) {
+void App::startGrabbingScreen(int slot, const XrInputState& in) {
     ensureScreenPlacement(slot);
     const VulkanRenderer::ScreenPlacement& pl = renderer_.screenPlacement(slot);
-    const float dx = pl.center[0] - in.headPos[0];
-    const float dy = pl.center[1] - in.headPos[1];
-    const float dz = pl.center[2] - in.headPos[2];
-    movingDistance_ = std::clamp(std::sqrt(dx * dx + dy * dy + dz * dz), 1.0f, 8.0f);
+    const int hand = renderer_.pointerHand() == 0 ? 0 : 1;
+    const float* hit = renderer_.pointerScreenHit();
+    const float* origin = in.controllers[hand].position;
+    const float dx = hit[0] - origin[0];
+    const float dy = hit[1] - origin[1];
+    const float dz = hit[2] - origin[2];
+    // Keep the grabbed point under the laser: remember its distance along the
+    // ray and the screen centre's offset from it.
+    movingDistance_ = std::clamp(std::sqrt(dx * dx + dy * dy + dz * dz), 0.8f, 8.0f);
+    for (int k = 0; k < 3; ++k) grabOffset_[k] = pl.center[k] - hit[k];
     movingScreen_ = slot;
+}
+
+float App::screenEyeAspect(int slot) const {
+    float aspect = 16.0f / 9.0f;
+#ifdef PIXELVR_HAVE_MEDIA
+    const ScreenState& sc = screens_[slot];
+    if (sc.open && sc.engine.width() > 0 && sc.engine.height() > 0) {
+        aspect = static_cast<float>(sc.engine.width()) / static_cast<float>(sc.engine.height());
+        if (sc.stereo == 1 && aspect >= 2.6f) aspect *= 0.5f;       // full SBS
+        else if (sc.stereo == 2 && aspect <= 1.2f) aspect *= 2.0f;  // full TB
+    }
+#else
+    (void)slot;
+#endif
+    return aspect;
+}
+
+void App::openArrangeMenu() {
+    int n = 0;
+    for (const ScreenState& sc : screens_) n += sc.open ? 1 : 0;
+    actionMenu_.visible = true;
+    actionMenu_.page = 8;
+    actionMenu_.title = "Arrange Screens";
+    actionMenu_.subtitle = "Lines the open screens up around you";
+    actionMenu_.options.clear();
+    if (n >= 2) actionMenu_.options.push_back("Side by side");
+    if (n == 3) actionMenu_.options.push_back("Two below, one above");
+    if (n >= 2) actionMenu_.options.push_back("Stacked");
+    if (n >= 2) actionMenu_.options.push_back("Cinema (main + sides)");
+    if (n == 1) actionMenu_.options.push_back("Center in front");
+    actionMenu_.options.push_back("Cancel");
+    actionMenu_.selectedOption = 0;
+}
+
+void App::applyLayout(const std::string& preset) {
+    if (settings_.projectionMode() != 0 && selectedScreen_ == 0) return;  // immersive
+    // Open screens in their current left-to-right order.
+    int order[VulkanRenderer::kMaxVideoSlots];
+    renderer_.screenOrderLeftToRight(order);
+    std::vector<int> slots;
+    for (int i = 0; i < VulkanRenderer::kMaxVideoSlots; ++i) {
+        if (screens_[order[i]].open) slots.push_back(order[i]);
+    }
+    if (slots.empty()) return;
+    const int n = static_cast<int>(slots.size());
+    const float* pivot = renderer_.screenPivot();
+    const float baseYaw = renderer_.screenYaw();
+    const float basePitch = renderer_.recenterPitch();
+    const float dist = renderer_.screenDistance();
+    constexpr float kGap = 0.12f;  // metres between screens
+    auto width = [&](int slot, float scale) { return 3.2f * scale * screenEyeAspect(slot) / (16.0f / 9.0f); };
+    auto place = [&](int slot, float arcX, float arcY, float scale) {
+        // arcX / arcY: offsets along the viewing sphere at `dist` (metres of
+        // arc), converted to yaw (positive = left) and pitch around the view.
+        ensureScreenPlacement(slot);
+        VulkanRenderer::ScreenPlacement pl = renderer_.screenPlacement(slot);
+        pl.yaw = baseYaw - arcX / dist;
+        pl.pitch = basePitch + arcY / dist;
+        pl.scale = scale;
+        pl.center[0] = pivot[0] - std::sin(pl.yaw) * std::cos(pl.pitch) * dist;
+        pl.center[1] = pivot[1] + std::sin(pl.pitch) * dist;
+        pl.center[2] = pivot[2] - std::cos(pl.yaw) * std::cos(pl.pitch) * dist;
+        pl.active = true;
+        renderer_.setScreenPlacement(slot, pl);
+    };
+    auto row = [&](const std::vector<int>& rowSlots, float scale, float arcY) {
+        float total = -kGap;
+        for (int sl : rowSlots) total += width(sl, scale) + kGap;
+        float x = -0.5f * total;
+        for (int sl : rowSlots) {
+            const float w = width(sl, scale);
+            place(sl, x + 0.5f * w, arcY, scale);
+            x += w + kGap;
+        }
+    };
+
+    if (preset == "Side by side") {
+        row(slots, n == 3 ? 0.62f : 0.80f, 0.0f);
+    } else if (preset == "Stacked") {
+        const float scale = (n == 3) ? 0.50f : 0.65f;
+        const float h = 1.8f * scale;
+        const float total = n * h + (n - 1) * kGap;
+        float y = 0.5f * total - 0.5f * h;  // top screen first (leftmost)
+        for (int sl : slots) {
+            place(sl, 0.0f, y, scale);
+            y -= h + kGap;
+        }
+    } else if (preset == "Two below, one above" && n == 3) {
+        const float scale = 0.55f;
+        const float h = 1.8f * scale;
+        const int top = screens_[selectedScreen_].open ? selectedScreen_ : slots[1];
+        std::vector<int> bottom;
+        for (int sl : slots) {
+            if (sl != top) bottom.push_back(sl);
+        }
+        row({top}, scale, 0.5f * (h + kGap));
+        row(bottom, scale, -0.5f * (h + kGap));
+    } else if (preset == "Cinema (main + sides)") {
+        // Main (selected) screen big in front, the others smaller beside it.
+        const int main = screens_[selectedScreen_].open ? selectedScreen_ : slots[0];
+        const float mainScale = 0.90f;
+        const float sideScale = 0.55f;
+        place(main, 0.0f, 0.0f, mainScale);
+        const float mainHalf = 0.5f * width(main, mainScale);
+        int side = 0;
+        for (int sl : slots) {
+            if (sl == main) continue;
+            const float w = width(sl, sideScale);
+            const float x = mainHalf + kGap + 0.5f * w;
+            place(sl, side == 0 ? -x : x, 0.0f, sideScale);  // first to the left
+            ++side;
+        }
+    } else if (preset == "Center in front") {
+        place(slots[0], 0.0f, 0.0f, 1.0f);
+    }
 }
 
 void App::openActionMenu() {
@@ -1436,9 +1557,9 @@ int App::run() {
                                        static_cast<int>(textEntry_.cursor));
             renderer_.setKeyboardModes(textEntry_.shift, textEntry_.symbols);
 
-            // Multi-screen move mode: the screen follows the laser at a fixed
-            // distance and turns to face the viewer. Stick up/down = distance,
-            // left/right = size; trigger or B drops it. Owns the input meanwhile.
+            // Multi-screen grab: while the trigger is held on an unlocked screen it
+            // follows the laser (grab point stays under it) and turns to face the
+            // viewer. Stick up/down = distance, left/right = size; release drops it.
             if (movingScreen_ >= 0) {
                 VulkanRenderer::ScreenPlacement pl = renderer_.screenPlacement(movingScreen_);
                 if (!pl.active || !screens_[movingScreen_].open) {
@@ -1456,7 +1577,9 @@ int App::run() {
                         const float fwdLocal[3] = {0.0f, 0.0f, -1.0f};
                         float fwd[3];
                         quatRotate(ctl.orientation, fwdLocal, fwd);
-                        for (int k = 0; k < 3; ++k) pl.center[k] = ctl.position[k] + fwd[k] * movingDistance_;
+                        for (int k = 0; k < 3; ++k) {
+                            pl.center[k] = ctl.position[k] + fwd[k] * movingDistance_ + grabOffset_[k];
+                        }
                         const float d[3] = {pl.center[0] - in.headPos[0], pl.center[1] - in.headPos[1],
                                             pl.center[2] - in.headPos[2]};
                         const float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
@@ -1466,7 +1589,8 @@ int App::run() {
                         }
                         renderer_.setScreenPlacement(movingScreen_, pl);
                     }
-                    if (in.select || in.buttonDown[XrInputState::BtnB] ||
+                    // Releasing the trigger drops the screen (B cancels the grab too).
+                    if (!in.selectHeld || in.buttonDown[XrInputState::BtnB] ||
                         in.buttonDown[settings_.bindMenu()]) {
                         movingScreen_ = -1;
                         xr_.triggerHaptic(hand, 0.030f, 0.0f, 0.5f);
@@ -1706,8 +1830,9 @@ int App::run() {
             }
 #endif
             renderer_.setMultiScreen(multiScreenEnabled() && openScreenCount() > 0, selectedScreen_);
+            if (!multiScreenEnabled() || openScreenCount() == 0) screensUnlocked_ = false;
             renderer_.setScreenControls(multiScreenEnabled() && cur().open, selectedScreen_ + 1,
-                                        openScreenCount(), cur().muted);
+                                        cur().muted, screensUnlocked_);
             renderer_.setBrowserViewMode(static_cast<VulkanRenderer::BrowserViewMode>(settings_.browserViewMode()));
             renderer_.setBrowserQuickPath(browser_.isCurrentBookmarked());
 #ifdef PIXELVR_HAVE_FREETYPE
@@ -2453,7 +2578,7 @@ int App::run() {
 
             // File Action Submenu or Files view interaction inside Unified Spatial Hub
             if (actionMenu_.visible) {
-                if ((!browser_.isOpen() && actionMenu_.page != 5) || downloadsWindow_ || settings_.isOpen() || !pendingDl_.empty()) {
+                if ((!browser_.isOpen() && actionMenu_.page != 5 && actionMenu_.page != 8) || downloadsWindow_ || settings_.isOpen() || !pendingDl_.empty()) {
                     actionMenu_.visible = false;
                 } else {
                     const Browser::Entry* fe = browser_.focused();
@@ -2635,6 +2760,9 @@ int App::run() {
 #endif
                                     xr_.triggerHaptic(0, 0.040f, 0.0f, 0.6f);
                                     xr_.triggerHaptic(1, 0.040f, 0.0f, 0.6f);
+                                    actionMenu_.visible = false;
+                                } else if (actionMenu_.page == 8) {
+                                    if (opt != "Cancel") applyLayout(opt);
                                     actionMenu_.visible = false;
                                 } else if (actionMenu_.page == 6) {
                                     // Screen picker: 0..2 = screen slot tile, 3 = Cancel.
@@ -2950,10 +3078,9 @@ int App::run() {
                 const int ps = renderer_.pointerScreen();
                 if (ps >= 0 && renderer_.pointerButton() < 0 && !renderer_.pointerOnTimeline()) {
                     if (in.select) {
-                        if (ps != selectedScreen_) {
-                            selectScreen(ps);
-                            xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.020f, 0.0f, 0.45f);
-                        }
+                        if (ps != selectedScreen_) selectScreen(ps);
+                        if (screensUnlocked_) startGrabbingScreen(ps, in);
+                        xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.020f, 0.0f, 0.45f);
                         in.select = false;
                         interacted = true;
                     }
@@ -3047,8 +3174,10 @@ int App::run() {
                         dismissHud(in, nowT);
                     } else if (cb == VulkanRenderer::CtrlButton::ScreenMute) {
                         cur().muted = !cur().muted;
-                    } else if (cb == VulkanRenderer::CtrlButton::ScreenMove) {
-                        startMovingScreen(selectedScreen_, in);
+                    } else if (cb == VulkanRenderer::CtrlButton::ScreenLock) {
+                        screensUnlocked_ = !screensUnlocked_;
+                    } else if (cb == VulkanRenderer::CtrlButton::ScreenLayout) {
+                        openArrangeMenu();
                     } else if (cb == VulkanRenderer::CtrlButton::ScreenClose) {
                         closeMedia(selectedScreen_);
 #ifdef PIXELVR_HAVE_FREETYPE

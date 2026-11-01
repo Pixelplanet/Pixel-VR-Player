@@ -250,6 +250,19 @@ void main() {
         float lf = sdTriangle(p, vec2(-0.48, -0.20), vec2(-0.48, 0.20), vec2(-0.78, 0.0)) - 0.02;
         float rt = sdTriangle(p, vec2(0.48, -0.20), vec2(0.78, 0.0), vec2(0.48, 0.20)) - 0.02;
         d = min(min(bar1, bar2), min(min(up, dn), min(lf, rt)));
+    } else if (shape == 28) {
+        // Shape 28: Open padlock (shackle lifted and swung to the left)
+        float body = sdRoundedBox(p - vec2(0.0, -0.22), vec2(0.50, 0.38), 0.10);
+        vec2 pq = p - vec2(-0.30, 0.34);
+        float shackle = abs(length(pq) - 0.30) - 0.08;
+        shackle = max(shackle, -pq.y);
+        float leg = sdRoundedBox(vec2(p.x + 0.60, p.y - 0.26), vec2(0.08, 0.10), 0.02);
+        float keyhole = length(p - vec2(0.0, -0.18)) - 0.09;
+        d = max(min(body, min(shackle, leg)), -keyhole);
+    } else if (shape == 29) {
+        // Shape 29: Layout (2 x 2 tiles)
+        vec2 q = abs(p) - vec2(0.32, 0.26);
+        d = sdRoundedBox(q, vec2(0.25, 0.19), 0.05);
     } else {
         d = sdRoundedBox(p, vec2(1.0), 0.0);
     }

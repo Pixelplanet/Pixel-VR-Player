@@ -216,7 +216,14 @@ private:
     // Gives a screen an explicit placement (the main screen starts from its
     // recenter-anchored pose) so it can be moved or resized freely.
     void ensureScreenPlacement(int slot);
-    void startMovingScreen(int slot, const XrInputState& in);
+    // Unlocked screens can be grabbed with the laser (hold trigger) and dragged.
+    bool screensUnlocked_ = false;
+    float grabOffset_[3] = {0.0f, 0.0f, 0.0f};  // screen centre minus grab point
+    void startGrabbingScreen(int slot, const XrInputState& in);
+    // Preset arrangements ("Side by side", "Stacked", ...).
+    void openArrangeMenu();
+    void applyLayout(const std::string& preset);
+    float screenEyeAspect(int slot) const;  // per-eye width / height of a screen's video
     // Browser 'play' entry point: asks where to play when screens are in use.
     void playFromBrowser(const std::string& path);
     int movingScreen_ = -1;  // screen being placed with the laser, or -1

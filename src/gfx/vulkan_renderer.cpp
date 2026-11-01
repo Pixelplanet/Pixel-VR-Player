@@ -104,11 +104,12 @@ constexpr float kDockHalfH = 0.23f;
 constexpr int kBtnCount = static_cast<int>(VulkanRenderer::CtrlButton::Count);
 
 // The multi-screen row extends the dock downward by this much when shown.
-constexpr float kDockScreenRowExtra = 0.105f;
+constexpr float kDockScreenRowExtra = 0.135f;
 inline bool is_screen_row_button(int b) {
     using Btn = VulkanRenderer::CtrlButton;
     const auto cb = static_cast<Btn>(b);
-    return cb == Btn::ScreenMute || cb == Btn::ScreenMove || cb == Btn::ScreenClose;
+    return cb == Btn::ScreenMute || cb == Btn::ScreenLock || cb == Btn::ScreenLayout ||
+           cb == Btn::ScreenClose;
 }
 
 inline CtrlButtonRect get_ctrl_button_rect(int b) {
@@ -131,9 +132,10 @@ inline CtrlButtonRect get_ctrl_button_rect(int b) {
         case Btn::ScreenToggle: return { 0.62f, kBarY - 0.128f, 0.210f, 0.036f};
 
         // Multi-screen row (below the main controls, only while shown)
-        case Btn::ScreenMute:   return { 0.06f, kBarY - 0.272f, 0.034f, 0.034f};
-        case Btn::ScreenMove:   return { 0.16f, kBarY - 0.272f, 0.034f, 0.034f};
-        case Btn::ScreenClose:  return { 0.26f, kBarY - 0.272f, 0.034f, 0.034f};
+        case Btn::ScreenMute:   return {-0.03f, kBarY - 0.292f, 0.046f, 0.046f};
+        case Btn::ScreenLock:   return { 0.10f, kBarY - 0.292f, 0.046f, 0.046f};
+        case Btn::ScreenLayout: return { 0.23f, kBarY - 0.292f, 0.046f, 0.046f};
+        case Btn::ScreenClose:  return { 0.36f, kBarY - 0.292f, 0.046f, 0.046f};
         default: return {0.0f, 0.0f, 0.0f, 0.0f};
     }
 }
@@ -1828,7 +1830,7 @@ void VulkanRenderer::updatePointer() {
             if (inPanel) {
                 hitHere(world.x, world.y, world.z);
                 const int optCount = static_cast<int>(actionMenu_.options.size());
-                if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5) {
+                if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5 || actionMenu_.page == 8) {
                     for (int i = 0; i < optCount; ++i) {
                         if (hub::actionMenuOption(i, optCount).contains(hx, hyy, 0.002f)) {
                             actionMenuBtnHovered_ = i;
@@ -2459,213 +2461,6 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                       static_cast<uint32_t>(vt.height)};
     vkCmdSetScissor(commandBuffer_, 0, 1, &scissor);
 
-    // Draw each video slot that has a frame; otherwise the render pass just
-    // clears the eye image. Slot 0 is the main screen (recenter-anchored, also
-    // 360/180); slots 1..2 are extra flat screens placed by the user. Each flat
-    // screen's model matrix and half-size are kept for the selection outline.
-    if (viewIndex == 0) {
-        for (ScreenHitInfo& h : screenHit_) h.valid = false;  // refreshed below
-    }
-    math::Mat4 screenModels[kMaxVideoSlots];
-    float screenBend[kMaxVideoSlots] = {};
-    float screenScaleX[kMaxVideoSlots] = {};
-    bool screenDrawn[kMaxVideoSlots] = {};
-    {
-        using namespace math;
-        const Mat4 viewMatV = rigidInverse(rigidTransform(
-            Quat{view.pose.orientation.x, view.pose.orientation.y,
-                 view.pose.orientation.z, view.pose.orientation.w},
-            Vec3{view.pose.position.x, view.pose.position.y, view.pose.position.z}));
-        const Mat4 projV = perspectiveVulkan(
-            std::tan(view.fov.angleLeft), std::tan(view.fov.angleRight),
-            std::tan(view.fov.angleUp), std::tan(view.fov.angleDown), 0.05f, 100.0f);
-        const Mat4 vpV = multiply(projV, viewMatV);
-
-        // Draw order: farther screens first so nearer ones blend over them.
-        int order[kMaxVideoSlots] = {0, 1, 2};
-        float orderDist[kMaxVideoSlots] = {};
-        for (int slot = 0; slot < kMaxVideoSlots; ++slot) {
-            const ScreenPlacement& pl = screenPlacements_[slot];
-            Vec3 c{0.0f, 0.0f, 0.0f};
-            if (slot == 0 && !pl.active) {
-                c = Vec3{screenPivot_[0] + screenForward_[0] * screenDistance_,
-                         screenPivot_[1] + screenForward_[1] * screenDistance_,
-                         screenPivot_[2] + screenForward_[2] * screenDistance_};
-            } else {
-                c = Vec3{pl.center[0], pl.center[1], pl.center[2]};
-            }
-            const Vec3 d = c - Vec3{view.pose.position.x, view.pose.position.y, view.pose.position.z};
-            orderDist[slot] = dot(d, d);
-        }
-        std::sort(order, order + kMaxVideoSlots,
-                  [&](int a, int b) { return orderDist[a] > orderDist[b]; });
-
-        for (int oi = 0; oi < kMaxVideoSlots; ++oi) {
-            const int slot = order[oi];
-            VideoSlot& v = videoSlots_[slot];
-            const ScreenPlacement& pl = screenPlacements_[slot];
-            if (!v.hasVideo) continue;
-            if (slot > 0 && !pl.active) continue;  // extra slot not in use
-            const bool sphere = (slot == 0) && projectionMode_ != ProjectionMode::Flat;
-            // While 360/180 plays on the main slot it is immersive and alone.
-            if (slot > 0 && projectionMode_ != ProjectionMode::Flat) continue;
-            const StereoMode stereo = (slot == 0) ? stereoMode_ : pl.stereo;
-            const bool ycbcr = v.usingDmabuf && v.resolveImage != VK_NULL_HANDLE &&
-                               v.ycbcrQuadPipeline != VK_NULL_HANDLE &&
-                               v.ycbcrSpherePipeline != VK_NULL_HANDLE;
-            VkDescriptorSet videoSet = ycbcr ? v.resolveSet : v.descriptorSet;
-            auto fillCommon = [&](float conv[4], float range[4]) {
-                std::memcpy(conv, v.conversion, sizeof(float) * 4);
-                std::memcpy(range, v.range, sizeof(float) * 4);
-                if (ycbcr) {  // reuse conversion.xy as the crop UV scale
-                    conv[0] = v.drmUvScaleX;
-                    conv[1] = v.drmUvScaleY;
-                }
-            };
-
-            if (!sphere) {
-                VkPipeline pipe = ycbcr ? v.ycbcrQuadPipeline : pipeline_;
-                VkPipelineLayout layout = ycbcr ? v.ycbcrQuadLayout : pipelineLayout_;
-                Vec3 center{0.0f, 0.0f, 0.0f};
-                Mat4 rot;
-                float scale = 1.0f;
-                float curvature = screenCurvature_;
-                Vec3 fwd{screenForward_[0], screenForward_[1], screenForward_[2]};
-                if (slot == 0 && !pl.active) {
-                    center = Vec3{screenPivot_[0] + screenForward_[0] * screenDistance_,
-                                  screenPivot_[1] + screenForward_[1] * screenDistance_,
-                                  screenPivot_[2] + screenForward_[2] * screenDistance_};
-                    rot = orientFromYawPitch(screenYaw_, recenterPitch_);
-                } else {
-                    center = Vec3{pl.center[0], pl.center[1], pl.center[2]};
-                    rot = orientFromYawPitch(pl.yaw, pl.pitch);
-                    scale = pl.scale;
-                    curvature = pl.curvature;
-                    fwd = Vec3{-std::sin(pl.yaw), 0.0f, -std::cos(pl.yaw)};
-                }
-                // Each eye shows half the frame. Full-width SBS (~2x wide) is halved
-                // back to a normal shape; half-SBS already has per-eye shape so it is
-                // stretched (no change). Same idea vertically for full vs half OU.
-                float eyeAspect = v.videoAspect;
-                if (stereo == StereoMode::SideBySide) {
-                    if (v.videoAspect >= 2.6f) eyeAspect = v.videoAspect * 0.5f;
-                } else if (stereo == StereoMode::TopBottom) {
-                    if (v.videoAspect <= 1.2f) eyeAspect = v.videoAspect * 2.0f;
-                }
-                const float widthScale = eyeAspect / (16.0f / 9.0f);
-
-                // Cinema Screen Ambilight Glow: only around one screen (the main
-                // one, or the selected one in multi-screen mode).
-                const bool glowHere = (multiScreenActive_ ? slot == selectedScreen_ : slot == 0);
-                if (ambilightIntensity_ > 0.01f && glowHere) {
-                    VkPipeline ambPipe = ycbcr ? v.ycbcrAmbilightPipeline : ambilightPipeline_;
-                    if (ambPipe != VK_NULL_HANDLE) {
-                        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, ambPipe);
-                        vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                                layout, 0, 1, &videoSet, 0, nullptr);
-                        const Vec3 ambCenter = center + fwd * 0.015f;
-                        const Mat4 ambModel = multiply(
-                            multiply(translation(ambCenter), rot),
-                            scaling(Vec3{widthScale * 1.55f * scale, 1.90f * scale, scale}));
-                        const Mat4 ambMvp = multiply(vpV, ambModel);
-                        PushConstants ambPush{};
-                        std::memcpy(ambPush.mvp, ambMvp.m, sizeof(ambPush.mvp));
-                        fillCommon(ambPush.conversion, ambPush.range);
-                        ambPush.range[3] = ambilightIntensity_;
-                        ambPush.stereo[0] = static_cast<float>(static_cast<int>(stereo));
-                        ambPush.stereo[1] = static_cast<float>(viewIndex);
-                        ambPush.stereo[2] = swapEyes_ ? 1.0f : 0.0f;
-                        ambPush.stereo[3] = curvature;
-                        vkCmdPushConstants(commandBuffer_, layout,
-                                           VK_SHADER_STAGE_VERTEX_BIT |
-                                               VK_SHADER_STAGE_FRAGMENT_BIT,
-                                           0, sizeof(PushConstants), &ambPush);
-                        vkCmdDraw(commandBuffer_, 64 * 6, 1, 0, 0);
-                    }
-                }
-
-                vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
-                vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                        layout, 0, 1, &videoSet, 0, nullptr);
-                const Mat4 model = multiply(multiply(translation(center), rot),
-                                            scaling(Vec3{widthScale * scale, scale, scale}));
-                const Mat4 mvp = multiply(vpV, model);
-                PushConstants push{};
-                std::memcpy(push.mvp, mvp.m, sizeof(push.mvp));
-                fillCommon(push.conversion, push.range);
-                push.stereo[0] = static_cast<float>(static_cast<int>(stereo));
-                push.stereo[1] = static_cast<float>(viewIndex);
-                push.stereo[2] = swapEyes_ ? 1.0f : 0.0f;
-                push.stereo[3] = curvature;
-                vkCmdPushConstants(commandBuffer_, layout,
-                                   VK_SHADER_STAGE_VERTEX_BIT |
-                                       VK_SHADER_STAGE_FRAGMENT_BIT,
-                                   0, sizeof(PushConstants), &push);
-                vkCmdDraw(commandBuffer_, 64 * 6, 1, 0, 0);
-
-                // Outline geometry in the screen's own (unscaled) model space:
-                // quad.vert's screen is 3.2 x 1.8 and bends with radius
-                // 3.2 / (curvature * 1.75), the same bend ui.vert applies.
-                screenModels[slot] = model;
-                screenBend[slot] = (curvature > 0.005f) ? 3.2f / (curvature * 1.75f) : 0.0f;
-                if (viewIndex == 0) {
-                    ScreenHitInfo& hit = screenHit_[slot];
-                    hit.valid = true;
-                    hit.center[0] = center.x;
-                    hit.center[1] = center.y;
-                    hit.center[2] = center.z;
-                    hit.yaw = (slot == 0 && !pl.active) ? screenYaw_ : pl.yaw;
-                    hit.pitch = (slot == 0 && !pl.active) ? recenterPitch_ : pl.pitch;
-                    hit.halfW = 1.6f * widthScale * scale;
-                    hit.halfH = 0.9f * scale;
-                }
-                screenScaleX[slot] = widthScale * scale;
-                screenDrawn[slot] = true;
-            } else {
-                VkPipeline pipe = ycbcr ? v.ycbcrSpherePipeline : spherePipeline_;
-                VkPipelineLayout layout =
-                    ycbcr ? v.ycbcrSphereLayout : spherePipelineLayout_;
-                vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
-                vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                        layout, 0, 1, &videoSet, 0, nullptr);
-                // Fold the recenter yaw + viewpoint tilt into the camera orientation
-                // and scale the FOV by the zoom so 360/180 content can be re-angled and
-                // pushed nearer/farther.
-                const Mat4 headRot = fromQuat(Quat{
-                    view.pose.orientation.x, view.pose.orientation.y,
-                    view.pose.orientation.z, view.pose.orientation.w});
-                // Recenter yaw + pitch (so 360/180 re-centers where you look, incl.
-                // reclined) folded with the user's viewpoint tilt.
-                const float spherePitchTotal = spherePitch_ - recenterPitch_;
-                const Mat4 adjust = multiply(
-                    fromQuat(Quat{std::sin(0.5f * spherePitchTotal), 0.0f, 0.0f,
-                                  std::cos(0.5f * spherePitchTotal)}),
-                    fromQuat(Quat{0.0f, std::sin(0.5f * sphereYaw_), 0.0f,
-                                  std::cos(0.5f * sphereYaw_)}));
-                const Mat4 rot = multiply(adjust, headRot);
-                SpherePush push{};
-                std::memcpy(push.viewRotation, rot.m, sizeof(push.viewRotation));
-                push.fov[0] = std::tan(view.fov.angleLeft) * sphereZoom_;
-                push.fov[1] = std::tan(view.fov.angleRight) * sphereZoom_;
-                push.fov[2] = std::tan(view.fov.angleUp) * sphereZoom_;
-                push.fov[3] = std::tan(view.fov.angleDown) * sphereZoom_;
-                push.mode[0] =
-                    (projectionMode_ == ProjectionMode::Equirect180) ? 2.0f : 1.0f;
-                push.mode[1] = (stereo == StereoMode::TopBottom)     ? 2.0f
-                               : (stereo == StereoMode::SideBySide)  ? 1.0f
-                                                                     : 0.0f;
-                push.mode[2] = static_cast<float>(viewIndex);
-                push.mode[3] = swapEyes_ ? 1.0f : 0.0f;
-                fillCommon(push.conversion, push.range);
-                vkCmdPushConstants(
-                    commandBuffer_, layout,
-                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
-                    sizeof(SpherePush), &push);
-                vkCmdDraw(commandBuffer_, 3, 1, 0, 0);
-            }
-        }
-    }
-
     // Transport HUD. For flat content it is world-locked just beneath the video
     // screen (so it stays put as the viewer looks around and only appears for a
     // few seconds after a control change); for immersive 360/180 content, where
@@ -3119,26 +2914,234 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
     const float* themeTextCol = kTextPalettes[tcIdx];
     const float* themeAccentCol = kAccentPalettes[acIdx];
 
-    // Multi-screen: frame every screen, the selected one in the accent colour,
-    // so it is clear which screen the dock and laser clicks control.
-    if (multiScreenActive_ && uiPipeline_ != VK_NULL_HANDLE) {
-        int drawnCount = 0;
-        for (bool d : screenDrawn) drawnCount += d ? 1 : 0;
-        if (drawnCount > 1) {
-            bindPipe(uiPipeline_);
-            const Mat4 vpWorld = multiply(proj, viewMat);
-            for (int slot = 0; slot < kMaxVideoSlots; ++slot) {
-                if (!screenDrawn[slot]) continue;
-                const bool sel = (slot == selectedScreen_);
-                const Mat4 vpScreen = multiply(vpWorld, screenModels[slot]);
-                uiBendOverride = screenBend[slot];
-                // Model space is unscaled (half 1.6 x 0.9); pad ~2.5 cm outside.
-                const float padX = 0.025f / std::max(screenScaleX[slot], 0.1f);
-                const float frameCol[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-                const float* rim = sel ? themeAccentCol : kGlassRim;
-                drawUiElement(vpScreen, 0.0f, 0.0f, 1.6f + padX, 0.9f + 0.025f,
-                              UiShape::RoundedBox, frameCol, 0.03f, sel ? 0.012f : 0.006f, rim);
-                uiBendOverride = -1.0f;
+    // Video screens (drawn here so each one's frame can follow it far-to-near).
+    // Draw each video slot that has a frame; otherwise the render pass just
+    // clears the eye image. Slot 0 is the main screen (recenter-anchored, also
+    // 360/180); slots 1..2 are extra flat screens placed by the user. Each flat
+    // screen's model matrix and half-size are kept for the selection outline.
+    if (viewIndex == 0) {
+        for (ScreenHitInfo& h : screenHit_) h.valid = false;  // refreshed below
+    }
+    math::Mat4 screenModels[kMaxVideoSlots];
+    float screenBend[kMaxVideoSlots] = {};
+    float screenScaleX[kMaxVideoSlots] = {};
+    {
+        using namespace math;
+        const Mat4 viewMatV = rigidInverse(rigidTransform(
+            Quat{view.pose.orientation.x, view.pose.orientation.y,
+                 view.pose.orientation.z, view.pose.orientation.w},
+            Vec3{view.pose.position.x, view.pose.position.y, view.pose.position.z}));
+        const Mat4 projV = perspectiveVulkan(
+            std::tan(view.fov.angleLeft), std::tan(view.fov.angleRight),
+            std::tan(view.fov.angleUp), std::tan(view.fov.angleDown), 0.05f, 100.0f);
+        const Mat4 vpV = multiply(projV, viewMatV);
+
+        // Draw order: farther screens first so nearer ones blend over them.
+        int order[kMaxVideoSlots] = {0, 1, 2};
+        float orderDist[kMaxVideoSlots] = {};
+        for (int slot = 0; slot < kMaxVideoSlots; ++slot) {
+            const ScreenPlacement& pl = screenPlacements_[slot];
+            Vec3 c{0.0f, 0.0f, 0.0f};
+            if (slot == 0 && !pl.active) {
+                c = Vec3{screenPivot_[0] + screenForward_[0] * screenDistance_,
+                         screenPivot_[1] + screenForward_[1] * screenDistance_,
+                         screenPivot_[2] + screenForward_[2] * screenDistance_};
+            } else {
+                c = Vec3{pl.center[0], pl.center[1], pl.center[2]};
+            }
+            const Vec3 d = c - Vec3{view.pose.position.x, view.pose.position.y, view.pose.position.z};
+            orderDist[slot] = dot(d, d);
+        }
+        std::sort(order, order + kMaxVideoSlots,
+                  [&](int a, int b) { return orderDist[a] > orderDist[b]; });
+        // Frames: always while screens are unlocked (grab mode), otherwise only
+        // when more than one screen is visible.
+        int visibleScreens = 0;
+        for (int slot = 0; slot < kMaxVideoSlots; ++slot) {
+            const bool flatMain = (projectionMode_ == ProjectionMode::Flat);
+            if (videoSlots_[slot].hasVideo && flatMain && (slot == 0 || screenPlacements_[slot].active)) {
+                ++visibleScreens;
+            }
+        }
+        const bool drawFrames = multiScreenActive_ && (screensUnlocked_ || visibleScreens > 1) &&
+                                uiPipeline_ != VK_NULL_HANDLE;
+
+        for (int oi = 0; oi < kMaxVideoSlots; ++oi) {
+            const int slot = order[oi];
+            VideoSlot& v = videoSlots_[slot];
+            const ScreenPlacement& pl = screenPlacements_[slot];
+            if (!v.hasVideo) continue;
+            if (slot > 0 && !pl.active) continue;  // extra slot not in use
+            const bool sphere = (slot == 0) && projectionMode_ != ProjectionMode::Flat;
+            // While 360/180 plays on the main slot it is immersive and alone.
+            if (slot > 0 && projectionMode_ != ProjectionMode::Flat) continue;
+            const StereoMode stereo = (slot == 0) ? stereoMode_ : pl.stereo;
+            const bool ycbcr = v.usingDmabuf && v.resolveImage != VK_NULL_HANDLE &&
+                               v.ycbcrQuadPipeline != VK_NULL_HANDLE &&
+                               v.ycbcrSpherePipeline != VK_NULL_HANDLE;
+            VkDescriptorSet videoSet = ycbcr ? v.resolveSet : v.descriptorSet;
+            auto fillCommon = [&](float conv[4], float range[4]) {
+                std::memcpy(conv, v.conversion, sizeof(float) * 4);
+                std::memcpy(range, v.range, sizeof(float) * 4);
+                if (ycbcr) {  // reuse conversion.xy as the crop UV scale
+                    conv[0] = v.drmUvScaleX;
+                    conv[1] = v.drmUvScaleY;
+                }
+            };
+
+            if (!sphere) {
+                VkPipeline pipe = ycbcr ? v.ycbcrQuadPipeline : pipeline_;
+                VkPipelineLayout layout = ycbcr ? v.ycbcrQuadLayout : pipelineLayout_;
+                Vec3 center{0.0f, 0.0f, 0.0f};
+                Mat4 rot;
+                float scale = 1.0f;
+                float curvature = screenCurvature_;
+                Vec3 fwd{screenForward_[0], screenForward_[1], screenForward_[2]};
+                if (slot == 0 && !pl.active) {
+                    center = Vec3{screenPivot_[0] + screenForward_[0] * screenDistance_,
+                                  screenPivot_[1] + screenForward_[1] * screenDistance_,
+                                  screenPivot_[2] + screenForward_[2] * screenDistance_};
+                    rot = orientFromYawPitch(screenYaw_, recenterPitch_);
+                } else {
+                    center = Vec3{pl.center[0], pl.center[1], pl.center[2]};
+                    rot = orientFromYawPitch(pl.yaw, pl.pitch);
+                    scale = pl.scale;
+                    curvature = pl.curvature;
+                    fwd = Vec3{-std::sin(pl.yaw), 0.0f, -std::cos(pl.yaw)};
+                }
+                // Each eye shows half the frame. Full-width SBS (~2x wide) is halved
+                // back to a normal shape; half-SBS already has per-eye shape so it is
+                // stretched (no change). Same idea vertically for full vs half OU.
+                float eyeAspect = v.videoAspect;
+                if (stereo == StereoMode::SideBySide) {
+                    if (v.videoAspect >= 2.6f) eyeAspect = v.videoAspect * 0.5f;
+                } else if (stereo == StereoMode::TopBottom) {
+                    if (v.videoAspect <= 1.2f) eyeAspect = v.videoAspect * 2.0f;
+                }
+                const float widthScale = eyeAspect / (16.0f / 9.0f);
+
+                // Cinema Screen Ambilight Glow: only around one screen (the main
+                // one, or the selected one in multi-screen mode).
+                const bool glowHere = (multiScreenActive_ ? slot == selectedScreen_ : slot == 0);
+                if (ambilightIntensity_ > 0.01f && glowHere) {
+                    VkPipeline ambPipe = ycbcr ? v.ycbcrAmbilightPipeline : ambilightPipeline_;
+                    if (ambPipe != VK_NULL_HANDLE) {
+                        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, ambPipe);
+                        vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                                layout, 0, 1, &videoSet, 0, nullptr);
+                        const Vec3 ambCenter = center + fwd * 0.015f;
+                        const Mat4 ambModel = multiply(
+                            multiply(translation(ambCenter), rot),
+                            scaling(Vec3{widthScale * 1.55f * scale, 1.90f * scale, scale}));
+                        const Mat4 ambMvp = multiply(vpV, ambModel);
+                        PushConstants ambPush{};
+                        std::memcpy(ambPush.mvp, ambMvp.m, sizeof(ambPush.mvp));
+                        fillCommon(ambPush.conversion, ambPush.range);
+                        ambPush.range[3] = ambilightIntensity_;
+                        ambPush.stereo[0] = static_cast<float>(static_cast<int>(stereo));
+                        ambPush.stereo[1] = static_cast<float>(viewIndex);
+                        ambPush.stereo[2] = swapEyes_ ? 1.0f : 0.0f;
+                        ambPush.stereo[3] = curvature;
+                        vkCmdPushConstants(commandBuffer_, layout,
+                                           VK_SHADER_STAGE_VERTEX_BIT |
+                                               VK_SHADER_STAGE_FRAGMENT_BIT,
+                                           0, sizeof(PushConstants), &ambPush);
+                        vkCmdDraw(commandBuffer_, 64 * 6, 1, 0, 0);
+                    }
+                }
+
+                vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+                vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        layout, 0, 1, &videoSet, 0, nullptr);
+                const Mat4 model = multiply(multiply(translation(center), rot),
+                                            scaling(Vec3{widthScale * scale, scale, scale}));
+                const Mat4 mvp = multiply(vpV, model);
+                PushConstants push{};
+                std::memcpy(push.mvp, mvp.m, sizeof(push.mvp));
+                fillCommon(push.conversion, push.range);
+                push.stereo[0] = static_cast<float>(static_cast<int>(stereo));
+                push.stereo[1] = static_cast<float>(viewIndex);
+                push.stereo[2] = swapEyes_ ? 1.0f : 0.0f;
+                push.stereo[3] = curvature;
+                vkCmdPushConstants(commandBuffer_, layout,
+                                   VK_SHADER_STAGE_VERTEX_BIT |
+                                       VK_SHADER_STAGE_FRAGMENT_BIT,
+                                   0, sizeof(PushConstants), &push);
+                vkCmdDraw(commandBuffer_, 64 * 6, 1, 0, 0);
+
+                // Outline geometry in the screen's own (unscaled) model space:
+                // quad.vert's screen is 3.2 x 1.8 and bends with radius
+                // 3.2 / (curvature * 1.75), the same bend ui.vert applies.
+                screenModels[slot] = model;
+                screenBend[slot] = (curvature > 0.005f) ? 3.2f / (curvature * 1.75f) : 0.0f;
+                if (viewIndex == 0) {
+                    ScreenHitInfo& hit = screenHit_[slot];
+                    hit.valid = true;
+                    hit.center[0] = center.x;
+                    hit.center[1] = center.y;
+                    hit.center[2] = center.z;
+                    hit.yaw = (slot == 0 && !pl.active) ? screenYaw_ : pl.yaw;
+                    hit.pitch = (slot == 0 && !pl.active) ? recenterPitch_ : pl.pitch;
+                    hit.halfW = 1.6f * widthScale * scale;
+                    hit.halfH = 0.9f * scale;
+                }
+                screenScaleX[slot] = widthScale * scale;
+
+                if (drawFrames) {
+                    vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipeline_);
+                    const bool sel = (slot == selectedScreen_);
+                    uiBendOverride = screenBend[slot];
+                    // Model space is unscaled (half 1.6 x 0.9); pad ~2.5 cm outside.
+                    const float padX = 0.025f / std::max(screenScaleX[slot], 0.1f);
+                    const float frameCol[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                    const float unlockedRim[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.75f};
+                    const float* rim = sel ? themeAccentCol : (screensUnlocked_ ? unlockedRim : kGlassRim);
+                    const float width = sel ? 0.012f : (screensUnlocked_ ? 0.010f : 0.006f);
+                    drawUiElement(mvp, 0.0f, 0.0f, 1.6f + padX, 0.9f + 0.025f,
+                                  UiShape::RoundedBox, frameCol, 0.03f, width, rim);
+                    uiBendOverride = -1.0f;
+                }
+            } else {
+                VkPipeline pipe = ycbcr ? v.ycbcrSpherePipeline : spherePipeline_;
+                VkPipelineLayout layout =
+                    ycbcr ? v.ycbcrSphereLayout : spherePipelineLayout_;
+                vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+                vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        layout, 0, 1, &videoSet, 0, nullptr);
+                // Fold the recenter yaw + viewpoint tilt into the camera orientation
+                // and scale the FOV by the zoom so 360/180 content can be re-angled and
+                // pushed nearer/farther.
+                const Mat4 headRot = fromQuat(Quat{
+                    view.pose.orientation.x, view.pose.orientation.y,
+                    view.pose.orientation.z, view.pose.orientation.w});
+                // Recenter yaw + pitch (so 360/180 re-centers where you look, incl.
+                // reclined) folded with the user's viewpoint tilt.
+                const float spherePitchTotal = spherePitch_ - recenterPitch_;
+                const Mat4 adjust = multiply(
+                    fromQuat(Quat{std::sin(0.5f * spherePitchTotal), 0.0f, 0.0f,
+                                  std::cos(0.5f * spherePitchTotal)}),
+                    fromQuat(Quat{0.0f, std::sin(0.5f * sphereYaw_), 0.0f,
+                                  std::cos(0.5f * sphereYaw_)}));
+                const Mat4 rot = multiply(adjust, headRot);
+                SpherePush push{};
+                std::memcpy(push.viewRotation, rot.m, sizeof(push.viewRotation));
+                push.fov[0] = std::tan(view.fov.angleLeft) * sphereZoom_;
+                push.fov[1] = std::tan(view.fov.angleRight) * sphereZoom_;
+                push.fov[2] = std::tan(view.fov.angleUp) * sphereZoom_;
+                push.fov[3] = std::tan(view.fov.angleDown) * sphereZoom_;
+                push.mode[0] =
+                    (projectionMode_ == ProjectionMode::Equirect180) ? 2.0f : 1.0f;
+                push.mode[1] = (stereo == StereoMode::TopBottom)     ? 2.0f
+                               : (stereo == StereoMode::SideBySide)  ? 1.0f
+                                                                     : 0.0f;
+                push.mode[2] = static_cast<float>(viewIndex);
+                push.mode[3] = swapEyes_ ? 1.0f : 0.0f;
+                fillCommon(push.conversion, push.range);
+                vkCmdPushConstants(
+                    commandBuffer_, layout,
+                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                    sizeof(SpherePush), &push);
+                vkCmdDraw(commandBuffer_, 3, 1, 0, 0);
             }
         }
     }
@@ -3157,11 +3160,11 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         drawGlass(0.0f, dockCy, kDockHalfW, dockHh, glassPanelT.data(), 0.16f, 0.010f, kGlassRim);
         if (screenControlsVisible_) {
             // Divider above the multi-screen row + "SCREEN n" label pill
-            drawUiElement(vpPanel, 0.0f, kBarY - 0.212f, kDockHalfW - 0.06f, 0.0012f,
+            drawUiElement(vpPanel, 0.0f, kBarY - 0.215f, kDockHalfW - 0.06f, 0.0012f,
                           UiShape::RoundedBox, kGlassDivider, 1.0f);
             const float labelBg[4] = {themeAccentCol[0] * 0.22f, themeAccentCol[1] * 0.22f,
                                       themeAccentCol[2] * 0.28f, 0.92f};
-            drawUiElement(vpPanel, -0.12f, kBarY - 0.272f, 0.115f, 0.030f,
+            drawUiElement(vpPanel, -0.24f, kBarY - 0.292f, 0.125f, 0.038f,
                           UiShape::RoundedBox, labelBg, 1.0f, 0.08f, themeAccentCol);
         }
 
@@ -3248,10 +3251,14 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 else if (cb == CtrlButton::HideHud) iconShape = UiShape::Close;
                 else if (cb == CtrlButton::ScreenMute)
                     iconShape = screenControlsMuted_ ? UiShape::SpeakerMuted : UiShape::Speaker;
-                else if (cb == CtrlButton::ScreenMove) iconShape = UiShape::Move;
+                else if (cb == CtrlButton::ScreenLock)
+                    iconShape = screensUnlocked_ ? UiShape::Unlocked : UiShape::Lock;
+                else if (cb == CtrlButton::ScreenLayout) iconShape = UiShape::Layout;
                 else if (cb == CtrlButton::ScreenClose) iconShape = UiShape::Close;
-                drawUiElement(vpPanel, r.cx, r.cy, r.hw * 0.42f, r.hh * 0.42f,
-                              iconShape, themeTextCol);
+                const float iconK = is_screen_row_button(b) ? 0.52f : 0.42f;
+                drawUiElement(vpPanel, r.cx, r.cy, r.hw * iconK, r.hh * iconK, iconShape,
+                              (cb == CtrlButton::ScreenLock && screensUnlocked_) ? themeAccentCol
+                                                                                : themeTextCol);
             }
         }
 
@@ -3336,7 +3343,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         const bool rowTip = is_screen_row_button(pointerButton_) && screenControlsVisible_;
         if (rowTip) {
             const CtrlButtonRect rT = get_ctrl_button_rect(pointerButton_);
-            drawUiElement(vpPanel, rT.cx, rT.cy + 0.068f, 0.090f, 0.024f,
+            drawUiElement(vpPanel, rT.cx, rT.cy + 0.080f, 0.110f, 0.026f,
                           UiShape::RoundedBox, glassControlT.data(), 1.0f, 0.06f, kGlassRim);
         } else if (pointerButton_ == static_cast<int>(CtrlButton::HideHud)) {
             const CtrlButtonRect rH = get_ctrl_button_rect(static_cast<int>(CtrlButton::HideHud));
@@ -3399,7 +3406,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 char lbl[32];
                 std::snprintf(lbl, sizeof(lbl), "SCREEN %d", screenControlsNumber_);
                 withHeadingFont([&] {
-                    drawFitCentered(-0.12f, kBarY - 0.272f, 0.21f, pillSc * 0.95f, themeTextCol, lbl);
+                    drawFitCentered(-0.24f, kBarY - 0.292f, 0.23f, pillSc * 1.05f, themeTextCol, lbl);
                 });
             }
             // Tooltip text for button hover
@@ -3407,8 +3414,9 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 const CtrlButtonRect rT = get_ctrl_button_rect(pointerButton_);
                 const auto cbT = static_cast<CtrlButton>(pointerButton_);
                 const char* tip = (cbT == CtrlButton::ScreenMute) ? (screenControlsMuted_ ? "Unmute" : "Mute")
-                                : (cbT == CtrlButton::ScreenMove) ? "Move" : "Close screen";
-                drawFitCentered(rT.cx, rT.cy + 0.068f, 0.17f, pillSc * 0.90f, themeTextCol, tip);
+                                : (cbT == CtrlButton::ScreenLock) ? (screensUnlocked_ ? "Lock screens" : "Unlock screens")
+                                : (cbT == CtrlButton::ScreenLayout) ? "Arrange" : "Close screen";
+                drawFitCentered(rT.cx, rT.cy + 0.080f, 0.21f, pillSc * 0.90f, themeTextCol, tip);
             } else if (pointerButton_ == static_cast<int>(CtrlButton::HideHud)) {
                 const CtrlButtonRect rH = get_ctrl_button_rect(static_cast<int>(CtrlButton::HideHud));
                 drawFitCentered(rH.cx, rH.cy + 0.075f, 0.12f, pillSc * 0.90f, themeTextCol, "Hide UI");
@@ -4562,7 +4570,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         const float dimCol[4] = {
             themeTextCol[0] * 0.62f, themeTextCol[1] * 0.70f, themeTextCol[2] * 0.82f, 0.90f};
 
-        if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5) {
+        if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5 || actionMenu_.page == 8) {
             const float btnHalfW = 0.38f;
             const float btnHalfH = 0.028f;
             for (int i = 0; i < menuOptCount; ++i) {
@@ -4762,7 +4770,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             drawFitCentered(0.0f, mHalfH - 0.090f, mHalfW * 1.8f, sc * 0.85f, slateCol, actionMenu_.subtitle);
         }
 
-        if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5) {
+        if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5 || actionMenu_.page == 8) {
             for (int i = 0; i < menuOptCount; ++i) {
                 const float cy = hub::actionMenuOption(i, menuOptCount).cy;
                 const bool hov = (actionMenuBtnHovered_ == i) || (actionMenu_.selectedOption == i);
