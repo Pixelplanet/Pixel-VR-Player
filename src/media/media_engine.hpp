@@ -86,6 +86,10 @@ public:
     void setPaused(bool paused);
     void togglePause();
     bool paused() const;
+    // Mute keeps decoding and the audio clock running but outputs silence
+    // (multi-screen: only one screen is usually audible).
+    void setMuted(bool muted);
+    bool muted() const;
 
     // Seeking (thread-safe; applied on the decode thread).
     void seek(double seconds);        // absolute, clamped to [0, duration]

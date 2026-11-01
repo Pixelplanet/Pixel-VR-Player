@@ -349,6 +349,7 @@ struct MediaEngine::Impl {
     std::atomic<bool> running{false};
     std::atomic<bool> eof{false};
     std::atomic<bool> paused{false};
+    std::atomic<bool> muted{false};  // audio keeps its clock but plays silence
     std::atomic<double> seekTarget{-1.0};  // >= 0 requests a seek (seconds)
     std::atomic<bool> releaseReq{false};   // ask the consumer to free held frames
     std::condition_variable releaseCv;     // consumer signals release complete
@@ -922,6 +923,10 @@ void MediaEngine::Impl::audioThreadLoop() {
 
         if (haveChunk && pa != nullptr && !chunk.pcm.empty()) {
             int err = 0;
+            if (muted.load(std::memory_order_relaxed)) {
+                // Write silence of the same length so pacing / A-V sync is unchanged.
+                std::fill(chunk.pcm.begin(), chunk.pcm.end(), 0);
+            }
             pa_simple_write(pa, chunk.pcm.data(), chunk.pcm.size(), &err);
         }
     }
@@ -1277,6 +1282,14 @@ void MediaEngine::setPaused(bool paused) {
 
 void MediaEngine::togglePause() {
     if (impl_) impl_->paused.store(!impl_->paused.load());
+}
+
+void MediaEngine::setMuted(bool muted) {
+    impl_->muted.store(muted);
+}
+
+bool MediaEngine::muted() const {
+    return impl_->muted.load();
 }
 
 bool MediaEngine::paused() const {

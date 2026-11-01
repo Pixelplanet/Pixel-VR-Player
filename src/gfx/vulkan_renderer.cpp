@@ -530,8 +530,10 @@ VulkanRenderer::~VulkanRenderer() {
             vkDestroyImage(device_, depthImage_, nullptr);
         if (depthMemory_ != VK_NULL_HANDLE)
             vkFreeMemory(device_, depthMemory_, nullptr);
-        destroyVideoResources();
-        destroyYcbcr();
+        for (VideoSlot& v : videoSlots_) {
+            destroyVideoResources(v);
+            destroyYcbcr(v);
+        }
         if (sampler_ != VK_NULL_HANDLE) vkDestroySampler(device_, sampler_, nullptr);
         if (descriptorPool_ != VK_NULL_HANDLE)
             vkDestroyDescriptorPool(device_, descriptorPool_, nullptr);
@@ -2365,147 +2367,196 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                       static_cast<uint32_t>(vt.height)};
     vkCmdSetScissor(commandBuffer_, 0, 1, &scissor);
 
-    // Draw the video only once a frame has been uploaded; otherwise the render
-    // pass just clears the eye image.
-    if (hasVideo_) {
+    // Draw each video slot that has a frame; otherwise the render pass just
+    // clears the eye image. Slot 0 is the main screen (recenter-anchored, also
+    // 360/180); slots 1..2 are extra flat screens placed by the user. Each flat
+    // screen's model matrix and half-size are kept for the selection outline.
+    math::Mat4 screenModels[kMaxVideoSlots];
+    float screenBend[kMaxVideoSlots] = {};
+    float screenScaleX[kMaxVideoSlots] = {};
+    bool screenDrawn[kMaxVideoSlots] = {};
+    {
         using namespace math;
-        const bool ycbcr = usingDmabuf_ && resolveImage_ != VK_NULL_HANDLE &&
-                           ycbcrQuadPipeline_ != VK_NULL_HANDLE &&
-                           ycbcrSpherePipeline_ != VK_NULL_HANDLE;
-        VkDescriptorSet videoSet = ycbcr ? resolveSet_ : descriptorSet_;
-        if (projectionMode_ == ProjectionMode::Flat) {
-            VkPipeline pipe = ycbcr ? ycbcrQuadPipeline_ : pipeline_;
-            VkPipelineLayout layout = ycbcr ? ycbcrQuadLayout_ : pipelineLayout_;
+        const Mat4 viewMatV = rigidInverse(rigidTransform(
+            Quat{view.pose.orientation.x, view.pose.orientation.y,
+                 view.pose.orientation.z, view.pose.orientation.w},
+            Vec3{view.pose.position.x, view.pose.position.y, view.pose.position.z}));
+        const Mat4 projV = perspectiveVulkan(
+            std::tan(view.fov.angleLeft), std::tan(view.fov.angleRight),
+            std::tan(view.fov.angleUp), std::tan(view.fov.angleDown), 0.05f, 100.0f);
+        const Mat4 vpV = multiply(projV, viewMatV);
 
-            const Mat4 viewMat = rigidInverse(rigidTransform(
-                Quat{view.pose.orientation.x, view.pose.orientation.y,
-                     view.pose.orientation.z, view.pose.orientation.w},
-                Vec3{view.pose.position.x, view.pose.position.y,
-                     view.pose.position.z}));
-            const Mat4 proj = perspectiveVulkan(
-                std::tan(view.fov.angleLeft), std::tan(view.fov.angleRight),
-                std::tan(view.fov.angleUp), std::tan(view.fov.angleDown), 0.05f,
-                100.0f);
-            const Vec3 center{
-                screenPivot_[0] + screenForward_[0] * screenDistance_,
-                screenPivot_[1] + screenForward_[1] * screenDistance_,
-                screenPivot_[2] + screenForward_[2] * screenDistance_};
-            const Mat4 yawRot = orientFromYawPitch(screenYaw_, recenterPitch_);
-            // Each eye shows half the frame. Full-width SBS (~2x wide) is halved
-            // back to a normal shape; half-SBS already has per-eye shape so it is
-            // stretched (no change). Same idea vertically for full vs half OU.
-            float eyeAspect = videoAspect_;
-            if (stereoMode_ == StereoMode::SideBySide) {
-                if (videoAspect_ >= 2.6f) eyeAspect = videoAspect_ * 0.5f;
-            } else if (stereoMode_ == StereoMode::TopBottom) {
-                if (videoAspect_ <= 1.2f) eyeAspect = videoAspect_ * 2.0f;
+        // Draw order: farther screens first so nearer ones blend over them.
+        int order[kMaxVideoSlots] = {0, 1, 2};
+        float orderDist[kMaxVideoSlots] = {};
+        for (int slot = 0; slot < kMaxVideoSlots; ++slot) {
+            const ScreenPlacement& pl = screenPlacements_[slot];
+            Vec3 c{0.0f, 0.0f, 0.0f};
+            if (slot == 0 && !pl.active) {
+                c = Vec3{screenPivot_[0] + screenForward_[0] * screenDistance_,
+                         screenPivot_[1] + screenForward_[1] * screenDistance_,
+                         screenPivot_[2] + screenForward_[2] * screenDistance_};
+            } else {
+                c = Vec3{pl.center[0], pl.center[1], pl.center[2]};
             }
+            const Vec3 d = c - Vec3{view.pose.position.x, view.pose.position.y, view.pose.position.z};
+            orderDist[slot] = dot(d, d);
+        }
+        std::sort(order, order + kMaxVideoSlots,
+                  [&](int a, int b) { return orderDist[a] > orderDist[b]; });
 
-            // Cinema Screen Ambilight Glow: soft ambient lighting cast into the room
-            if (ambilightIntensity_ > 0.01f) {
-                VkPipeline ambPipe = ycbcr ? ycbcrAmbilightPipeline_ : ambilightPipeline_;
-                if (ambPipe != VK_NULL_HANDLE) {
-                    vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, ambPipe);
-                    vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                            layout, 0, 1, &videoSet, 0, nullptr);
-                    const Vec3 ambCenter{center.x + screenForward_[0] * 0.015f,
-                                         center.y + screenForward_[1] * 0.015f,
-                                         center.z + screenForward_[2] * 0.015f};
-                    const Mat4 ambModel = multiply(
-                        multiply(translation(ambCenter), yawRot),
-                        scaling(Vec3{(eyeAspect / (16.0f / 9.0f)) * 1.55f, 1.90f, 1.0f}));
-                    const Mat4 ambMvp = multiply(multiply(proj, viewMat), ambModel);
-                    PushConstants ambPush{};
-                    std::memcpy(ambPush.mvp, ambMvp.m, sizeof(ambPush.mvp));
-                    std::memcpy(ambPush.conversion, conversion_, sizeof(ambPush.conversion));
-                    std::memcpy(ambPush.range, range_, sizeof(ambPush.range));
-                    ambPush.range[3] = ambilightIntensity_;
-                    ambPush.stereo[0] = static_cast<float>(static_cast<int>(stereoMode_));
-                    ambPush.stereo[1] = static_cast<float>(viewIndex);
-                    ambPush.stereo[2] = swapEyes_ ? 1.0f : 0.0f;
-                    ambPush.stereo[3] = screenCurvature_;
-                    if (ycbcr) {
-                        ambPush.conversion[0] = drmUvScaleX_;
-                        ambPush.conversion[1] = drmUvScaleY_;
-                    }
-                    vkCmdPushConstants(commandBuffer_, layout,
-                                       VK_SHADER_STAGE_VERTEX_BIT |
-                                           VK_SHADER_STAGE_FRAGMENT_BIT,
-                                       0, sizeof(PushConstants), &ambPush);
-                    vkCmdDraw(commandBuffer_, 64 * 6, 1, 0, 0);
+        for (int oi = 0; oi < kMaxVideoSlots; ++oi) {
+            const int slot = order[oi];
+            VideoSlot& v = videoSlots_[slot];
+            const ScreenPlacement& pl = screenPlacements_[slot];
+            if (!v.hasVideo) continue;
+            if (slot > 0 && !pl.active) continue;  // extra slot not in use
+            const bool sphere = (slot == 0) && projectionMode_ != ProjectionMode::Flat;
+            // While 360/180 plays on the main slot it is immersive and alone.
+            if (slot > 0 && projectionMode_ != ProjectionMode::Flat) continue;
+            const StereoMode stereo = (slot == 0) ? stereoMode_ : pl.stereo;
+            const bool ycbcr = v.usingDmabuf && v.resolveImage != VK_NULL_HANDLE &&
+                               v.ycbcrQuadPipeline != VK_NULL_HANDLE &&
+                               v.ycbcrSpherePipeline != VK_NULL_HANDLE;
+            VkDescriptorSet videoSet = ycbcr ? v.resolveSet : v.descriptorSet;
+            auto fillCommon = [&](float conv[4], float range[4]) {
+                std::memcpy(conv, v.conversion, sizeof(float) * 4);
+                std::memcpy(range, v.range, sizeof(float) * 4);
+                if (ycbcr) {  // reuse conversion.xy as the crop UV scale
+                    conv[0] = v.drmUvScaleX;
+                    conv[1] = v.drmUvScaleY;
                 }
-            }
+            };
 
-            vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
-            vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                    layout, 0, 1, &videoSet, 0, nullptr);
-            const Mat4 model = multiply(
-                multiply(translation(center), yawRot),
-                scaling(Vec3{eyeAspect / (16.0f / 9.0f), 1.0f, 1.0f}));
-            const Mat4 mvp = multiply(multiply(proj, viewMat), model);
-            PushConstants push{};
-            std::memcpy(push.mvp, mvp.m, sizeof(push.mvp));
-            std::memcpy(push.conversion, conversion_, sizeof(push.conversion));
-            std::memcpy(push.range, range_, sizeof(push.range));
-            push.stereo[0] = static_cast<float>(static_cast<int>(stereoMode_));
-            push.stereo[1] = static_cast<float>(viewIndex);
-            push.stereo[2] = swapEyes_ ? 1.0f : 0.0f;
-            push.stereo[3] = screenCurvature_;
-            if (ycbcr) {  // reuse conversion.xy as the crop UV scale
-                push.conversion[0] = drmUvScaleX_;
-                push.conversion[1] = drmUvScaleY_;
+            if (!sphere) {
+                VkPipeline pipe = ycbcr ? v.ycbcrQuadPipeline : pipeline_;
+                VkPipelineLayout layout = ycbcr ? v.ycbcrQuadLayout : pipelineLayout_;
+                Vec3 center{0.0f, 0.0f, 0.0f};
+                Mat4 rot;
+                float scale = 1.0f;
+                float curvature = screenCurvature_;
+                Vec3 fwd{screenForward_[0], screenForward_[1], screenForward_[2]};
+                if (slot == 0 && !pl.active) {
+                    center = Vec3{screenPivot_[0] + screenForward_[0] * screenDistance_,
+                                  screenPivot_[1] + screenForward_[1] * screenDistance_,
+                                  screenPivot_[2] + screenForward_[2] * screenDistance_};
+                    rot = orientFromYawPitch(screenYaw_, recenterPitch_);
+                } else {
+                    center = Vec3{pl.center[0], pl.center[1], pl.center[2]};
+                    rot = orientFromYawPitch(pl.yaw, pl.pitch);
+                    scale = pl.scale;
+                    curvature = pl.curvature;
+                    fwd = Vec3{-std::sin(pl.yaw), 0.0f, -std::cos(pl.yaw)};
+                }
+                // Each eye shows half the frame. Full-width SBS (~2x wide) is halved
+                // back to a normal shape; half-SBS already has per-eye shape so it is
+                // stretched (no change). Same idea vertically for full vs half OU.
+                float eyeAspect = v.videoAspect;
+                if (stereo == StereoMode::SideBySide) {
+                    if (v.videoAspect >= 2.6f) eyeAspect = v.videoAspect * 0.5f;
+                } else if (stereo == StereoMode::TopBottom) {
+                    if (v.videoAspect <= 1.2f) eyeAspect = v.videoAspect * 2.0f;
+                }
+                const float widthScale = eyeAspect / (16.0f / 9.0f);
+
+                // Cinema Screen Ambilight Glow: only around one screen (the main
+                // one, or the selected one in multi-screen mode).
+                const bool glowHere = (multiScreenActive_ ? slot == selectedScreen_ : slot == 0);
+                if (ambilightIntensity_ > 0.01f && glowHere) {
+                    VkPipeline ambPipe = ycbcr ? v.ycbcrAmbilightPipeline : ambilightPipeline_;
+                    if (ambPipe != VK_NULL_HANDLE) {
+                        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, ambPipe);
+                        vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                                layout, 0, 1, &videoSet, 0, nullptr);
+                        const Vec3 ambCenter = center + fwd * 0.015f;
+                        const Mat4 ambModel = multiply(
+                            multiply(translation(ambCenter), rot),
+                            scaling(Vec3{widthScale * 1.55f * scale, 1.90f * scale, scale}));
+                        const Mat4 ambMvp = multiply(vpV, ambModel);
+                        PushConstants ambPush{};
+                        std::memcpy(ambPush.mvp, ambMvp.m, sizeof(ambPush.mvp));
+                        fillCommon(ambPush.conversion, ambPush.range);
+                        ambPush.range[3] = ambilightIntensity_;
+                        ambPush.stereo[0] = static_cast<float>(static_cast<int>(stereo));
+                        ambPush.stereo[1] = static_cast<float>(viewIndex);
+                        ambPush.stereo[2] = swapEyes_ ? 1.0f : 0.0f;
+                        ambPush.stereo[3] = curvature;
+                        vkCmdPushConstants(commandBuffer_, layout,
+                                           VK_SHADER_STAGE_VERTEX_BIT |
+                                               VK_SHADER_STAGE_FRAGMENT_BIT,
+                                           0, sizeof(PushConstants), &ambPush);
+                        vkCmdDraw(commandBuffer_, 64 * 6, 1, 0, 0);
+                    }
+                }
+
+                vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+                vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        layout, 0, 1, &videoSet, 0, nullptr);
+                const Mat4 model = multiply(multiply(translation(center), rot),
+                                            scaling(Vec3{widthScale * scale, scale, scale}));
+                const Mat4 mvp = multiply(vpV, model);
+                PushConstants push{};
+                std::memcpy(push.mvp, mvp.m, sizeof(push.mvp));
+                fillCommon(push.conversion, push.range);
+                push.stereo[0] = static_cast<float>(static_cast<int>(stereo));
+                push.stereo[1] = static_cast<float>(viewIndex);
+                push.stereo[2] = swapEyes_ ? 1.0f : 0.0f;
+                push.stereo[3] = curvature;
+                vkCmdPushConstants(commandBuffer_, layout,
+                                   VK_SHADER_STAGE_VERTEX_BIT |
+                                       VK_SHADER_STAGE_FRAGMENT_BIT,
+                                   0, sizeof(PushConstants), &push);
+                vkCmdDraw(commandBuffer_, 64 * 6, 1, 0, 0);
+
+                // Outline geometry in the screen's own (unscaled) model space:
+                // quad.vert's screen is 3.2 x 1.8 and bends with radius
+                // 3.2 / (curvature * 1.75), the same bend ui.vert applies.
+                screenModels[slot] = model;
+                screenBend[slot] = (curvature > 0.005f) ? 3.2f / (curvature * 1.75f) : 0.0f;
+                screenScaleX[slot] = widthScale * scale;
+                screenDrawn[slot] = true;
+            } else {
+                VkPipeline pipe = ycbcr ? v.ycbcrSpherePipeline : spherePipeline_;
+                VkPipelineLayout layout =
+                    ycbcr ? v.ycbcrSphereLayout : spherePipelineLayout_;
+                vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+                vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                        layout, 0, 1, &videoSet, 0, nullptr);
+                // Fold the recenter yaw + viewpoint tilt into the camera orientation
+                // and scale the FOV by the zoom so 360/180 content can be re-angled and
+                // pushed nearer/farther.
+                const Mat4 headRot = fromQuat(Quat{
+                    view.pose.orientation.x, view.pose.orientation.y,
+                    view.pose.orientation.z, view.pose.orientation.w});
+                // Recenter yaw + pitch (so 360/180 re-centers where you look, incl.
+                // reclined) folded with the user's viewpoint tilt.
+                const float spherePitchTotal = spherePitch_ - recenterPitch_;
+                const Mat4 adjust = multiply(
+                    fromQuat(Quat{std::sin(0.5f * spherePitchTotal), 0.0f, 0.0f,
+                                  std::cos(0.5f * spherePitchTotal)}),
+                    fromQuat(Quat{0.0f, std::sin(0.5f * sphereYaw_), 0.0f,
+                                  std::cos(0.5f * sphereYaw_)}));
+                const Mat4 rot = multiply(adjust, headRot);
+                SpherePush push{};
+                std::memcpy(push.viewRotation, rot.m, sizeof(push.viewRotation));
+                push.fov[0] = std::tan(view.fov.angleLeft) * sphereZoom_;
+                push.fov[1] = std::tan(view.fov.angleRight) * sphereZoom_;
+                push.fov[2] = std::tan(view.fov.angleUp) * sphereZoom_;
+                push.fov[3] = std::tan(view.fov.angleDown) * sphereZoom_;
+                push.mode[0] =
+                    (projectionMode_ == ProjectionMode::Equirect180) ? 2.0f : 1.0f;
+                push.mode[1] = (stereo == StereoMode::TopBottom)     ? 2.0f
+                               : (stereo == StereoMode::SideBySide)  ? 1.0f
+                                                                     : 0.0f;
+                push.mode[2] = static_cast<float>(viewIndex);
+                push.mode[3] = swapEyes_ ? 1.0f : 0.0f;
+                fillCommon(push.conversion, push.range);
+                vkCmdPushConstants(
+                    commandBuffer_, layout,
+                    VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                    sizeof(SpherePush), &push);
+                vkCmdDraw(commandBuffer_, 3, 1, 0, 0);
             }
-            vkCmdPushConstants(commandBuffer_, layout,
-                               VK_SHADER_STAGE_VERTEX_BIT |
-                                   VK_SHADER_STAGE_FRAGMENT_BIT,
-                               0, sizeof(PushConstants), &push);
-            vkCmdDraw(commandBuffer_, 64 * 6, 1, 0, 0);
-        } else {
-            VkPipeline pipe = ycbcr ? ycbcrSpherePipeline_ : spherePipeline_;
-            VkPipelineLayout layout =
-                ycbcr ? ycbcrSphereLayout_ : spherePipelineLayout_;
-            vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
-            vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                    layout, 0, 1, &videoSet, 0, nullptr);
-            // Fold the recenter yaw + viewpoint tilt into the camera orientation
-            // and scale the FOV by the zoom so 360/180 content can be re-angled and
-            // pushed nearer/farther.
-            const Mat4 headRot = fromQuat(Quat{
-                view.pose.orientation.x, view.pose.orientation.y,
-                view.pose.orientation.z, view.pose.orientation.w});
-            // Recenter yaw + pitch (so 360/180 re-centers where you look, incl.
-            // reclined) folded with the user's viewpoint tilt.
-            const float spherePitchTotal = spherePitch_ - recenterPitch_;
-            const Mat4 adjust = multiply(
-                fromQuat(Quat{std::sin(0.5f * spherePitchTotal), 0.0f, 0.0f,
-                              std::cos(0.5f * spherePitchTotal)}),
-                fromQuat(Quat{0.0f, std::sin(0.5f * sphereYaw_), 0.0f,
-                              std::cos(0.5f * sphereYaw_)}));
-            const Mat4 rot = multiply(adjust, headRot);
-            SpherePush push{};
-            std::memcpy(push.viewRotation, rot.m, sizeof(push.viewRotation));
-            push.fov[0] = std::tan(view.fov.angleLeft) * sphereZoom_;
-            push.fov[1] = std::tan(view.fov.angleRight) * sphereZoom_;
-            push.fov[2] = std::tan(view.fov.angleUp) * sphereZoom_;
-            push.fov[3] = std::tan(view.fov.angleDown) * sphereZoom_;
-            push.mode[0] =
-                (projectionMode_ == ProjectionMode::Equirect180) ? 2.0f : 1.0f;
-            push.mode[1] = (stereoMode_ == StereoMode::TopBottom)     ? 2.0f
-                           : (stereoMode_ == StereoMode::SideBySide)  ? 1.0f
-                                                                      : 0.0f;
-            push.mode[2] = static_cast<float>(viewIndex);
-            push.mode[3] = swapEyes_ ? 1.0f : 0.0f;
-            std::memcpy(push.conversion, conversion_, sizeof(push.conversion));
-            std::memcpy(push.range, range_, sizeof(push.range));
-            if (ycbcr) {  // reuse conversion.xy as the crop UV scale
-                push.conversion[0] = drmUvScaleX_;
-                push.conversion[1] = drmUvScaleY_;
-            }
-            vkCmdPushConstants(
-                commandBuffer_, layout,
-                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
-                sizeof(SpherePush), &push);
-            vkCmdDraw(commandBuffer_, 3, 1, 0, 0);
         }
     }
 
@@ -2566,6 +2617,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         glassPhase = std::clamp((eyeLocal.x - 0.35f) / 4.0f + 0.5f, 0.0f, 1.0f);
     }
 
+    float uiBendOverride = -1.0f;  // >= 0: bend radius for elements on a video screen
     auto drawUiElement = [&](const Mat4& vp, float cx, float cy, float hw, float hh,
                              UiShape shape, const float col[4], float radius = 0.0f,
                              float borderWidth = 0.0f, const float borderCol[4] = nullptr) {
@@ -2577,7 +2629,8 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         push.params[0] = static_cast<float>(shape);
         push.params[1] = radius;
         push.params[2] = borderWidth;
-        push.params[3] = bendR;
+        const float elemBend = (uiBendOverride >= 0.0f) ? uiBendOverride : bendR;
+        push.params[3] = elemBend;
         push.rect[0] = cx;
         push.rect[1] = cy;
         push.rect[2] = hw;
@@ -2590,7 +2643,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         vkCmdPushConstants(commandBuffer_, uiPipelineLayout_,
                            VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(UiPush), &push);
-        vkCmdDraw(commandBuffer_, bendR > 0.0f ? 6 * kUiBendSegments : 6, 1, 0, 0);
+        vkCmdDraw(commandBuffer_, elemBend > 0.0f ? 6 * kUiBendSegments : 6, 1, 0, 0);
     };
     // Large glass surfaces (hub panel, dock, modals): bevel + reflection sheen.
     auto drawGlass = [&](float cx, float cy, float hw, float hh, const float col[4],
@@ -2959,6 +3012,30 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
     const int acIdx = std::clamp(uiAccentColorIdx_, 0, 4);
     const float* themeTextCol = kTextPalettes[tcIdx];
     const float* themeAccentCol = kAccentPalettes[acIdx];
+
+    // Multi-screen: frame every screen, the selected one in the accent colour,
+    // so it is clear which screen the dock and laser clicks control.
+    if (multiScreenActive_ && uiPipeline_ != VK_NULL_HANDLE) {
+        int drawnCount = 0;
+        for (bool d : screenDrawn) drawnCount += d ? 1 : 0;
+        if (drawnCount > 1) {
+            bindPipe(uiPipeline_);
+            const Mat4 vpWorld = multiply(proj, viewMat);
+            for (int slot = 0; slot < kMaxVideoSlots; ++slot) {
+                if (!screenDrawn[slot]) continue;
+                const bool sel = (slot == selectedScreen_);
+                const Mat4 vpScreen = multiply(vpWorld, screenModels[slot]);
+                uiBendOverride = screenBend[slot];
+                // Model space is unscaled (half 1.6 x 0.9); pad ~2.5 cm outside.
+                const float padX = 0.025f / std::max(screenScaleX[slot], 0.1f);
+                const float frameCol[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                const float* rim = sel ? themeAccentCol : kGlassRim;
+                drawUiElement(vpScreen, 0.0f, 0.0f, 1.6f + padX, 0.9f + 0.025f,
+                              UiShape::RoundedBox, frameCol, 0.03f, sel ? 0.012f : 0.006f, rim);
+                uiBendOverride = -1.0f;
+            }
+        }
+    }
 
     // =========================================================================
     // 1. In-Playback Floating Cinema Transport Dock (Mockup #4)
@@ -5044,10 +5121,10 @@ bool VulkanRenderer::createSamplerAndDescriptors() {
 
     VkDescriptorPoolSize poolSize{};
     poolSize.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    poolSize.descriptorCount = 2;
+    poolSize.descriptorCount = 2 * kMaxVideoSlots;
 
     VkDescriptorPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    poolInfo.maxSets = 1;
+    poolInfo.maxSets = kMaxVideoSlots;
     poolInfo.poolSizeCount = 1;
     poolInfo.pPoolSizes = &poolSize;
     PIXELVR_VK_CHECK(
@@ -5058,7 +5135,9 @@ bool VulkanRenderer::createSamplerAndDescriptors() {
     allocInfo.descriptorPool = descriptorPool_;
     allocInfo.descriptorSetCount = 1;
     allocInfo.pSetLayouts = &descriptorSetLayout_;
-    PIXELVR_VK_CHECK(vkAllocateDescriptorSets(device_, &allocInfo, &descriptorSet_));
+    for (VideoSlot& v : videoSlots_) {
+        PIXELVR_VK_CHECK(vkAllocateDescriptorSets(device_, &allocInfo, &v.descriptorSet));
+    }
     return true;
 }
 
@@ -5076,9 +5155,9 @@ uint32_t VulkanRenderer::findMemoryType(uint32_t typeBits,
     return 0;
 }
 
-bool VulkanRenderer::createVideoResources(int width, int height) {
+bool VulkanRenderer::createVideoResources(VideoSlot& v, int width, int height) {
     vkDeviceWaitIdle(device_);
-    destroyVideoResources();
+    destroyVideoResources(v);
 
     auto make_image = [&](int w, int h, VkFormat format, uint32_t mipLevels,
                           VkImage& image, VkDeviceMemory& memory,
@@ -5126,49 +5205,49 @@ bool VulkanRenderer::createVideoResources(int width, int height) {
         while (dim > 1) { dim >>= 1; ++levels; }
         return levels;
     };
-    lumaMipLevels_ = mip_count(width, height);
-    chromaMipLevels_ = mip_count(width / 2, height / 2);
+    v.lumaMipLevels = mip_count(width, height);
+    v.chromaMipLevels = mip_count(width / 2, height / 2);
 
-    if (!make_image(width, height, VK_FORMAT_R8_UNORM, lumaMipLevels_,
-                    lumaImage_, lumaMemory_, lumaView_) ||
-        !make_image(width / 2, height / 2, VK_FORMAT_R8G8_UNORM, chromaMipLevels_,
-                    chromaImage_, chromaMemory_, chromaView_)) {
+    if (!make_image(width, height, VK_FORMAT_R8_UNORM, v.lumaMipLevels,
+                    v.lumaImage, v.lumaMemory, v.lumaView) ||
+        !make_image(width / 2, height / 2, VK_FORMAT_R8G8_UNORM, v.chromaMipLevels,
+                    v.chromaImage, v.chromaMemory, v.chromaView)) {
         PIXELVR_LOG_ERROR("Failed to create NV12 video images");
         return false;
     }
 
     // Staging holds the luma plane (w*h) followed by the chroma plane (w*h/2).
-    stagingSize_ = static_cast<VkDeviceSize>(width) * height * 3 / 2;
+    v.stagingSize = static_cast<VkDeviceSize>(width) * height * 3 / 2;
     VkBufferCreateInfo bufInfo{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    bufInfo.size = stagingSize_;
+    bufInfo.size = v.stagingSize;
     bufInfo.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
     bufInfo.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    PIXELVR_VK_CHECK(vkCreateBuffer(device_, &bufInfo, nullptr, &stagingBuffer_));
+    PIXELVR_VK_CHECK(vkCreateBuffer(device_, &bufInfo, nullptr, &v.stagingBuffer));
 
     VkMemoryRequirements bufReq{};
-    vkGetBufferMemoryRequirements(device_, stagingBuffer_, &bufReq);
+    vkGetBufferMemoryRequirements(device_, v.stagingBuffer, &bufReq);
     VkMemoryAllocateInfo bufAlloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     bufAlloc.allocationSize = bufReq.size;
     bufAlloc.memoryTypeIndex = findMemoryType(
         bufReq.memoryTypeBits,
         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    PIXELVR_VK_CHECK(vkAllocateMemory(device_, &bufAlloc, nullptr, &stagingMemory_));
-    PIXELVR_VK_CHECK(vkBindBufferMemory(device_, stagingBuffer_, stagingMemory_, 0));
+    PIXELVR_VK_CHECK(vkAllocateMemory(device_, &bufAlloc, nullptr, &v.stagingMemory));
+    PIXELVR_VK_CHECK(vkBindBufferMemory(device_, v.stagingBuffer, v.stagingMemory, 0));
     PIXELVR_VK_CHECK(
-        vkMapMemory(device_, stagingMemory_, 0, stagingSize_, 0, &stagingMapped_));
+        vkMapMemory(device_, v.stagingMemory, 0, v.stagingSize, 0, &v.stagingMapped));
 
     // Bind luma to binding 0 and chroma to binding 1.
     VkDescriptorImageInfo infos[2]{};
     infos[0].sampler = sampler_;
-    infos[0].imageView = lumaView_;
+    infos[0].imageView = v.lumaView;
     infos[0].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     infos[1].sampler = sampler_;
-    infos[1].imageView = chromaView_;
+    infos[1].imageView = v.chromaView;
     infos[1].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     VkWriteDescriptorSet writes[2]{};
     for (uint32_t i = 0; i < 2; ++i) {
         writes[i] = {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        writes[i].dstSet = descriptorSet_;
+        writes[i].dstSet = v.descriptorSet;
         writes[i].dstBinding = i;
         writes[i].descriptorCount = 1;
         writes[i].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -5176,69 +5255,69 @@ bool VulkanRenderer::createVideoResources(int width, int height) {
     }
     vkUpdateDescriptorSets(device_, 2, writes, 0, nullptr);
 
-    videoWidth_ = width;
-    videoHeight_ = height;
-    videoAspect_ = static_cast<float>(width) / static_cast<float>(height);
-    videoLayoutInitialized_ = false;
+    v.videoWidth = width;
+    v.videoHeight = height;
+    v.videoAspect = static_cast<float>(width) / static_cast<float>(height);
+    v.videoLayoutInitialized = false;
     return true;
 }
 
-void VulkanRenderer::destroyVideoResources() {
+void VulkanRenderer::destroyVideoResources(VideoSlot& v) {
     if (device_ == VK_NULL_HANDLE) {
         return;
     }
-    if (stagingMapped_ != nullptr) {
-        vkUnmapMemory(device_, stagingMemory_);
-        stagingMapped_ = nullptr;
+    if (v.stagingMapped != nullptr) {
+        vkUnmapMemory(device_, v.stagingMemory);
+        v.stagingMapped = nullptr;
     }
-    if (stagingBuffer_ != VK_NULL_HANDLE) {
-        vkDestroyBuffer(device_, stagingBuffer_, nullptr);
-        stagingBuffer_ = VK_NULL_HANDLE;
+    if (v.stagingBuffer != VK_NULL_HANDLE) {
+        vkDestroyBuffer(device_, v.stagingBuffer, nullptr);
+        v.stagingBuffer = VK_NULL_HANDLE;
     }
-    if (stagingMemory_ != VK_NULL_HANDLE) {
-        vkFreeMemory(device_, stagingMemory_, nullptr);
-        stagingMemory_ = VK_NULL_HANDLE;
+    if (v.stagingMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(device_, v.stagingMemory, nullptr);
+        v.stagingMemory = VK_NULL_HANDLE;
     }
-    if (lumaView_ != VK_NULL_HANDLE) {
-        vkDestroyImageView(device_, lumaView_, nullptr);
-        lumaView_ = VK_NULL_HANDLE;
+    if (v.lumaView != VK_NULL_HANDLE) {
+        vkDestroyImageView(device_, v.lumaView, nullptr);
+        v.lumaView = VK_NULL_HANDLE;
     }
-    if (lumaImage_ != VK_NULL_HANDLE) {
-        vkDestroyImage(device_, lumaImage_, nullptr);
-        lumaImage_ = VK_NULL_HANDLE;
+    if (v.lumaImage != VK_NULL_HANDLE) {
+        vkDestroyImage(device_, v.lumaImage, nullptr);
+        v.lumaImage = VK_NULL_HANDLE;
     }
-    if (lumaMemory_ != VK_NULL_HANDLE) {
-        vkFreeMemory(device_, lumaMemory_, nullptr);
-        lumaMemory_ = VK_NULL_HANDLE;
+    if (v.lumaMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(device_, v.lumaMemory, nullptr);
+        v.lumaMemory = VK_NULL_HANDLE;
     }
-    if (chromaView_ != VK_NULL_HANDLE) {
-        vkDestroyImageView(device_, chromaView_, nullptr);
-        chromaView_ = VK_NULL_HANDLE;
+    if (v.chromaView != VK_NULL_HANDLE) {
+        vkDestroyImageView(device_, v.chromaView, nullptr);
+        v.chromaView = VK_NULL_HANDLE;
     }
-    if (chromaImage_ != VK_NULL_HANDLE) {
-        vkDestroyImage(device_, chromaImage_, nullptr);
-        chromaImage_ = VK_NULL_HANDLE;
+    if (v.chromaImage != VK_NULL_HANDLE) {
+        vkDestroyImage(device_, v.chromaImage, nullptr);
+        v.chromaImage = VK_NULL_HANDLE;
     }
-    if (chromaMemory_ != VK_NULL_HANDLE) {
-        vkFreeMemory(device_, chromaMemory_, nullptr);
-        chromaMemory_ = VK_NULL_HANDLE;
+    if (v.chromaMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(device_, v.chromaMemory, nullptr);
+        v.chromaMemory = VK_NULL_HANDLE;
     }
-    stagingSize_ = 0;
-    videoWidth_ = 0;
-    videoHeight_ = 0;
-    videoLayoutInitialized_ = false;
+    v.stagingSize = 0;
+    v.videoWidth = 0;
+    v.videoHeight = 0;
+    v.videoLayoutInitialized = false;
 }
 
-bool VulkanRenderer::createYcbcrPipeline(uint32_t fourcc, int colorspace,
+bool VulkanRenderer::createYcbcrPipeline(VideoSlot& v, uint32_t fourcc, int colorspace,
                                          bool fullRange) {
     constexpr uint32_t kDrmP010 = 0x30313050;  // fourcc 'P','0','1','0'
-    ycbcrFormat_ = (fourcc == kDrmP010)
+    v.ycbcrFormat = (fourcc == kDrmP010)
                        ? VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16
                        : VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;  // NV12 (8-bit)
 
     VkSamplerYcbcrConversionCreateInfo conv{
         VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_CREATE_INFO};
-    conv.format = ycbcrFormat_;
+    conv.format = v.ycbcrFormat;
     conv.ycbcrModel =
         (colorspace == 9) ? VK_SAMPLER_YCBCR_MODEL_CONVERSION_YCBCR_2020
         : (colorspace == 5 || colorspace == 6)
@@ -5253,11 +5332,11 @@ bool VulkanRenderer::createYcbcrPipeline(uint32_t fourcc, int colorspace,
     conv.chromaFilter = VK_FILTER_LINEAR;
     conv.forceExplicitReconstruction = VK_FALSE;
     PIXELVR_VK_CHECK(
-        vkCreateSamplerYcbcrConversion(device_, &conv, nullptr, &ycbcrConversion_));
+        vkCreateSamplerYcbcrConversion(device_, &conv, nullptr, &v.ycbcrConversion));
 
     VkSamplerYcbcrConversionInfo convInfo{
         VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO};
-    convInfo.conversion = ycbcrConversion_;
+    convInfo.conversion = v.ycbcrConversion;
     VkSamplerCreateInfo si{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     si.pNext = &convInfo;
     si.magFilter = VK_FILTER_LINEAR;
@@ -5268,7 +5347,7 @@ bool VulkanRenderer::createYcbcrPipeline(uint32_t fourcc, int colorspace,
     si.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
     si.unnormalizedCoordinates = VK_FALSE;
     si.borderColor = VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK;
-    PIXELVR_VK_CHECK(vkCreateSampler(device_, &si, nullptr, &ycbcrSampler_));
+    PIXELVR_VK_CHECK(vkCreateSampler(device_, &si, nullptr, &v.ycbcrSampler));
 
     // A ycbcr combined image sampler can consume more than one descriptor.
     uint32_t combinedCount = 1;
@@ -5278,7 +5357,7 @@ bool VulkanRenderer::createYcbcrPipeline(uint32_t fourcc, int colorspace,
     fmtProps.pNext = &ycbcrProps;
     VkPhysicalDeviceImageFormatInfo2 fmtInfo{
         VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_IMAGE_FORMAT_INFO_2};
-    fmtInfo.format = ycbcrFormat_;
+    fmtInfo.format = v.ycbcrFormat;
     fmtInfo.type = VK_IMAGE_TYPE_2D;
     fmtInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
     fmtInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
@@ -5293,13 +5372,13 @@ bool VulkanRenderer::createYcbcrPipeline(uint32_t fourcc, int colorspace,
     binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     binding.descriptorCount = 1;
     binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
-    binding.pImmutableSamplers = &ycbcrSampler_;  // required immutable for ycbcr
+    binding.pImmutableSamplers = &v.ycbcrSampler;  // required immutable for ycbcr
     VkDescriptorSetLayoutCreateInfo li{
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     li.bindingCount = 1;
     li.pBindings = &binding;
     PIXELVR_VK_CHECK(
-        vkCreateDescriptorSetLayout(device_, &li, nullptr, &ycbcrSetLayout_));
+        vkCreateDescriptorSetLayout(device_, &li, nullptr, &v.ycbcrSetLayout));
 
     VkDescriptorPoolSize ps{};
     ps.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -5308,13 +5387,13 @@ bool VulkanRenderer::createYcbcrPipeline(uint32_t fourcc, int colorspace,
     pi.maxSets = 1;
     pi.poolSizeCount = 1;
     pi.pPoolSizes = &ps;
-    PIXELVR_VK_CHECK(vkCreateDescriptorPool(device_, &pi, nullptr, &ycbcrPool_));
+    PIXELVR_VK_CHECK(vkCreateDescriptorPool(device_, &pi, nullptr, &v.ycbcrPool));
 
     VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    ai.descriptorPool = ycbcrPool_;
+    ai.descriptorPool = v.ycbcrPool;
     ai.descriptorSetCount = 1;
-    ai.pSetLayouts = &ycbcrSetLayout_;
-    PIXELVR_VK_CHECK(vkAllocateDescriptorSets(device_, &ai, &ycbcrSet_));
+    ai.pSetLayouts = &v.ycbcrSetLayout;
+    PIXELVR_VK_CHECK(vkAllocateDescriptorSets(device_, &ai, &v.ycbcrSet));
 
     // --- Minification resolve target --------------------------------------
     // A plain (non-ycbcr) sampler with a full mip chain. The video pipelines
@@ -5338,7 +5417,7 @@ bool VulkanRenderer::createYcbcrPipeline(uint32_t fourcc, int colorspace,
             rs.anisotropyEnable = VK_TRUE;
             rs.maxAnisotropy = std::min(8.0f, dp.limits.maxSamplerAnisotropy);
         }
-        PIXELVR_VK_CHECK(vkCreateSampler(device_, &rs, nullptr, &resolveSampler_));
+        PIXELVR_VK_CHECK(vkCreateSampler(device_, &rs, nullptr, &v.resolveSampler));
     }
     {
         VkDescriptorSetLayoutBinding b{};
@@ -5351,7 +5430,7 @@ bool VulkanRenderer::createYcbcrPipeline(uint32_t fourcc, int colorspace,
         li.bindingCount = 1;
         li.pBindings = &b;
         PIXELVR_VK_CHECK(vkCreateDescriptorSetLayout(device_, &li, nullptr,
-                                                     &resolveSetLayout_));
+                                                     &v.resolveSetLayout));
         VkDescriptorPoolSize ps{};
         ps.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         ps.descriptorCount = 1;
@@ -5359,12 +5438,12 @@ bool VulkanRenderer::createYcbcrPipeline(uint32_t fourcc, int colorspace,
         pi.maxSets = 1;
         pi.poolSizeCount = 1;
         pi.pPoolSizes = &ps;
-        PIXELVR_VK_CHECK(vkCreateDescriptorPool(device_, &pi, nullptr, &resolvePool_));
+        PIXELVR_VK_CHECK(vkCreateDescriptorPool(device_, &pi, nullptr, &v.resolvePool));
         VkDescriptorSetAllocateInfo ai{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-        ai.descriptorPool = resolvePool_;
+        ai.descriptorPool = v.resolvePool;
         ai.descriptorSetCount = 1;
-        ai.pSetLayouts = &resolveSetLayout_;
-        PIXELVR_VK_CHECK(vkAllocateDescriptorSets(device_, &ai, &resolveSet_));
+        ai.pSetLayouts = &v.resolveSetLayout;
+        PIXELVR_VK_CHECK(vkAllocateDescriptorSets(device_, &ai, &v.resolveSet));
     }
     {
         VkAttachmentDescription at{};
@@ -5386,15 +5465,15 @@ bool VulkanRenderer::createYcbcrPipeline(uint32_t fourcc, int colorspace,
         rp.pAttachments = &at;
         rp.subpassCount = 1;
         rp.pSubpasses = &sp;
-        PIXELVR_VK_CHECK(vkCreateRenderPass(device_, &rp, nullptr, &resolvePass_));
+        PIXELVR_VK_CHECK(vkCreateRenderPass(device_, &rp, nullptr, &v.resolvePass));
 
         VkPipelineLayoutCreateInfo pl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
         pl.setLayoutCount = 1;
-        pl.pSetLayouts = &ycbcrSetLayout_;  // resolve samples the imported frame
+        pl.pSetLayouts = &v.ycbcrSetLayout;  // resolve samples the imported frame
         PIXELVR_VK_CHECK(
-            vkCreatePipelineLayout(device_, &pl, nullptr, &resolveLayout_));
-        if (!buildPipeline("resolve.vert.spv", "resolve.frag.spv", resolveLayout_,
-                           resolvePipeline_, false, resolvePass_,
+            vkCreatePipelineLayout(device_, &pl, nullptr, &v.resolveLayout));
+        if (!buildPipeline("resolve.vert.spv", "resolve.frag.spv", v.resolveLayout,
+                           v.resolvePipeline, false, v.resolvePass,
                            VK_SAMPLE_COUNT_1_BIT)) {
             return false;
         }
@@ -5407,11 +5486,11 @@ bool VulkanRenderer::createYcbcrPipeline(uint32_t fourcc, int colorspace,
     quadPush.size = sizeof(PushConstants);
     VkPipelineLayoutCreateInfo ql{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     ql.setLayoutCount = 1;
-    ql.pSetLayouts = &resolveSetLayout_;
+    ql.pSetLayouts = &v.resolveSetLayout;
     ql.pushConstantRangeCount = 1;
     ql.pPushConstantRanges = &quadPush;
     PIXELVR_VK_CHECK(
-        vkCreatePipelineLayout(device_, &ql, nullptr, &ycbcrQuadLayout_));
+        vkCreatePipelineLayout(device_, &ql, nullptr, &v.ycbcrQuadLayout));
 
     VkPushConstantRange spherePush{};
     spherePush.stageFlags =
@@ -5419,120 +5498,120 @@ bool VulkanRenderer::createYcbcrPipeline(uint32_t fourcc, int colorspace,
     spherePush.size = sizeof(SpherePush);
     VkPipelineLayoutCreateInfo sl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     sl.setLayoutCount = 1;
-    sl.pSetLayouts = &resolveSetLayout_;
+    sl.pSetLayouts = &v.resolveSetLayout;
     sl.pushConstantRangeCount = 1;
     sl.pPushConstantRanges = &spherePush;
     PIXELVR_VK_CHECK(
-        vkCreatePipelineLayout(device_, &sl, nullptr, &ycbcrSphereLayout_));
+        vkCreatePipelineLayout(device_, &sl, nullptr, &v.ycbcrSphereLayout));
 
-    if (!buildPipeline("quad.vert.spv", "video_quad.frag.spv", ycbcrQuadLayout_,
-                       ycbcrQuadPipeline_) ||
-        !buildPipeline("quad.vert.spv", "ambilight.frag.spv", ycbcrQuadLayout_,
-                       ycbcrAmbilightPipeline_, true) ||
+    if (!buildPipeline("quad.vert.spv", "video_quad.frag.spv", v.ycbcrQuadLayout,
+                       v.ycbcrQuadPipeline) ||
+        !buildPipeline("quad.vert.spv", "ambilight.frag.spv", v.ycbcrQuadLayout,
+                       v.ycbcrAmbilightPipeline, true) ||
         !buildPipeline("sphere.vert.spv", "video_sphere.frag.spv",
-                       ycbcrSphereLayout_, ycbcrSpherePipeline_)) {
+                       v.ycbcrSphereLayout, v.ycbcrSpherePipeline)) {
         return false;
     }
 
-    ycbcrKeyFourcc_ = fourcc;
-    ycbcrKeyColorspace_ = colorspace;
-    ycbcrKeyFullRange_ = fullRange;
+    v.ycbcrKeyFourcc = fourcc;
+    v.ycbcrKeyColorspace = colorspace;
+    v.ycbcrKeyFullRange = fullRange;
     PIXELVR_LOG_INFO("ycbcr video pipeline ready (fourcc 0x%08x, cs %d, %s range)",
                      fourcc, colorspace, fullRange ? "full" : "narrow");
     return true;
 }
 
-void VulkanRenderer::destroyYcbcr() {
+void VulkanRenderer::destroyYcbcr(VideoSlot& v) {
     if (device_ == VK_NULL_HANDLE) {
         return;
     }
-    if (drmView_ != VK_NULL_HANDLE) {
-        vkDestroyImageView(device_, drmView_, nullptr);
-        drmView_ = VK_NULL_HANDLE;
+    if (v.drmView != VK_NULL_HANDLE) {
+        vkDestroyImageView(device_, v.drmView, nullptr);
+        v.drmView = VK_NULL_HANDLE;
     }
-    if (drmImage_ != VK_NULL_HANDLE) {
-        vkDestroyImage(device_, drmImage_, nullptr);
-        drmImage_ = VK_NULL_HANDLE;
+    if (v.drmImage != VK_NULL_HANDLE) {
+        vkDestroyImage(device_, v.drmImage, nullptr);
+        v.drmImage = VK_NULL_HANDLE;
     }
-    if (drmMemory_ != VK_NULL_HANDLE) {
-        vkFreeMemory(device_, drmMemory_, nullptr);
-        drmMemory_ = VK_NULL_HANDLE;
+    if (v.drmMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(device_, v.drmMemory, nullptr);
+        v.drmMemory = VK_NULL_HANDLE;
     }
-    if (ycbcrQuadPipeline_ != VK_NULL_HANDLE) {
-        vkDestroyPipeline(device_, ycbcrQuadPipeline_, nullptr);
-        ycbcrQuadPipeline_ = VK_NULL_HANDLE;
+    if (v.ycbcrQuadPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device_, v.ycbcrQuadPipeline, nullptr);
+        v.ycbcrQuadPipeline = VK_NULL_HANDLE;
     }
-    if (ycbcrAmbilightPipeline_ != VK_NULL_HANDLE) {
-        vkDestroyPipeline(device_, ycbcrAmbilightPipeline_, nullptr);
-        ycbcrAmbilightPipeline_ = VK_NULL_HANDLE;
+    if (v.ycbcrAmbilightPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device_, v.ycbcrAmbilightPipeline, nullptr);
+        v.ycbcrAmbilightPipeline = VK_NULL_HANDLE;
     }
-    if (ycbcrSpherePipeline_ != VK_NULL_HANDLE) {
-        vkDestroyPipeline(device_, ycbcrSpherePipeline_, nullptr);
-        ycbcrSpherePipeline_ = VK_NULL_HANDLE;
+    if (v.ycbcrSpherePipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device_, v.ycbcrSpherePipeline, nullptr);
+        v.ycbcrSpherePipeline = VK_NULL_HANDLE;
     }
-    if (ycbcrQuadLayout_ != VK_NULL_HANDLE) {
-        vkDestroyPipelineLayout(device_, ycbcrQuadLayout_, nullptr);
-        ycbcrQuadLayout_ = VK_NULL_HANDLE;
+    if (v.ycbcrQuadLayout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(device_, v.ycbcrQuadLayout, nullptr);
+        v.ycbcrQuadLayout = VK_NULL_HANDLE;
     }
-    if (ycbcrSphereLayout_ != VK_NULL_HANDLE) {
-        vkDestroyPipelineLayout(device_, ycbcrSphereLayout_, nullptr);
-        ycbcrSphereLayout_ = VK_NULL_HANDLE;
+    if (v.ycbcrSphereLayout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(device_, v.ycbcrSphereLayout, nullptr);
+        v.ycbcrSphereLayout = VK_NULL_HANDLE;
     }
-    if (ycbcrPool_ != VK_NULL_HANDLE) {
-        vkDestroyDescriptorPool(device_, ycbcrPool_, nullptr);
-        ycbcrPool_ = VK_NULL_HANDLE;
-        ycbcrSet_ = VK_NULL_HANDLE;
+    if (v.ycbcrPool != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(device_, v.ycbcrPool, nullptr);
+        v.ycbcrPool = VK_NULL_HANDLE;
+        v.ycbcrSet = VK_NULL_HANDLE;
     }
-    if (ycbcrSetLayout_ != VK_NULL_HANDLE) {
-        vkDestroyDescriptorSetLayout(device_, ycbcrSetLayout_, nullptr);
-        ycbcrSetLayout_ = VK_NULL_HANDLE;
+    if (v.ycbcrSetLayout != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(device_, v.ycbcrSetLayout, nullptr);
+        v.ycbcrSetLayout = VK_NULL_HANDLE;
     }
-    if (ycbcrSampler_ != VK_NULL_HANDLE) {
-        vkDestroySampler(device_, ycbcrSampler_, nullptr);
-        ycbcrSampler_ = VK_NULL_HANDLE;
+    if (v.ycbcrSampler != VK_NULL_HANDLE) {
+        vkDestroySampler(device_, v.ycbcrSampler, nullptr);
+        v.ycbcrSampler = VK_NULL_HANDLE;
     }
-    if (ycbcrConversion_ != VK_NULL_HANDLE) {
-        vkDestroySamplerYcbcrConversion(device_, ycbcrConversion_, nullptr);
-        ycbcrConversion_ = VK_NULL_HANDLE;
+    if (v.ycbcrConversion != VK_NULL_HANDLE) {
+        vkDestroySamplerYcbcrConversion(device_, v.ycbcrConversion, nullptr);
+        v.ycbcrConversion = VK_NULL_HANDLE;
     }
-    destroyResolveTarget();
-    if (resolvePipeline_ != VK_NULL_HANDLE) {
-        vkDestroyPipeline(device_, resolvePipeline_, nullptr);
-        resolvePipeline_ = VK_NULL_HANDLE;
+    destroyResolveTarget(v);
+    if (v.resolvePipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device_, v.resolvePipeline, nullptr);
+        v.resolvePipeline = VK_NULL_HANDLE;
     }
-    if (resolveLayout_ != VK_NULL_HANDLE) {
-        vkDestroyPipelineLayout(device_, resolveLayout_, nullptr);
-        resolveLayout_ = VK_NULL_HANDLE;
+    if (v.resolveLayout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(device_, v.resolveLayout, nullptr);
+        v.resolveLayout = VK_NULL_HANDLE;
     }
-    if (resolvePass_ != VK_NULL_HANDLE) {
-        vkDestroyRenderPass(device_, resolvePass_, nullptr);
-        resolvePass_ = VK_NULL_HANDLE;
+    if (v.resolvePass != VK_NULL_HANDLE) {
+        vkDestroyRenderPass(device_, v.resolvePass, nullptr);
+        v.resolvePass = VK_NULL_HANDLE;
     }
-    if (resolvePool_ != VK_NULL_HANDLE) {
-        vkDestroyDescriptorPool(device_, resolvePool_, nullptr);
-        resolvePool_ = VK_NULL_HANDLE;
-        resolveSet_ = VK_NULL_HANDLE;
+    if (v.resolvePool != VK_NULL_HANDLE) {
+        vkDestroyDescriptorPool(device_, v.resolvePool, nullptr);
+        v.resolvePool = VK_NULL_HANDLE;
+        v.resolveSet = VK_NULL_HANDLE;
     }
-    if (resolveSetLayout_ != VK_NULL_HANDLE) {
-        vkDestroyDescriptorSetLayout(device_, resolveSetLayout_, nullptr);
-        resolveSetLayout_ = VK_NULL_HANDLE;
+    if (v.resolveSetLayout != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(device_, v.resolveSetLayout, nullptr);
+        v.resolveSetLayout = VK_NULL_HANDLE;
     }
-    if (resolveSampler_ != VK_NULL_HANDLE) {
-        vkDestroySampler(device_, resolveSampler_, nullptr);
-        resolveSampler_ = VK_NULL_HANDLE;
+    if (v.resolveSampler != VK_NULL_HANDLE) {
+        vkDestroySampler(device_, v.resolveSampler, nullptr);
+        v.resolveSampler = VK_NULL_HANDLE;
     }
-    ycbcrFormat_ = VK_FORMAT_UNDEFINED;
-    ycbcrKeyFourcc_ = 0;
-    ycbcrKeyColorspace_ = -1;
-    drmKeepAlive_.reset();  // release the decoder frame the image was holding
-    usingDmabuf_ = false;
+    v.ycbcrFormat = VK_FORMAT_UNDEFINED;
+    v.ycbcrKeyFourcc = 0;
+    v.ycbcrKeyColorspace = -1;
+    v.drmKeepAlive.reset();  // release the decoder frame the image was holding
+    v.usingDmabuf = false;
 }
 
-bool VulkanRenderer::createResolveTarget(int width, int height) {
-    destroyResolveTarget();
+bool VulkanRenderer::createResolveTarget(VideoSlot& v, int width, int height) {
+    destroyResolveTarget(v);
     uint32_t mips = 1;
     for (int d = std::min(width, height); d > 1; d >>= 1) ++mips;
-    resolveMips_ = mips;
+    v.resolveMips = mips;
 
     VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     ii.imageType = VK_IMAGE_TYPE_2D;
@@ -5546,89 +5625,89 @@ bool VulkanRenderer::createResolveTarget(int width, int height) {
                VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     ii.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    if (vkCreateImage(device_, &ii, nullptr, &resolveImage_) != VK_SUCCESS) {
+    if (vkCreateImage(device_, &ii, nullptr, &v.resolveImage) != VK_SUCCESS) {
         return false;
     }
     VkMemoryRequirements req{};
-    vkGetImageMemoryRequirements(device_, resolveImage_, &req);
+    vkGetImageMemoryRequirements(device_, v.resolveImage, &req);
     VkMemoryAllocateInfo ma{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     ma.allocationSize = req.size;
     ma.memoryTypeIndex =
         findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (vkAllocateMemory(device_, &ma, nullptr, &resolveMemory_) != VK_SUCCESS ||
-        vkBindImageMemory(device_, resolveImage_, resolveMemory_, 0) != VK_SUCCESS) {
+    if (vkAllocateMemory(device_, &ma, nullptr, &v.resolveMemory) != VK_SUCCESS ||
+        vkBindImageMemory(device_, v.resolveImage, v.resolveMemory, 0) != VK_SUCCESS) {
         return false;
     }
 
     VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-    vi.image = resolveImage_;
+    vi.image = v.resolveImage;
     vi.viewType = VK_IMAGE_VIEW_TYPE_2D;
     vi.format = VK_FORMAT_R8G8B8A8_UNORM;
     vi.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
     vi.subresourceRange.levelCount = mips;
     vi.subresourceRange.layerCount = 1;
-    if (vkCreateImageView(device_, &vi, nullptr, &resolveView_) != VK_SUCCESS) {
+    if (vkCreateImageView(device_, &vi, nullptr, &v.resolveView) != VK_SUCCESS) {
         return false;
     }
     vi.subresourceRange.levelCount = 1;  // mip 0 only for the render target
-    if (vkCreateImageView(device_, &vi, nullptr, &resolveTargetView_) !=
+    if (vkCreateImageView(device_, &vi, nullptr, &v.resolveTargetView) !=
         VK_SUCCESS) {
         return false;
     }
 
     VkFramebufferCreateInfo fi{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
-    fi.renderPass = resolvePass_;
+    fi.renderPass = v.resolvePass;
     fi.attachmentCount = 1;
-    fi.pAttachments = &resolveTargetView_;
+    fi.pAttachments = &v.resolveTargetView;
     fi.width = static_cast<uint32_t>(width);
     fi.height = static_cast<uint32_t>(height);
     fi.layers = 1;
-    if (vkCreateFramebuffer(device_, &fi, nullptr, &resolveFbo_) != VK_SUCCESS) {
+    if (vkCreateFramebuffer(device_, &fi, nullptr, &v.resolveFbo) != VK_SUCCESS) {
         return false;
     }
 
     VkDescriptorImageInfo di{};
-    di.sampler = resolveSampler_;
-    di.imageView = resolveView_;
+    di.sampler = v.resolveSampler;
+    di.imageView = v.resolveView;
     di.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    w.dstSet = resolveSet_;
+    w.dstSet = v.resolveSet;
     w.dstBinding = 0;
     w.descriptorCount = 1;
     w.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     w.pImageInfo = &di;
     vkUpdateDescriptorSets(device_, 1, &w, 0, nullptr);
 
-    resolveW_ = width;
-    resolveH_ = height;
+    v.resolveW = width;
+    v.resolveH = height;
     return true;
 }
 
-void VulkanRenderer::destroyResolveTarget() {
+void VulkanRenderer::destroyResolveTarget(VideoSlot& v) {
     if (device_ == VK_NULL_HANDLE) return;
-    if (resolveFbo_ != VK_NULL_HANDLE) {
-        vkDestroyFramebuffer(device_, resolveFbo_, nullptr);
-        resolveFbo_ = VK_NULL_HANDLE;
+    if (v.resolveFbo != VK_NULL_HANDLE) {
+        vkDestroyFramebuffer(device_, v.resolveFbo, nullptr);
+        v.resolveFbo = VK_NULL_HANDLE;
     }
-    if (resolveTargetView_ != VK_NULL_HANDLE) {
-        vkDestroyImageView(device_, resolveTargetView_, nullptr);
-        resolveTargetView_ = VK_NULL_HANDLE;
+    if (v.resolveTargetView != VK_NULL_HANDLE) {
+        vkDestroyImageView(device_, v.resolveTargetView, nullptr);
+        v.resolveTargetView = VK_NULL_HANDLE;
     }
-    if (resolveView_ != VK_NULL_HANDLE) {
-        vkDestroyImageView(device_, resolveView_, nullptr);
-        resolveView_ = VK_NULL_HANDLE;
+    if (v.resolveView != VK_NULL_HANDLE) {
+        vkDestroyImageView(device_, v.resolveView, nullptr);
+        v.resolveView = VK_NULL_HANDLE;
     }
-    if (resolveImage_ != VK_NULL_HANDLE) {
-        vkDestroyImage(device_, resolveImage_, nullptr);
-        resolveImage_ = VK_NULL_HANDLE;
+    if (v.resolveImage != VK_NULL_HANDLE) {
+        vkDestroyImage(device_, v.resolveImage, nullptr);
+        v.resolveImage = VK_NULL_HANDLE;
     }
-    if (resolveMemory_ != VK_NULL_HANDLE) {
-        vkFreeMemory(device_, resolveMemory_, nullptr);
-        resolveMemory_ = VK_NULL_HANDLE;
+    if (v.resolveMemory != VK_NULL_HANDLE) {
+        vkFreeMemory(device_, v.resolveMemory, nullptr);
+        v.resolveMemory = VK_NULL_HANDLE;
     }
-    resolveW_ = 0;
-    resolveH_ = 0;
-    resolveMips_ = 1;
+    v.resolveW = 0;
+    v.resolveH = 0;
+    v.resolveMips = 1;
 }
 
 void VulkanRenderer::downloadsButtonLayout(std::vector<float>& cx,
@@ -6219,7 +6298,7 @@ bool VulkanRenderer::loadControllerModel(int hand, const std::vector<uint8_t>& g
     return ok;
 }
 
-bool VulkanRenderer::importDmabufImage(const DrmVideoFrame& frame, VkImage& image,
+bool VulkanRenderer::importDmabufImage(VideoSlot& v, const DrmVideoFrame& frame, VkImage& image,
                                        VkDeviceMemory& memory, VkImageView& view,
                                        bool& fdConsumed) {
     fdConsumed = false;
@@ -6251,7 +6330,7 @@ bool VulkanRenderer::importDmabufImage(const DrmVideoFrame& frame, VkImage& imag
     VkImageCreateInfo imageInfo{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     imageInfo.pNext = &extImg;
     imageInfo.imageType = VK_IMAGE_TYPE_2D;
-    imageInfo.format = ycbcrFormat_;
+    imageInfo.format = v.ycbcrFormat;
     imageInfo.extent = {static_cast<uint32_t>(frame.width),
                         static_cast<uint32_t>(frame.height), 1};
     imageInfo.mipLevels = 1;
@@ -6331,12 +6410,12 @@ bool VulkanRenderer::importDmabufImage(const DrmVideoFrame& frame, VkImage& imag
 
     VkSamplerYcbcrConversionInfo convInfo{
         VK_STRUCTURE_TYPE_SAMPLER_YCBCR_CONVERSION_INFO};
-    convInfo.conversion = ycbcrConversion_;
+    convInfo.conversion = v.ycbcrConversion;
     VkImageViewCreateInfo viewInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
     viewInfo.pNext = &convInfo;
     viewInfo.image = image;
     viewInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-    viewInfo.format = ycbcrFormat_;
+    viewInfo.format = v.ycbcrFormat;
     viewInfo.components = {VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
                            VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY};
     viewInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -6353,7 +6432,7 @@ bool VulkanRenderer::importDmabufImage(const DrmVideoFrame& frame, VkImage& imag
     return true;
 }
 
-void VulkanRenderer::resolveFrame(VkImage importedImage) {
+void VulkanRenderer::resolveFrame(VideoSlot& v, VkImage importedImage) {
     vkResetCommandBuffer(uploadCmd_, 0);
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
@@ -6379,33 +6458,33 @@ void VulkanRenderer::resolveFrame(VkImage importedImage) {
 
     // 2. Convert YCbCr -> RGBA into mip 0 of the resolve image.
     VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-    rp.renderPass = resolvePass_;
-    rp.framebuffer = resolveFbo_;
-    rp.renderArea.extent = {static_cast<uint32_t>(resolveW_),
-                            static_cast<uint32_t>(resolveH_)};
+    rp.renderPass = v.resolvePass;
+    rp.framebuffer = v.resolveFbo;
+    rp.renderArea.extent = {static_cast<uint32_t>(v.resolveW),
+                            static_cast<uint32_t>(v.resolveH)};
     vkCmdBeginRenderPass(uploadCmd_, &rp, VK_SUBPASS_CONTENTS_INLINE);
-    VkViewport vp{0.0f, 0.0f, static_cast<float>(resolveW_),
-                  static_cast<float>(resolveH_), 0.0f, 1.0f};
+    VkViewport vp{0.0f, 0.0f, static_cast<float>(v.resolveW),
+                  static_cast<float>(v.resolveH), 0.0f, 1.0f};
     vkCmdSetViewport(uploadCmd_, 0, 1, &vp);
     VkRect2D scissor{{0, 0},
-                     {static_cast<uint32_t>(resolveW_),
-                      static_cast<uint32_t>(resolveH_)}};
+                     {static_cast<uint32_t>(v.resolveW),
+                      static_cast<uint32_t>(v.resolveH)}};
     vkCmdSetScissor(uploadCmd_, 0, 1, &scissor);
-    vkCmdBindPipeline(uploadCmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, resolvePipeline_);
+    vkCmdBindPipeline(uploadCmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, v.resolvePipeline);
     vkCmdBindDescriptorSets(uploadCmd_, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            resolveLayout_, 0, 1, &ycbcrSet_, 0, nullptr);
+                            v.resolveLayout, 0, 1, &v.ycbcrSet, 0, nullptr);
     vkCmdDraw(uploadCmd_, 3, 1, 0, 0);
     vkCmdEndRenderPass(uploadCmd_);  // mip 0 now in TRANSFER_SRC_OPTIMAL
 
     // 3. Build the mip chain by blitting each level from the previous one.
-    int32_t mw = resolveW_, mh = resolveH_;
-    for (uint32_t level = 1; level < resolveMips_; ++level) {
+    int32_t mw = v.resolveW, mh = v.resolveH;
+    for (uint32_t level = 1; level < v.resolveMips; ++level) {
         VkImageMemoryBarrier td{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
         td.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         td.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         td.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         td.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        td.image = resolveImage_;
+        td.image = v.resolveImage;
         td.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, level, 1, 0, 1};
         td.srcAccessMask = 0;
         td.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -6420,8 +6499,8 @@ void VulkanRenderer::resolveFrame(VkImage importedImage) {
         blit.srcOffsets[1] = {mw, mh, 1};
         blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1};
         blit.dstOffsets[1] = {nw, nh, 1};
-        vkCmdBlitImage(uploadCmd_, resolveImage_,
-                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, resolveImage_,
+        vkCmdBlitImage(uploadCmd_, v.resolveImage,
+                       VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, v.resolveImage,
                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
                        VK_FILTER_LINEAR);
 
@@ -6430,7 +6509,7 @@ void VulkanRenderer::resolveFrame(VkImage importedImage) {
         ts.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
         ts.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
         ts.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-        ts.image = resolveImage_;
+        ts.image = v.resolveImage;
         ts.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, level, 1, 0, 1};
         ts.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         ts.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
@@ -6447,8 +6526,8 @@ void VulkanRenderer::resolveFrame(VkImage importedImage) {
     sr.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     sr.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     sr.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    sr.image = resolveImage_;
-    sr.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, resolveMips_, 0, 1};
+    sr.image = v.resolveImage;
+    sr.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, v.resolveMips, 0, 1};
     sr.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
     sr.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     vkCmdPipelineBarrier(uploadCmd_, VK_PIPELINE_STAGE_TRANSFER_BIT,
@@ -6465,7 +6544,9 @@ void VulkanRenderer::resolveFrame(VkImage importedImage) {
     vkResetFences(device_, 1, &uploadFence_);
 }
 
-void VulkanRenderer::updateVideoDmabuf(DrmVideoFrame& frame) {
+void VulkanRenderer::updateVideoDmabuf(DrmVideoFrame& frame, int slot) {
+    if (slot < 0 || slot >= kMaxVideoSlots) slot = 0;
+    VideoSlot& v = videoSlots_[slot];
     if (!dmabufCapable_ || frame.fd < 0) {
         if (frame.fd >= 0) ::close(frame.fd);
         frame.fd = -1;
@@ -6474,18 +6555,18 @@ void VulkanRenderer::updateVideoDmabuf(DrmVideoFrame& frame) {
 
     // (Re)build the conversion + pipelines when the format or colour metadata
     // changes (rare: once per video, or on a mid-stream format switch).
-    if (ycbcrConversion_ == VK_NULL_HANDLE || frame.fourcc != ycbcrKeyFourcc_ ||
-        frame.colorspace != ycbcrKeyColorspace_ ||
-        frame.fullRange != ycbcrKeyFullRange_) {
+    if (v.ycbcrConversion == VK_NULL_HANDLE || frame.fourcc != v.ycbcrKeyFourcc ||
+        frame.colorspace != v.ycbcrKeyColorspace ||
+        frame.fullRange != v.ycbcrKeyFullRange) {
         PIXELVR_LOG_INFO("YCbCr pipeline rebuild #%llu: fourcc=%u colorspace=%d fullRange=%d (prev: fourcc=%u colorspace=%d fullRange=%d)",
                          static_cast<unsigned long long>(ycbcrRebuildCount_ + 1),
                          frame.fourcc, frame.colorspace, static_cast<int>(frame.fullRange),
-                         ycbcrKeyFourcc_, ycbcrKeyColorspace_, static_cast<int>(ycbcrKeyFullRange_));
+                         v.ycbcrKeyFourcc, v.ycbcrKeyColorspace, static_cast<int>(v.ycbcrKeyFullRange));
         ++ycbcrRebuildCount_;
         vkDeviceWaitIdle(device_);
-        destroyYcbcr();
-        if (!createYcbcrPipeline(frame.fourcc, frame.colorspace, frame.fullRange)) {
-            destroyYcbcr();
+        destroyYcbcr(v);
+        if (!createYcbcrPipeline(v, frame.fourcc, frame.colorspace, frame.fullRange)) {
+            destroyYcbcr(v);
             ::close(frame.fd);
             frame.fd = -1;
             return;
@@ -6497,7 +6578,7 @@ void VulkanRenderer::updateVideoDmabuf(DrmVideoFrame& frame) {
     VkImageView view = VK_NULL_HANDLE;
     bool fdConsumed = false;
     const bool imported =
-        importDmabufImage(frame, image, memory, view, fdConsumed);
+        importDmabufImage(v, frame, image, memory, view, fdConsumed);
     // Resolve fd ownership exactly once: Vulkan keeps it on success, else close.
     if (!fdConsumed && frame.fd >= 0) ::close(frame.fd);
     frame.fd = -1;
@@ -6511,7 +6592,7 @@ void VulkanRenderer::updateVideoDmabuf(DrmVideoFrame& frame) {
     info.imageView = view;
     info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    write.dstSet = ycbcrSet_;
+    write.dstSet = v.ycbcrSet;
     write.dstBinding = 0;
     write.descriptorCount = 1;
     write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
@@ -6519,9 +6600,9 @@ void VulkanRenderer::updateVideoDmabuf(DrmVideoFrame& frame) {
     vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
 
     // (Re)create the mipmapped resolve target at the coded frame size.
-    if (resolveImage_ == VK_NULL_HANDLE || resolveW_ != frame.width ||
-        resolveH_ != frame.height) {
-        if (!createResolveTarget(frame.width, frame.height)) {
+    if (v.resolveImage == VK_NULL_HANDLE || v.resolveW != frame.width ||
+        v.resolveH != frame.height) {
+        if (!createResolveTarget(v, frame.width, frame.height)) {
             vkDestroyImageView(device_, view, nullptr);
             vkDestroyImage(device_, image, nullptr);
             vkFreeMemory(device_, memory, nullptr);
@@ -6530,66 +6611,70 @@ void VulkanRenderer::updateVideoDmabuf(DrmVideoFrame& frame) {
     }
 
     // Acquire the imported frame, convert YCbCr -> RGBA, and build its mip chain.
-    resolveFrame(image);
+    resolveFrame(v, image);
 
     // Retire the previous frame's imported image (its resolve has completed).
-    if (drmImage_ != VK_NULL_HANDLE) {
-        vkDestroyImageView(device_, drmView_, nullptr);
-        vkDestroyImage(device_, drmImage_, nullptr);
-        vkFreeMemory(device_, drmMemory_, nullptr);
+    if (v.drmImage != VK_NULL_HANDLE) {
+        vkDestroyImageView(device_, v.drmView, nullptr);
+        vkDestroyImage(device_, v.drmImage, nullptr);
+        vkFreeMemory(device_, v.drmMemory, nullptr);
     }
-    drmImage_ = image;
-    drmMemory_ = memory;
-    drmView_ = view;
+    v.drmImage = image;
+    v.drmMemory = memory;
+    v.drmView = view;
     // Hold the decoder's frame ref for this image's lifetime; this assignment
     // also releases the previous frame, whose image was just retired.
-    drmKeepAlive_ = std::move(frame.keepAlive);
+    v.drmKeepAlive = std::move(frame.keepAlive);
 
     int visibleW = frame.width - frame.crop[0] - frame.crop[2];
     int visibleH = frame.height - frame.crop[1] - frame.crop[3];
     if (visibleW <= 0) visibleW = frame.width;
     if (visibleH <= 0) visibleH = frame.height;
-    videoAspect_ = static_cast<float>(visibleW) / static_cast<float>(visibleH);
-    drmUvScaleX_ = static_cast<float>(visibleW) / static_cast<float>(frame.width);
-    drmUvScaleY_ = static_cast<float>(visibleH) / static_cast<float>(frame.height);
-    range_[2] = 1.0f;  // re-encode to sRGB in the shader (matches the CPU path)
-    usingDmabuf_ = true;
-    hasVideo_ = true;
+    v.videoAspect = static_cast<float>(visibleW) / static_cast<float>(visibleH);
+    v.drmUvScaleX = static_cast<float>(visibleW) / static_cast<float>(frame.width);
+    v.drmUvScaleY = static_cast<float>(visibleH) / static_cast<float>(frame.height);
+    v.range[2] = 1.0f;  // re-encode to sRGB in the shader (matches the CPU path)
+    v.usingDmabuf = true;
+    v.hasVideo = true;
 }
 
-void VulkanRenderer::releaseVideoFrame() {
-    if (drmImage_ == VK_NULL_HANDLE && !drmKeepAlive_) {
+void VulkanRenderer::releaseVideoFrame(int slot) {
+    if (slot < 0 || slot >= kMaxVideoSlots) slot = 0;
+    VideoSlot& v = videoSlots_[slot];
+    if (v.drmImage == VK_NULL_HANDLE && !v.drmKeepAlive) {
         return;
     }
     vkDeviceWaitIdle(device_);  // the GPU may still sample the imported image
-    if (drmView_ != VK_NULL_HANDLE) vkDestroyImageView(device_, drmView_, nullptr);
-    if (drmImage_ != VK_NULL_HANDLE) vkDestroyImage(device_, drmImage_, nullptr);
-    if (drmMemory_ != VK_NULL_HANDLE) vkFreeMemory(device_, drmMemory_, nullptr);
-    drmView_ = VK_NULL_HANDLE;
-    drmImage_ = VK_NULL_HANDLE;
-    drmMemory_ = VK_NULL_HANDLE;
-    drmKeepAlive_.reset();  // return the decoder's V4L2 capture buffer
+    if (v.drmView != VK_NULL_HANDLE) vkDestroyImageView(device_, v.drmView, nullptr);
+    if (v.drmImage != VK_NULL_HANDLE) vkDestroyImage(device_, v.drmImage, nullptr);
+    if (v.drmMemory != VK_NULL_HANDLE) vkFreeMemory(device_, v.drmMemory, nullptr);
+    v.drmView = VK_NULL_HANDLE;
+    v.drmImage = VK_NULL_HANDLE;
+    v.drmMemory = VK_NULL_HANDLE;
+    v.drmKeepAlive.reset();  // return the decoder's V4L2 capture buffer
     // The resolve target keeps the last frame on screen until the next import.
 }
 
 void VulkanRenderer::updateVideoTexture(int width, int height, const uint8_t* y,
                                         const uint8_t* uv, int colorspace,
-                                        bool fullRange) {
+                                        bool fullRange, int slot) {
+    if (slot < 0 || slot >= kMaxVideoSlots) slot = 0;
+    VideoSlot& v = videoSlots_[slot];
     if (width <= 0 || height <= 0 || y == nullptr || uv == nullptr) {
         return;
     }
-    usingDmabuf_ = false;  // CPU NV12 path owns the video draw from here
+    v.usingDmabuf = false;  // CPU NV12 path owns the video draw from here
 
-    if (lumaImage_ == VK_NULL_HANDLE || width != videoWidth_ ||
-        height != videoHeight_) {
-        if (!createVideoResources(width, height)) {
+    if (v.lumaImage == VK_NULL_HANDLE || width != v.videoWidth ||
+        height != v.videoHeight) {
+        if (!createVideoResources(v, width, height)) {
             return;
         }
     }
 
     const std::size_t lumaBytes = static_cast<std::size_t>(width) * height;
     const std::size_t chromaBytes = static_cast<std::size_t>(width) * (height / 2);
-    auto* dst = static_cast<uint8_t*>(stagingMapped_);
+    auto* dst = static_cast<uint8_t*>(v.stagingMapped);
     std::memcpy(dst, y, lumaBytes);
     std::memcpy(dst + lumaBytes, uv, chromaBytes);
 
@@ -6598,7 +6683,7 @@ void VulkanRenderer::updateVideoTexture(int width, int height, const uint8_t* y,
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(uploadCmd_, &begin);
 
-    const bool wasInit = videoLayoutInitialized_;
+    const bool wasInit = v.videoLayoutInitialized;
 
     auto upload_plane = [&](VkImage image, int w, int h, uint32_t mipLevels,
                             VkDeviceSize bufferOffset) {
@@ -6629,7 +6714,7 @@ void VulkanRenderer::updateVideoTexture(int width, int height, const uint8_t* y,
         region.imageSubresource.mipLevel = 0;
         region.imageSubresource.layerCount = 1;
         region.imageExtent = {static_cast<uint32_t>(w), static_cast<uint32_t>(h), 1};
-        vkCmdCopyBufferToImage(uploadCmd_, stagingBuffer_, image,
+        vkCmdCopyBufferToImage(uploadCmd_, v.stagingBuffer, image,
                                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
         // Generate mipmaps by blitting each level from the previous one.
@@ -6707,8 +6792,8 @@ void VulkanRenderer::updateVideoTexture(int width, int height, const uint8_t* y,
                              nullptr, 0, nullptr, 1, &lastBarrier);
     };
 
-    upload_plane(lumaImage_, width, height, lumaMipLevels_, 0);
-    upload_plane(chromaImage_, width / 2, height / 2, chromaMipLevels_,
+    upload_plane(v.lumaImage, width, height, v.lumaMipLevels, 0);
+    upload_plane(v.chromaImage, width / 2, height / 2, v.chromaMipLevels,
                  static_cast<VkDeviceSize>(lumaBytes));
 
     vkEndCommandBuffer(uploadCmd_);
@@ -6733,17 +6818,17 @@ void VulkanRenderer::updateVideoTexture(int width, int height, const uint8_t* y,
     }
     const float kg = 1.0f - kr - kb;
     const float cscale = fullRange ? 1.0f : 255.0f / 224.0f;
-    conversion_[0] = 2.0f * (1.0f - kr) * cscale;
-    conversion_[1] = -2.0f * kb * (1.0f - kb) / kg * cscale;
-    conversion_[2] = -2.0f * kr * (1.0f - kr) / kg * cscale;
-    conversion_[3] = 2.0f * (1.0f - kb) * cscale;
-    range_[0] = fullRange ? 0.0f : 16.0f / 255.0f;
-    range_[1] = fullRange ? 1.0f : 255.0f / 219.0f;
-    range_[2] = 1.0f;  // sRGB swapchain: linearize in the shader
-    range_[3] = 0.0f;
+    v.conversion[0] = 2.0f * (1.0f - kr) * cscale;
+    v.conversion[1] = -2.0f * kb * (1.0f - kb) / kg * cscale;
+    v.conversion[2] = -2.0f * kr * (1.0f - kr) / kg * cscale;
+    v.conversion[3] = 2.0f * (1.0f - kb) * cscale;
+    v.range[0] = fullRange ? 0.0f : 16.0f / 255.0f;
+    v.range[1] = fullRange ? 1.0f : 255.0f / 219.0f;
+    v.range[2] = 1.0f;  // sRGB swapchain: linearize in the shader
+    v.range[3] = 0.0f;
 
-    videoLayoutInitialized_ = true;
-    hasVideo_ = true;
+    v.videoLayoutInitialized = true;
+    v.hasVideo = true;
 }
 
 } // namespace pixelvr

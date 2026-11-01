@@ -55,18 +55,22 @@ public:
     // Uploads a decoded NV12 frame (luma + interleaved chroma) into the video
     // textures, creating or resizing them as needed. Safe to call once per frame.
     void updateVideoTexture(int width, int height, const uint8_t* y,
-                            const uint8_t* uv, int colorspace, bool fullRange);
+                            const uint8_t* uv, int colorspace, bool fullRange,
+                            int slot = 0);
 
     // Imports a decoded DMA-BUF frame (drm_prime) as a YCbCr image sampled
     // through a VkSamplerYcbcrConversion, replacing the CPU NV12 upload. Resolves
     // ownership of frame.fd (imports it into Vulkan or closes it) and clears it.
-    void updateVideoDmabuf(DrmVideoFrame& frame);
+    void updateVideoDmabuf(DrmVideoFrame& frame, int slot = 0);
     // Releases the imported dma-buf frame and the decoder's capture-buffer ref
     // while keeping the resolved image on screen; call before the decoder seeks
     // or a new clip opens so the hardware decoder can reclaim its buffers.
-    void releaseVideoFrame();
-    bool hasVideo() const { return hasVideo_; }
-    void clearVideo() { hasVideo_ = false; }
+    void releaseVideoFrame(int slot = 0);
+    // Video slots: slot 0 is the main screen (also 360/180); slots 1..2 are the
+    // extra flat screens of multi-screen mode.
+    static constexpr int kMaxVideoSlots = 3;
+    bool hasVideo(int slot = 0) const { return videoSlots_[slot].hasVideo; }
+    void clearVideo(int slot = 0) { videoSlots_[slot].hasVideo = false; }
 
     enum class ProjectionMode { Flat, Equirect360, Equirect180 };
     enum class StereoMode { Mono, SideBySide, TopBottom };
@@ -88,6 +92,29 @@ public:
     float sphereZoom() const { return sphereZoom_; }
     float spherePitch() const { return spherePitch_; }
     void setSwapEyes(bool on) { swapEyes_ = on; }
+
+    // Multi-screen placement. Slots 1..2 are extra flat screens and are drawn
+    // only while `active`; slot 0 (the main screen) follows the recenter pose
+    // unless its placement is `active` (the user moved it).
+    struct ScreenPlacement {
+        bool active = false;
+        float center[3] = {0.0f, 0.0f, -3.0f};  // app space, metres
+        float yaw = 0.0f;                         // same convention as screenYaw
+        float pitch = 0.0f;
+        float scale = 1.0f;                       // 1 = the default 3.2 m wide screen
+        float curvature = 0.0f;
+        StereoMode stereo = StereoMode::Mono;     // slot 0 uses setStereoMode()
+    };
+    void setScreenPlacement(int slot, const ScreenPlacement& p) {
+        if (slot >= 0 && slot < kMaxVideoSlots) screenPlacements_[slot] = p;
+    }
+    const ScreenPlacement& screenPlacement(int slot) const { return screenPlacements_[slot]; }
+    // Multi-screen mode: outlines + "selected" highlight; ambilight follows the
+    // selected screen.
+    void setMultiScreen(bool active, int selectedSlot) {
+        multiScreenActive_ = active;
+        selectedScreen_ = (selectedSlot >= 0 && selectedSlot < kMaxVideoSlots) ? selectedSlot : 0;
+    }
     void setDrawModels(bool on) { drawModels_ = on; }
 
     // Debug statistics overlay (FPS, decode, system load). Drawn head-locked.
@@ -473,21 +500,22 @@ private:
                        VkSampleCountFlagBits samples =
                            VK_SAMPLE_COUNT_FLAG_BITS_MAX_ENUM,
                        const VkPipelineVertexInputStateCreateInfo* vertexInput = nullptr);
-    bool createVideoResources(int width, int height);
-    void destroyVideoResources();
-    bool createYcbcrPipeline(uint32_t fourcc, int colorspace, bool fullRange);
-    void destroyYcbcr();
-    bool createResolveTarget(int width, int height);
-    void destroyResolveTarget();
+    struct VideoSlot;
+    bool createVideoResources(VideoSlot& v, int width, int height);
+    void destroyVideoResources(VideoSlot& v);
+    bool createYcbcrPipeline(VideoSlot& v, uint32_t fourcc, int colorspace, bool fullRange);
+    void destroyYcbcr(VideoSlot& v);
+    bool createResolveTarget(VideoSlot& v, int width, int height);
+    void destroyResolveTarget(VideoSlot& v);
     bool createModelPipeline();
     // Content-sized layout for the downloads-window buttons (centered, along the
     // bottom). Fills centre-x and half-width per button.
     void downloadsButtonLayout(std::vector<float>& cx,
                                std::vector<float>& halfW) const;
-    bool importDmabufImage(const DrmVideoFrame& frame, VkImage& image,
+    bool importDmabufImage(VideoSlot& v, const DrmVideoFrame& frame, VkImage& image,
                            VkDeviceMemory& memory, VkImageView& view,
                            bool& fdConsumed);
-    void resolveFrame(VkImage importedImage);
+    void resolveFrame(VideoSlot& v, VkImage importedImage);
     void updatePointer();
     uint32_t findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags props) const;
     VkShaderModule loadShaderModule(const std::string& filename);
@@ -524,7 +552,6 @@ private:
     StereoMode stereoMode_ = StereoMode::Mono;
     bool swapEyes_ = false;
     bool drawModels_ = false;
-    float videoAspect_ = 16.0f / 9.0f;
 
     bool statsVisible_ = false;
     std::vector<std::string> statsLines_;
@@ -700,31 +727,92 @@ private:
     // Video texture sampling: descriptor set + sampler shared by both eyes.
     VkDescriptorSetLayout descriptorSetLayout_ = VK_NULL_HANDLE;
     VkDescriptorPool descriptorPool_ = VK_NULL_HANDLE;
-    VkDescriptorSet descriptorSet_ = VK_NULL_HANDLE;
     VkSampler sampler_ = VK_NULL_HANDLE;
 
     // NV12 video textures (luma R8 full-res + chroma RG8 half-res) and staging.
-    VkImage lumaImage_ = VK_NULL_HANDLE;
-    VkDeviceMemory lumaMemory_ = VK_NULL_HANDLE;
-    VkImageView lumaView_ = VK_NULL_HANDLE;
-    VkImage chromaImage_ = VK_NULL_HANDLE;
-    VkDeviceMemory chromaMemory_ = VK_NULL_HANDLE;
-    VkImageView chromaView_ = VK_NULL_HANDLE;
-    int videoWidth_ = 0;
-    int videoHeight_ = 0;
-    uint32_t lumaMipLevels_ = 1;
-    uint32_t chromaMipLevels_ = 1;
-    bool videoLayoutInitialized_ = false;
-    bool hasVideo_ = false;
 
     // YUV->RGB coefficients + luma range/scale, derived from the frame metadata.
-    float conversion_[4] = {1.402f, -0.344f, -0.714f, 1.772f};
-    float range_[4] = {16.0f / 255.0f, 255.0f / 219.0f, 1.0f, 0.0f};
 
-    VkBuffer stagingBuffer_ = VK_NULL_HANDLE;
-    VkDeviceMemory stagingMemory_ = VK_NULL_HANDLE;
-    VkDeviceSize stagingSize_ = 0;
-    void* stagingMapped_ = nullptr;
+
+    // All GPU state of one playing video: CPU NV12 upload textures, the zero-copy
+    // dma-buf import with its YCbCr conversion + pipelines, and the mipmapped
+    // RGBA resolve target the video pipelines sample.
+    struct VideoSlot {
+        VkDescriptorSet descriptorSet = VK_NULL_HANDLE;  // CPU NV12 path
+
+        // NV12 video textures (luma R8 full-res + chroma RG8 half-res) and staging.
+        VkImage lumaImage = VK_NULL_HANDLE;
+        VkDeviceMemory lumaMemory = VK_NULL_HANDLE;
+        VkImageView lumaView = VK_NULL_HANDLE;
+        VkImage chromaImage = VK_NULL_HANDLE;
+        VkDeviceMemory chromaMemory = VK_NULL_HANDLE;
+        VkImageView chromaView = VK_NULL_HANDLE;
+        int videoWidth = 0;
+        int videoHeight = 0;
+        uint32_t lumaMipLevels = 1;
+        uint32_t chromaMipLevels = 1;
+        bool videoLayoutInitialized = false;
+        bool hasVideo = false;
+        float videoAspect = 16.0f / 9.0f;
+
+        // YUV->RGB coefficients + luma range/scale, derived from the frame metadata.
+        float conversion[4] = {1.402f, -0.344f, -0.714f, 1.772f};
+        float range[4] = {16.0f / 255.0f, 255.0f / 219.0f, 1.0f, 0.0f};
+
+        VkBuffer stagingBuffer = VK_NULL_HANDLE;
+        VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+        VkDeviceSize stagingSize = 0;
+        void* stagingMapped = nullptr;
+
+        // Zero-copy dma-buf video: a YCbCr conversion + immutable sampler baked into
+        // its own descriptor set layout and pipelines, rebuilt when the frame format
+        // or colour metadata changes. The imported image is single-buffered and
+        // retired on the next import.
+        VkSamplerYcbcrConversion ycbcrConversion = VK_NULL_HANDLE;
+        VkSampler ycbcrSampler = VK_NULL_HANDLE;
+        VkDescriptorSetLayout ycbcrSetLayout = VK_NULL_HANDLE;
+        VkDescriptorPool ycbcrPool = VK_NULL_HANDLE;
+        VkDescriptorSet ycbcrSet = VK_NULL_HANDLE;
+        VkPipelineLayout ycbcrQuadLayout = VK_NULL_HANDLE;
+        VkPipeline ycbcrQuadPipeline = VK_NULL_HANDLE;
+        VkPipeline ycbcrAmbilightPipeline = VK_NULL_HANDLE;
+        VkPipelineLayout ycbcrSphereLayout = VK_NULL_HANDLE;
+        VkPipeline ycbcrSpherePipeline = VK_NULL_HANDLE;
+        VkFormat ycbcrFormat = VK_FORMAT_UNDEFINED;
+        uint32_t ycbcrKeyFourcc = 0;
+        int ycbcrKeyColorspace = -1;
+        bool ycbcrKeyFullRange = false;
+        VkImage drmImage = VK_NULL_HANDLE;
+        VkDeviceMemory drmMemory = VK_NULL_HANDLE;
+        VkImageView drmView = VK_NULL_HANDLE;
+        std::shared_ptr<void> drmKeepAlive;  // decoder frame ref for the live image
+        bool usingDmabuf = false;
+        float drmUvScaleX = 1.0f;  // visible/coded, applied to UVs to drop padding
+        float drmUvScaleY = 1.0f;
+
+        // Minification mip chain: the imported YCbCr frame is resolved into this
+        // RGBA image (with mipmaps) each frame, then sampled trilinearly.
+        VkRenderPass resolvePass = VK_NULL_HANDLE;
+        VkPipelineLayout resolveLayout = VK_NULL_HANDLE;
+        VkPipeline resolvePipeline = VK_NULL_HANDLE;
+        VkSampler resolveSampler = VK_NULL_HANDLE;
+        VkDescriptorSetLayout resolveSetLayout = VK_NULL_HANDLE;
+        VkDescriptorPool resolvePool = VK_NULL_HANDLE;
+        VkDescriptorSet resolveSet = VK_NULL_HANDLE;
+        VkImage resolveImage = VK_NULL_HANDLE;
+        VkDeviceMemory resolveMemory = VK_NULL_HANDLE;
+        VkImageView resolveView = VK_NULL_HANDLE;        // all mips (sampled)
+        VkImageView resolveTargetView = VK_NULL_HANDLE;  // mip 0 (render target)
+        VkFramebuffer resolveFbo = VK_NULL_HANDLE;
+        int resolveW = 0;
+        int resolveH = 0;
+        uint32_t resolveMips = 1;
+    };
+    VideoSlot videoSlots_[kMaxVideoSlots];
+    ScreenPlacement screenPlacements_[kMaxVideoSlots];
+    bool multiScreenActive_ = false;
+    int selectedScreen_ = 0;
+    uint64_t ycbcrRebuildCount_ = 0;
 
     VkCommandBuffer uploadCmd_ = VK_NULL_HANDLE;
     VkFence uploadFence_ = VK_NULL_HANDLE;
@@ -752,47 +840,10 @@ private:
     // its own descriptor set layout and pipelines, rebuilt when the frame format
     // or colour metadata changes. The imported image is single-buffered and
     // retired on the next import (renderView has waited on its fence by then).
-    VkSamplerYcbcrConversion ycbcrConversion_ = VK_NULL_HANDLE;
-    VkSampler ycbcrSampler_ = VK_NULL_HANDLE;
-    VkDescriptorSetLayout ycbcrSetLayout_ = VK_NULL_HANDLE;
-    VkDescriptorPool ycbcrPool_ = VK_NULL_HANDLE;
-    VkDescriptorSet ycbcrSet_ = VK_NULL_HANDLE;
-    VkPipelineLayout ycbcrQuadLayout_ = VK_NULL_HANDLE;
-    VkPipeline ycbcrQuadPipeline_ = VK_NULL_HANDLE;
-    VkPipeline ycbcrAmbilightPipeline_ = VK_NULL_HANDLE;
-    VkPipelineLayout ycbcrSphereLayout_ = VK_NULL_HANDLE;
-    VkPipeline ycbcrSpherePipeline_ = VK_NULL_HANDLE;
-    VkFormat ycbcrFormat_ = VK_FORMAT_UNDEFINED;
-    uint32_t ycbcrKeyFourcc_ = 0;
-    int ycbcrKeyColorspace_ = -1;
-    bool ycbcrKeyFullRange_ = false;
-    uint64_t ycbcrRebuildCount_ = 0;
-    VkImage drmImage_ = VK_NULL_HANDLE;
-    VkDeviceMemory drmMemory_ = VK_NULL_HANDLE;
-    VkImageView drmView_ = VK_NULL_HANDLE;
-    std::shared_ptr<void> drmKeepAlive_;  // decoder frame ref for the live image
-    bool usingDmabuf_ = false;
-    float drmUvScaleX_ = 1.0f;  // visible/coded, applied to UVs to drop padding
-    float drmUvScaleY_ = 1.0f;
 
     // Minification mip chain: the imported YCbCr frame is resolved into this RGBA
     // image (with mipmaps) each frame, then sampled trilinearly by the video
     // pipelines so 4K content doesn't shimmer when shown on a small screen.
-    VkRenderPass resolvePass_ = VK_NULL_HANDLE;
-    VkPipelineLayout resolveLayout_ = VK_NULL_HANDLE;
-    VkPipeline resolvePipeline_ = VK_NULL_HANDLE;
-    VkSampler resolveSampler_ = VK_NULL_HANDLE;
-    VkDescriptorSetLayout resolveSetLayout_ = VK_NULL_HANDLE;
-    VkDescriptorPool resolvePool_ = VK_NULL_HANDLE;
-    VkDescriptorSet resolveSet_ = VK_NULL_HANDLE;
-    VkImage resolveImage_ = VK_NULL_HANDLE;
-    VkDeviceMemory resolveMemory_ = VK_NULL_HANDLE;
-    VkImageView resolveView_ = VK_NULL_HANDLE;        // all mips (sampled)
-    VkImageView resolveTargetView_ = VK_NULL_HANDLE;  // mip 0 (render target)
-    VkFramebuffer resolveFbo_ = VK_NULL_HANDLE;
-    int resolveW_ = 0;
-    int resolveH_ = 0;
-    uint32_t resolveMips_ = 1;
 
     // Lit, textured 3D controller render models. The glTF geometry is loaded
     // separately for left (0) and right (1) hands into handModels_[2].

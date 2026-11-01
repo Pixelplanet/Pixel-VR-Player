@@ -111,9 +111,9 @@ private:
     void performVaultLock();
     // Closes the current clip and returns the renderer to flat/mono so the hub
     // panel stops behaving as if 180/360 content were still playing.
-    void closeMedia();
+    void closeMedia(int slot = -1);
     // Stores the current clip's position in playbackMemory_ (never for vault files).
-    void rememberPlaybackPosition();
+    void rememberPlaybackPosition(int slot = -1);
     VulkanRenderer::ActionMenuData actionMenu_{};
     void openActionMenu();
 
@@ -180,14 +180,46 @@ private:
     PlaybackMemory playbackMemory_;  // resume position + format override per file
     std::chrono::steady_clock::time_point lastPlaybackRemember_{};
 
+    // Multi-screen: one player per video slot (slot 0 = main screen, also used
+    // for 360/180; slots 1..2 = extra flat screens). Everything that used to act
+    // on "the" video acts on the selected screen via cur().
+    struct ScreenState {
 #ifdef PIXELVR_HAVE_MEDIA
-    MediaEngine media_;
-    ScrubPreview scrubPreview_;  // timeline hover keyframe preview
-    VideoFrame frame_;
-    DrmVideoFrame drmFrame_;
-    bool mediaOpen_ = false;
-    std::string currentMediaPath_;  // for reloading on a track/language change
-    void loadMedia(const std::string& path);
+        MediaEngine engine;
+        VideoFrame frame;
+        DrmVideoFrame drmFrame;
+#endif
+        bool open = false;
+        std::string path;    // for resume and reloading on a track change
+        bool muted = false;  // user mute (the audio mode may mute it as well)
+        int projection = 0;  // 0 flat, 1 360, 2 180 (extra screens: always 0)
+        int stereo = 0;      // 0 mono, 1 SBS, 2 TB
+    };
+    ScreenState screens_[VulkanRenderer::kMaxVideoSlots];
+    int selectedScreen_ = 0;
+    ScreenState& cur() { return screens_[selectedScreen_]; }
+    bool multiScreenEnabled() const;
+    int openScreenCount() const;
+    int freeScreenSlot() const;  // first unused extra slot, or -1
+    void selectScreen(int slot);
+    // Applies a projection/stereo format to the selected screen (renderer +
+    // settings mirror). Extra screens accept flat formats only.
+    bool applyFormat(int projection, int stereo);
+    // Default placement for a new extra screen beside the main one.
+    void placeNewScreen(int slot);
+    // Recenter the view; in multi-screen mode the whole arrangement moves along.
+    void recenterView(const XrInputState& in);
+    // Rough check that another stream fits the hardware decoder budget.
+    bool decoderBudgetAllows(const std::string& path) const;
+    void openScreenMenu(int slot);
+    void openPlayTargetMenu(const std::string& path);
+    int movingScreen_ = -1;  // screen being placed with the laser, or -1
+    float movingDistance_ = 3.0f;
+    std::string pendingPlayPath_;  // file waiting for the "play where?" choice
+
+#ifdef PIXELVR_HAVE_MEDIA
+    ScrubPreview scrubPreview_;  // timeline hover keyframe preview (selected screen)
+    void loadMedia(const std::string& path, int slot = -1);
     void switchTracks(bool byLanguage);  // reload current media at its position
 #endif
 

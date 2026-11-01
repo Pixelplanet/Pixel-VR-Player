@@ -9,8 +9,16 @@
 
 ## Next major features (planned 2026-11-01, after v1.8.0)
 
-Order: **Multi-screen first**, then **YouTube streaming** (priority one after
-multi-screen), then other streaming sources and a general web browser.
+Order: **Step 1 = Multi-screen**, **Step 2 = YouTube** (embedded mobile-site UI + yt-dlp
+playback + login/Premium), then other streaming sources.
+
+**Decisions (2026-11-01):**
+- Nothing is reused from StreamXR; everything is our own implementation (no licensing to track).
+- YouTube: show the real **YouTube mobile site** (m.youtube.com) in an embedded browser panel
+  for browsing, search and login; when the user opens a video, intercept the watch URL and
+  play it in our own player via yt-dlp instead of in the browser.
+- Login is part of Step 2: Premium users get no ads and the higher-bitrate 1080p formats.
+- Multi-screen: one shared control dock for the selected screen.
 
 ### Facts gathered (2026-11-01, on the Steam Frame)
 - Hardware decoder `qcom-iris-decoder` (`/dev/video22`) accepts **H.264, HEVC and VP9** only
@@ -23,11 +31,8 @@ multi-screen), then other streaming sources and a general web browser.
   `VulkanRenderer` has exactly one set of video resources (NV12/dma-buf images, YCbCr
   conversion + pipelines, resolve/mip target, screen pose, projection/stereo, ambilight).
 - `python3` 3.12 and `curl` exist on the device; `yt-dlp` is **not** installed.
-- **StreamXR** (github.com/FauxxYT/StreamXR, MIT) is a **Chrome extension** (plain JS +
-  WebXR) that drives YouTube's own web player inside the browser. Its code cannot be dropped
-  into our native C++/Vulkan app; reuse means reading its YouTube data handling, UI flows and
-  format handling (VR180 / 360 / YouTube "mesh"/cubemap). Its Steam Frame controller models
-  are CC BY-NC-SA 4.0 — do not bundle them.
+- StreamXR (a Chrome extension built on WebXR) was looked at for reference only; we do not
+  reuse any of its code or assets.
 
 ### M. Multi-screen playback (up to 3 screens)
 Scope: flat 2D and every 3D format (SBS / half-SBS / TB) on flat or curved screens.
@@ -73,38 +78,37 @@ Scope: flat 2D and every 3D format (SBS / half-SBS / TB) on flat or curved scree
 - [ ] **M6. Test matrix** — 2 and 3 screens with mixed H.264/HEVC/VP9, 1080p/4K, SBS/TB;
   audio modes; vault lock; recenter (should recenter the whole arrangement around the user).
 
-### Y. YouTube streaming (priority one after multi-screen)
-Approach: native, no embedded browser for video. **yt-dlp** resolves stream URLs, FFmpeg
-streams them (hardware VP9/H.264), our own UI does search and browsing.
+### Y. YouTube (Step 2)
+Approach: embedded browser shows m.youtube.com (browse, search, login); watch URLs are
+intercepted and played natively — **yt-dlp** resolves the streams, FFmpeg plays them with
+hardware VP9/H.264 in our player (works with multi-screen).
 
-- [ ] **Y0. Decide & document legal/ToS stance** — third-party YouTube clients violate
-  YouTube's ToS; keep it personal-use, no downloading of YouTube content by default, no
-  ad-blocking claims. Mention in README.
-- [ ] **Y1. Play a YouTube URL** (first milestone)
+- [ ] **Y0. Legal/ToS note** — personal use; no downloading of YouTube content by default.
+- [ ] **Y1. Play a YouTube URL natively** (testable before the browser exists)
   - Ship the standalone `yt-dlp_linux_aarch64` binary (Unlicense) via the installer into the
-    app dir; self-update with `yt-dlp -U` (YouTube changes break old versions often).
-  - `yt-dlp -J <url>` → pick formats: VP9 or H.264 video only (never AV1 for >1080p), up to the
-    chosen quality; Opus/AAC audio; pass yt-dlp's `http_headers` to FFmpeg.
-  - `MediaEngine`: support **separate video and audio inputs** (two demuxers, one clock) —
-    adaptive streams are split above 720p. Alternative: generate a local DASH MPD and let
-    FFmpeg's dash demuxer handle it. Network options: reconnect, timeouts, buffering
-    indicator, seeking over HTTP.
-  - "Open URL" field in the hub (uses the in-app keyboard).
-- [ ] **Y2. Search** — first version via `yt-dlp "ytsearch20:<query>" --flat-playlist -J`;
-  later the InnerTube API (`youtubei/v1/search`) over libcurl + a JSON library (e.g.
-  nlohmann/json, MIT) for speed. Results reuse the card grid (thumbnail from i.ytimg.com via
-  stb_image, title, channel, duration, views, VR180/360/3D badge).
-- [ ] **Y3. Browse** — Trending/Explore, channel pages, playlists, related videos ("Up next").
+    app dir; self-update with `yt-dlp -U` (old versions break often).
+  - `yt-dlp -J <url>` → pick VP9 or H.264 video (never AV1 above 1080p) up to the chosen
+    quality + Opus/AAC audio; pass yt-dlp's `http_headers` to FFmpeg.
+  - `MediaEngine`: **separate video + audio inputs** (two demuxers, one clock), or a generated
+    local DASH MPD for FFmpeg's dash demuxer. Reconnect/timeouts, buffering indicator,
+    seeking over HTTP.
+  - Temporary "Open URL" field (in-app keyboard) for testing.
+- [ ] **Y2. Embedded browser panel** (engine evaluation = W1 below)
+  - Glass panel showing m.youtube.com with a mobile user agent; laser → touch/mouse events,
+    thumbstick → scroll, in-app keyboard → text input; back / reload / home.
+  - **Intercept navigation** to `youtube.com/watch?v=…`, `youtu.be/…`, `/shorts/…`,
+    `/live/…`: cancel it in the browser and play the URL in our player (selected or new screen).
+  - Pause/mute any page audio while our player runs.
+- [ ] **Y3. Login & Premium**
+  - Sign in on the mobile site inside the browser (Google login works in a normal web view).
+  - Export the browser's YouTube cookies to a Netscape cookie file for `yt-dlp --cookies`
+    so Premium accounts get the higher-bitrate 1080p formats (and no ads — our player never
+    shows ads anyway). Store with 0600 permissions; "Sign out" clears browser + cookie file.
 - [ ] **Y4. VR formats** — VR180 (equirect 180 + SBS), 360 equirect mono/TB, and YouTube's
-  **EAC cubemap / "mesh"** projection (new sphere shader path). Read FFmpeg spherical /
-  stereo3d side data and yt-dlp metadata to auto-select; check StreamXR's format handling.
+  **EAC cubemap** projection (new sphere shader path); auto-select from FFmpeg spherical /
+  stereo3d side data and yt-dlp metadata.
 - [ ] **Y5. Player features** — quality picker in the HUD (warn when a quality needs software
   decode), captions (WebVTT → text overlay), chapters on the timeline, playback speed.
-- [ ] **Y6. Account (optional)** — subscriptions/history/likes via YouTube TV device-code OAuth
-  or imported cookies; tokens in `~/.config/pixelvr` with 0600 permissions; easy sign-out.
-- [ ] **Y7. Hub integration** — a "Streaming" main tab (YouTube first, more providers later)
-  with Home / Search / Subscriptions / History; works with multi-screen (any screen can
-  play a stream).
 
 ### S. Other streaming sources (after YouTube)
 - [ ] **S1. yt-dlp generic** — the same Open URL path works for many sites yt-dlp supports
@@ -113,13 +117,12 @@ streams them (hardware VP9/H.264), our own UI does search and browsing.
   browsing in the Streaming tab.
 - [ ] DRM services (Netflix, Disney+, …) are out of scope (Widevine).
 
-### W. General web browser (last, needs evaluation)
-- [ ] **W1. Evaluate engines**: **WPE WebKit** (the fdo backend exports dma-buf frames →
-  zero-copy Vulkan import, lighter) vs **CEF** offscreen rendering (Chromium, heavy, CPU copy).
-  Check aarch64 SteamOS packaging, memory use and input injection (laser → mouse, in-app
-  keyboard → key events).
-- [ ] **W2. Browser panel** — URL bar, back/forward/reload, tabs (max 2–3), shown on a hub-like
-  glass panel; video inside pages plays in the page (no hardware decode guarantee).
+### W. Browser engine (needed by Y2)
+- [ ] **W1. Evaluate engines**: **WPE WebKit** (fdo backend exports dma-buf frames → zero-copy
+  Vulkan import, lighter) vs **CEF** offscreen rendering (Chromium, heavy, CPU copy). Check
+  aarch64 SteamOS availability/packaging, memory, Google login support, touch/mouse/key input
+  injection and navigation interception hooks.
+- [ ] **W2. General browsing (later)** — URL bar, back/forward, a couple of tabs; same panel.
 
 ---
 
