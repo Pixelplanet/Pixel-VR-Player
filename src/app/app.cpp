@@ -1274,6 +1274,22 @@ void App::openPlayTargetMenu(const std::string& path) {
             if (!screens_[slot].open) pls[slot] = newScreenPlacement(slot);
         }
     }
+    if (spatial && arrangementActive_) {
+        // Layout in use: show it as it will be once a screen is added, with
+        // the next free slot as a "+" tile in the spot it will join (other free
+        // slots are left out so the preview always matches the result).
+        int freeSlot = -1;
+        for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
+            if (screens_[slot].open) continue;
+            if (freeSlot < 0) freeSlot = slot;
+            else actionMenu_.options[static_cast<std::size_t>(slot)] = "-";
+        }
+        if (freeSlot >= 0 && !inArrangement(freeSlot)) {
+            Arrangement joined = arrangement_;
+            joined.order.push_back(freeSlot);
+            computeArrangement(joined, pls);
+        }
+    }
     if (spatial) {
         renderer_.setArrangePreview(pls, pivot, anchorYaw, anchorPitch, -1, arrangementActive_ && arrangement_.snap);
     }
