@@ -103,6 +103,14 @@ constexpr float kDockHalfW = 0.92f;
 constexpr float kDockHalfH = 0.23f;
 constexpr int kBtnCount = static_cast<int>(VulkanRenderer::CtrlButton::Count);
 
+// The multi-screen row extends the dock downward by this much when shown.
+constexpr float kDockScreenRowExtra = 0.105f;
+inline bool is_screen_row_button(int b) {
+    using Btn = VulkanRenderer::CtrlButton;
+    const auto cb = static_cast<Btn>(b);
+    return cb == Btn::ScreenMute || cb == Btn::ScreenMove || cb == Btn::ScreenClose;
+}
+
 inline CtrlButtonRect get_ctrl_button_rect(int b) {
     using Btn = VulkanRenderer::CtrlButton;
     switch (static_cast<Btn>(b)) {
@@ -121,6 +129,11 @@ inline CtrlButtonRect get_ctrl_button_rect(int b) {
         case Btn::FormatToggle: return { 0.62f, kBarY + 0.040f, 0.210f, 0.036f};
         case Btn::AudioToggle:  return { 0.62f, kBarY - 0.044f, 0.210f, 0.036f};
         case Btn::ScreenToggle: return { 0.62f, kBarY - 0.128f, 0.210f, 0.036f};
+
+        // Multi-screen row (below the main controls, only while shown)
+        case Btn::ScreenMute:   return { 0.06f, kBarY - 0.272f, 0.034f, 0.034f};
+        case Btn::ScreenMove:   return { 0.16f, kBarY - 0.272f, 0.034f, 0.034f};
+        case Btn::ScreenClose:  return { 0.26f, kBarY - 0.272f, 0.034f, 0.034f};
         default: return {0.0f, 0.0f, 0.0f, 0.0f};
     }
 }
@@ -406,6 +419,12 @@ inline const std::vector<KbKey>& keyboardKeys() {
     }();
     return keys;
 }
+// "Play on which screen?" picker (action menu page 6): three 16:9 tiles in a row
+// (index = left-to-right position) plus a Cancel button (option 3).
+constexpr float kPickHalfW = 0.68f;
+constexpr float kPickHalfH = 0.31f;
+inline UiRect pickerTile(int i) { return {-0.42f + 0.42f * static_cast<float>(i), 0.005f, 0.18f, 0.18f * 9.0f / 16.0f}; }
+inline UiRect pickerCancel() { return {0.0f, -0.235f, 0.095f, 0.032f}; }
 }  // namespace hub
 
 // Seconds -> "M:SS" or "H:MM:SS" for the transport time readout.
@@ -1607,6 +1626,24 @@ void VulkanRenderer::updateCardThumbnail(int slot, const std::string& path,
     PIXELVR_LOG_INFO("VulkanRenderer: uploaded card thumbnail slot %d -> %s", slot, path.c_str());
 }
 
+void VulkanRenderer::screenOrderLeftToRight(int out[kMaxVideoSlots]) const {
+    // Angle of each screen around the viewer relative to the recenter yaw
+    // (positive = to the left). Unused extra slots take their default side.
+    float ang[kMaxVideoSlots] = {0.0f, 0.80f, -0.80f};
+    for (int slot = 0; slot < kMaxVideoSlots; ++slot) {
+        const ScreenPlacement& pl = screenPlacements_[slot];
+        if (!pl.active) continue;
+        const float dx = pl.center[0] - screenPivot_[0];
+        const float dz = pl.center[2] - screenPivot_[2];
+        float a = std::atan2(-dx, -dz) - screenYaw_;
+        while (a > 3.14159f) a -= 6.28318f;
+        while (a < -3.14159f) a += 6.28318f;
+        ang[slot] = a;
+    }
+    for (int i = 0; i < kMaxVideoSlots; ++i) out[i] = i;
+    std::sort(out, out + kMaxVideoSlots, [&](int a, int b) { return ang[a] > ang[b]; });
+}
+
 int VulkanRenderer::keyboardKeyCode(int index) {
     const auto& keys = hub::keyboardKeys();
     return (index >= 0 && index < static_cast<int>(keys.size())) ? keys[index].code : -1;
@@ -1791,13 +1828,20 @@ void VulkanRenderer::updatePointer() {
             if (inPanel) {
                 hitHere(world.x, world.y, world.z);
                 const int optCount = static_cast<int>(actionMenu_.options.size());
-                if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5 || actionMenu_.page >= 6) {
+                if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5) {
                     for (int i = 0; i < optCount; ++i) {
                         if (hub::actionMenuOption(i, optCount).contains(hx, hyy, 0.002f)) {
                             actionMenuBtnHovered_ = i;
                             break;
                         }
                     }
+                } else if (actionMenu_.page == 6) {
+                    int order[kMaxVideoSlots];
+                    screenOrderLeftToRight(order);
+                    for (int i = 0; i < kMaxVideoSlots; ++i) {
+                        if (hub::pickerTile(i).contains(hx, hyy, 0.012f)) actionMenuBtnHovered_ = order[i];
+                    }
+                    if (hub::pickerCancel().contains(hx, hyy, 0.004f)) actionMenuBtnHovered_ = 3;
                 } else if (actionMenu_.page == 2) {
                     for (int i = 0; i < 2; ++i) {
                         if (hub::deleteConfirmButton(i).contains(hx, hyy)) actionMenuBtnHovered_ = i;
@@ -2019,6 +2063,7 @@ void VulkanRenderer::updatePointer() {
         for (int b = 0; b < kBtnCount; ++b) {
             const auto cb = static_cast<CtrlButton>(b);
             if (cb == CtrlButton::AudioToggle && !hudAudioEnabled_) continue;
+            if (is_screen_row_button(b) && !screenControlsVisible_) continue;
             if (cb == CtrlButton::FormatToggle && !hudFormatEnabled_) continue;
             const CtrlButtonRect r = get_ctrl_button_rect(b);
             if (r.hw <= 0.0f) continue;
@@ -2034,8 +2079,10 @@ void VulkanRenderer::updatePointer() {
         }
 
         // Catch the laser on the dock background plate so the beam never shoots to infinity
+        const float dockBottom = kBarY - kDockHalfH -
+                                 (screenControlsVisible_ ? kDockScreenRowExtra : 0.0f);
         if (hx >= -kDockHalfW && hx <= kDockHalfW &&
-            hyy >= kBarY - kDockHalfH && hyy <= kBarY + kDockHalfH) {
+            hyy >= dockBottom && hyy <= kBarY + kDockHalfH) {
             hitHere(world.x, world.y, world.z);
             pointerButton_ = -1;
             break;
@@ -3103,8 +3150,20 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
     if (controlBarVisible_ && !hubOpen && !modalOpen && uiPipeline_ != VK_NULL_HANDLE) {
         bindPipe(uiPipeline_);
         const float dockShadow[4] = {0.0f, 0.0f, 0.0f, 0.55f};
-        drawGlow(vpPanel, 0.0f, kBarY - 0.01f, kDockHalfW, kDockHalfH, 0.06f, dockShadow, 0.14f, true);
-        drawGlass(0.0f, kBarY, kDockHalfW, kDockHalfH, glassPanelT.data(), 0.16f, 0.010f, kGlassRim);
+        const float rowExtra = screenControlsVisible_ ? kDockScreenRowExtra : 0.0f;
+        const float dockCy = kBarY - 0.5f * rowExtra;
+        const float dockHh = kDockHalfH + 0.5f * rowExtra;
+        drawGlow(vpPanel, 0.0f, dockCy - 0.01f, kDockHalfW, dockHh, 0.06f, dockShadow, 0.14f, true);
+        drawGlass(0.0f, dockCy, kDockHalfW, dockHh, glassPanelT.data(), 0.16f, 0.010f, kGlassRim);
+        if (screenControlsVisible_) {
+            // Divider above the multi-screen row + "SCREEN n" label pill
+            drawUiElement(vpPanel, 0.0f, kBarY - 0.212f, kDockHalfW - 0.06f, 0.0012f,
+                          UiShape::RoundedBox, kGlassDivider, 1.0f);
+            const float labelBg[4] = {themeAccentCol[0] * 0.22f, themeAccentCol[1] * 0.22f,
+                                      themeAccentCol[2] * 0.28f, 0.92f};
+            drawUiElement(vpPanel, -0.12f, kBarY - 0.272f, 0.115f, 0.030f,
+                          UiShape::RoundedBox, labelBg, 1.0f, 0.08f, themeAccentCol);
+        }
 
         // Top scrubber groove
         drawUiElement(vpPanel, 0.0f, kBarY + 0.125f, kDockHalfW - 0.045f, 0.052f,
@@ -3126,6 +3185,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
 
         for (int b = 0; b < kBtnCount; ++b) {
             const auto cb = static_cast<CtrlButton>(b);
+            if (is_screen_row_button(b) && !screenControlsVisible_) continue;
             const CtrlButtonRect r = get_ctrl_button_rect(b);
             const bool hovered = (pointerButton_ == b);
             const float* bg = hovered ? btnBgHover : glassControlT.data();
@@ -3186,6 +3246,10 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 else if (cb == CtrlButton::SeekFwd) iconShape = UiShape::SeekFwd;
                 else if (cb == CtrlButton::Stop) iconShape = UiShape::Stop;
                 else if (cb == CtrlButton::HideHud) iconShape = UiShape::Close;
+                else if (cb == CtrlButton::ScreenMute)
+                    iconShape = screenControlsMuted_ ? UiShape::SpeakerMuted : UiShape::Speaker;
+                else if (cb == CtrlButton::ScreenMove) iconShape = UiShape::Move;
+                else if (cb == CtrlButton::ScreenClose) iconShape = UiShape::Close;
                 drawUiElement(vpPanel, r.cx, r.cy, r.hw * 0.42f, r.hh * 0.42f,
                               iconShape, themeTextCol);
             }
@@ -3269,7 +3333,12 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         }
 
         // Button hover tooltip pills
-        if (pointerButton_ == static_cast<int>(CtrlButton::HideHud)) {
+        const bool rowTip = is_screen_row_button(pointerButton_) && screenControlsVisible_;
+        if (rowTip) {
+            const CtrlButtonRect rT = get_ctrl_button_rect(pointerButton_);
+            drawUiElement(vpPanel, rT.cx, rT.cy + 0.068f, 0.090f, 0.024f,
+                          UiShape::RoundedBox, glassControlT.data(), 1.0f, 0.06f, kGlassRim);
+        } else if (pointerButton_ == static_cast<int>(CtrlButton::HideHud)) {
             const CtrlButtonRect rH = get_ctrl_button_rect(static_cast<int>(CtrlButton::HideHud));
             drawUiElement(vpPanel, rH.cx, rH.cy + 0.075f, 0.068f, 0.024f,
                           UiShape::RoundedBox, glassControlT.data(), 1.0f, 0.06f, kGlassRim);
@@ -3326,8 +3395,21 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             const CtrlButtonRect rS = get_ctrl_button_rect(static_cast<int>(CtrlButton::ScreenToggle));
             drawFitCentered(rS.cx, rS.cy, rS.hw * 1.88f, pillSc, themeTextCol, hudScreen_);
 
+            if (screenControlsVisible_) {
+                char lbl[32];
+                std::snprintf(lbl, sizeof(lbl), "SCREEN %d", screenControlsNumber_);
+                withHeadingFont([&] {
+                    drawFitCentered(-0.12f, kBarY - 0.272f, 0.21f, pillSc * 0.95f, themeTextCol, lbl);
+                });
+            }
             // Tooltip text for button hover
-            if (pointerButton_ == static_cast<int>(CtrlButton::HideHud)) {
+            if (rowTip) {
+                const CtrlButtonRect rT = get_ctrl_button_rect(pointerButton_);
+                const auto cbT = static_cast<CtrlButton>(pointerButton_);
+                const char* tip = (cbT == CtrlButton::ScreenMute) ? (screenControlsMuted_ ? "Unmute" : "Mute")
+                                : (cbT == CtrlButton::ScreenMove) ? "Move" : "Close screen";
+                drawFitCentered(rT.cx, rT.cy + 0.068f, 0.17f, pillSc * 0.90f, themeTextCol, tip);
+            } else if (pointerButton_ == static_cast<int>(CtrlButton::HideHud)) {
                 const CtrlButtonRect rH = get_ctrl_button_rect(static_cast<int>(CtrlButton::HideHud));
                 drawFitCentered(rH.cx, rH.cy + 0.075f, 0.12f, pillSc * 0.90f, themeTextCol, "Hide UI");
             } else if (pointerButton_ == static_cast<int>(CtrlButton::Stop)) {
@@ -4445,8 +4527,11 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         const float menuSpanY = static_cast<float>(std::max(0, menuOptCount - 1)) * menuStepY;
         const float menuDynHalfH = std::max(0.22f, 0.5f * menuSpanY + 0.125f);
 
-        const float mHalfW = (actionMenu_.page == 4) ? hub::kSmbHalfW : 0.44f;
-        const float mHalfH = (actionMenu_.page == 4) ? hub::kSmbHalfH : ((actionMenu_.page == 2) ? 0.24f : menuDynHalfH);
+        const float mHalfW = (actionMenu_.page == 4) ? hub::kSmbHalfW
+                           : (actionMenu_.page == 6) ? hub::kPickHalfW : 0.44f;
+        const float mHalfH = (actionMenu_.page == 4) ? hub::kSmbHalfH
+                           : (actionMenu_.page == 6) ? hub::kPickHalfH
+                           : ((actionMenu_.page == 2) ? 0.24f : menuDynHalfH);
         const float modalBg[4] = {0.032f, 0.045f, 0.075f, 0.98f * (0.55f + 0.45f * op)};
         drawGlass(0.0f, 0.0f, mHalfW, mHalfH, modalBg, 0.10f, 0.010f, themeAccentCol);
 
@@ -4477,7 +4562,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         const float dimCol[4] = {
             themeTextCol[0] * 0.62f, themeTextCol[1] * 0.70f, themeTextCol[2] * 0.82f, 0.90f};
 
-        if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5 || actionMenu_.page >= 6) {
+        if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5) {
             const float btnHalfW = 0.38f;
             const float btnHalfH = 0.028f;
             for (int i = 0; i < menuOptCount; ++i) {
@@ -4505,6 +4590,79 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                           UiShape::RoundedBox, delHov ? redBgHov : redBg, 1.0f, 0.05f, redBorder);
             drawUiElement(vpPanel, 0.15f, cy, btnHalfW, btnHalfH,
                           UiShape::RoundedBox, canHov ? slateBgHov : slateBg, 1.0f, 0.05f, slateBorder);
+        } else if (actionMenu_.page == 6) {
+            // "Play on which screen?" picker: live preview tiles in the order the
+            // screens sit around the viewer; empty slots show a "+".
+            int order[kMaxVideoSlots];
+            screenOrderLeftToRight(order);
+            const float tileGlow[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.30f};
+            const float plusCol[4] = {themeTextCol[0], themeTextCol[1], themeTextCol[2], 0.85f};
+            auto tileVp = [&](const UiRect& r) {
+                // Place a flat tile on the (possibly curved) panel: bend its centre
+                // like ui.vert and turn it to the panel tangent there.
+                Vec3 c{r.cx, r.cy, 0.0f};
+                float ang = 0.0f;
+                if (bendR > 0.0f) {
+                    ang = r.cx / bendR;
+                    c = Vec3{bendR * std::sin(ang), r.cy, bendR * (1.0f - std::cos(ang))};
+                }
+                const Mat4 rotY = fromQuat(Quat{0.0f, std::sin(-0.5f * ang), 0.0f, std::cos(-0.5f * ang)});
+                return multiply(vpPanel, multiply(translation(c), rotY));
+            };
+            for (int i = 0; i < kMaxVideoSlots; ++i) {
+                const int slot = order[i];
+                const UiRect r = hub::pickerTile(i);
+                const bool occupied = slot < static_cast<int>(actionMenu_.options.size()) &&
+                                      actionMenu_.options[static_cast<std::size_t>(slot)] == "Replace";
+                const bool hov = (actionMenuBtnHovered_ == slot) || (actionMenu_.selectedOption == slot);
+                if (hov) drawGlow(vpPanel, r.cx, r.cy, r.hw, r.hh, 0.016f, tileGlow, 0.15f);
+                drawUiElement(vpPanel, r.cx, r.cy, r.hw + 0.008f, r.hh + 0.008f, UiShape::RoundedBox,
+                              glassWellT.data(), 0.14f, hov ? 0.10f : 0.05f,
+                              hov ? tabActiveBord : kGlassRimFaint);
+                VideoSlot& v = videoSlots_[slot];
+                if (occupied && v.hasVideo) {
+                    // Live frame of that screen (left eye for 3D), flat on the tile.
+                    const bool ycbcr = v.usingDmabuf && v.resolveImage != VK_NULL_HANDLE &&
+                                       v.ycbcrQuadPipeline != VK_NULL_HANDLE;
+                    VkPipeline pipe = ycbcr ? v.ycbcrQuadPipeline : pipeline_;
+                    VkPipelineLayout layout = ycbcr ? v.ycbcrQuadLayout : pipelineLayout_;
+                    VkDescriptorSet set = ycbcr ? v.resolveSet : v.descriptorSet;
+                    const StereoMode st = (slot == 0) ? stereoMode_ : screenPlacements_[slot].stereo;
+                    bindPipe(pipe);
+                    vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                            layout, 0, 1, &set, 0, nullptr);
+                    const Mat4 mvp = multiply(tileVp(r), scaling(Vec3{r.hw / 1.6f, r.hh / 0.9f, 1.0f}));
+                    PushConstants push{};
+                    std::memcpy(push.mvp, mvp.m, sizeof(push.mvp));
+                    std::memcpy(push.conversion, v.conversion, sizeof(push.conversion));
+                    std::memcpy(push.range, v.range, sizeof(push.range));
+                    if (ycbcr) {
+                        push.conversion[0] = v.drmUvScaleX;
+                        push.conversion[1] = v.drmUvScaleY;
+                    }
+                    push.stereo[0] = static_cast<float>(static_cast<int>(st));
+                    push.stereo[1] = 0.0f;  // both eyes see the left view: a 2D preview
+                    vkCmdPushConstants(commandBuffer_, layout,
+                                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                                       0, sizeof(PushConstants), &push);
+                    vkCmdDraw(commandBuffer_, 64 * 6, 1, 0, 0);
+                    bindPipe(uiPipeline_);
+                } else {
+                    // Empty slot: big "+" to add a screen
+                    drawUiElement(vpPanel, r.cx, r.cy, 0.034f, 0.006f, UiShape::RoundedBox, plusCol, 1.0f);
+                    drawUiElement(vpPanel, r.cx, r.cy, 0.006f, 0.034f, UiShape::RoundedBox, plusCol, 1.0f);
+                }
+                // Screen number badge in the top-left corner
+                const float badgeBg[4] = {0.03f, 0.04f, 0.06f, 0.82f};
+                drawUiElement(vpPanel, r.cx - r.hw + 0.030f, r.cy + r.hh - 0.030f, 0.022f, 0.022f,
+                              UiShape::RoundedBox, occupied ? badgeBg : glassControlT.data(), 1.0f, 0.10f,
+                              occupied ? themeAccentCol : kGlassRimFaint);
+            }
+            const UiRect cr = hub::pickerCancel();
+            const bool cHov = (actionMenuBtnHovered_ == 3) || (actionMenu_.selectedOption == 3);
+            drawUiElement(vpPanel, cr.cx, cr.cy, cr.hw, cr.hh, UiShape::RoundedBox,
+                          cHov ? glassCardHoverT.data() : glassControlT.data(), 1.0f, 0.06f,
+                          cHov ? kGlassRim : kGlassRimFaint);
         } else if (actionMenu_.page == 4) {
             // SMB share editor: two-column glass form (layout in hub::smbFieldWell)
             const int optCount = static_cast<int>(actionMenu_.options.size());
@@ -4594,16 +4752,17 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                                 textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
         const float sc = (0.032f * tScale) / fontAtlas_.lineHeight;
 
-        if (actionMenu_.page != 4) {  // the SMB form lays out its own header
+        if (actionMenu_.page != 4 && actionMenu_.page != 6) {  // these lay out their own header
             withHeadingFont([&] {
                 drawFitCentered(0.0f, mHalfH - 0.045f, mHalfW * 1.8f, sc * 1.15f, themeAccentCol, actionMenu_.title);
             });
         }
-        if (!actionMenu_.subtitle.empty() && actionMenu_.page != 2 && actionMenu_.page != 4) {
+        if (!actionMenu_.subtitle.empty() && actionMenu_.page != 2 && actionMenu_.page != 4 &&
+            actionMenu_.page != 6) {
             drawFitCentered(0.0f, mHalfH - 0.090f, mHalfW * 1.8f, sc * 0.85f, slateCol, actionMenu_.subtitle);
         }
 
-        if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5 || actionMenu_.page >= 6) {
+        if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5) {
             for (int i = 0; i < menuOptCount; ++i) {
                 const float cy = hub::actionMenuOption(i, menuOptCount).cy;
                 const bool hov = (actionMenuBtnHovered_ == i) || (actionMenu_.selectedOption == i);
@@ -4613,6 +4772,32 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             drawFitCentered(0.0f, 0.035f, (mHalfW - 0.06f) * 2.0f, sc, themeTextCol, actionMenu_.subtitle);
             drawFitCentered(-0.15f, -0.12f, 0.13f * 1.8f, sc, themeTextCol, "Delete");
             drawFitCentered(0.15f, -0.12f, 0.13f * 1.8f, sc, themeTextCol, "Cancel");
+        } else if (actionMenu_.page == 6) {
+            int order[kMaxVideoSlots];
+            screenOrderLeftToRight(order);
+            withHeadingFont([&] {
+                drawFitCentered(0.0f, hub::kPickHalfH - 0.050f, hub::kPickHalfW * 1.8f, sc * 1.10f,
+                                themeTextCol, actionMenu_.title);
+            });
+            drawFitCentered(0.0f, hub::kPickHalfH - 0.098f, hub::kPickHalfW * 1.8f, sc * 0.80f, slateCol,
+                            actionMenu_.subtitle);
+            const float scCap = ((0.024f * tScale) / fontAtlas_.lineHeight);
+            for (int i = 0; i < kMaxVideoSlots; ++i) {
+                const int slot = order[i];
+                const UiRect r = hub::pickerTile(i);
+                const bool occupied = slot < static_cast<int>(actionMenu_.options.size()) &&
+                                      actionMenu_.options[static_cast<std::size_t>(slot)] == "Replace";
+                const bool hov = (actionMenuBtnHovered_ == slot) || (actionMenu_.selectedOption == slot);
+                withHeadingFont([&] {
+                    drawFitCentered(r.cx - r.hw + 0.030f, r.cy + r.hh - 0.030f, 0.04f, scCap, themeTextCol,
+                                    std::to_string(slot + 1));
+                });
+                drawFitCentered(r.cx, r.cy - r.hh - 0.036f, r.hw * 2.0f, scCap,
+                                hov ? themeTextCol : slateCol,
+                                occupied ? ("Replace screen " + std::to_string(slot + 1)) : std::string("Add a screen"));
+            }
+            const UiRect cr = hub::pickerCancel();
+            drawFitCentered(cr.cx, cr.cy, cr.hw * 2.0f - 0.02f, scCap * 1.05f, themeTextCol, "Cancel");
         } else if (actionMenu_.page == 4) {
             const int optCount = static_cast<int>(actionMenu_.options.size());
             const bool anon = optCount > 2 && actionMenu_.options[2] == "guest";

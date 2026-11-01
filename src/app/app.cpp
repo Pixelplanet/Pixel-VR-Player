@@ -1156,13 +1156,16 @@ void App::openPlayTargetMenu(const std::string& path) {
     pendingPlayPath_ = path;
     actionMenu_.visible = true;
     actionMenu_.page = 6;
-    actionMenu_.title = "Play Video";
+    actionMenu_.title = "Play on which screen?";
     actionMenu_.subtitle = std::filesystem::path(path).filename().string();
+    // One entry per screen slot ("Replace" = playing now, "Add" = empty), then
+    // Cancel; the renderer draws them as live preview tiles.
     actionMenu_.options.clear();
-    actionMenu_.options.push_back("Play on Screen " + std::to_string(selectedScreen_ + 1));
-    if (freeScreenSlot() >= 0) actionMenu_.options.push_back("Play on a New Screen");
+    for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
+        actionMenu_.options.push_back(screens_[slot].open ? "Replace" : "Add");
+    }
     actionMenu_.options.push_back("Cancel");
-    actionMenu_.selectedOption = 0;
+    actionMenu_.selectedOption = selectedScreen_;
 }
 
 void App::playFromBrowser(const std::string& path) {
@@ -1179,30 +1182,35 @@ void App::playFromBrowser(const std::string& path) {
 #endif
 }
 
-void App::openScreenMenu(int slot) {
-    selectScreen(slot);
-    const ScreenState& sc = screens_[slot];
-    const VulkanRenderer::ScreenPlacement& pl = renderer_.screenPlacement(slot);
-    const float curv = (slot > 0 || pl.active) ? pl.curvature : renderer_.screenCurvature();
-    const int curvPct = static_cast<int>(curv * 100.0f + 0.5f);
-    actionMenu_.visible = true;
-    actionMenu_.page = 7;
-    actionMenu_.title = "Screen " + std::to_string(slot + 1);
-    actionMenu_.subtitle = sc.path.empty() ? std::string("Empty")
-                                           : std::filesystem::path(sc.path).filename().string();
-    actionMenu_.options.clear();
-    actionMenu_.options.push_back(sc.muted ? "Unmute" : "Mute");
-    actionMenu_.options.push_back("Move Screen");
-    actionMenu_.options.push_back("Bigger");
-    actionMenu_.options.push_back("Smaller");
-    actionMenu_.options.push_back(curvPct <= 2 ? "Curvature: Flat"
-                                               : "Curvature: " + std::to_string(curvPct) + "%");
-    actionMenu_.options.push_back("Close Screen");
-    actionMenu_.options.push_back("Cancel");
-    if (actionMenu_.selectedOption < 0 ||
-        actionMenu_.selectedOption >= static_cast<int>(actionMenu_.options.size())) {
-        actionMenu_.selectedOption = 0;
+void App::ensureScreenPlacement(int slot) {
+    VulkanRenderer::ScreenPlacement pl = renderer_.screenPlacement(slot);
+    if (pl.active) return;
+    if (slot > 0) {
+        placeNewScreen(slot);
+        return;
     }
+    // Main screen: take over its recenter-anchored pose.
+    const float* pv = renderer_.screenPivot();
+    const float* fw = renderer_.screenForward();
+    const float d = renderer_.screenDistance();
+    for (int k = 0; k < 3; ++k) pl.center[k] = pv[k] + fw[k] * d;
+    pl.yaw = renderer_.screenYaw();
+    pl.pitch = renderer_.recenterPitch();
+    pl.scale = 1.0f;
+    pl.curvature = renderer_.screenCurvature();
+    pl.stereo = static_cast<VulkanRenderer::StereoMode>(screens_[slot].stereo);
+    pl.active = true;
+    renderer_.setScreenPlacement(slot, pl);
+}
+
+void App::startMovingScreen(int slot, const XrInputState& in) {
+    ensureScreenPlacement(slot);
+    const VulkanRenderer::ScreenPlacement& pl = renderer_.screenPlacement(slot);
+    const float dx = pl.center[0] - in.headPos[0];
+    const float dy = pl.center[1] - in.headPos[1];
+    const float dz = pl.center[2] - in.headPos[2];
+    movingDistance_ = std::clamp(std::sqrt(dx * dx + dy * dy + dz * dz), 1.0f, 8.0f);
+    movingScreen_ = slot;
 }
 
 void App::openActionMenu() {
@@ -1698,6 +1706,8 @@ int App::run() {
             }
 #endif
             renderer_.setMultiScreen(multiScreenEnabled() && openScreenCount() > 0, selectedScreen_);
+            renderer_.setScreenControls(multiScreenEnabled() && cur().open, selectedScreen_ + 1,
+                                        openScreenCount(), cur().muted);
             renderer_.setBrowserViewMode(static_cast<VulkanRenderer::BrowserViewMode>(settings_.browserViewMode()));
             renderer_.setBrowserQuickPath(browser_.isCurrentBookmarked());
 #ifdef PIXELVR_HAVE_FREETYPE
@@ -2443,7 +2453,7 @@ int App::run() {
 
             // File Action Submenu or Files view interaction inside Unified Spatial Hub
             if (actionMenu_.visible) {
-                if ((!browser_.isOpen() && actionMenu_.page != 5 && actionMenu_.page != 7) || downloadsWindow_ || settings_.isOpen() || !pendingDl_.empty()) {
+                if ((!browser_.isOpen() && actionMenu_.page != 5) || downloadsWindow_ || settings_.isOpen() || !pendingDl_.empty()) {
                     actionMenu_.visible = false;
                 } else {
                     const Browser::Entry* fe = browser_.focused();
@@ -2627,74 +2637,18 @@ int App::run() {
                                     xr_.triggerHaptic(1, 0.040f, 0.0f, 0.6f);
                                     actionMenu_.visible = false;
                                 } else if (actionMenu_.page == 6) {
-                                    // "Play where?" (multi-screen)
-                                    int target = -1;
-                                    if (opt.rfind("Play on Screen", 0) == 0) {
-                                        target = selectedScreen_;
-                                    } else if (opt == "Play on a New Screen") {
-                                        const int slot = freeScreenSlot();
-                                        if (slot >= 0 && decoderBudgetAllows(pendingPlayPath_)) {
-                                            target = slot;
-                                        } else {
+                                    // Screen picker: 0..2 = screen slot tile, 3 = Cancel.
+                                    if (chosen < VulkanRenderer::kMaxVideoSlots) {
+                                        const bool occupied = screens_[chosen].open;
+                                        if (!occupied && !decoderBudgetAllows(pendingPlayPath_)) {
                                             actionMenu_.subtitle = "Not enough decoder capacity - close a screen first";
-                                        }
-                                    } else {
-                                        actionMenu_.visible = false;
-                                    }
-                                    if (target >= 0) {
-#ifdef PIXELVR_HAVE_MEDIA
-                                        loadMedia(pendingPlayPath_, target);
-#endif
-                                        actionMenu_.visible = false;
-                                        browser_.setOpen(false);
-                                    }
-                                } else if (actionMenu_.page == 7) {
-                                    // Screen menu (Y while pointing at a screen)
-                                    const int slot = selectedScreen_;
-                                    VulkanRenderer::ScreenPlacement pl = renderer_.screenPlacement(slot);
-                                    auto ensurePlacement = [&]() {
-                                        if (pl.active) return;
-                                        // Main screen: take over its recenter-anchored pose.
-                                        const float* pv = renderer_.screenPivot();
-                                        const float* fw = renderer_.screenForward();
-                                        const float d = renderer_.screenDistance();
-                                        for (int k = 0; k < 3; ++k) pl.center[k] = pv[k] + fw[k] * d;
-                                        pl.yaw = renderer_.screenYaw();
-                                        pl.pitch = renderer_.recenterPitch();
-                                        pl.scale = 1.0f;
-                                        pl.curvature = renderer_.screenCurvature();
-                                        pl.stereo = static_cast<VulkanRenderer::StereoMode>(screens_[slot].stereo);
-                                        pl.active = true;
-                                    };
-                                    if (opt == "Mute" || opt == "Unmute") {
-                                        screens_[slot].muted = !screens_[slot].muted;
-                                        openScreenMenu(slot);
-                                    } else if (opt == "Move Screen") {
-                                        ensurePlacement();
-                                        renderer_.setScreenPlacement(slot, pl);
-                                        const float dx = pl.center[0] - in.headPos[0];
-                                        const float dy = pl.center[1] - in.headPos[1];
-                                        const float dz = pl.center[2] - in.headPos[2];
-                                        movingDistance_ = std::clamp(std::sqrt(dx * dx + dy * dy + dz * dz), 1.0f, 8.0f);
-                                        movingScreen_ = slot;
-                                        actionMenu_.visible = false;
-                                    } else if (opt == "Bigger" || opt == "Smaller") {
-                                        ensurePlacement();
-                                        pl.scale = std::clamp(pl.scale * (opt == "Bigger" ? 1.15f : 1.0f / 1.15f), 0.35f, 2.5f);
-                                        renderer_.setScreenPlacement(slot, pl);
-                                        openScreenMenu(slot);
-                                    } else if (opt.rfind("Curvature", 0) == 0) {
-                                        if (slot == 0 && !pl.active) {
-                                            settings_.setCurvatureIdx(settings_.curvatureIdx() + 1);
-                                            renderer_.setScreenCurvature(settings_.screenCurvature());
                                         } else {
-                                            pl.curvature = (pl.curvature >= 0.99f) ? 0.0f : std::min(1.0f, pl.curvature + 0.25f);
-                                            renderer_.setScreenPlacement(slot, pl);
+#ifdef PIXELVR_HAVE_MEDIA
+                                            loadMedia(pendingPlayPath_, chosen);
+#endif
+                                            actionMenu_.visible = false;
+                                            browser_.setOpen(false);
                                         }
-                                        openScreenMenu(slot);
-                                    } else if (opt == "Close Screen") {
-                                        actionMenu_.visible = false;
-                                        closeMedia(slot);
                                     } else {
                                         actionMenu_.visible = false;
                                     }
@@ -2990,8 +2944,8 @@ int App::run() {
             // Cinema Transport Dock is only active when the Unified Spatial Hub is closed.
             const bool barOk = !browserOpen && !settingsOpen && !downloadsWindow_ &&
                                pendingDl_.empty() && !actionMenu_.visible && !smbModal_.active;
-            // Multi-screen: point at a screen and pull the trigger to select it (the
-            // dock then controls it); Y on a screen opens its menu.
+            // Multi-screen: point at a screen and pull the trigger to select it; the
+            // dock (including its screen row) then controls that screen.
             if (barOk && multiScreenEnabled() && movingScreen_ < 0) {
                 const int ps = renderer_.pointerScreen();
                 if (ps >= 0 && renderer_.pointerButton() < 0 && !renderer_.pointerOnTimeline()) {
@@ -3001,10 +2955,6 @@ int App::run() {
                             xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.020f, 0.0f, 0.45f);
                         }
                         in.select = false;
-                        interacted = true;
-                    }
-                    if (actionBtnPressed) {
-                        openScreenMenu(ps);
                         interacted = true;
                     }
                 }
@@ -3095,6 +3045,15 @@ int App::run() {
                         }
                     } else if (cb == VulkanRenderer::CtrlButton::HideHud) {
                         dismissHud(in, nowT);
+                    } else if (cb == VulkanRenderer::CtrlButton::ScreenMute) {
+                        cur().muted = !cur().muted;
+                    } else if (cb == VulkanRenderer::CtrlButton::ScreenMove) {
+                        startMovingScreen(selectedScreen_, in);
+                    } else if (cb == VulkanRenderer::CtrlButton::ScreenClose) {
+                        closeMedia(selectedScreen_);
+#ifdef PIXELVR_HAVE_FREETYPE
+                        if (openScreenCount() == 0) browser_.open();
+#endif
                     }
 #endif
                     interacted = true;

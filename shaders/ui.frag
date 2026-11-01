@@ -232,6 +232,24 @@ void main() {
         float b2 = sdRoundedBox(p - vec2(-0.16, 0.00), vec2(0.46, 0.09), 0.06);
         float b3 = sdRoundedBox(p - vec2(-0.32, -0.46), vec2(0.30, 0.09), 0.06);
         d = min(b1, min(b2, b3));
+    } else if (shape == 26) {
+        // Shape 26: Speaker muted (speaker body + cone + small cross)
+        float box = sdRoundedBox(p - vec2(-0.46, 0.0), vec2(0.12, 0.18), 0.03);
+        float cone = sdTriangle(p - vec2(-0.14, 0.0), vec2(-0.20, 0.18), vec2(0.16, 0.45), vec2(-0.20, -0.18)) - 0.02;
+        float cone2 = sdTriangle(p - vec2(-0.14, 0.0), vec2(-0.20, -0.18), vec2(0.16, -0.45), vec2(0.16, 0.45)) - 0.02;
+        vec2 q = p - vec2(0.42, 0.0);
+        float x1 = sdSegment(q, vec2(-0.18, -0.18), vec2(0.18, 0.18)) - 0.07;
+        float x2 = sdSegment(q, vec2(-0.18, 0.18), vec2(0.18, -0.18)) - 0.07;
+        d = min(min(box, min(cone, cone2)), min(x1, x2));
+    } else if (shape == 27) {
+        // Shape 27: Move (cross with four arrow heads)
+        float bar1 = sdRoundedBox(p, vec2(0.50, 0.06), 0.03);
+        float bar2 = sdRoundedBox(p, vec2(0.06, 0.50), 0.03);
+        float up = sdTriangle(p, vec2(-0.20, 0.48), vec2(0.20, 0.48), vec2(0.0, 0.78)) - 0.02;
+        float dn = sdTriangle(p, vec2(-0.20, -0.48), vec2(0.0, -0.78), vec2(0.20, -0.48)) - 0.02;
+        float lf = sdTriangle(p, vec2(-0.48, -0.20), vec2(-0.48, 0.20), vec2(-0.78, 0.0)) - 0.02;
+        float rt = sdTriangle(p, vec2(0.48, -0.20), vec2(0.78, 0.0), vec2(0.48, 0.20)) - 0.02;
+        d = min(min(bar1, bar2), min(min(up, dn), min(lf, rt)));
     } else {
         d = sdRoundedBox(p, vec2(1.0), 0.0);
     }

@@ -399,6 +399,8 @@ public:
         Star = 21,
         Lock = 22,
         Sort = 23,       // three bars of decreasing length
+        SpeakerMuted = 26,  // speaker with a cross
+        Move = 27,          // four-way arrows
         GlassPanel = 25, // rounded box with bevel + eye-dependent reflection sheen
     };
 
@@ -421,8 +423,19 @@ public:
         ScreenToggle,
         Recenter,      // recenter screen/view from HUD
         HideHud,       // immediately hide player controls
+        ScreenMute,    // multi-screen row: mute / unmute the selected screen
+        ScreenMove,    // multi-screen row: place the selected screen with the laser
+        ScreenClose,   // multi-screen row: close the selected screen
         Count
     };
+    // Multi-screen row under the dock (shown while Multiple Screens is on and a
+    // video plays): which screen the dock controls and its mute state.
+    void setScreenControls(bool visible, int screenNumber, int screenCount, bool muted) {
+        screenControlsVisible_ = visible;
+        screenControlsNumber_ = screenNumber;
+        screenControlsCount_ = screenCount;
+        screenControlsMuted_ = muted;
+    }
     void setControlBar(bool visible) { controlBarVisible_ = visible; }
     bool controlBarVisible() const { return controlBarVisible_; }
     void setHudLabels(const std::string& format, const std::string& audio,
@@ -820,6 +833,10 @@ private:
     bool multiScreenActive_ = false;
     int selectedScreen_ = 0;
     int pointerScreen_ = -1;
+    bool screenControlsVisible_ = false;
+    int screenControlsNumber_ = 1;
+    int screenControlsCount_ = 1;
+    bool screenControlsMuted_ = false;
     // Last drawn flat-screen geometry per slot (for laser hit-testing): centre,
     // yaw/pitch and half-size in metres; valid only while the slot is drawn.
     struct ScreenHitInfo {
@@ -831,6 +848,9 @@ private:
         float halfH = 0.0f;
     };
     ScreenHitInfo screenHit_[kMaxVideoSlots];
+    // Screen slots ordered left-to-right as they sit around the viewer (for the
+    // "play on which screen?" picker tiles).
+    void screenOrderLeftToRight(int out[kMaxVideoSlots]) const;
     uint64_t ycbcrRebuildCount_ = 0;
 
     VkCommandBuffer uploadCmd_ = VK_NULL_HANDLE;

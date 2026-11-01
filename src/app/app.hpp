@@ -211,8 +211,12 @@ private:
     void recenterView(const XrInputState& in);
     // Rough check that another stream fits the hardware decoder budget.
     bool decoderBudgetAllows(const std::string& path) const;
-    void openScreenMenu(int slot);
+    // "Play on which screen?" picker with live preview tiles.
     void openPlayTargetMenu(const std::string& path);
+    // Gives a screen an explicit placement (the main screen starts from its
+    // recenter-anchored pose) so it can be moved or resized freely.
+    void ensureScreenPlacement(int slot);
+    void startMovingScreen(int slot, const XrInputState& in);
     // Browser 'play' entry point: asks where to play when screens are in use.
     void playFromBrowser(const std::string& path);
     int movingScreen_ = -1;  // screen being placed with the laser, or -1
