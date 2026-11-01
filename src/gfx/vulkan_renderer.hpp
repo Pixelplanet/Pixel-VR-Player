@@ -418,6 +418,9 @@ public:
         Move = 27,          // four-way arrows
         Unlocked = 28,      // open padlock
         Layout = 29,        // three screens: two below, one above
+        Frame = 30,         // hollow screen outline
+        SwapH = 31,         // double-headed arrow, horizontal
+        SwapV = 32,         // double-headed arrow, vertical
         GlassPanel = 25, // rounded box with bevel + eye-dependent reflection sheen
     };
 
@@ -442,17 +445,19 @@ public:
         HideHud,       // immediately hide player controls
         ScreenMute,    // multi-screen row: mute / unmute the selected screen
         ScreenLock,    // multi-screen row: unlock / lock all screens for grabbing
+        ScreenFrames,  // multi-screen row: show / hide the borders around screens
         ScreenLayout,  // multi-screen row: arrange screens with a preset
         ScreenClose,   // multi-screen row: close the selected screen
         Count
     };
     // Multi-screen row under the dock (shown while Multiple Screens is on and a
     // video plays): which screen the dock controls and its mute state.
-    void setScreenControls(bool visible, int screenNumber, bool muted, bool unlocked) {
+    void setScreenControls(bool visible, int screenNumber, bool muted, bool unlocked, bool frames) {
         screenControlsVisible_ = visible;
         screenControlsNumber_ = screenNumber;
         screenControlsMuted_ = muted;
         screensUnlocked_ = unlocked;
+        screenFramesOn_ = frames;
     }
     void setControlBar(bool visible) { controlBarVisible_ = visible; }
     bool controlBarVisible() const { return controlBarVisible_; }
@@ -854,6 +859,17 @@ private:
     float arrangePitch_ = 0.0f;
     int arrangePreset_ = -1;
     bool arrangeSnap_ = true;
+    // Swap arrows between neighbouring screens in the arrange preview (panel
+    // coords, refreshed while drawing; hit-tested on the next frame).
+    struct SwapArrow {
+        float x = 0.0f;
+        float y = 0.0f;
+        bool vertical = false;
+        int slotA = 0;
+        int slotB = 0;
+    };
+    SwapArrow arrangeArrows_[4];
+    int arrangeArrowCount_ = 0;
     bool multiScreenActive_ = false;
     int selectedScreen_ = 0;
     int pointerScreen_ = -1;
@@ -861,6 +877,7 @@ private:
     int screenControlsNumber_ = 1;
     bool screenControlsMuted_ = false;
     bool screensUnlocked_ = false;  // screens can be grabbed with the laser
+    bool screenFramesOn_ = true;    // borders around screens (multi-screen)
     // Last drawn flat-screen geometry per slot (for laser hit-testing): centre,
     // yaw/pitch and half-size in metres; valid only while the slot is drawn.
     struct ScreenHitInfo {

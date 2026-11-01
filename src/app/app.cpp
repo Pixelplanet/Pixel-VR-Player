@@ -253,12 +253,6 @@ ScreenExtent screenExtent(float eyeAspect, float scale, float curvature) {
 
 float wrapAngle(float a) { return std::atan2(std::sin(a), std::cos(a)); }
 
-int factorial(int n) {
-    int f = 1;
-    for (int i = 2; i <= n; ++i) f *= i;
-    return f;
-}
-
 } // namespace
 
 App::App() = default;
@@ -1348,8 +1342,7 @@ void App::computeArrangement(const Arrangement& a,
     std::vector<float> curv(static_cast<std::size_t>(n));
     for (int i = 0; i < n; ++i) {
         const int slot = a.order[static_cast<std::size_t>(i)];
-        const VulkanRenderer::ScreenPlacement& pl = renderer_.screenPlacement(slot);
-        curv[i] = pl.active ? pl.curvature : renderer_.screenCurvature();
+        curv[i] = a.curvature;
         ext[i] = screenExtent(screenEyeAspect(slot), scale[i] * a.scale, curv[i]);
     }
     std::vector<float> rowHalf(rows.size(), 0.0f);
@@ -1377,47 +1370,46 @@ void App::computeArrangement(const Arrangement& a,
     };
 
     if (!a.flat) {
-        // Curved wall: every screen faces the viewer from its own direction and
-        // neighbours sit exactly the angle apart that their edges subtend, so
-        // snapped edges touch.
-        const float d = a.dist;
-        const float gapP = gap / d;
-        std::vector<float> halfP(rows.size());
-        float totalP = gapP * static_cast<float>(rows.size() - 1);
+        // Curved wall: a cylinder around the viewer. Within a row each screen
+        // turns to face the viewer and neighbours sit exactly the angle apart
+        // their edges subtend (snapped edges touch); rows stack straight up
+        // with the same tilt, so top and bottom edges line up along the arc.
+        const float sp = std::sin(a.pitch);
+        const float cp = std::max(std::cos(a.pitch), 0.2f);
+        float total = gap * static_cast<float>(rows.size() - 1);
+        for (float hh : rowHalf) total += 2.0f * hh;
+        float y = 0.5f * total;
         for (std::size_t r = 0; r < rows.size(); ++r) {
-            halfP[r] = std::atan(rowHalf[r] / d);
-            totalP += 2.0f * halfP[r];
-        }
-        float p = a.pitch + 0.5f * totalP;
-        for (std::size_t r = 0; r < rows.size(); ++r) {
-            const float rowPitch = p - halfP[r];
-            p -= 2.0f * halfP[r] + gapP;
-            const float cp = std::max(std::cos(rowPitch), 0.2f);
-            // The row's largest screen sits at `d`; smaller ones move back so
-            // their side edges are as far out as its edges and meet them.
-            const int big = biggest(rows[r]);
-            const float bx = (d - ext[big].ez) * cp;
-            const float edgeR2 = bx * bx + ext[big].hx * ext[big].hx;
+            const float rowY = y - rowHalf[r];
+            y -= 2.0f * rowHalf[r] + gap;
             const std::vector<int>& row = rows[r];
+            // Horizontal distance of the side-edge midpoints from the viewer: the
+            // row's largest screen sits at a.dist, smaller ones move back so
+            // their edges are as far out as its edges and meet them.
+            const int big = biggest(row);
+            const float bz = std::max((a.dist - ext[big].ez) * cp - rowY * sp, 0.3f);
+            const float edgeR2 = bz * bz + ext[big].hx * ext[big].hx;
             std::vector<float> di(row.size()), yawRel(row.size());
-            const float gapY = gap / (d * cp);
-            float y = 0.0f;
+            const float gapY = gap / bz;
+            float yaw = 0.0f;
             float ref = 0.0f;
             for (std::size_t k = 0; k < row.size(); ++k) {
                 const ScreenExtent& e = ext[row[k]];
-                di[k] = e.ez + std::sqrt(std::max(edgeR2 - e.hx * e.hx, 0.25f)) / cp;
-                const float half = std::atan(e.hx / ((di[k] - e.ez) * cp));
-                yawRel[k] = y - half;  // positive yaw = left, so walk toward negative
-                y -= 2.0f * half + gapY;
+                const float depth = std::sqrt(std::max(edgeR2 - e.hx * e.hx, 0.09f));
+                di[k] = e.ez + (depth + rowY * sp) / cp;
+                const float half = std::atan(e.hx / depth);
+                yawRel[k] = yaw - half;  // positive yaw = left, so walk toward negative
+                yaw -= 2.0f * half + gapY;
                 if (row[k] == anchorPos) ref = yawRel[k];
             }
-            if (std::find(row.begin(), row.end(), anchorPos) == row.end()) ref = 0.5f * (y + gapY);
+            if (std::find(row.begin(), row.end(), anchorPos) == row.end()) ref = 0.5f * (yaw + gapY);
             for (std::size_t k = 0; k < row.size(); ++k) {
-                const float yaw = a.yaw + yawRel[k] - ref;
-                const float c[3] = {pivot[0] - std::sin(yaw) * cp * di[k],
-                                    pivot[1] + std::sin(rowPitch) * di[k],
-                                    pivot[2] - std::cos(yaw) * cp * di[k]};
-                put(row[k], c, yaw, rowPitch);
+                // Centre = pivot + Ry(yaw) * Rx(pitch) * (0, rowY, -di).
+                const float yw = a.yaw + yawRel[k] - ref;
+                const float ly = rowY * std::cos(a.pitch) + di[k] * sp;
+                const float lz = rowY * sp - di[k] * std::cos(a.pitch);
+                const float c[3] = {pivot[0] + lz * std::sin(yw), pivot[1] + ly, pivot[2] + lz * std::cos(yw)};
+                put(row[k], c, yw, a.pitch);
             }
         }
     } else {
@@ -1532,6 +1524,11 @@ void App::openArrangeMenu() {
     arrangeDraft_.pitch = renderer_.recenterPitch();
     arrangeDraft_.dist = renderer_.screenDistance();
     arrangeDraft_.scale = 1.0f;
+    {
+        // All screens of a layout share one curvature: the selected screen's.
+        const VulkanRenderer::ScreenPlacement& sel = renderer_.screenPlacement(selectedScreen_);
+        arrangeDraft_.curvature = sel.active ? sel.curvature : renderer_.screenCurvature();
+    }
     ArrangePreset start = arrangePresets_.empty() ? ArrangePreset::SideBySide : arrangePresets_[0];
     if (arrangementActive_ &&
         std::find(arrangePresets_.begin(), arrangePresets_.end(), arrangement_.preset) != arrangePresets_.end()) {
@@ -1541,14 +1538,14 @@ void App::openArrangeMenu() {
     actionMenu_.visible = true;
     actionMenu_.page = 8;
     actionMenu_.title = "Arrange Screens";
-    actionMenu_.subtitle = n >= 2 ? "Pick a layout and order, then Apply" : "Open a second screen to use a layout";
+    actionMenu_.subtitle = n >= 2 ? "Pick a layout, use the arrows to swap screens, then Apply"
+                                  : "Open a second screen to use a layout";
     actionMenu_.selectedOption = 0;
     refreshArrangeMenu();
 }
 
 void App::selectArrangePreset(ArrangePreset preset) {
     arrangeDraft_.preset = preset;
-    arrangePerm_ = 0;
     int order[VulkanRenderer::kMaxVideoSlots];
     renderer_.screenOrderLeftToRight(order);
     std::vector<int> lr;  // open screens, left to right as they sit now
@@ -1560,31 +1557,20 @@ void App::selectArrangePreset(ArrangePreset preset) {
     std::sort(sortedNow.begin(), sortedNow.end());
     std::sort(sortedArr.begin(), sortedArr.end());
     if (arrangementActive_ && arrangement_.preset == preset && sortedNow == sortedArr) {
-        arrangeBase_ = arrangement_.order;  // start from what is on show
+        arrangeDraft_.order = arrangement_.order;  // start from what is on show
     } else if ((preset == ArrangePreset::Cinema || preset == ArrangePreset::TwoBelowOneAbove) &&
                screens_[selectedScreen_].open) {
         // The selected screen becomes the main / top one.
-        arrangeBase_ = {selectedScreen_};
+        arrangeDraft_.order = {selectedScreen_};
         for (int slot : lr) {
-            if (slot != selectedScreen_) arrangeBase_.push_back(slot);
+            if (slot != selectedScreen_) arrangeDraft_.order.push_back(slot);
         }
     } else {
-        arrangeBase_ = lr;
+        arrangeDraft_.order = lr;
     }
-    arrangeDraft_.order = arrangeBase_;
 }
 
 void App::refreshArrangeMenu() {
-    // Order variants: every assignment of the screens to the layout's positions.
-    const int n = static_cast<int>(arrangeBase_.size());
-    const int variants = n >= 2 ? factorial(n) : 1;
-    arrangePerm_ %= variants;
-    std::vector<int> idx(static_cast<std::size_t>(n));
-    for (int i = 0; i < n; ++i) idx[i] = i;
-    for (int k = 0; k < arrangePerm_; ++k) std::next_permutation(idx.begin(), idx.end());
-    arrangeDraft_.order.clear();
-    for (int i : idx) arrangeDraft_.order.push_back(arrangeBase_[static_cast<std::size_t>(i)]);
-
     // Options: one per preset, then fixed ids (see the renderer's hub::arrangeButton).
     actionMenu_.options.clear();
     int presetIdx = -1;
@@ -1597,8 +1583,6 @@ void App::refreshArrangeMenu() {
         }
         if (arrangePresets_[i] == arrangeDraft_.preset) presetIdx = static_cast<int>(i);
     }
-    actionMenu_.options.push_back("Change order  " + std::to_string(arrangePerm_ + 1) + " / " +
-                                  std::to_string(variants));
     actionMenu_.options.push_back(arrangeDraft_.snap ? "Snap edges: On" : "Snap edges: Off");
     actionMenu_.options.push_back(arrangeDraft_.flat ? "Style: Flat wall" : "Style: Curved");
     actionMenu_.options.push_back("Apply");
@@ -2129,7 +2113,7 @@ int App::run() {
             renderer_.setMultiScreen(multiScreenEnabled() && openScreenCount() > 0, selectedScreen_);
             if (!multiScreenEnabled() || openScreenCount() == 0) screensUnlocked_ = false;
             renderer_.setScreenControls(multiScreenEnabled() && cur().open, selectedScreen_ + 1,
-                                        cur().muted, screensUnlocked_);
+                                        cur().muted, screensUnlocked_, settings_.screenFrames());
             renderer_.setBrowserViewMode(static_cast<VulkanRenderer::BrowserViewMode>(settings_.browserViewMode()));
             renderer_.setBrowserQuickPath(browser_.isCurrentBookmarked());
 #ifdef PIXELVR_HAVE_FREETYPE
@@ -2896,6 +2880,21 @@ int App::run() {
 
                         if (in.select || in.togglePlay) {
                             int chosen = (hov >= 0) ? hov : actionMenu_.selectedOption;
+                            if (actionMenu_.page == 8 && chosen >= 100) {
+                                // Swap arrow between two screens in the preview.
+                                const int sa = (chosen - 100) / 3;
+                                const int sb = (chosen - 100) % 3;
+                                std::vector<int>& o = arrangeDraft_.order;
+                                auto ia = std::find(o.begin(), o.end(), sa);
+                                auto ib = std::find(o.begin(), o.end(), sb);
+                                if (ia != o.end() && ib != o.end()) {
+                                    std::iter_swap(ia, ib);
+                                    refreshArrangeMenu();
+                                    xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.020f, 0.0f, 0.45f);
+                                }
+                                actionMenu_.selectedOption = -1;
+                                chosen = -1;
+                            }
                             if (chosen >= 0 && chosen < static_cast<int>(actionMenu_.options.size())) {
                                 const std::string opt = actionMenu_.options[chosen];
                                 if (actionMenu_.page == 0) {
@@ -3059,22 +3058,19 @@ int App::run() {
                                     xr_.triggerHaptic(1, 0.040f, 0.0f, 0.6f);
                                     actionMenu_.visible = false;
                                 } else if (actionMenu_.page == 8) {
-                                    // 0..P-1 = presets, then Order, Snap, Style, Apply, Cancel.
+                                    // 0..P-1 = presets, then Snap, Style, Apply, Cancel.
                                     const int presetCount = static_cast<int>(arrangePresets_.size());
                                     const int id = chosen - presetCount;
                                     if (chosen < presetCount) {
                                         selectArrangePreset(arrangePresets_[static_cast<std::size_t>(chosen)]);
                                         refreshArrangeMenu();
                                     } else if (id == 0) {
-                                        ++arrangePerm_;
-                                        refreshArrangeMenu();
-                                    } else if (id == 1) {
                                         arrangeDraft_.snap = !arrangeDraft_.snap;
                                         refreshArrangeMenu();
-                                    } else if (id == 2) {
+                                    } else if (id == 1) {
                                         arrangeDraft_.flat = !arrangeDraft_.flat;
                                         refreshArrangeMenu();
-                                    } else if (id == 3) {
+                                    } else if (id == 2) {
                                         if (presetCount > 0) {
                                             applyArrangement(arrangeDraft_);
                                             xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.030f, 0.0f, 0.5f);
@@ -3481,8 +3477,12 @@ int App::run() {
                             renderer_.screenPlacement(selectedScreen_).active) {
                             VulkanRenderer::ScreenPlacement pl = renderer_.screenPlacement(selectedScreen_);
                             pl.curvature = (pl.curvature >= 0.99f) ? 0.0f : std::min(1.0f, pl.curvature + 0.25f);
-                            renderer_.setScreenPlacement(selectedScreen_, pl);
-                            if (groupedScreen(selectedScreen_)) applyArrangement(arrangement_);
+                            if (groupedScreen(selectedScreen_)) {
+                                arrangement_.curvature = pl.curvature;  // the snapped wall bends together
+                                applyArrangement(arrangement_);
+                            } else {
+                                renderer_.setScreenPlacement(selectedScreen_, pl);
+                            }
                         } else if (settings_.projectionMode() == 0) {
                             settings_.setCurvatureIdx(settings_.curvatureIdx() + 1);
                             renderer_.setScreenCurvature(settings_.screenCurvature());
@@ -3496,6 +3496,8 @@ int App::run() {
                         cur().muted = !cur().muted;
                     } else if (cb == VulkanRenderer::CtrlButton::ScreenLock) {
                         screensUnlocked_ = !screensUnlocked_;
+                    } else if (cb == VulkanRenderer::CtrlButton::ScreenFrames) {
+                        settings_.setScreenFrames(!settings_.screenFrames());
                     } else if (cb == VulkanRenderer::CtrlButton::ScreenLayout) {
                         openArrangeMenu();
                     } else if (cb == VulkanRenderer::CtrlButton::ScreenClose) {

@@ -265,6 +265,18 @@ void main() {
         vec2 q = vec2(abs(p.x) - 0.35, p.y + 0.25);
         float bottom = sdRoundedBox(q, vec2(0.30, 0.19), 0.05);
         d = min(top, bottom);
+    } else if (shape == 30) {
+        // Shape 30: Frame (screen outline with a small stand)
+        float outline = abs(sdRoundedBox(p - vec2(0.0, 0.08), vec2(0.66, 0.44), 0.08)) - 0.07;
+        float stand = sdRoundedBox(p - vec2(0.0, -0.58), vec2(0.26, 0.05), 0.03);
+        d = min(outline, stand);
+    } else if (shape == 31 || shape == 32) {
+        // Shapes 31 / 32: double-headed swap arrow (horizontal / vertical)
+        vec2 q = (shape == 31) ? p : p.yx;
+        float bar = sdRoundedBox(q, vec2(0.46, 0.08), 0.04);
+        float lt = sdTriangle(q, vec2(-0.82, 0.0), vec2(-0.40, -0.34), vec2(-0.40, 0.34)) - 0.03;
+        float rt = sdTriangle(q, vec2(0.82, 0.0), vec2(0.40, 0.34), vec2(0.40, -0.34)) - 0.03;
+        d = min(bar, min(lt, rt));
     } else {
         d = sdRoundedBox(p, vec2(1.0), 0.0);
     }

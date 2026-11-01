@@ -236,6 +236,7 @@ private:
         float pitch = 0.0f;
         float dist = 3.0f;
         float scale = 1.0f;      // group size (snapped screens resize together)
+        float curvature = 0.0f;  // shared by all screens of the layout
     };
     void computeArrangement(const Arrangement& a,
                             VulkanRenderer::ScreenPlacement out[VulkanRenderer::kMaxVideoSlots]) const;
@@ -250,14 +251,12 @@ private:
     bool arrangementActive_ = false;  // the last applied layout is still in place
     Arrangement arrangement_;
     // Arrange menu (action menu page 8): presets on the left, live preview of
-    // the draft on the right, order / snap / style toggles, Apply.
+    // the draft on the right (swap arrows between neighbours), snap / style, Apply.
     void openArrangeMenu();
     void selectArrangePreset(ArrangePreset preset);
     void refreshArrangeMenu();
     Arrangement arrangeDraft_;
     std::vector<ArrangePreset> arrangePresets_;  // presets listed in the menu
-    std::vector<int> arrangeBase_;               // default order for the draft's preset
-    int arrangePerm_ = 0;                        // order variant (permutation index)
     float screenEyeAspect(int slot) const;  // per-eye width / height of a screen's video
     // Browser 'play' entry point: asks where to play when screens are in use.
     void playFromBrowser(const std::string& path);

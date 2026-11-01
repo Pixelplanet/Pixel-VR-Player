@@ -719,6 +719,7 @@ void SettingsMenu::loadConfig() {
             else if (key == "ambilight") ambilightIdx_ = std::clamp(std::stoi(val), 0, kAmbilightCount - 1);
             else if (key == "res_scale") resScaleIdx_ = std::clamp(std::stoi(val), 0, kResScaleCount - 1);
             else if (key == "multi_screen") multiScreen_ = (val == "1" || val == "true");
+            else if (key == "screen_frames") screenFrames_ = (val == "1" || val == "true");
             else if (key == "screen_audio") screenAudioMode_ = std::clamp(std::stoi(val), 0, 1);
             else if (key == "ui_opacity") uiOpacityIdx_ = std::clamp(std::stoi(val), 0, kUiOpacityCount - 1);
             else if (key == "panel_curve") panelCurveIdx_ = std::clamp(std::stoi(val), 0, kPanelCurveCount - 1);
@@ -769,6 +770,7 @@ void SettingsMenu::saveConfig() const {
             file << "panel_curve=" << panelCurveIdx_ << "\n";
             file << "ui_opacity=" << uiOpacityIdx_ << "\n";
             file << "multi_screen=" << (multiScreen_ ? 1 : 0) << "\n";
+            file << "screen_frames=" << (screenFrames_ ? 1 : 0) << "\n";
             file << "screen_audio=" << screenAudioMode_ << "\n";
             file << "browser_sort=" << browserSort_ << "\n";
             if (!quickPath_.empty()) {

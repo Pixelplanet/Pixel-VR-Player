@@ -124,6 +124,9 @@ public:
     // Multi-screen playback (up to 3 flat screens) and whose audio is heard:
     // 0 = only the selected screen, 1 = all screens mixed.
     bool multiScreen() const { return multiScreen_; }
+    // Borders around the screens in multi-screen mode (dock toggle).
+    bool screenFrames() const { return screenFrames_; }
+    void setScreenFrames(bool on) { screenFrames_ = on; saveConfig(); }
     int screenAudioMode() const { return screenAudioMode_; }
     // Panel transparency: 0 = solid .. 3 = clear; uiOpacity() is the renderer factor.
     int uiOpacityIdx() const { return uiOpacityIdx_; }
@@ -213,6 +216,7 @@ private:
     int panelCurveIdx_ = 1;    // 0=Flat, 1=Gentle (default), 2=Wrap
     int uiOpacityIdx_ = 2;     // 0=Solid, 1=Frosted, 2=Glass (default), 3=Clear
     bool multiScreen_ = false; // off = classic single-screen player
+    bool screenFrames_ = true;
     int screenAudioMode_ = 0;  // 0=Selected screen only, 1=All screens
     int browserSort_ = 0;      // 0=Name, 1=Newest, 2=Largest
     bool listShowFormat_ = true;
