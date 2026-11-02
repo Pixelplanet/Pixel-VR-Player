@@ -195,6 +195,7 @@ private:
         bool muted = false;  // user mute (the audio mode may mute it as well)
         int projection = 0;  // 0 flat, 1 360, 2 180 (extra screens: always 0)
         int stereo = 0;      // 0 mono, 1 SBS, 2 TB
+        bool web = false;    // shows the web browser instead of a video
     };
     ScreenState screens_[VulkanRenderer::kMaxVideoSlots];
     int selectedScreen_ = 0;
@@ -268,13 +269,20 @@ private:
     int movingScreen_ = -1;  // screen being placed with the laser, or -1
     // Web browser screen (proof of concept): the pvr-browser helper's page on a
     // floating screen; the laser acts as the mouse.
+    // One browser at a time; it lives on a screen slot like a video (placement,
+    // arrangement, close). "web://" is its pseudo path in the screen picker.
+    static constexpr const char* kWebPath = "web://";
     BrowserHost webHost_;
     bool webMouseDown_ = false;
-    float webMouseX_ = 0.0f;
+    bool webDragging_ = false;   // moved past the click slop while pressed
+    float webMouseX_ = 0.0f;     // smoothed laser position, page pixels
     float webMouseY_ = 0.0f;
+    float webDownX_ = 0.0f;      // where the press started
+    float webDownY_ = 0.0f;
+    bool webHoverValid_ = false;
     float webWheelAccum_ = 0.0f;
-    void openWebScreen();
-    void closeWebScreen();
+    void openWebScreen();        // "Web" tab: pick a screen (or use the main one)
+    void loadWeb(int slot);
     float movingDistance_ = 3.0f;
     std::string pendingPlayPath_;  // file waiting for the "play where?" choice
 

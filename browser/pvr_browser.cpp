@@ -304,20 +304,27 @@ bool commandSucceeds(const std::vector<std::string>& args) {
     return WIFEXITED(status) && WEXITSTATUS(status) == 0;
 }
 
+enum class ChromiumKind { None, Flatpak, Native };
+
+ChromiumKind findChromium() {
+    if (commandSucceeds({"flatpak", "info", "org.chromium.Chromium"})) return ChromiumKind::Flatpak;
+    if (commandSucceeds({"sh", "-c", "command -v chromium"})) return ChromiumKind::Native;
+    return ChromiumKind::None;
+}
+
 // Launches Chromium in its own process group; returns its pid or -1.
-pid_t launchChromium(const std::string& profile, int width, int height) {
+pid_t launchChromium(ChromiumKind kind, const std::string& profile, int width, int height) {
     std::vector<std::string> args;
-    if (commandSucceeds({"flatpak", "info", "org.chromium.Chromium"})) {
-        args = {"flatpak", "run", "--command=chromium", "org.chromium.Chromium"};
-    } else if (commandSucceeds({"sh", "-c", "command -v chromium"})) {
-        args = {"chromium"};
-    } else {
-        return -1;
-    }
+    if (kind == ChromiumKind::Flatpak) args = {"flatpak", "run", "--command=chromium", "org.chromium.Chromium"};
+    else if (kind == ChromiumKind::Native) args = {"chromium"};
+    else return -1;
     const std::vector<std::string> flags = {
         "--headless=new",
         "--remote-debugging-port=0",
         "--user-data-dir=" + profile,
+        // Same cookie key as a desktop session without a keyring, so the
+        // user's existing logins can be read.
+        "--password-store=basic",
         "--window-size=" + std::to_string(width) + "," + std::to_string(height),
         "--no-first-run",
         "--no-default-browser-check",
@@ -452,18 +459,40 @@ int main(int argc, char** argv) {
     auto* header = static_cast<BrowserShmHeader*>(shmMem);
     uint8_t* pixels = static_cast<uint8_t*>(shmMem) + sizeof(BrowserShmHeader);
 
-    // Chromium with a persistent profile (cookies and logins survive).
-    const char* home = std::getenv("HOME");
-    const std::string profile = std::string(home ? home : "/tmp") + "/.config/pixelvr/chromium";
-    mkdir((std::string(home ? home : "/tmp") + "/.config/pixelvr").c_str(), 0700);
-    mkdir(profile.c_str(), 0700);
-    unlink((profile + "/DevToolsActivePort").c_str());
-    const pid_t chrome = launchChromium(profile, width, height);
-    if (chrome <= 0) {
+    // Prefer the user's own Chromium profile so desktop logins carry over. A
+    // profile can only be open once: if their Chromium is running, it hands
+    // our launch over and exits, and we fall back to a profile of our own.
+    const char* homeEnv = std::getenv("HOME");
+    const std::string home = homeEnv ? homeEnv : "/tmp";
+    const ChromiumKind kind = findChromium();
+    if (kind == ChromiumKind::None) {
         emitLine("error Chromium is not installed (install it from Discover)");
         return 3;
     }
-    const int port = waitForDevToolsPort(profile, chrome, 20000);
+    const std::string userProfile = kind == ChromiumKind::Flatpak
+                                        ? home + "/.var/app/org.chromium.Chromium/config/chromium"
+                                        : home + "/.config/chromium";
+    const std::string ownProfile = home + "/.config/pixelvr/chromium";
+    pid_t chrome = -1;
+    int port = -1;
+    for (const std::string& profile : {userProfile, ownProfile}) {
+        if (profile == ownProfile) {
+            mkdir((home + "/.config/pixelvr").c_str(), 0700);
+            mkdir(profile.c_str(), 0700);
+        }
+        unlink((profile + "/DevToolsActivePort").c_str());
+        chrome = launchChromium(kind, profile, width, height);
+        if (chrome <= 0) break;
+        port = waitForDevToolsPort(profile, chrome, 20000);
+        if (port > 0) break;
+        stopChromium(chrome);
+        chrome = -1;
+        emitLine("error Chromium profile in use; using a separate profile (close Chromium to share logins)");
+    }
+    if (chrome <= 0) {
+        emitLine("error could not start Chromium");
+        return 3;
+    }
     const std::string target = port > 0 ? findPageTarget(port) : std::string();
     WebSocket ws;
     if (target.empty() || !ws.connectTo(port, target)) {
@@ -479,6 +508,19 @@ int main(int argc, char** argv) {
         return id;
     };
     cdp("Page.enable");
+    // Look like a regular Chrome: sites (and Google sign-in) treat
+    // "HeadlessChrome" differently.
+    {
+        pvrjson::Value version;
+        if (pvrjson::parse(httpGet(port, "/json/version"), version)) {
+            std::string ua = version.getString("User-Agent");
+            const size_t h = ua.find("HeadlessChrome");
+            if (h != std::string::npos) {
+                ua.replace(h, 14, "Chrome");
+                cdp("Emulation.setUserAgentOverride", "{\"userAgent\":" + pvrjson::quote(ua) + "}");
+            }
+        }
+    }
     // The headless window reserves room for (invisible) browser UI; pin the
     // page viewport to exactly our frame size so input maps 1:1.
     cdp("Emulation.setDeviceMetricsOverride", "{\"width\":" + std::to_string(width) + ",\"height\":" +

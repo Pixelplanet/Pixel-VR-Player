@@ -223,10 +223,10 @@ public:
                     const std::string& status);
     void updateCardThumbnail(int slot, const std::string& path, const uint8_t* rgba, int width, int height);
     void clearCardThumbnails();
-    // Web browser screen (proof of concept): a floating screen just in front of
-    // the main screen position showing the pvr-browser helper's page.
-    void setWebScreen(bool visible) { webScreenVisible_ = visible; }
-    bool webScreenVisible() const { return webScreenVisible_; }
+    // Web browser screen: screen slot `slot` (-1 = none) shows the pvr-browser
+    // helper's page instead of video, with the slot's usual placement.
+    void setWebSlot(int slot) { webSlot_ = slot; }
+    int webSlot() const { return webSlot_; }
     void updateWebFrame(const uint8_t* rgba, int width, int height);
     // Laser position on the web screen (u right, v down, 0..1); false when the
     // laser is not on it.
@@ -715,7 +715,7 @@ private:
         bool initialized = false;  // image has been written once (layout is shader-read)
     };
     WebTexture webTex_;
-    bool webScreenVisible_ = false;
+    int webSlot_ = -1;
     bool webPointerValid_ = false;
     float webPointerU_ = 0.0f;
     float webPointerV_ = 0.0f;

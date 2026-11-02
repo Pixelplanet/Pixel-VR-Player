@@ -716,7 +716,7 @@ void App::rememberPlaybackPosition(int slot) {
 #ifdef PIXELVR_HAVE_MEDIA
     if (slot < 0) slot = selectedScreen_;
     ScreenState& sc = screens_[slot];
-    if (!sc.open || sc.path.empty() || VaultManager::instance().isVaultPath(sc.path)) {
+    if (!sc.open || sc.web || sc.path.empty() || VaultManager::instance().isVaultPath(sc.path)) {
         return;
     }
     playbackMemory_.setPosition(sc.path, sc.engine.position(), sc.engine.duration());
@@ -728,12 +728,19 @@ void App::rememberPlaybackPosition(int slot) {
 void App::closeMedia(int slot) {
     if (slot < 0) slot = selectedScreen_;
     ScreenState& sc = screens_[slot];
+    if (sc.web) {
+        webHost_.stop();
+        renderer_.setWebSlot(-1);
+        sc.web = false;
+        webMouseDown_ = false;
+    } else {
 #ifdef PIXELVR_HAVE_MEDIA
-    rememberPlaybackPosition(slot);
-    playbackMemory_.save();
-    if (slot == selectedScreen_) scrubPreview_.setSource(std::string(), 0);
-    sc.engine.close();
+        rememberPlaybackPosition(slot);
+        playbackMemory_.save();
+        if (slot == selectedScreen_) scrubPreview_.setSource(std::string(), 0);
+        sc.engine.close();
 #endif
+    }
     sc.open = false;
     sc.path.clear();
     sc.muted = false;  // the next clip on this screen starts audible
@@ -1635,22 +1642,60 @@ void App::moveArrangementTo(int slot, const float target[3]) {
 }
 
 void App::openWebScreen() {
-    if (!webHost_.running() && !webHost_.start("https://www.youtube.com", 1280, 720)) {
-        PIXELVR_LOG_WARN("Web screen: browser helper unavailable");
-        return;
-    }
-    renderer_.setWebScreen(true);
 #ifdef PIXELVR_HAVE_FREETYPE
     browser_.setOpen(false);
 #endif
     settings_.close();
     downloadsWindow_ = false;
+    for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
+        if (screens_[slot].web) {  // already open: select it
+            selectScreen(slot);
+            return;
+        }
+    }
+    if (multiScreenEnabled() && openScreenCount() > 0) {
+        openPlayTargetMenu(kWebPath);
+        actionMenu_.subtitle = "Web browser";
+        return;
+    }
+    loadWeb(0);
 }
 
-void App::closeWebScreen() {
-    webHost_.stop();
-    renderer_.setWebScreen(false);
+void App::loadWeb(int slot) {
+    if (!multiScreenEnabled()) slot = 0;
+    for (int s = 0; s < VulkanRenderer::kMaxVideoSlots; ++s) {
+        if (screens_[s].web && s != slot) closeMedia(s);  // one browser at a time
+    }
+    if (screens_[slot].open && !screens_[slot].web) closeMedia(slot);
+    if (!webHost_.running() && !webHost_.start("https://www.youtube.com", 1280, 720)) {
+        PIXELVR_LOG_WARN("Web screen: browser helper unavailable");
+        return;
+    }
+    ScreenState& sc = screens_[slot];
+    sc.open = true;
+    sc.web = true;
+    sc.path = kWebPath;
+    sc.projection = 0;
+    sc.stereo = 0;
+    sc.muted = false;
+    if (slot == 0) {
+        renderer_.setProjectionMode(VulkanRenderer::ProjectionMode::Flat);
+        renderer_.setStereoMode(VulkanRenderer::StereoMode::Mono);
+    } else {
+        VulkanRenderer::ScreenPlacement pl = renderer_.screenPlacement(slot);
+        if (!pl.active) {
+            placeNewScreen(slot);
+            pl = renderer_.screenPlacement(slot);
+        }
+        pl.active = true;
+        pl.stereo = VulkanRenderer::StereoMode::Mono;
+        renderer_.setScreenPlacement(slot, pl);
+    }
+    renderer_.setWebSlot(slot);
+    joinArrangement(slot);
+    selectScreen(slot);
     webMouseDown_ = false;
+    webHoverValid_ = false;
 }
 
 void App::openArrangeMenu() {
@@ -1855,7 +1900,7 @@ int App::run() {
             // can reclaim its V4L2 capture buffers (otherwise it wedges).
             for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
                 ScreenState& sc = screens_[slot];
-                if (!sc.open) continue;
+                if (!sc.open || sc.web) continue;
                 if (sc.engine.needsFrameRelease()) {
                     renderer_.releaseVideoFrame(slot);
                     sc.engine.confirmFrameRelease();
@@ -2036,31 +2081,57 @@ int App::run() {
                 lastControllerActivity_ = nowT;
             }
 
-            // Web browser screen: page frames in, laser as the mouse. Trigger =
-            // click (hold to drag), thumbstick = scroll, B = back, Y = close.
+            // Web browser screen: page frames in, laser as the mouse while the
+            // screens are locked (unlocked, trigger grabs it like any screen).
+            // Trigger = click (a press only becomes a drag after moving past a
+            // small slop, so laser jitter doesn't select text), thumbstick =
+            // scroll, B = back. Close it with the dock's X like any screen.
             if (webHost_.running()) {
                 webHost_.poll();
                 if (const uint8_t* rgba = webHost_.takeFrame()) {
                     renderer_.updateWebFrame(rgba, webHost_.width(), webHost_.height());
                 }
             }
-            if (!webHost_.running() && renderer_.webScreenVisible()) closeWebScreen();  // helper died
+            for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
+                if (screens_[slot].web && !webHost_.running()) closeMedia(slot);  // helper died
+            }
             bool hubShown = settings_.isOpen() || downloadsWindow_;
 #ifdef PIXELVR_HAVE_FREETYPE
             hubShown = hubShown || browser_.isOpen();
 #endif
-            if (renderer_.webScreenVisible() && !hubShown &&
-                !actionMenu_.visible && !textEntry_.active) {
+            if (renderer_.webSlot() >= 0 && !hubShown && !actionMenu_.visible && !textEntry_.active &&
+                !screensUnlocked_ && movingScreen_ < 0) {
+                constexpr float kClickSlop = 16.0f;  // page pixels
                 float u = 0.0f, v = 0.0f;
-                if (renderer_.webPointer(u, v)) {
-                    webMouseX_ = u * static_cast<float>(webHost_.width());
-                    webMouseY_ = v * static_cast<float>(webHost_.height());
-                    webHost_.mouseMove(webMouseX_, webMouseY_);
+                const bool onWeb = renderer_.webPointer(u, v);
+                if (onWeb) {
+                    const float rx = u * static_cast<float>(webHost_.width());
+                    const float ry = v * static_cast<float>(webHost_.height());
+                    if (!webHoverValid_) {
+                        webMouseX_ = rx;
+                        webMouseY_ = ry;
+                        webHoverValid_ = true;
+                    } else {  // light smoothing against hand jitter
+                        webMouseX_ += (rx - webMouseX_) * 0.5f;
+                        webMouseY_ += (ry - webMouseY_) * 0.5f;
+                    }
                     if (in.select) {
-                        webHost_.mouseDown(webMouseX_, webMouseY_);
+                        if (renderer_.webSlot() != selectedScreen_) selectScreen(renderer_.webSlot());
+                        webDownX_ = webMouseX_;
+                        webDownY_ = webMouseY_;
+                        webDragging_ = false;
+                        webHost_.mouseMove(webDownX_, webDownY_);
+                        webHost_.mouseDown(webDownX_, webDownY_);
                         webMouseDown_ = true;
                         in.select = false;
                         in.togglePlay = false;
+                    } else if (webMouseDown_) {
+                        const float dx = webMouseX_ - webDownX_;
+                        const float dy = webMouseY_ - webDownY_;
+                        if (!webDragging_ && dx * dx + dy * dy > kClickSlop * kClickSlop) webDragging_ = true;
+                        if (webDragging_) webHost_.mouseMove(webMouseX_, webMouseY_);
+                    } else {
+                        webHost_.mouseMove(webMouseX_, webMouseY_);
                     }
                     if (std::fabs(in.thumbstickY) > 0.2f) {
                         webWheelAccum_ += in.thumbstickY * dt * 1800.0f;  // wheel units (120 per notch)
@@ -2071,18 +2142,19 @@ int App::run() {
                         }
                         in.thumbstickY = 0.0f;
                     }
+                    if (in.buttonDown[XrInputState::BtnB]) {
+                        webHost_.back();
+                        in.buttonDown[XrInputState::BtnB] = false;
+                    }
+                } else {
+                    webHoverValid_ = false;
                 }
                 if (webMouseDown_ && !in.selectHeld) {
-                    webHost_.mouseUp(webMouseX_, webMouseY_);
+                    // A press that never left the slop is a clean click where it started.
+                    if (webDragging_) webHost_.mouseUp(webMouseX_, webMouseY_);
+                    else webHost_.mouseUp(webDownX_, webDownY_);
                     webMouseDown_ = false;
-                }
-                if (in.buttonDown[XrInputState::BtnB]) {
-                    webHost_.back();
-                    in.buttonDown[XrInputState::BtnB] = false;
-                }
-                if (in.buttonDown[XrInputState::BtnY]) {
-                    closeWebScreen();
-                    in.buttonDown[XrInputState::BtnY] = false;
+                    webDragging_ = false;
                 }
             }
 
@@ -2304,7 +2376,7 @@ int App::run() {
 #ifdef PIXELVR_HAVE_MEDIA
             for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
                 ScreenState& sc = screens_[slot];
-                if (!sc.open) continue;
+                if (!sc.open || sc.web) continue;
                 const bool audioModeMutes = multiScreenEnabled() && settings_.screenAudioMode() == 0 &&
                                             slot != selectedScreen_;
                 // Per-screen mute only exists in multi-screen mode (its button is
@@ -3291,9 +3363,13 @@ int App::run() {
                                         if (!occupied && !decoderBudgetAllows(pendingPlayPath_)) {
                                             actionMenu_.subtitle = "Not enough decoder capacity - close a screen first";
                                         } else {
+                                            if (pendingPlayPath_ == kWebPath) {
+                                                loadWeb(chosen);
+                                            } else {
 #ifdef PIXELVR_HAVE_MEDIA
-                                            loadMedia(pendingPlayPath_, chosen);
+                                                loadMedia(pendingPlayPath_, chosen);
 #endif
+                                            }
                                             actionMenu_.visible = false;
                                             browser_.setOpen(false);
                                         }

@@ -475,25 +475,6 @@ math::Mat4 orientFromYawPitch(float yaw, float pitch) {
                     fromQuat(Quat{std::sin(hp), 0.0f, 0.0f, std::cos(hp)}));
 }
 
-// Web browser screen: a little nearer than the main screen (so it sits in front
-// of a playing video) with the same apparent size, facing the viewer.
-struct WebScreenPose {
-    math::Vec3 center;
-    math::Mat4 rot;
-    float halfW = 1.6f;
-    float halfH = 0.9f;
-};
-WebScreenPose webScreenPose(const float pivot[3], const float forward[3], float yaw, float pitch,
-                            float screenDist) {
-    const float d = std::max(1.2f, screenDist * 0.85f);
-    WebScreenPose p;
-    p.center = math::Vec3{pivot[0] + forward[0] * d, pivot[1] + forward[1] * d, pivot[2] + forward[2] * d};
-    p.rot = orientFromYawPitch(yaw, pitch);
-    p.halfW = 1.6f * d / screenDist;
-    p.halfH = 0.9f * d / screenDist;
-    return p;
-}
-
 // Pose of the UI panel plane (hub, modals, transport dock) plus the distance
 // it sits from the viewer, shared by rendering and pointer hit-testing.
 struct PanelPlacement {
@@ -1911,12 +1892,10 @@ void VulkanRenderer::updatePointer() {
                          (downloadsVisible_ && !downloadsModal_)) && !actionMenuOpen && !kbOpen;
     const bool modalOpen = (downloadsVisible_ && downloadsModal_) && !actionMenuOpen && !kbOpen;
     const bool controlBar = controlBarVisible_ && !hubOpen && !modalOpen && !actionMenuOpen && !kbOpen;
-    const bool screensPointable = multiScreenActive_ && !hubOpen && !modalOpen &&
+    const bool screensPointable = (multiScreenActive_ || webSlot_ >= 0) && !hubOpen && !modalOpen &&
                                   !actionMenuOpen && !kbOpen;
-    const bool webPointable = webScreenVisible_ && webTex_.initialized && !hubOpen && !modalOpen &&
-                              !actionMenuOpen && !kbOpen;
     if (!kbOpen && !hubOpen && !modalOpen && !controlBar && !actionMenuOpen &&
-        !screensPointable && !webPointable) {
+        !screensPointable) {
         return;  // No UI surface to point at.
     }
 
@@ -2223,6 +2202,8 @@ void VulkanRenderer::updatePointer() {
         // sits in front of them, so it wins when both are hit.
         int screenHitSlot = -1;
         Vec3 screenHitWorld{0.0f, 0.0f, 0.0f};
+        float screenHitU = 0.0f;  // 0..1 across the screen (left to right)
+        float screenHitV = 0.0f;  // 0..1 down the screen
         if (screensPointable) {
             float bestT = 1e9f;
             for (int slot = 0; slot < kMaxVideoSlots; ++slot) {
@@ -2246,41 +2227,26 @@ void VulkanRenderer::updatePointer() {
                     bestT = t;
                     screenHitSlot = slot;
                     screenHitWorld = p;
+                    screenHitU = 0.5f + 0.5f * lx / sh.halfW;
+                    screenHitV = 0.5f - 0.5f * ly / sh.halfH;
                 }
             }
         }
-        // Web browser screen (in front of the video screens).
-        auto takeWebHit = [&]() {
-            if (!webPointable) return false;
-            const WebScreenPose wp = webScreenPose(screenPivot_, screenForward_, screenYaw_,
-                                                   recenterPitch_, screenDistance_);
-            const Vec3 xAxis = transformDir(wp.rot, Vec3{1.0f, 0.0f, 0.0f});
-            const Vec3 yAxis = transformDir(wp.rot, Vec3{0.0f, 1.0f, 0.0f});
-            const Vec3 nAxis = transformDir(wp.rot, Vec3{0.0f, 0.0f, 1.0f});
-            const float denom = dot(dir, nAxis);
-            if (std::fabs(denom) < 1e-4f) return false;
-            const float t = dot(wp.center - origin, nAxis) / denom;
-            if (t <= 0.05f) return false;
-            const Vec3 p = origin + dir * t;
-            const float lx = dot(p - wp.center, xAxis);
-            const float ly = dot(p - wp.center, yAxis);
-            if (std::fabs(lx) > wp.halfW || std::fabs(ly) > wp.halfH) return false;
-            hitHere(p.x, p.y, p.z);
-            webPointerValid_ = true;
-            webPointerU_ = 0.5f + 0.5f * lx / wp.halfW;
-            webPointerV_ = 0.5f - 0.5f * ly / wp.halfH;
-            return true;
-        };
         auto takeScreenHit = [&]() {
             if (screenHitSlot < 0) return false;
             hitHere(screenHitWorld.x, screenHitWorld.y, screenHitWorld.z);
             pointerScreen_ = screenHitSlot;
+            if (screenHitSlot == webSlot_) {
+                webPointerValid_ = true;
+                webPointerU_ = screenHitU;
+                webPointerV_ = screenHitV;
+            }
             return true;
         };
 
         // 5. In-Playback Floating Cinema Transport Dock (only when Hub is closed)
         if (!controlBar || !panelHit) {
-            if (takeWebHit() || takeScreenHit()) break;
+            if (takeScreenHit()) break;
             continue;
         }
 
@@ -2332,7 +2298,7 @@ void VulkanRenderer::updatePointer() {
             pointerButton_ = -1;
             break;
         }
-        if (takeWebHit() || takeScreenHit()) break;
+        if (takeScreenHit()) break;
     }
 }
 
@@ -3212,7 +3178,8 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         int visibleScreens = 0;
         for (int slot = 0; slot < kMaxVideoSlots; ++slot) {
             const bool flatMain = (projectionMode_ == ProjectionMode::Flat);
-            if (videoSlots_[slot].hasVideo && flatMain && (slot == 0 || screenPlacements_[slot].active)) {
+            const bool picture = videoSlots_[slot].hasVideo || (slot == webSlot_ && webTex_.initialized);
+            if (picture && flatMain && (slot == 0 || screenPlacements_[slot].active)) {
                 ++visibleScreens;
             }
         }
@@ -3226,7 +3193,10 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             const int slot = order[oi];
             VideoSlot& v = videoSlots_[slot];
             const ScreenPlacement& pl = screenPlacements_[slot];
-            if (!v.hasVideo) continue;
+            // The web browser's slot shows the page texture instead of video.
+            const bool webHere = (slot == webSlot_) && webTex_.initialized && webTex_.set != VK_NULL_HANDLE &&
+                                 thumbPipeline_ != VK_NULL_HANDLE;
+            if (!v.hasVideo && !webHere) continue;
             if (slot > 0 && !pl.active) continue;  // extra slot not in use
             const bool sphere = (slot == 0) && projectionMode_ != ProjectionMode::Flat;
             if (pass == 0 && sphere) continue;
@@ -3269,8 +3239,10 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 // Each eye shows half the frame. Full-width SBS (~2x wide) is halved
                 // back to a normal shape; half-SBS already has per-eye shape so it is
                 // stretched (no change). Same idea vertically for full vs half OU.
-                float eyeAspect = v.videoAspect;
-                if (stereo == StereoMode::SideBySide) {
+                float eyeAspect = webHere ? 16.0f / 9.0f : v.videoAspect;
+                if (webHere) {
+                    // the page is always 16:9 mono
+                } else if (stereo == StereoMode::SideBySide) {
                     if (v.videoAspect >= 2.6f) eyeAspect = v.videoAspect * 0.5f;
                 } else if (stereo == StereoMode::TopBottom) {
                     if (v.videoAspect <= 1.2f) eyeAspect = v.videoAspect * 2.0f;
@@ -3280,7 +3252,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 // Cinema Screen Ambilight Glow: only around one screen (the main
                 // one, or the selected one in multi-screen mode).
                 const bool glowHere = (multiScreenActive_ ? slot == selectedScreen_ : slot == 0);
-                if (pass == 0 && ambilightIntensity_ > 0.01f && glowHere) {
+                if (pass == 0 && ambilightIntensity_ > 0.01f && glowHere && !webHere) {
                     VkPipeline ambPipe = ycbcr ? v.ycbcrAmbilightPipeline : ambilightPipeline_;
                     if (ambPipe != VK_NULL_HANDLE) {
                         vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, ambPipe);
@@ -3308,24 +3280,48 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 }
                 if (pass == 0) continue;
 
-                vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
-                vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                        layout, 0, 1, &videoSet, 0, nullptr);
                 const Mat4 model = multiply(multiply(translation(center), rot),
                                             scaling(Vec3{widthScale * scale, scale, widthScale * scale}));
                 const Mat4 mvp = multiply(vpV, model);
-                PushConstants push{};
-                std::memcpy(push.mvp, mvp.m, sizeof(push.mvp));
-                fillCommon(push.conversion, push.range);
-                push.stereo[0] = static_cast<float>(static_cast<int>(stereo));
-                push.stereo[1] = static_cast<float>(viewIndex);
-                push.stereo[2] = swapEyes_ ? 1.0f : 0.0f;
-                push.stereo[3] = curvature;
-                vkCmdPushConstants(commandBuffer_, layout,
-                                   VK_SHADER_STAGE_VERTEX_BIT |
-                                       VK_SHADER_STAGE_FRAGMENT_BIT,
-                                   0, sizeof(PushConstants), &push);
-                vkCmdDraw(commandBuffer_, 64 * 6, 1, 0, 0);
+                if (webHere) {
+                    // Page texture over the same 3.2 x 1.8 model quad, bent like
+                    // quad.vert (arc of radius 3.2 / (curvature * 1.75)).
+                    vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, thumbPipeline_);
+                    vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                            textPipelineLayout_, 0, 1, &webTex_.set, 0, nullptr);
+                    TextPush tp{};
+                    std::memcpy(tp.mvp, mvp.m, sizeof(tp.mvp));
+                    const float white4[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+                    std::memcpy(tp.color, white4, sizeof(tp.color));
+                    tp.rect[0] = -1.6f;
+                    tp.rect[1] = -0.9f;
+                    tp.rect[2] = 3.2f;
+                    tp.rect[3] = 1.8f;
+                    tp.uv[2] = 1.0f;
+                    tp.uv[3] = 1.0f;
+                    tp.bend[0] = (curvature > 0.005f) ? 3.2f / (curvature * 1.75f) : 0.0f;
+                    tp.bend[1] = static_cast<float>(kThumbBendSegments);
+                    vkCmdPushConstants(commandBuffer_, textPipelineLayout_,
+                                       VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                                       sizeof(TextPush), &tp);
+                    vkCmdDraw(commandBuffer_, tp.bend[0] > 0.0f ? 6 * kThumbBendSegments : 6, 1, 0, 0);
+                } else {
+                    vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+                    vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                            layout, 0, 1, &videoSet, 0, nullptr);
+                    PushConstants push{};
+                    std::memcpy(push.mvp, mvp.m, sizeof(push.mvp));
+                    fillCommon(push.conversion, push.range);
+                    push.stereo[0] = static_cast<float>(static_cast<int>(stereo));
+                    push.stereo[1] = static_cast<float>(viewIndex);
+                    push.stereo[2] = swapEyes_ ? 1.0f : 0.0f;
+                    push.stereo[3] = curvature;
+                    vkCmdPushConstants(commandBuffer_, layout,
+                                       VK_SHADER_STAGE_VERTEX_BIT |
+                                           VK_SHADER_STAGE_FRAGMENT_BIT,
+                                       0, sizeof(PushConstants), &push);
+                    vkCmdDraw(commandBuffer_, 64 * 6, 1, 0, 0);
+                }
 
                 // Outline geometry in the screen's own (unscaled) model space:
                 // quad.vert's screen is 3.2 x 1.8 and bends with radius
@@ -3403,31 +3399,6 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             }
         }
 
-        // Web browser screen, in front of the main screen position.
-        if (webScreenVisible_ && webTex_.initialized && webTex_.set != VK_NULL_HANDLE &&
-            thumbPipeline_ != VK_NULL_HANDLE) {
-            const WebScreenPose wp = webScreenPose(screenPivot_, screenForward_, screenYaw_,
-                                                   recenterPitch_, screenDistance_);
-            const Mat4 mvp = multiply(vpV, multiply(translation(wp.center), wp.rot));
-            vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, thumbPipeline_);
-            vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipelineLayout_, 0,
-                                    1, &webTex_.set, 0, nullptr);
-            TextPush push{};
-            std::memcpy(push.mvp, mvp.m, sizeof(push.mvp));
-            const float white4[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-            std::memcpy(push.color, white4, sizeof(push.color));
-            push.rect[0] = -wp.halfW;
-            push.rect[1] = -wp.halfH;
-            push.rect[2] = 2.0f * wp.halfW;
-            push.rect[3] = 2.0f * wp.halfH;
-            push.uv[2] = 1.0f;
-            push.uv[3] = 1.0f;
-            push.bend[1] = 1.0f;
-            vkCmdPushConstants(commandBuffer_, textPipelineLayout_,
-                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(TextPush),
-                               &push);
-            vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
-        }
     }
 
     // =========================================================================
@@ -4876,6 +4847,30 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         // Live frame of a screen (left eye for 3D) with the video pipeline; `mvp`
         // maps the unscaled 3.2 x 1.8 screen model onto the panel.
         auto drawLivePreview = [&](int slot, const Mat4& mvp, float curvature) {
+            if (slot == webSlot_ && webTex_.initialized && webTex_.set != VK_NULL_HANDLE &&
+                thumbPipeline_ != VK_NULL_HANDLE) {
+                bindPipe(thumbPipeline_);
+                vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipelineLayout_, 0,
+                                        1, &webTex_.set, 0, nullptr);
+                TextPush tp{};
+                std::memcpy(tp.mvp, mvp.m, sizeof(tp.mvp));
+                const float white4[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+                std::memcpy(tp.color, white4, sizeof(tp.color));
+                tp.rect[0] = -1.6f;
+                tp.rect[1] = -0.9f;
+                tp.rect[2] = 3.2f;
+                tp.rect[3] = 1.8f;
+                tp.uv[2] = 1.0f;
+                tp.uv[3] = 1.0f;
+                tp.bend[0] = (curvature > 0.005f) ? 3.2f / (curvature * 1.75f) : 0.0f;
+                tp.bend[1] = static_cast<float>(kThumbBendSegments);
+                vkCmdPushConstants(commandBuffer_, textPipelineLayout_,
+                                   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(TextPush),
+                                   &tp);
+                vkCmdDraw(commandBuffer_, tp.bend[0] > 0.0f ? 6 * kThumbBendSegments : 6, 1, 0, 0);
+                bindPipe(uiPipeline_);
+                return;
+            }
             VideoSlot& v = videoSlots_[slot];
             const bool ycbcr = v.usingDmabuf && v.resolveImage != VK_NULL_HANDLE &&
                                v.ycbcrQuadPipeline != VK_NULL_HANDLE;
@@ -5095,7 +5090,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 if (ghost) {
                     // Empty slot: where a new screen would open.
                     drawUiElement(mvp, 0.0f, 0.0f, 1.6f, 0.9f, UiShape::RoundedBox, glassWellT.data(), 0.0f);
-                } else if (videoSlots_[slot].hasVideo) {
+                } else if (videoSlots_[slot].hasVideo || slot == webSlot_) {
                     drawLivePreview(slot, mvp, t.curvature);
                 } else {
                     drawUiElement(mvp, 0.0f, 0.0f, 1.6f, 0.9f, UiShape::RoundedBox, glassControlT.data(), 0.0f);
@@ -5163,7 +5158,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 drawUiElement(vpPanel, r.cx, r.cy, r.hw + 0.008f, r.hh + 0.008f, UiShape::RoundedBox,
                               glassWellT.data(), 0.14f, hov ? 0.10f : 0.05f,
                               hov ? tabActiveBord : kGlassRimFaint);
-                if (occupied && videoSlots_[slot].hasVideo) {
+                if (occupied && (videoSlots_[slot].hasVideo || slot == webSlot_)) {
                     drawLivePreview(slot, multiply(tileVp(r), scaling(Vec3{r.hw / 1.6f, r.hh / 0.9f, 1.0f})),
                                     0.0f);
                 } else {
@@ -5223,7 +5218,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 if (!t.valid) continue;
                 const Mat4 mvp = multiply(boxVp, t.model);
                 uiBendOverride = t.bend;
-                if (videoSlots_[slot].hasVideo) {
+                if (videoSlots_[slot].hasVideo || slot == webSlot_) {
                     drawLivePreview(slot, mvp, t.curvature);
                 } else {
                     drawUiElement(mvp, 0.0f, 0.0f, 1.6f, 0.9f, UiShape::RoundedBox, glassControlT.data(), 0.0f);
