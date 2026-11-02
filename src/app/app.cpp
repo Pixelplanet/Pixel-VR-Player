@@ -308,7 +308,7 @@ void App::watchdogLoop() {
                         ScreenState& sc = screens_[slot];
                         if (!sc.open) continue;
                         if (sc.web) {
-                            webHosts_[slot].pauseMedia();
+                            webHosts_[slot].pauseMedia(pauseLivestreams_.load(std::memory_order_relaxed));
                         } else {
 #ifdef PIXELVR_HAVE_MEDIA
                             sc.engine.setPaused(true);
@@ -323,6 +323,20 @@ void App::watchdogLoop() {
         }
     }
 }
+
+namespace {
+// Byte offset in UTF-8 `s` of the JavaScript (UTF-16) string index `units`.
+std::size_t utf16ToByteOffset(const std::string& s, int units) {
+    std::size_t i = 0;
+    while (i < s.size() && units > 0) {
+        const unsigned char c = static_cast<unsigned char>(s[i]);
+        const std::size_t len = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : 4;
+        units -= len == 4 ? 2 : 1;  // characters beyond the BMP are two units
+        i += len;
+    }
+    return std::min(i, s.size());
+}
+}  // namespace
 
 bool App::init(const std::string& mediaPath) {
     if (!xr_.createInstanceAndSystem("Pixel VR Player")) {
@@ -739,6 +753,7 @@ void App::closeMedia(int slot) {
     if (slot < 0) slot = selectedScreen_;
     ScreenState& sc = screens_[slot];
     if (sc.web) {
+        if (kbWebSlot_ == slot) cancelKeyboard();
         webHosts_[slot].stop();
         renderer_.setWebSlot(slot, false);
         sc.web = false;
@@ -994,9 +1009,28 @@ void App::openKeyboard(const std::string& prompt,
     textEntry_.password = isPassword;
 }
 
+void App::openWebKeyboard(int slot, const BrowserHost::FocusEvent* field, const XrInputState& in) {
+    openKeyboard("Typing on the page", field ? field->value : std::string(), field && field->password, in, nullptr);
+    if (field) textEntry_.cursor = utf16ToByteOffset(field->value, field->cursor);
+    kbWebSlot_ = slot;
+}
+
+void App::webCaretTo(std::size_t byteOffset) {
+    if (kbWebSlot_ < 0) return;
+    const std::string& t = textEntry_.text;
+    const std::size_t from = std::min(textEntry_.cursor, t.size());
+    const std::size_t to = std::min(byteOffset, t.size());
+    int chars = 0;  // characters between the two (UTF-8 lead bytes)
+    for (std::size_t i = std::min(from, to); i < std::max(from, to); ++i) {
+        if ((static_cast<unsigned char>(t[i]) & 0xC0) != 0x80) ++chars;
+    }
+    for (int k = 0; k < chars; ++k) webHosts_[kbWebSlot_].key(to < from ? "Left" : "Right");
+}
+
 void App::commitKeyboard() {
     const std::string text = textEntry_.text;
     textEntry_ = {};
+    kbWebSlot_ = -1;
     auto cb = std::move(kbOnDone_);
     kbOnDone_ = nullptr;
     kbOnCancel_ = nullptr;
@@ -1009,6 +1043,7 @@ void App::commitKeyboard() {
 
 void App::cancelKeyboard() {
     textEntry_ = {};
+    kbWebSlot_ = -1;
     auto cb = std::move(kbOnCancel_);
     kbOnDone_ = nullptr;
     kbOnCancel_ = nullptr;
@@ -1029,6 +1064,9 @@ void App::moveTextCursor(int delta) {
     std::string& t = textEntry_.text;
     std::size_t& c = textEntry_.cursor;
     if (c > t.size()) c = t.size();
+    if (kbWebSlot_ >= 0) {  // the page's caret moves too
+        for (int k = 0; k < std::abs(delta); ++k) webHosts_[kbWebSlot_].key(delta < 0 ? "Left" : "Right");
+    }
     for (; delta < 0 && c > 0; ++delta) {
         do { --c; } while (c > 0 && (static_cast<unsigned char>(t[c]) & 0xC0) == 0x80);
     }
@@ -1042,7 +1080,22 @@ void App::pressKeyboardKey(int key) {
     std::string& t = textEntry_.text;
     std::size_t& c = textEntry_.cursor;
     if (c > t.size()) c = t.size();
-    switch (VulkanRenderer::keyboardKeyCode(key)) {
+    const int code = VulkanRenderer::keyboardKeyCode(key);
+    if (kbWebSlot_ >= 0) {
+        // Typing into a page: every key goes to it at once; our field mirrors
+        // it (corrected by the page's own value right after).
+        BrowserHost& host = webHosts_[kbWebSlot_];
+        if (code == 0 || code == 4) {
+            const char ch = VulkanRenderer::keyboardKeyChar(key, textEntry_.shift, textEntry_.symbols);
+            if (ch != 0) host.text(std::string(1, ch));
+        } else if (code == 1) {
+            host.key("Backspace");
+        } else if (code == 7) {
+            host.key("Enter");  // stays open while the field keeps focus
+            return;
+        }
+    }
+    switch (code) {
         case 0:    // character
         case 4: {  // space
             const char ch = VulkanRenderer::keyboardKeyChar(key, textEntry_.shift, textEntry_.symbols);
@@ -1069,6 +1122,72 @@ void App::pressKeyboardKey(int key) {
         case 8: cancelKeyboard(); break;
         default: break;
     }
+}
+
+// ---------------------------------------------------------------------------
+// Dock transport (video engine or a browser screen's page video)
+// ---------------------------------------------------------------------------
+bool App::curPaused() {
+    if (cur().web) {
+        const BrowserHost::Media& m = webHosts_[selectedScreen_].media();
+        return m.present && m.paused;
+    }
+#ifdef PIXELVR_HAVE_MEDIA
+    return cur().engine.paused();
+#else
+    return false;
+#endif
+}
+
+double App::curPosition() {
+    if (cur().web) return webHosts_[selectedScreen_].media().position;
+#ifdef PIXELVR_HAVE_MEDIA
+    return cur().engine.position();
+#else
+    return 0.0;
+#endif
+}
+
+double App::curDuration() {
+    if (cur().web) {
+        const BrowserHost::Media& m = webHosts_[selectedScreen_].media();
+        return (m.present && !m.live) ? m.duration : 0.0;
+    }
+#ifdef PIXELVR_HAVE_MEDIA
+    return cur().engine.duration();
+#else
+    return 0.0;
+#endif
+}
+
+void App::curTogglePause() {
+    if (cur().web) {
+        webHosts_[selectedScreen_].mediaToggle();
+        return;
+    }
+#ifdef PIXELVR_HAVE_MEDIA
+    cur().engine.togglePause();
+#endif
+}
+
+void App::curSeek(double t) {
+    if (cur().web) {
+        webHosts_[selectedScreen_].mediaSeek(t);
+        return;
+    }
+#ifdef PIXELVR_HAVE_MEDIA
+    cur().engine.seek(t);
+#endif
+}
+
+void App::curSeekRelative(double d) {
+    if (cur().web) {
+        webHosts_[selectedScreen_].mediaSeekRelative(d);
+        return;
+    }
+#ifdef PIXELVR_HAVE_MEDIA
+    cur().engine.seekRelative(d);
+#endif
 }
 
 // ---------------------------------------------------------------------------
@@ -1677,37 +1796,11 @@ void App::moveArrangementTo(int slot, const float target[3]) {
     applyArrangement(arrangement_);
 }
 
-namespace {
-// What the user typed into the Browser tab's prompt as a URL: a full URL as
-// is, something that looks like a host ("example.com/x") over https, anything
-// else as a web search.
-std::string webAddressFor(const std::string& typed) {
-    const std::size_t a = typed.find_first_not_of(" \t");
-    if (a == std::string::npos) return {};
-    const std::string t = typed.substr(a, typed.find_last_not_of(" \t") + 1 - a);
-    if (t.find("://") != std::string::npos) return t;
-    const bool oneWord = t.find(' ') == std::string::npos;
-    if (oneWord && (t.find('.') != std::string::npos || t.rfind("localhost", 0) == 0)) return "https://" + t;
-    std::string q;
-    for (unsigned char c : t) {
-        if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
-            q += static_cast<char>(c);
-        } else if (c == ' ') {
-            q += '+';
-        } else {
-            char hex[4];
-            std::snprintf(hex, sizeof(hex), "%%%02X", c);
-            q += hex;
-        }
-    }
-    return "https://www.google.com/search?q=" + q;
-}
-}  // namespace
-
-void App::openWebScreen(const std::string& url) {
+void App::openWebScreen(const std::string& url, bool kiosk) {
     settings_.close();
     downloadsWindow_ = false;
     pendingWebUrl_ = url;
+    pendingWebKiosk_ = kiosk;
     if (multiScreenEnabled() && openScreenCount() > 0) {
         // The picker lives in the Files hub (it is dismissed without it), like
         // picking a screen for a file; choosing a screen closes the hub.
@@ -1715,24 +1808,27 @@ void App::openWebScreen(const std::string& url) {
         browser_.setOpen(true);
 #endif
         openPlayTargetMenu(kWebPath);
-        actionMenu_.subtitle = (url == kYouTubeUrl) ? "YouTube" : url;
+        actionMenu_.subtitle = kiosk ? "YouTube" : "Web browser";
         return;
     }
 #ifdef PIXELVR_HAVE_FREETYPE
     browser_.setOpen(false);
 #endif
-    loadWeb(0, url);
+    loadWeb(0, url, kiosk);
 }
 
-void App::loadWeb(int slot, const std::string& url) {
+void App::loadWeb(int slot, const std::string& url, bool kiosk) {
     if (!multiScreenEnabled()) slot = 0;
-    if (screens_[slot].web) {  // already a browser: just go there
-        webHosts_[slot].navigate(url);
+    if (screens_[slot].web && webHosts_[slot].kiosk() == kiosk) {  // same kind: keep its pages
+        webHosts_[slot].openTab(url);
         selectScreen(slot);
         return;
     }
     if (screens_[slot].open) closeMedia(slot);
-    if (!webHosts_[slot].start(url, 1280, 720)) {
+    BrowserHost::Options opt;
+    opt.kiosk = kiosk;
+    opt.incognito = settings_.privateBrowsing();
+    if (!webHosts_[slot].start(url, 1280, 720, opt)) {
         PIXELVR_LOG_WARN("Web screen: browser helper unavailable");
         return;
     }
@@ -2042,6 +2138,7 @@ int App::run() {
                     if (pressed && renderer_.keyboardFieldHovered()) {
                         const int pos = renderer_.keyboardCursorAtPointer();
                         if (pos >= 0) {
+                            webCaretTo(static_cast<std::size_t>(pos));
                             textEntry_.cursor = static_cast<std::size_t>(pos);
                             kbFieldDrag_ = true;
                             xr_.triggerHaptic(hand, 0.010f, 0.0f, 0.35f);
@@ -2052,6 +2149,7 @@ int App::run() {
                         } else if (renderer_.keyboardFieldHovered()) {
                             const int pos = renderer_.keyboardCursorAtPointer();
                             if (pos >= 0 && static_cast<std::size_t>(pos) != textEntry_.cursor) {
+                                webCaretTo(static_cast<std::size_t>(pos));
                                 textEntry_.cursor = static_cast<std::size_t>(pos);
                                 xr_.triggerHaptic(hand, 0.004f, 0.0f, 0.2f);
                             }
@@ -2161,7 +2259,27 @@ int App::run() {
                     continue;
                 }
                 if (const uint8_t* rgba = host.takeFrame()) {
-                    renderer_.updateWebFrame(slot, rgba, host.width(), host.height());
+                    renderer_.updateWebFrame(slot, rgba, host.frameWidth(), host.frameHeight());
+                }
+                // Text fields: a click into one opens the keyboard, which then
+                // types straight into the page; it closes when the field does.
+                BrowserHost::FocusEvent fe;
+                while (host.takeFocusEvent(fe)) {
+                    if (fe.focused && kbWebSlot_ == slot) {
+                        textEntry_.text = fe.value;
+                        textEntry_.cursor = utf16ToByteOffset(fe.value, fe.cursor);
+                        textEntry_.password = fe.password;
+                    } else if (fe.focused && fe.byClick && !textEntry_.active && slot == webMouseSlot_) {
+                        openWebKeyboard(slot, &fe, in);
+                    } else if (!fe.focused && kbWebSlot_ == slot) {
+                        cancelKeyboard();
+                    }
+                }
+                int fieldCursor = 0;
+                std::string fieldValue;
+                if (host.takeFieldValue(fieldCursor, fieldValue) && kbWebSlot_ == slot) {
+                    textEntry_.text = fieldValue;
+                    textEntry_.cursor = utf16ToByteOffset(fieldValue, fieldCursor);
                 }
             }
             bool hubShown = settings_.isOpen() || downloadsWindow_;
@@ -2182,8 +2300,8 @@ int App::run() {
                 BrowserHost* host = (webMouseSlot_ >= 0 && screens_[webMouseSlot_].web) ? &webHosts_[webMouseSlot_]
                                                                                        : nullptr;
                 if (host && onWeb && ws == webMouseSlot_) {
-                    const float rx = u * static_cast<float>(host->width());
-                    const float ry = v * static_cast<float>(host->height());
+                    const float rx = u * static_cast<float>(host->frameWidth());
+                    const float ry = v * static_cast<float>(host->frameHeight());
                     if (!webHoverValid_) {
                         webMouseX_ = rx;
                         webMouseY_ = ry;
@@ -2453,12 +2571,14 @@ int App::run() {
 #ifdef PIXELVR_HAVE_MEDIA
             for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
                 ScreenState& sc = screens_[slot];
-                if (!sc.open || sc.web) continue;
+                if (!sc.open) continue;
                 const bool audioModeMutes = multiScreenEnabled() && settings_.screenAudioMode() == 0 &&
                                             slot != selectedScreen_;
                 // Per-screen mute only exists in multi-screen mode (its button is
                 // hidden otherwise), so it never silences the single screen.
-                sc.engine.setMuted((sc.muted && multiScreenEnabled()) || audioModeMutes);
+                const bool mute = (sc.muted && multiScreenEnabled()) || audioModeMutes;
+                if (sc.web) webHosts_[slot].setMuted(mute);
+                else sc.engine.setMuted(mute);
             }
 #endif
             renderer_.setMultiScreen(multiScreenEnabled() && openScreenCount() > 0, selectedScreen_);
@@ -2555,6 +2675,7 @@ int App::run() {
                 VaultManager::instance().recordActivity(nowT);
             }
             pauseOnRemoval_.store(settings_.pauseOnRemoval(), std::memory_order_relaxed);
+            pauseLivestreams_.store(settings_.pauseLivestreams(), std::memory_order_relaxed);
             if (VaultManager::instance().tick(nowT, in.headValid && xr_.sessionFocused())) {
                 performVaultLock();
             }
@@ -3119,14 +3240,11 @@ int App::run() {
             const int sbHover = renderer_.browserSidebarHovered();
             if (hubActive && (in.togglePlay || in.select) && sbHover >= 0) {
                 if (sbHover == 10) {
-                    // Main Tab: YouTube (browser screen on youtube.com)
-                    openWebScreen(kYouTubeUrl);
+                    // Main Tab: YouTube (just the page, on youtube.com)
+                    openWebScreen(kYouTubeUrl, true);
                 } else if (sbHover == 11) {
-                    // Main Tab: Browser (any site: address or search first)
-                    openKeyboard("Web address or search", "", false, in, [this](const std::string& typed) {
-                        const std::string url = webAddressFor(typed);
-                        if (!url.empty()) openWebScreen(url);
-                    });
+                    // Main Tab: Browser (full browser: tabs, address bar, bookmarks)
+                    openWebScreen(kBrowserHomeUrl, false);
                 } else if (sbHover == 0) {
                     // Main Tab: Files
                     downloadsWindow_ = false;
@@ -3452,7 +3570,7 @@ int App::run() {
                                             actionMenu_.subtitle = "Not enough decoder capacity - close a screen first";
                                         } else {
                                             if (pendingPlayPath_ == kWebPath) {
-                                                loadWeb(chosen, pendingWebUrl_);
+                                                loadWeb(chosen, pendingWebUrl_, pendingWebKiosk_);
                                             } else {
 #ifdef PIXELVR_HAVE_MEDIA
                                                 loadMedia(pendingPlayPath_, chosen);
@@ -3805,13 +3923,20 @@ int App::run() {
 #ifdef PIXELVR_HAVE_MEDIA
                     else if (cur().open &&
                              cb == VulkanRenderer::CtrlButton::PlayPause) {
-                        cur().engine.togglePause();
+                        curTogglePause();
                     } else if (cur().open &&
                                cb == VulkanRenderer::CtrlButton::SeekBack) {
-                        cur().engine.seekRelative(-10.0);
+                        curSeekRelative(-10.0);
                     } else if (cur().open &&
                                cb == VulkanRenderer::CtrlButton::SeekFwd) {
-                        cur().engine.seekRelative(10.0);
+                        curSeekRelative(10.0);
+                    } else if (cur().web && cb == VulkanRenderer::CtrlButton::FormatToggle) {
+                        webHosts_[selectedScreen_].toggleFullscreen();  // F11
+                    } else if (cur().web && cb == VulkanRenderer::CtrlButton::AudioToggle) {
+                        if (!textEntry_.active) {
+                            openWebKeyboard(selectedScreen_, nullptr, in);
+                            webHosts_[selectedScreen_].requestFocusReport();  // fill in the field, if any
+                        }
                     } else if (cb == VulkanRenderer::CtrlButton::FormatToggle) {
                         actionMenu_.visible = true;
                         actionMenu_.page = 5;
@@ -3950,7 +4075,7 @@ int App::run() {
                 }
 #ifdef PIXELVR_HAVE_MEDIA
                 if (in.togglePlay && cur().open) {
-                    cur().engine.togglePause();
+                    curTogglePause();
                     interacted = true;
                 }
                 if (cur().open) {
@@ -3959,11 +4084,11 @@ int App::run() {
                     constexpr double kStep = 30.0;
                     const bool sphereMode = settings_.projectionMode() != 0;
                     if (!sphereMode && in.thumbstickRX > 0.6f && seekStepArmed_) {
-                        cur().engine.seekRelative(kStep);
+                        curSeekRelative(kStep);
                         seekStepArmed_ = false;
                         interacted = true;
                     } else if (!sphereMode && in.thumbstickRX < -0.6f && seekStepArmed_) {
-                        cur().engine.seekRelative(-kStep);
+                        curSeekRelative(-kStep);
                         seekStepArmed_ = false;
                         interacted = true;
                     } else if (std::fabs(in.thumbstickRX) < 0.3f) {
@@ -3976,41 +4101,40 @@ int App::run() {
                     // gesture stays responsive.
                     bool scrubInput = false;
                     if (!wasHudDismissed && renderer_.pointerOnTimeline() && in.selectHeld &&
-                        cur().engine.duration() > 0.0) {
-                        scrubTarget_ = renderer_.pointerScrub() * cur().engine.duration();
+                        curDuration() > 0.0) {
+                        scrubTarget_ = renderer_.pointerScrub() * curDuration();
                         scrubInput = true;
                     } else if (std::fabs(in.thumbstickLX) > 0.15f && dt > 0.0f &&
-                               cur().engine.duration() > 0.0) {
-                        if (!scrubbing_) scrubTarget_ = cur().engine.position();
+                               curDuration() > 0.0) {
+                        if (!scrubbing_) scrubTarget_ = curPosition();
                         const float ax = in.thumbstickLX;
                         const float t = (std::fabs(ax) - 0.15f) / 0.85f;
                         const double rate =
                             std::copysign(static_cast<double>(t * t) * 60.0, ax);
-                        scrubTarget_ = std::clamp(scrubTarget_ + rate * dt, 0.0,
-                                                  cur().engine.duration());
+                        scrubTarget_ = std::clamp(scrubTarget_ + rate * dt, 0.0, curDuration());
                         scrubInput = true;
                     }
                     if (scrubInput) {
                         scrubbing_ = true;
                         interacted = true;
                     } else if (scrubbing_) {
-                        cur().engine.seek(scrubTarget_);  // commit the scrub with one seek
+                        curSeek(scrubTarget_);  // commit the scrub with one seek
                         scrubbing_ = false;
                     }
                 }
                 if (interacted) {
                     lastControllerActivity_ = nowT;
                 }
-                const bool paused = cur().open && cur().engine.paused();
+                const bool paused = cur().open && curPaused();
                 const bool controlsUp =
                     cur().open &&
                     (paused || (controllersEngaged && (in.controllers[0].active ||
                                                        in.controllers[1].active)));
                 float progress = 0.0f;
                 double elapsed = 0.0, total = 0.0;
-                if (cur().open && cur().engine.duration() > 0.0) {
-                    total = cur().engine.duration();
-                    elapsed = scrubbing_ ? scrubTarget_ : cur().engine.position();
+                if (cur().open && curDuration() > 0.0) {
+                    total = curDuration();
+                    elapsed = scrubbing_ ? scrubTarget_ : curPosition();
                     progress = static_cast<float>(elapsed / total);
                 }
                 std::string fLabel = "2D FLAT";
@@ -4062,6 +4186,11 @@ int App::run() {
                     }
                 }
 
+                if (cur().web) {  // browser screens: F11 and the keyboard instead
+                    fLabel = "FULLSCREEN";
+                    aLabel = "KEYBOARD";
+                    aEnabled = true;
+                }
                 renderer_.setHudLabels(fLabel, aLabel, sLabel, true, aEnabled);
                 renderer_.setTransport(controlsUp, progress, paused, elapsed, total);
 #else
@@ -4075,7 +4204,7 @@ int App::run() {
             }
             // Timeline hover preview: follow the current clip/stereo layout, ask
             // for the hovered time and upload whatever the worker has finished.
-            scrubPreview_.setSource(cur().open ? cur().path : std::string(),
+            scrubPreview_.setSource(cur().open && !cur().web ? cur().path : std::string(),
                                     settings_.stereoMode());
             if (cur().open && renderer_.pointerOnTimeline() && cur().engine.duration() > 0.0) {
                 scrubPreview_.request(renderer_.pointerScrub() * cur().engine.duration());

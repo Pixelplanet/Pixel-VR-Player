@@ -3290,7 +3290,13 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 // stretched (no change). Same idea vertically for full vs half OU.
                 float eyeAspect = webHere ? 16.0f / 9.0f : v.videoAspect;
                 if (webHere) {
-                    // the page is always 16:9 mono
+                    // Page (16:9) plus toolbar: the screen keeps its width and
+                    // grows in height by the toolbar.
+                    const WebTexture& wt = webTex_[slot];
+                    if (wt.width > 0 && wt.height > 0) {
+                        eyeAspect = static_cast<float>(wt.width) / static_cast<float>(wt.height);
+                        scale *= (16.0f / 9.0f) / eyeAspect;
+                    }
                 } else if (stereo == StereoMode::SideBySide) {
                     if (v.videoAspect >= 2.6f) eyeAspect = v.videoAspect * 0.5f;
                 } else if (stereo == StereoMode::TopBottom) {

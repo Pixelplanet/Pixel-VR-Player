@@ -274,6 +274,7 @@ private:
     // screen picker uses for "open a browser here".
     static constexpr const char* kWebPath = "web://";
     static constexpr const char* kYouTubeUrl = "https://www.youtube.com";
+    static constexpr const char* kBrowserHomeUrl = "https://www.google.com";
     BrowserHost webHosts_[VulkanRenderer::kMaxVideoSlots];
     int webMouseSlot_ = -1;      // browser screen the press / hover belongs to
     bool webMouseDown_ = false;
@@ -284,11 +285,27 @@ private:
     float webDownY_ = 0.0f;
     bool webHoverValid_ = false;
     float webWheelAccum_ = 0.0f;
-    // YouTube / Browser tabs: pick a screen (or use the main one) for `url`.
-    void openWebScreen(const std::string& url);
-    // Opens `url` on `slot`; a browser already there navigates to it.
-    void loadWeb(int slot, const std::string& url);
+    // YouTube / Browser tabs: pick a screen (or use the main one) for `url`;
+    // `kiosk` = just the page (YouTube), else a full browser with toolbar.
+    void openWebScreen(const std::string& url, bool kiosk);
+    // Opens `url` on `slot`; a browser of the same kind already there opens it
+    // in a new tab (kiosk: navigates).
+    void loadWeb(int slot, const std::string& url, bool kiosk);
     std::string pendingWebUrl_;  // page waiting for the "play where?" choice
+    bool pendingWebKiosk_ = false;
+    // In-app keyboard typing straight into a browser screen's focused field
+    // (-1 = the keyboard edits its own text as usual).
+    int kbWebSlot_ = -1;
+    void openWebKeyboard(int slot, const BrowserHost::FocusEvent* field, const XrInputState& in);
+    void webCaretTo(std::size_t byteOffset);  // move the page caret along with ours
+    // Dock transport for the selected screen: its video, or on a browser
+    // screen the page's main video (media bridge).
+    bool curPaused();
+    double curPosition();
+    double curDuration();  // 0 = no timeline (nothing playing, livestream)
+    void curTogglePause();
+    void curSeek(double t);
+    void curSeekRelative(double d);
     float movingDistance_ = 3.0f;
     std::string pendingPlayPath_;  // file waiting for the "play where?" choice
 
@@ -302,7 +319,8 @@ private:
     std::thread watchdogThread_;
     std::atomic<int64_t> lastFrameHeartbeatMs_{0};
     std::atomic<bool> pendingAutoLock_{false};
-    std::atomic<bool> pauseOnRemoval_{true};  // settings mirror for the watchdog thread
+    std::atomic<bool> pauseOnRemoval_{true};  // settings mirrors for the watchdog thread
+    std::atomic<bool> pauseLivestreams_{false};
     std::chrono::steady_clock::time_point lastGripFullRelease_{};
     void watchdogLoop();
 };

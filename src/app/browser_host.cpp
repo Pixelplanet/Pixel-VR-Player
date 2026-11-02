@@ -1,6 +1,7 @@
 #include "app/browser_host.hpp"
 
 #include "../../browser/browser_protocol.hpp"
+#include "../../browser/mini_json.hpp"
 #include "util/logging.hpp"
 
 #include <algorithm>
@@ -121,6 +122,7 @@ struct Launcher {
     int fromFd = -1;
     std::string out;
     int port = -1;
+    std::string profile;  // Chromium profile in use (bookmarks)
     int users = 0;
     bool failed = false;
 
@@ -150,7 +152,9 @@ struct Launcher {
         while ((nl = out.find('\n')) != std::string::npos) {
             const std::string line = out.substr(0, nl);
             out.erase(0, nl + 1);
-            if (line.rfind("port ", 0) == 0) {
+            if (line.rfind("profile ", 0) == 0) {
+                profile = line.substr(8);
+            } else if (line.rfind("port ", 0) == 0) {
                 port = std::atoi(line.c_str() + 5);
                 PIXELVR_LOG_INFO("Browser: Chromium ready on port %d", port);
             } else if (line.rfind("error ", 0) == 0) {
@@ -182,10 +186,17 @@ int gShmCounter = 0;
 
 BrowserHost::~BrowserHost() { stop(); }
 
-bool BrowserHost::start(const std::string& url, int width, int height) {
+bool BrowserHost::start(const std::string& url, int width, int height, const Options& opt) {
     stop();
+    options_ = opt;
     width_ = std::min(width, kBrowserMaxWidth);
     height_ = std::min(height, kBrowserMaxHeight);
+    frameW_ = width_;
+    frameH_ = height_;
+    media_ = {};
+    mutedState_ = -1;
+    focusEvents_.clear();
+    fieldValueNew_ = false;
 
     // Shared memory for frames (the app owns and unlinks it).
     shmName_ = "/pixelvr-browser-" + std::to_string(getpid()) + "-" + std::to_string(++gShmCounter);
@@ -196,7 +207,7 @@ bool BrowserHost::start(const std::string& url, int width, int height) {
         shmName_.clear();
         return false;
     }
-    shmSize_ = browserShmSize(width_, height_);
+    shmSize_ = browserShmSize(width_, kBrowserMaxHeight);  // room for the toolbar
     if (ftruncate(fd, static_cast<off_t>(shmSize_)) != 0) {
         close(fd);
         stop();
@@ -213,7 +224,7 @@ bool BrowserHost::start(const std::string& url, int width, int height) {
     std::memcpy(hd->magic, "PVRBRW1", 8);
     hd->seq.store(0);
     lastSeq_ = 0;
-    frame_.assign(static_cast<size_t>(width_) * height_ * 4, 0);
+    frame_.assign(static_cast<size_t>(width_) * kBrowserMaxHeight * 4, 0);
 
     if (!launcher().ensureStarted(width_, height_)) {
         stop();
@@ -232,9 +243,16 @@ bool BrowserHost::start(const std::string& url, int width, int height) {
 bool BrowserHost::spawnPage(int port) {
     {
         std::lock_guard<std::mutex> lock(sendMutex_);
-        pid_ = spawnHelper({"--port", std::to_string(port), "--shm", shmName_, "--url", startUrl_, "--width",
-                            std::to_string(width_), "--height", std::to_string(height_)},
-                           toHelper_, fromHelper_);
+        std::vector<std::string> args = {"--port",   std::to_string(port), "--shm",   shmName_,
+                                         "--url",    startUrl_,            "--width", std::to_string(width_),
+                                         "--height", std::to_string(height_)};
+        if (!launcher().profile.empty()) {
+            args.push_back("--profile");
+            args.push_back(launcher().profile);
+        }
+        if (options_.kiosk) args.push_back("--kiosk");
+        if (options_.incognito) args.push_back("--incognito");
+        pid_ = spawnHelper(args, toHelper_, fromHelper_);
     }
     if (pid_ <= 0) return false;
     PIXELVR_LOG_INFO("Browser: page helper pid %d (%dx%d) on %s", static_cast<int>(pid_), width_, height_,
@@ -304,10 +322,53 @@ void BrowserHost::handleLine(const std::string& line) {
     const size_t sp = line.find(' ');
     const std::string cmd = line.substr(0, sp);
     const std::string rest = sp == std::string::npos ? std::string() : line.substr(sp + 1);
-    if (cmd == "url") url_ = rest;
-    else if (cmd == "title") title_ = rest;
-    else if (cmd == "loading") loading_ = (rest == "1");
-    else if (cmd == "error") PIXELVR_LOG_WARN("Browser: %s", rest.c_str());
+    if (cmd == "url") {
+        url_ = rest;
+    } else if (cmd == "title") {
+        title_ = rest;
+    } else if (cmd == "loading") {
+        loading_ = (rest == "1");
+    } else if (cmd == "media") {
+        // "0" | "1 PAUSED POS DUR LIVE"
+        int present = 0, paused = 1, live = 0;
+        double pos = 0.0, dur = 0.0;
+        const int n = std::sscanf(rest.c_str(), "%d %d %lf %lf %d", &present, &paused, &pos, &dur, &live);
+        media_ = {};
+        if (n == 5 && present) {
+            media_.present = true;
+            media_.paused = paused != 0;
+            media_.position = pos;
+            media_.duration = dur;
+            media_.live = live != 0;
+        }
+    } else if (cmd == "focus") {
+        // "c|p 0" | "c|p 1 PASSWORD CURSOR <json string>"
+        FocusEvent ev;
+        ev.byClick = rest.rfind("c ", 0) == 0;
+        const char* p = rest.c_str() + std::min<size_t>(2, rest.size());
+        int focused = 0, pw = 0, cursor = 0, used = 0;
+        if (std::sscanf(p, "%d %d %d %n", &focused, &pw, &cursor, &used) >= 3 && focused) {
+            pvrjson::Value v;
+            if (used > 0 && pvrjson::parse(p + used, v)) ev.value = v.str;
+            ev.focused = true;
+            ev.password = pw != 0;
+            ev.cursor = cursor;
+        }
+        focusEvents_.push_back(std::move(ev));
+    } else if (cmd == "value") {
+        int cursor = 0, used = 0;
+        pvrjson::Value v;
+        if (std::sscanf(rest.c_str(), "%d %n", &cursor, &used) >= 1 && used > 0 &&
+            pvrjson::parse(rest.c_str() + used, v)) {
+            fieldCursor_ = cursor;
+            fieldValue_ = v.str;
+            fieldValueNew_ = true;
+        }
+    } else if (cmd == "download") {
+        PIXELVR_LOG_INFO("Browser: downloaded %s", rest.c_str());
+    } else if (cmd == "error") {
+        PIXELVR_LOG_WARN("Browser: %s", rest.c_str());
+    }
 }
 
 const uint8_t* BrowserHost::takeFrame() {
@@ -315,11 +376,16 @@ const uint8_t* BrowserHost::takeFrame() {
     auto* hd = static_cast<const BrowserShmHeader*>(shm_);
     const uint64_t seq = hd->seq.load(std::memory_order_acquire);
     if (seq == lastSeq_ || (seq & 1u)) return nullptr;
+    const int w = std::min(static_cast<int>(hd->width), width_);
+    const int h = std::min(static_cast<int>(hd->height), kBrowserMaxHeight);
+    if (w <= 0 || h <= 0) return nullptr;
     const auto* pixels = static_cast<const uint8_t*>(shm_) + sizeof(BrowserShmHeader);
-    std::memcpy(frame_.data(), pixels, frame_.size());
+    std::memcpy(frame_.data(), pixels, static_cast<size_t>(w) * h * 4);
     // Discard it if the helper started the next frame while we copied.
     if (hd->seq.load(std::memory_order_acquire) != seq) return nullptr;
     lastSeq_ = seq;
+    frameW_ = w;
+    frameH_ = h;
     return frame_.data();
 }
 
@@ -331,8 +397,40 @@ void BrowserHost::send(const std::string& line) {
     (void)n;
 }
 
-void BrowserHost::pauseMedia() {
-    send("eval document.querySelectorAll('video,audio').forEach(m=>m.pause())");
+void BrowserHost::pauseMedia(bool includeLive) { send(includeLive ? "pausemedia 1" : "pausemedia 0"); }
+void BrowserHost::toggleFullscreen() { send("fullscreen"); }
+
+void BrowserHost::mediaSeek(double t) {
+    char b[64];
+    std::snprintf(b, sizeof(b), "media seek %.2f", t);
+    send(b);
+}
+
+void BrowserHost::mediaSeekRelative(double d) {
+    char b[64];
+    std::snprintf(b, sizeof(b), "media seekrel %.2f", d);
+    send(b);
+}
+
+void BrowserHost::setMuted(bool muted) {
+    if (mutedState_ == (muted ? 1 : 0)) return;
+    mutedState_ = muted ? 1 : 0;
+    send(muted ? "mute 1" : "mute 0");
+}
+
+bool BrowserHost::takeFocusEvent(FocusEvent& out) {
+    if (focusEvents_.empty()) return false;
+    out = std::move(focusEvents_.front());
+    focusEvents_.erase(focusEvents_.begin());
+    return true;
+}
+
+bool BrowserHost::takeFieldValue(int& cursor, std::string& value) {
+    if (!fieldValueNew_) return false;
+    fieldValueNew_ = false;
+    cursor = fieldCursor_;
+    value = fieldValue_;
+    return true;
 }
 
 void BrowserHost::mouseMove(float x, float y) {
@@ -365,6 +463,7 @@ void BrowserHost::wheel(float x, float y, int deltaY) {
 void BrowserHost::key(const std::string& name) { send("key " + name); }
 void BrowserHost::text(const std::string& utf8) { send("text " + utf8); }
 void BrowserHost::navigate(const std::string& url) { send("nav " + url); }
+void BrowserHost::openTab(const std::string& url) { send("tab " + url); }
 void BrowserHost::back() { send("back"); }
 void BrowserHost::forward() { send("forward"); }
 void BrowserHost::reload() { send("reload"); }

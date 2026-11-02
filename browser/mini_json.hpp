@@ -229,4 +229,35 @@ inline std::string quote(std::string_view in) {
     return out;
 }
 
+// Writes `v` back out as compact JSON (integral numbers without a fraction).
+inline std::string dump(const Value& v) {
+    switch (v.type) {
+        case Value::Type::Null: return "null";
+        case Value::Type::Bool: return v.boolean ? "true" : "false";
+        case Value::Type::Number: {
+            const long long i = static_cast<long long>(v.number);
+            if (static_cast<double>(i) == v.number) return std::to_string(i);
+            return std::to_string(v.number);
+        }
+        case Value::Type::String: return quote(v.str);
+        case Value::Type::Array: {
+            std::string out = "[";
+            for (size_t k = 0; k < v.array.size(); ++k) {
+                if (k) out += ',';
+                out += dump(v.array[k]);
+            }
+            return out + "]";
+        }
+        case Value::Type::Object: {
+            std::string out = "{";
+            for (size_t k = 0; k < v.object.size(); ++k) {
+                if (k) out += ',';
+                out += quote(v.object[k].first) + ":" + dump(v.object[k].second);
+            }
+            return out + "}";
+        }
+    }
+    return "null";
+}
+
 }  // namespace pvrjson

@@ -213,6 +213,7 @@ void SettingsMenu::refresh() {
             rows_.push_back(r);
         }
         toggle("Pause When Headset Is Removed", pauseOnRemoval_, Action::TogglePauseOnRemoval);
+        toggle("Pause Livestreams Too", pauseLivestreams_, Action::TogglePauseLivestreams, pauseOnRemoval_);
         toggle("Debug Statistics", showStats_, Action::ToggleStats);
     } else if (section_ == 1) {
         title_ = "Settings > UI & Appearance";
@@ -274,6 +275,7 @@ void SettingsMenu::refresh() {
         title_ = "Settings > Vault & Privacy";
         toggle("Auto-Lock on Headset Removal", VaultManager::instance().autoLockHeadsetOff(),
                Action::CycleVaultAutoLockHeadset);
+        toggle("Private Browsing (Incognito)", privateBrowsing_, Action::TogglePrivateBrowsing);
 
         const int toSec = VaultManager::instance().autoLockTimeoutSec();
         const int toIdx = (toSec == 120) ? 1 : (toSec == 300) ? 2 : (toSec == 600) ? 3 : 0;
@@ -522,6 +524,16 @@ SettingsMenu::Action SettingsMenu::activate() {
             saveConfig();
             refresh();
             break;
+        case Action::TogglePauseLivestreams:
+            pauseLivestreams_ = !pauseLivestreams_;
+            saveConfig();
+            refresh();
+            break;
+        case Action::TogglePrivateBrowsing:
+            privateBrowsing_ = !privateBrowsing_;
+            saveConfig();
+            refresh();
+            break;
         case Action::CycleScreenAudio:
             screenAudioMode_ = (screenAudioMode_ + 1) % 2;
             saveConfig();
@@ -726,6 +738,8 @@ void SettingsMenu::loadConfig() {
             else if (key == "res_scale") resScaleIdx_ = std::clamp(std::stoi(val), 0, kResScaleCount - 1);
             else if (key == "multi_screen") multiScreen_ = (val == "1" || val == "true");
             else if (key == "pause_on_removal") pauseOnRemoval_ = (val == "1" || val == "true");
+            else if (key == "pause_livestreams") pauseLivestreams_ = (val == "1" || val == "true");
+            else if (key == "private_browsing") privateBrowsing_ = (val == "1" || val == "true");
             else if (key == "screen_frames") screenFrames_ = (val == "1" || val == "true");
             else if (key == "screen_audio") screenAudioMode_ = std::clamp(std::stoi(val), 0, 1);
             else if (key == "ui_opacity") uiOpacityIdx_ = std::clamp(std::stoi(val), 0, kUiOpacityCount - 1);
@@ -778,6 +792,8 @@ void SettingsMenu::saveConfig() const {
             file << "ui_opacity=" << uiOpacityIdx_ << "\n";
             file << "multi_screen=" << (multiScreen_ ? 1 : 0) << "\n";
             file << "pause_on_removal=" << (pauseOnRemoval_ ? 1 : 0) << "\n";
+            file << "pause_livestreams=" << (pauseLivestreams_ ? 1 : 0) << "\n";
+            file << "private_browsing=" << (privateBrowsing_ ? 1 : 0) << "\n";
             file << "screen_frames=" << (screenFrames_ ? 1 : 0) << "\n";
             file << "screen_audio=" << screenAudioMode_ << "\n";
             file << "browser_sort=" << browserSort_ << "\n";

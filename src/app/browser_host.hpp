@@ -20,17 +20,25 @@ public:
     BrowserHost(const BrowserHost&) = delete;
     BrowserHost& operator=(const BrowserHost&) = delete;
 
-    // Opens a page of width x height pixels on `url`. Returns at once; the
-    // window appears once the shared Chromium is up (see poll()).
-    bool start(const std::string& url, int width, int height);
+    struct Options {
+        bool kiosk = false;      // just the page (YouTube), no toolbar
+        bool incognito = false;  // private browser context
+    };
+    // Opens a page of width x height pixels on `url` (a full browser adds its
+    // toolbar above the page). Returns at once; the window appears once the
+    // shared Chromium is up (see poll()).
+    bool start(const std::string& url, int width, int height, const Options& opt);
     void stop();
     bool running() const { return state_ != State::Idle; }
-    int width() const { return width_; }
-    int height() const { return height_; }
+    bool kiosk() const { return options_.kiosk; }
+    // Size of the last frame (page plus toolbar); input uses these pixels.
+    int frameWidth() const { return frameW_; }
+    int frameHeight() const { return frameH_; }
 
     // Advances startup, reads helper events and notices exits; once per frame.
     void poll();
-    // Latest complete frame (RGBA, width*height*4), or nullptr if nothing new.
+    // Latest complete frame (RGBA, frameWidth*frameHeight*4), or nullptr if
+    // nothing new.
     const uint8_t* takeFrame();
 
     // Input in page pixels.
@@ -41,12 +49,43 @@ public:
     void key(const std::string& name);  // Enter, Backspace, Left, ...
     void text(const std::string& utf8);
     void navigate(const std::string& url);
+    void openTab(const std::string& url);  // new tab (kiosk: navigates)
     void back();
     void forward();
     void reload();
-    // Pauses every <video>/<audio> on the page. Safe to call from another
-    // thread (the headset-removal watchdog).
-    void pauseMedia();
+    void toggleFullscreen();  // F11 (or leaves the site's own fullscreen)
+    // Pauses every <video>/<audio> in all tabs; livestreams only with
+    // `includeLive`. Safe to call from another thread (the headset-removal
+    // watchdog).
+    void pauseMedia(bool includeLive);
+
+    // The page's main video (media bridge for the dock).
+    struct Media {
+        bool present = false;
+        bool paused = true;
+        bool live = false;
+        double position = 0.0;
+        double duration = 0.0;
+    };
+    const Media& media() const { return media_; }
+    void mediaToggle() { send("media toggle"); }
+    void mediaSeek(double t);
+    void mediaSeekRelative(double d);
+    void setMuted(bool muted);
+
+    // Text fields: the page reports focus changes; the app types into
+    // whatever is focused.
+    struct FocusEvent {
+        bool focused = false;
+        bool byClick = false;  // right after a click (open the keyboard)
+        bool password = false;
+        int cursor = 0;
+        std::string value;
+    };
+    bool takeFocusEvent(FocusEvent& out);
+    // Latest value of the focused field after typing (cursor, text).
+    bool takeFieldValue(int& cursor, std::string& value);
+    void requestFocusReport() { send("keyboard"); }
 
     const std::string& url() const { return url_; }
     const std::string& title() const { return title_; }
@@ -75,6 +114,15 @@ private:
     std::string url_;
     std::string title_;
     bool loading_ = false;
+    Options options_;
+    int frameW_ = 0;
+    int frameH_ = 0;
+    Media media_;
+    int mutedState_ = -1;
+    std::vector<FocusEvent> focusEvents_;
+    bool fieldValueNew_ = false;
+    int fieldCursor_ = 0;
+    std::string fieldValue_;
     float lastMoveX_ = -1.0f;
     float lastMoveY_ = -1.0f;
 };

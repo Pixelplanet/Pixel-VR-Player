@@ -49,6 +49,8 @@ public:
         CycleUiOpacity,
         ToggleMultiScreen,
         TogglePauseOnRemoval,
+        TogglePauseLivestreams,
+        TogglePrivateBrowsing,
         CycleScreenAudio,
         CycleBrowserSort,
         BackToUI,
@@ -127,6 +129,10 @@ public:
     bool multiScreen() const { return multiScreen_; }
     // Pause all screens (videos and browser pages) when the headset comes off.
     bool pauseOnRemoval() const { return pauseOnRemoval_; }
+    // ...including livestreams on browser screens (off: they keep running).
+    bool pauseLivestreams() const { return pauseLivestreams_; }
+    // New browser screens open in a private (incognito) browser context.
+    bool privateBrowsing() const { return privateBrowsing_; }
     // Borders around the screens in multi-screen mode (dock toggle).
     bool screenFrames() const { return screenFrames_; }
     void setScreenFrames(bool on) { screenFrames_ = on; saveConfig(); }
@@ -220,6 +226,8 @@ private:
     int uiOpacityIdx_ = 2;     // 0=Solid, 1=Frosted, 2=Glass (default), 3=Clear
     bool multiScreen_ = false; // off = classic single-screen player
     bool pauseOnRemoval_ = true;
+    bool pauseLivestreams_ = false;
+    bool privateBrowsing_ = false;
     bool screenFrames_ = true;
     int screenAudioMode_ = 0;  // 0=Selected screen only, 1=All screens
     int browserSort_ = 0;      // 0=Name, 1=Newest, 2=Largest
