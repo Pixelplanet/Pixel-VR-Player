@@ -230,9 +230,12 @@ bool BrowserHost::start(const std::string& url, int width, int height) {
 }
 
 bool BrowserHost::spawnPage(int port) {
-    pid_ = spawnHelper({"--port", std::to_string(port), "--shm", shmName_, "--url", startUrl_, "--width",
-                        std::to_string(width_), "--height", std::to_string(height_)},
-                       toHelper_, fromHelper_);
+    {
+        std::lock_guard<std::mutex> lock(sendMutex_);
+        pid_ = spawnHelper({"--port", std::to_string(port), "--shm", shmName_, "--url", startUrl_, "--width",
+                            std::to_string(width_), "--height", std::to_string(height_)},
+                           toHelper_, fromHelper_);
+    }
     if (pid_ <= 0) return false;
     PIXELVR_LOG_INFO("Browser: page helper pid %d (%dx%d) on %s", static_cast<int>(pid_), width_, height_,
                      startUrl_.c_str());
@@ -240,7 +243,10 @@ bool BrowserHost::spawnPage(int port) {
 }
 
 void BrowserHost::stop() {
-    stopHelper(pid_, toHelper_, fromHelper_, 2000);
+    {
+        std::lock_guard<std::mutex> lock(sendMutex_);
+        stopHelper(pid_, toHelper_, fromHelper_, 2000);
+    }
     if (state_ != State::Idle) {
         state_ = State::Idle;
         Launcher& l = launcher();
@@ -318,10 +324,15 @@ const uint8_t* BrowserHost::takeFrame() {
 }
 
 void BrowserHost::send(const std::string& line) {
+    std::lock_guard<std::mutex> lock(sendMutex_);
     if (toHelper_ < 0) return;
     const std::string l = line + "\n";
     const ssize_t n = write(toHelper_, l.data(), l.size());
     (void)n;
+}
+
+void BrowserHost::pauseMedia() {
+    send("eval document.querySelectorAll('video,audio').forEach(m=>m.pause())");
 }
 
 void BrowserHost::mouseMove(float x, float y) {

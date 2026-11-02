@@ -48,6 +48,7 @@ public:
         CyclePanelCurve,
         CycleUiOpacity,
         ToggleMultiScreen,
+        TogglePauseOnRemoval,
         CycleScreenAudio,
         CycleBrowserSort,
         BackToUI,
@@ -124,6 +125,8 @@ public:
     // Multi-screen playback (up to 3 flat screens) and whose audio is heard:
     // 0 = only the selected screen, 1 = all screens mixed.
     bool multiScreen() const { return multiScreen_; }
+    // Pause all screens (videos and browser pages) when the headset comes off.
+    bool pauseOnRemoval() const { return pauseOnRemoval_; }
     // Borders around the screens in multi-screen mode (dock toggle).
     bool screenFrames() const { return screenFrames_; }
     void setScreenFrames(bool on) { screenFrames_ = on; saveConfig(); }
@@ -216,6 +219,7 @@ private:
     int panelCurveIdx_ = 1;    // 0=Flat, 1=Gentle (default), 2=Wrap
     int uiOpacityIdx_ = 2;     // 0=Solid, 1=Frosted, 2=Glass (default), 3=Clear
     bool multiScreen_ = false; // off = classic single-screen player
+    bool pauseOnRemoval_ = true;
     bool screenFrames_ = true;
     int screenAudioMode_ = 0;  // 0=Selected screen only, 1=All screens
     int browserSort_ = 0;      // 0=Name, 1=Newest, 2=Largest

@@ -475,6 +475,14 @@ math::Mat4 orientFromYawPitch(float yaw, float pitch) {
                     fromQuat(Quat{std::sin(hp), 0.0f, 0.0f, std::cos(hp)}));
 }
 
+// Same, then rolled about the view axis (screens of a tilted layout).
+math::Mat4 orientFromYawPitchRoll(float yaw, float pitch, float roll) {
+    using namespace math;
+    if (roll == 0.0f) return orientFromYawPitch(yaw, pitch);
+    const float hr = 0.5f * roll;
+    return multiply(orientFromYawPitch(yaw, pitch), fromQuat(Quat{0.0f, 0.0f, std::sin(hr), std::cos(hr)}));
+}
+
 // Pose of the UI panel plane (hub, modals, transport dock) plus the distance
 // it sits from the viewer, shared by rendering and pointer hit-testing.
 struct PanelPlacement {
@@ -2217,7 +2225,7 @@ void VulkanRenderer::updatePointer() {
                 if (!sh.valid) continue;
                 // Screen frame: forward = (-sin yaw, 0, -cos yaw) tilted by pitch;
                 // the screen faces back along -forward (toward the viewer).
-                const Mat4 rot = orientFromYawPitch(sh.yaw, sh.pitch);
+                const Mat4 rot = orientFromYawPitchRoll(sh.yaw, sh.pitch, sh.roll);
                 const Vec3 c{sh.center[0], sh.center[1], sh.center[2]};
                 const Vec3 xAxis = transformDir(rot, Vec3{1.0f, 0.0f, 0.0f});
                 const Vec3 yAxis = transformDir(rot, Vec3{0.0f, 1.0f, 0.0f});
@@ -3266,7 +3274,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                     rot = orientFromYawPitch(screenYaw_, recenterPitch_);
                 } else {
                     center = Vec3{pl.center[0], pl.center[1], pl.center[2]};
-                    rot = orientFromYawPitch(pl.yaw, pl.pitch);
+                    rot = orientFromYawPitchRoll(pl.yaw, pl.pitch, pl.roll);
                     scale = pl.scale;
                     curvature = pl.curvature;
                     fwd = Vec3{-std::sin(pl.yaw), 0.0f, -std::cos(pl.yaw)};
@@ -3371,6 +3379,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                     hit.center[2] = center.z;
                     hit.yaw = (slot == 0 && !pl.active) ? screenYaw_ : pl.yaw;
                     hit.pitch = (slot == 0 && !pl.active) ? recenterPitch_ : pl.pitch;
+                    hit.roll = (slot == 0 && !pl.active) ? 0.0f : pl.roll;
                     hit.halfW = 1.6f * widthScale * scale;
                     hit.halfH = 0.9f * scale;
                     // quad.vert's arc radius, in world units (model x and z
@@ -4972,7 +4981,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 else if (st == StereoMode::TopBottom && eyeAspect <= 1.2f) eyeAspect *= 2.0f;
                 const float ws = eyeAspect / (16.0f / 9.0f);
                 local[slot] = multiply(toView, multiply(multiply(translation(Vec3{pl.center[0], pl.center[1], pl.center[2]}),
-                                                                 orientFromYawPitch(pl.yaw, pl.pitch)),
+                                                                 orientFromYawPitchRoll(pl.yaw, pl.pitch, pl.roll)),
                                                         scaling(Vec3{ws * pl.scale, pl.scale, ws * pl.scale})));
                 edgeX[slot] = 1.6f;
                 if (pl.curvature > 0.005f) {  // quad.vert's arc

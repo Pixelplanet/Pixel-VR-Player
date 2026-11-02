@@ -101,6 +101,7 @@ public:
         float center[3] = {0.0f, 0.0f, -3.0f};  // app space, metres
         float yaw = 0.0f;                         // same convention as screenYaw
         float pitch = 0.0f;
+        float roll = 0.0f;                        // tilted layouts: screens turn with the wall
         float scale = 1.0f;                       // 1 = the default 3.2 m wide screen
         float curvature = 0.0f;
         StereoMode stereo = StereoMode::Mono;     // slot 0 uses setStereoMode()
@@ -936,6 +937,7 @@ private:
         float center[3] = {0.0f, 0.0f, 0.0f};
         float yaw = 0.0f;
         float pitch = 0.0f;
+        float roll = 0.0f;
         float halfW = 0.0f;   // half the (arc) width
         float halfH = 0.0f;
         float bendR = 0.0f;   // curved screens: radius of the arc (0 = flat)

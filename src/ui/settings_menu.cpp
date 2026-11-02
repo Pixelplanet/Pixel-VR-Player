@@ -212,6 +212,7 @@ void SettingsMenu::refresh() {
             r.options = {"Selected screen", "All screens"};
             rows_.push_back(r);
         }
+        toggle("Pause When Headset Is Removed", pauseOnRemoval_, Action::TogglePauseOnRemoval);
         toggle("Debug Statistics", showStats_, Action::ToggleStats);
     } else if (section_ == 1) {
         title_ = "Settings > UI & Appearance";
@@ -516,6 +517,11 @@ SettingsMenu::Action SettingsMenu::activate() {
             saveConfig();
             refresh();
             break;
+        case Action::TogglePauseOnRemoval:
+            pauseOnRemoval_ = !pauseOnRemoval_;
+            saveConfig();
+            refresh();
+            break;
         case Action::CycleScreenAudio:
             screenAudioMode_ = (screenAudioMode_ + 1) % 2;
             saveConfig();
@@ -719,6 +725,7 @@ void SettingsMenu::loadConfig() {
             else if (key == "ambilight") ambilightIdx_ = std::clamp(std::stoi(val), 0, kAmbilightCount - 1);
             else if (key == "res_scale") resScaleIdx_ = std::clamp(std::stoi(val), 0, kResScaleCount - 1);
             else if (key == "multi_screen") multiScreen_ = (val == "1" || val == "true");
+            else if (key == "pause_on_removal") pauseOnRemoval_ = (val == "1" || val == "true");
             else if (key == "screen_frames") screenFrames_ = (val == "1" || val == "true");
             else if (key == "screen_audio") screenAudioMode_ = std::clamp(std::stoi(val), 0, 1);
             else if (key == "ui_opacity") uiOpacityIdx_ = std::clamp(std::stoi(val), 0, kUiOpacityCount - 1);
@@ -770,6 +777,7 @@ void SettingsMenu::saveConfig() const {
             file << "panel_curve=" << panelCurveIdx_ << "\n";
             file << "ui_opacity=" << uiOpacityIdx_ << "\n";
             file << "multi_screen=" << (multiScreen_ ? 1 : 0) << "\n";
+            file << "pause_on_removal=" << (pauseOnRemoval_ ? 1 : 0) << "\n";
             file << "screen_frames=" << (screenFrames_ ? 1 : 0) << "\n";
             file << "screen_audio=" << screenAudioMode_ << "\n";
             file << "browser_sort=" << browserSort_ << "\n";

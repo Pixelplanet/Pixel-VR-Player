@@ -6,6 +6,7 @@
 // launcher helper with the first screen and stopped with the last.
 
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <sys/types.h>
 #include <vector>
@@ -43,6 +44,9 @@ public:
     void back();
     void forward();
     void reload();
+    // Pauses every <video>/<audio> on the page. Safe to call from another
+    // thread (the headset-removal watchdog).
+    void pauseMedia();
 
     const std::string& url() const { return url_; }
     const std::string& title() const { return title_; }
@@ -56,6 +60,7 @@ private:
 
     State state_ = State::Idle;
     pid_t pid_ = -1;
+    std::mutex sendMutex_;  // guards writes to / closing of toHelper_
     int toHelper_ = -1;    // helper stdin
     int fromHelper_ = -1;  // helper stdout (non-blocking)
     std::string shmName_;

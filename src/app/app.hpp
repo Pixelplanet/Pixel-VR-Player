@@ -298,6 +298,7 @@ private:
     std::thread watchdogThread_;
     std::atomic<int64_t> lastFrameHeartbeatMs_{0};
     std::atomic<bool> pendingAutoLock_{false};
+    std::atomic<bool> pauseOnRemoval_{true};  // settings mirror for the watchdog thread
     std::chrono::steady_clock::time_point lastGripFullRelease_{};
     void watchdogLoop();
 };

@@ -301,11 +301,21 @@ void App::watchdogLoop() {
                 PIXELVR_LOG_INFO("Watchdog: user absent for %lld ms (vrPresent=%d xrPresent=%d stalled=%d) -> triggering auto-lock & pause",
                                  static_cast<long long>(absentElapsedMs), (int)vrPresent, (int)xrPresent, (int)heartbeatStalled);
 
+                // From here, not the frame loop: that may be stalled while the
+                // headset is off, and a page's audio would keep playing.
+                if (pauseOnRemoval_.load(std::memory_order_relaxed)) {
+                    for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
+                        ScreenState& sc = screens_[slot];
+                        if (!sc.open) continue;
+                        if (sc.web) {
+                            webHosts_[slot].pauseMedia();
+                        } else {
 #ifdef PIXELVR_HAVE_MEDIA
-                for (ScreenState& sc : screens_) {
-                    if (sc.open) sc.engine.setPaused(true);
-                }
+                            sc.engine.setPaused(true);
 #endif
+                        }
+                    }
+                }
                 if (VaultManager::instance().isUnlocked()) {
                     pendingAutoLock_.store(true, std::memory_order_release);
                 }
@@ -1472,13 +1482,14 @@ void App::computeArrangement(const Arrangement& a,
         return big;
     };
     const float* pivot = renderer_.screenPivot();
-    auto put = [&](int pos, const float c[3], float yaw, float pitch) {
+    auto put = [&](int pos, const float c[3], float yaw, float pitch, float roll = 0.0f) {
         const int slot = a.order[static_cast<std::size_t>(pos)];
         VulkanRenderer::ScreenPlacement& pl = out[slot];
         pl.active = true;
         for (int k = 0; k < 3; ++k) pl.center[k] = c[k];
         pl.yaw = yaw;
         pl.pitch = pitch;
+        pl.roll = roll;
         pl.scale = scale[pos] * a.scale;
         pl.curvature = curv[pos];
         pl.stereo = static_cast<VulkanRenderer::StereoMode>(screens_[slot].stereo);
@@ -1487,10 +1498,14 @@ void App::computeArrangement(const Arrangement& a,
     if (!a.flat) {
         // Curved wall: a cylinder around the viewer. Within a row each screen
         // turns to face the viewer and neighbours sit exactly the angle apart
-        // their edges subtend (snapped edges touch); rows stack straight up
-        // with the same tilt, so top and bottom edges line up along the arc.
-        const float sp = std::sin(a.pitch);
-        const float cp = std::max(std::cos(a.pitch), 0.2f);
+        // their edges subtend (snapped edges touch); rows stack straight up.
+        // The wall is laid out level and then tilted by a.pitch as one piece,
+        // so neighbours stay edge to edge when it sits above or below the eyes
+        // (tilting each screen on its own would splay them apart).
+        const float sp = 0.0f;
+        const float cp = 1.0f;
+        const float tsp = std::sin(a.pitch);
+        const float tcp = std::cos(a.pitch);
         float total = gap * static_cast<float>(rows.size() - 1);
         for (float hh : rowHalf) total += 2.0f * hh;
         float y = 0.5f * total;
@@ -1526,12 +1541,30 @@ void App::computeArrangement(const Arrangement& a,
             }
             if (std::find(row.begin(), row.end(), anchorPos) == row.end()) ref = 0.5f * (yaw + gapY);
             for (std::size_t k = 0; k < row.size(); ++k) {
-                // Centre = pivot + Ry(yaw) * Rx(pitch) * (0, rowY, -di).
-                const float yw = a.yaw + yawRel[k] - ref;
-                const float ly = rowY * std::cos(a.pitch) + di[k] * sp;
-                const float lz = rowY * sp - di[k] * std::cos(a.pitch);
-                const float c[3] = {pivot[0] + lz * std::sin(yw), pivot[1] + ly, pivot[2] + lz * std::cos(yw)};
-                put(row[k], c, yw, a.pitch);
+                // Pose = Ry(a.yaw) * Rx(a.pitch) * Ry(phi): turned phi around the
+                // level wall, then the whole wall tilted and turned.
+                const float phi = yawRel[k] - ref;
+                const float sf = std::sin(phi), cf = std::cos(phi);
+                const float sa = std::sin(a.yaw), ca = std::cos(a.yaw);
+                auto toWorld = [&](float x, float y, float z, float o[3]) {
+                    const float x1 = x * cf + z * sf, z1 = -x * sf + z * cf;   // Ry(phi)
+                    const float y2 = y * tcp - z1 * tsp, z2 = y * tsp + z1 * tcp;  // Rx(pitch)
+                    o[0] = x1 * ca + z2 * sa;                                    // Ry(a.yaw)
+                    o[1] = y2;
+                    o[2] = -x1 * sa + z2 * ca;
+                };
+                float lc[3], ex[3], ey[3], ez[3];
+                toWorld(0.0f, rowY, -di[k], lc);
+                toWorld(1.0f, 0.0f, 0.0f, ex);
+                toWorld(0.0f, 1.0f, 0.0f, ey);
+                toWorld(0.0f, 0.0f, 1.0f, ez);
+                const float c[3] = {pivot[0] + lc[0], pivot[1] + lc[1], pivot[2] + lc[2]};
+                // Back to yaw / pitch / roll (Ry * Rx * Rz): the screen normal
+                // gives yaw and pitch, the right and up axes give the roll.
+                const float yw = std::atan2(ez[0], ez[2]);
+                const float pt = std::asin(std::clamp(-ez[1], -1.0f, 1.0f));
+                const float rl = std::atan2(ex[1], ey[1]);
+                put(row[k], c, yw, pt, rl);
             }
         }
     } else {
@@ -1645,16 +1678,21 @@ void App::moveArrangementTo(int slot, const float target[3]) {
 }
 
 void App::openWebScreen() {
-#ifdef PIXELVR_HAVE_FREETYPE
-    browser_.setOpen(false);
-#endif
     settings_.close();
     downloadsWindow_ = false;
     if (multiScreenEnabled() && openScreenCount() > 0) {
+        // The picker lives in the Files hub (it is dismissed without it), like
+        // picking a screen for a file; choosing a screen closes the hub.
+#ifdef PIXELVR_HAVE_FREETYPE
+        browser_.setOpen(true);
+#endif
         openPlayTargetMenu(kWebPath);
         actionMenu_.subtitle = "Web browser";
         return;
     }
+#ifdef PIXELVR_HAVE_FREETYPE
+    browser_.setOpen(false);
+#endif
     loadWeb(0);
 }
 
@@ -2045,6 +2083,7 @@ int App::run() {
                         if (len > 1e-3f && !group) {
                             pl.yaw = std::atan2(-d[0], -d[2]);
                             pl.pitch = std::asin(std::clamp(d[1] / len, -1.0f, 1.0f));
+                            pl.roll = 0.0f;
                         }
                         if (!group) renderer_.setScreenPlacement(movingScreen_, pl);
                     }
@@ -2486,6 +2525,7 @@ int App::run() {
                 lastControllerActivity_ = nowT;
                 VaultManager::instance().recordActivity(nowT);
             }
+            pauseOnRemoval_.store(settings_.pauseOnRemoval(), std::memory_order_relaxed);
             if (VaultManager::instance().tick(nowT, in.headValid && xr_.sessionFocused())) {
                 performVaultLock();
             }
