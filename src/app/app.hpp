@@ -302,7 +302,11 @@ private:
     // screen the page's main video (media bridge).
     bool curPaused();
     double curPosition();
-    double curDuration();  // 0 = no timeline (nothing playing, livestream)
+    // Timeline [curTimelineStart, curDuration] in media time; 0 duration = no
+    // timeline (nothing playing, a livestream without rewind).
+    double curDuration();
+    double curTimelineStart();  // livestreams: oldest point to rewind to
+    int curLive();              // 0 = not live, 1 = live but behind, 2 = at the live edge
     void curTogglePause();
     void curSeek(double t);
     void curSeekRelative(double d);

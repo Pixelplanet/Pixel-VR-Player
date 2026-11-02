@@ -49,6 +49,7 @@ public:
         CycleUiOpacity,
         ToggleMultiScreen,
         TogglePauseOnRemoval,
+        CycleKeyboardLayout,
         TogglePauseLivestreams,
         TogglePrivateBrowsing,
         CycleScreenAudio,
@@ -129,6 +130,8 @@ public:
     bool multiScreen() const { return multiScreen_; }
     // Pause all screens (videos and browser pages) when the headset comes off.
     bool pauseOnRemoval() const { return pauseOnRemoval_; }
+    // In-app keyboard: 0 = English (QWERTY), 1 = German (QWERTZ).
+    int keyboardLayout() const { return keyboardLayout_; }
     // ...including livestreams on browser screens (off: they keep running).
     bool pauseLivestreams() const { return pauseLivestreams_; }
     // New browser screens open in a private (incognito) browser context.
@@ -226,6 +229,7 @@ private:
     int uiOpacityIdx_ = 2;     // 0=Solid, 1=Frosted, 2=Glass (default), 3=Clear
     bool multiScreen_ = false; // off = classic single-screen player
     bool pauseOnRemoval_ = true;
+    int keyboardLayout_ = 0;
     bool pauseLivestreams_ = false;
     bool privateBrowsing_ = false;
     bool screenFrames_ = true;

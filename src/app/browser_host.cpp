@@ -329,12 +329,15 @@ void BrowserHost::handleLine(const std::string& line) {
     } else if (cmd == "loading") {
         loading_ = (rest == "1");
     } else if (cmd == "media") {
-        // "0" | "1 PAUSED POS DUR LIVE"
+        // "0" | "1 PAUSED POS DUR LIVE SEEKSTART SEEKEND"
         int present = 0, paused = 1, live = 0;
-        double pos = 0.0, dur = 0.0;
-        const int n = std::sscanf(rest.c_str(), "%d %d %lf %lf %d", &present, &paused, &pos, &dur, &live);
+        double pos = 0.0, dur = 0.0, s0 = 0.0, s1 = 0.0;
+        const int n = std::sscanf(rest.c_str(), "%d %d %lf %lf %d %lf %lf", &present, &paused, &pos, &dur, &live, &s0,
+                                  &s1);
         media_ = {};
-        if (n == 5 && present) {
+        if (n == 7 && present) {
+            media_.seekStart = s0;
+            media_.seekEnd = s1;
             media_.present = true;
             media_.paused = paused != 0;
             media_.position = pos;

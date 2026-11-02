@@ -188,6 +188,9 @@ public:
         transportElapsed_ = elapsedSec;
         transportDuration_ = durationSec;
     }
+    // Livestream: 0 = no, 1 = live but behind, 2 = at the live edge. The
+    // timeline's right end is then live and the readout shows "LIVE".
+    void setTransportLive(int live) { transportLive_ = live; }
     // True when the pointer is over the clickable total/remaining time readout.
     bool pointerOnTimeToggle() const { return pointerOnTimeToggle_; }
     void toggleTimeDisplay() { timeShowRemaining_ = !timeShowRemaining_; }
@@ -311,7 +314,8 @@ public:
     int keyboardCursorAtPointer() const;
     // Code / character a key index produces (see hub::keyboardKeys); used by the app.
     static int keyboardKeyCode(int index);
-    static char keyboardKeyChar(int index, bool shift, bool symbols);
+    static std::string keyboardKeyText(int index, bool shift, bool symbols);  // UTF-8
+    static void setKeyboardLayout(int layout);  // 0 = English, 1 = German
     void setKeyboardModal(bool visible, const std::string& prompt,
                           const std::string& text, bool isPassword = false,
                           const float* transform = nullptr,
@@ -450,6 +454,7 @@ public:
         SwapH = 31,         // double-headed arrow, horizontal
         SwapV = 32,         // double-headed arrow, vertical
         Globe = 33,         // web: circle with meridian + parallels
+        Backspace = 34,     // key pointing left with a cross
         GlassPanel = 25, // rounded box with bevel + eye-dependent reflection sheen
     };
 
@@ -683,6 +688,7 @@ private:
     double transportDuration_ = 0.0;  // seconds total
     bool timeShowRemaining_ = false;  // right readout shows time-left vs. total
     bool pointerOnTimeToggle_ = false;
+    int transportLive_ = 0;
     std::string hudFormat_ = "2D FLAT";
     std::string hudAudio_ = "AUDIO";
     std::string hudScreen_ = "CURVED";

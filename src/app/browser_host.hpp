@@ -66,9 +66,12 @@ public:
         bool live = false;
         double position = 0.0;
         double duration = 0.0;
+        double seekStart = 0.0;  // playable range (livestreams: rewind window)
+        double seekEnd = 0.0;
     };
     const Media& media() const { return media_; }
     void mediaToggle() { send("media toggle"); }
+    void mediaGoLive() { send("media live"); }
     void mediaSeek(double t);
     void mediaSeekRelative(double d);
     void setMuted(bool muted);

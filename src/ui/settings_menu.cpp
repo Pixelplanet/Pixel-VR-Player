@@ -266,6 +266,7 @@ void SettingsMenu::refresh() {
         binding("Open Menu / Browser", pressLabel(1, bindMenuBtn_), Action::ListenMenu);
         binding("Recenter View", pressLabel(2, bindRecenterBtn_), Action::ListenRecenter);
         binding("Bookmarks Shortcut", pressLabel(4, bindQuickPathBtn_), Action::ListenQuickPath);
+        segmented("Keyboard Layout", {"English", "Deutsch"}, keyboardLayout_ % 2, Action::CycleKeyboardLayout);
         toggle("Controller Models", drawModels_, Action::ToggleModels);
         toggle("Laser Hover Rumble", hoverHapticsEnabled_, Action::ToggleHoverHaptics);
         choice("Rumble Strength", hoverHapticsStrengthStr(), kHoverHapticsStrengthCount,
@@ -519,6 +520,11 @@ SettingsMenu::Action SettingsMenu::activate() {
             saveConfig();
             refresh();
             break;
+        case Action::CycleKeyboardLayout:
+            keyboardLayout_ = (keyboardLayout_ + 1) % 2;
+            saveConfig();
+            refresh();
+            break;
         case Action::TogglePauseOnRemoval:
             pauseOnRemoval_ = !pauseOnRemoval_;
             saveConfig();
@@ -738,6 +744,7 @@ void SettingsMenu::loadConfig() {
             else if (key == "res_scale") resScaleIdx_ = std::clamp(std::stoi(val), 0, kResScaleCount - 1);
             else if (key == "multi_screen") multiScreen_ = (val == "1" || val == "true");
             else if (key == "pause_on_removal") pauseOnRemoval_ = (val == "1" || val == "true");
+            else if (key == "keyboard_layout") keyboardLayout_ = std::clamp(std::stoi(val), 0, 1);
             else if (key == "pause_livestreams") pauseLivestreams_ = (val == "1" || val == "true");
             else if (key == "private_browsing") privateBrowsing_ = (val == "1" || val == "true");
             else if (key == "screen_frames") screenFrames_ = (val == "1" || val == "true");
@@ -792,6 +799,7 @@ void SettingsMenu::saveConfig() const {
             file << "ui_opacity=" << uiOpacityIdx_ << "\n";
             file << "multi_screen=" << (multiScreen_ ? 1 : 0) << "\n";
             file << "pause_on_removal=" << (pauseOnRemoval_ ? 1 : 0) << "\n";
+            file << "keyboard_layout=" << keyboardLayout_ << "\n";
             file << "pause_livestreams=" << (pauseLivestreams_ ? 1 : 0) << "\n";
             file << "private_browsing=" << (privateBrowsing_ ? 1 : 0) << "\n";
             file << "screen_frames=" << (screenFrames_ ? 1 : 0) << "\n";

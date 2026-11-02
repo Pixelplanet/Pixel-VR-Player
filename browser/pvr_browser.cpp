@@ -21,10 +21,10 @@
 //   - stdin, one command per line (coordinates in frame pixels):
 //       move X Y | down X Y | up X Y | wheel X Y DY | key NAME | text UTF8
 //       nav URL | tab URL | back | forward | reload | fullscreen | eval JS
-//       media toggle|play|pause|seek T|seekrel D | mute 0|1
+//       media toggle|play|pause|live|seek T|seekrel D | mute 0|1
 //       pausemedia LIVE(0|1) | keyboard | quit
 //   - stdout, one event per line: ready | url URL | title TEXT | loading 0|1
-//     | media 0 | media 1 PAUSED POS DUR LIVE
+//     | media 0 | media 1 PAUSED POS DUR LIVE SEEKSTART SEEKEND
 //     | focus c|p 0 | focus c|p 1 PASSWORD CURSOR "VALUE" (c = after a click)
 //     | value CURSOR "VALUE" | download NAME | eval RESULT | error TEXT
 #include "browser_protocol.hpp"
@@ -352,9 +352,30 @@ pid_t launchChromium(ChromiumKind kind, const std::string& profile, int width, i
         "--no-first-run",
         "--no-default-browser-check",
         "--autoplay-policy=no-user-gesture-required",
+        // Headless renders in software by default; draw pages on the GPU
+        // (ANGLE on Vulkan / Mesa Turnip). Video decoding stays on the CPU:
+        // Chromium has no hardware decoder for this platform.
+        "--enable-gpu",
+        "--ignore-gpu-blocklist",
+        "--use-angle=vulkan",
+        "--enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE",
         "about:blank",
     };
-    args.insert(args.end(), flags.begin(), flags.end());
+    args.insert(args.end(), flags.begin(), flags.end() - 1);
+    // Extra flags for experiments: PVR_CHROMIUM_FLAGS="--flag1 --flag2".
+    if (const char* extra = std::getenv("PVR_CHROMIUM_FLAGS")) {
+        std::string word;
+        for (const char* p = extra;; ++p) {
+            if (*p == ' ' || *p == '\0') {
+                if (!word.empty()) args.push_back(word);
+                word.clear();
+                if (*p == '\0') break;
+            } else {
+                word += *p;
+            }
+        }
+    }
+    args.push_back(flags.back());  // the start URL stays last
     std::vector<char*> argv;
     for (std::string& a : args) argv.push_back(a.data());
     argv.push_back(nullptr);
@@ -788,6 +809,14 @@ const char* const kBestVideoJs =
     "(()=>{let b=null,ba=0;for(const v of document.querySelectorAll('video')){"
     "const r=v.getBoundingClientRect(),a=r.width*r.height;if(v.readyState>0&&a>=ba){ba=a;b=v}}return b})()";
 
+// Whether media element v is a livestream: endless, or YouTube's player in
+// live mode (its live videos report a finite but meaningless duration).
+const char* const kIsLiveJs =
+    "(v=>{if(!isFinite(v.duration))return true;"
+    "const b=document.querySelector('.ytp-live-badge');"
+    "return !!(document.querySelector('.ytp-time-display.ytp-live')||(b&&b.offsetParent!==null&&"
+    "getComputedStyle(b).display!=='none'))})";
+
 int runScreen(const ScreenOptions& opt) {
     const int W = opt.width;
     const int pageH = opt.height;
@@ -1177,6 +1206,15 @@ int runScreen(const ScreenOptions& opt) {
         else if (what == "pause") js = "v.pause()";
         else if (what.rfind("seekrel ", 0) == 0) js = "v.currentTime=Math.max(0,v.currentTime+(" + std::to_string(std::atof(what.c_str() + 8)) + "))";
         else if (what.rfind("seek ", 0) == 0) js = "v.currentTime=" + std::to_string(std::max(0.0, std::atof(what.c_str() + 5)));
+        else if (what == "live") {
+            // Back to the live edge: YouTube's own LIVE button, else the end
+            // of what can be played.
+            js = "const b=document.querySelector('.ytp-live-badge'),yp=document.getElementById('movie_player');"
+                 "if(b&&b.offsetParent!==null){b.click()}"
+                 "else if(yp&&typeof yp.seekToLiveHead==='function'){yp.seekToLiveHead()}"
+                 "else if(v.seekable.length){v.currentTime=Math.max(0,v.seekable.end(v.seekable.length-1)-1)}"
+                 "if(v.paused)v.play()";
+        }
         else return;
         evalIn(t->session, std::string("(()=>{const v=") + kBestVideoJs + ";if(v){" + js + "}})()");
         nextPoll = Clock::now() + std::chrono::milliseconds(120);  // show the change soon
@@ -1299,6 +1337,9 @@ int runScreen(const ScreenOptions& opt) {
                              TJPF_RGBA, TJFLAG_FASTDCT) == 0;
     };
     tjhandle jpeg = tjInitDecompress();
+    int statFrames = 0;           // page frames since the last "stats"
+    long long statDecodeUs = 0;   // time spent decoding + compositing them
+    auto statSince = Clock::now();
 
     auto handleMessage = [&](const std::string& text) {
         pvrjson::Value msg;
@@ -1328,7 +1369,10 @@ int runScreen(const ScreenOptions& opt) {
                 if (decodeInto(jpeg, params->getString("data"), tbPx)) compose();
             } else if (t && session == t->session) {
                 lastPageJpeg = params->getString("data");
+                const auto t0 = Clock::now();
                 if (decodeInto(jpeg, lastPageJpeg, pagePx)) compose();
+                ++statFrames;
+                statDecodeUs += std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - t0).count();
             }
         } else if (method == "Runtime.bindingCalled" && session == toolbar) {
             handleToolbar(params->getString("payload"));
@@ -1589,9 +1633,9 @@ int runScreen(const ScreenOptions& opt) {
         } else if (cmd == "pausemedia") {
             // Headset off: pause everything, livestreams only when asked to.
             const std::string js = std::string("(()=>{const L=") + (rest == "1" ? "1" : "0") +
-                                   ";const live=!!document.querySelector('.html5-video-player.ytp-live');"
-                                   "for(const m of document.querySelectorAll('video,audio')){"
-                                   "if(!L&&(live||!isFinite(m.duration)))continue;m.pause()}})()";
+                                   ";const live=" + kIsLiveJs +
+                                   ";for(const m of document.querySelectorAll('video,audio')){"
+                                   "if(!L&&live(m))continue;m.pause()}})()";
             for (const Tab& t : tabs) evalIn(t.session, js);
         } else if (cmd == "keyboard") {
             // The app opened its keyboard by hand: report the field, if any.
@@ -1607,6 +1651,27 @@ int runScreen(const ScreenOptions& opt) {
                     if (c == '\n') c = ' ';
                 }
                 emitLine("eval " + out);
+            });
+        } else if (cmd == "stats") {  // debugging: page frame rate and decode cost
+            const double secs = std::chrono::duration<double>(Clock::now() - statSince).count();
+            char b[128];
+            std::snprintf(b, sizeof(b), "eval stats %.1f fps, %.1f ms per frame", statFrames / std::max(secs, 0.001),
+                          statFrames ? statDecodeUs / 1000.0 / statFrames : 0.0);
+            emitLine(b);
+            statFrames = 0;
+            statDecodeUs = 0;
+            statSince = Clock::now();
+        } else if (cmd == "gpuinfo") {  // debugging: Chromium's GPU / video decode status
+            sendThen("SystemInfo.getInfo", "{}", "", [](const pvrjson::Value& msg) {
+                const pvrjson::Value* r = msg.get("result");
+                const pvrjson::Value* gpu = r ? r->get("gpu") : nullptr;
+                if (!gpu) {
+                    emitLine("eval no gpu info");
+                    return;
+                }
+                if (const pvrjson::Value* f = gpu->get("featureStatus")) emitLine("eval features " + pvrjson::dump(*f));
+                if (const pvrjson::Value* d = gpu->get("devices")) emitLine("eval devices " + pvrjson::dump(*d));
+                if (const pvrjson::Value* v = gpu->get("videoDecoding")) emitLine("eval decode " + pvrjson::dump(*v));
             });
         } else if (cmd == "tbeval" && !rest.empty()) {  // debugging the toolbar page
             evalIn(toolbar, rest, [](const pvrjson::Value* v) {
@@ -1627,9 +1692,15 @@ int runScreen(const ScreenOptions& opt) {
                                ";for(const m of document.querySelectorAll('video,audio')){"
                                "if(M&&!m.muted){m.muted=true;m.__pvrM=1}else if(!M&&m.__pvrM){m.muted=false;delete m.__pvrM}}"
                                "const v=" + kBestVideoJs +
-                               ";let md=null;if(v){const live=!isFinite(v.duration)||"
-                               "!!document.querySelector('.html5-video-player.ytp-live');"
-                               "md=[v.paused?1:0,v.currentTime||0,isFinite(v.duration)?v.duration:0,live?1:0]}"
+                               ";let md=null;if(v){const live=" + kIsLiveJs + "(v);"
+                               "const s=v.seekable,n=s.length;let s0=n?s.start(0):0,s1=n?s.end(n-1):0;"
+                               // YouTube's live media ends an hour past the live edge; its
+                               // player knows the real rewind window (in its own clock).
+                               "const yp=document.getElementById('movie_player');"
+                               "if(live&&yp&&yp.getProgressState){try{const p=yp.getProgressState(),o=p.current-v.currentTime;"
+                               "if(isFinite(p.seekableStart)&&isFinite(p.seekableEnd)&&isFinite(o)){s0=p.seekableStart-o;"
+                               "s1=p.seekableEnd-o}}catch(_){}}"
+                               "md=[v.paused?1:0,v.currentTime||0,isFinite(v.duration)?v.duration:0,live?1:0,s0,s1]}"
                                "return {f:document.fullscreenElement?1:0,e:" + kEditableJs + "?1:0,m:md}})()";
         evalIn(session, js, [&, session](const pvrjson::Value* v) {
             const Tab* cur = activeTab();
@@ -1647,10 +1718,11 @@ int runScreen(const ScreenOptions& opt) {
             lastPageEditable = editable;
             std::string media = "media 0";
             const pvrjson::Value* m = v->get("m");
-            if (m && m->type == pvrjson::Value::Type::Array && m->array.size() == 4) {
-                char b[128];
-                std::snprintf(b, sizeof(b), "media 1 %d %.2f %.2f %d", static_cast<int>(m->array[0].number),
-                              m->array[1].number, m->array[2].number, static_cast<int>(m->array[3].number));
+            if (m && m->type == pvrjson::Value::Type::Array && m->array.size() == 6) {
+                char b[160];
+                std::snprintf(b, sizeof(b), "media 1 %d %.2f %.2f %d %.2f %.2f", static_cast<int>(m->array[0].number),
+                              m->array[1].number, m->array[2].number, static_cast<int>(m->array[3].number),
+                              m->array[4].number, m->array[5].number);
                 media = b;
             }
             if (media != lastMedia) emitLine(lastMedia = media);

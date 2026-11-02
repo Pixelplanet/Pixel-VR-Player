@@ -366,9 +366,9 @@ enum KbCode { kKbChar = 0, kKbBackspace, kKbShift, kKbSymbols, kKbSpace, kKbLeft
 struct KbKey {
     UiRect r;
     int code = kKbChar;
-    char lower = 0;   // character in letter mode
-    char upper = 0;   // with Shift
-    char sym = 0;     // in symbols mode
+    std::string lower;  // text in letter mode (UTF-8)
+    std::string upper;  // with Shift
+    std::string sym;    // in symbols mode
 };
 constexpr float kKbFieldY = 0.095f;      // input field centre
 constexpr float kKbFieldHalfW = 0.62f;
@@ -376,58 +376,80 @@ constexpr float kKbFieldHalfH = 0.046f;
 constexpr float kKbSheetY = -0.272f;     // key sheet centre
 constexpr float kKbSheetHalfW = 0.68f;
 constexpr float kKbSheetHalfH = 0.250f;
-inline const std::vector<KbKey>& keyboardKeys() {
-    static const std::vector<KbKey> keys = [] {
-        struct Spec { int code; char lower, upper, sym; float units; };
-        const float pitch = 0.107f;
-        const float keyHalfH = 0.040f;
-        const float gap = 0.010f;
-        const float rowY[5] = {-0.080f, -0.174f, -0.268f, -0.362f, -0.456f};
-        auto chars = [](const char* lo, const char* sy) {
-            std::vector<Spec> out;
-            for (std::size_t i = 0; lo[i]; ++i) {
-                const char c = lo[i];
-                const char up = (c >= 'a' && c <= 'z') ? static_cast<char>(c - 'a' + 'A') : c;
-                out.push_back({kKbChar, c, up, sy[i], 1.0f});
-            }
-            return out;
-        };
-        std::vector<std::vector<Spec>> rows(5);
-        rows[0] = chars("1234567890", "1234567890");
-        rows[0].push_back({kKbBackspace, 0, 0, 0, 1.5f});
-        rows[1] = chars("qwertyuiop-", "!@#$%^&*()~");
-        rows[1].back().upper = '_';
-        rows[2] = chars("asdfghjkl.", "-=+[]{};:'");
-        rows[3].push_back({kKbShift, 0, 0, 0, 1.5f});
-        for (const Spec& sp : chars("zxcvbnm/@", "<>?,\\|`/\"")) rows[3].push_back(sp);
-        rows[4] = {{kKbSymbols, 0, 0, 0, 1.5f}, {kKbLeft, 0, 0, 0, 1.0f},
-                   {kKbSpace, ' ', ' ', ' ', 5.0f}, {kKbRight, 0, 0, 0, 1.0f},
-                   {kKbDone, 0, 0, 0, 2.5f}};
-        std::vector<KbKey> out;
-        for (int r = 0; r < 5; ++r) {
-            float units = 0.0f;
-            for (const Spec& sp : rows[r]) units += sp.units;
-            float x = -0.5f * units * pitch;
-            for (const Spec& sp : rows[r]) {
-                const float w = sp.units * pitch;
-                KbKey k;
-                k.r = {x + 0.5f * w, rowY[r], 0.5f * w - 0.5f * gap, keyHalfH};
-                k.code = sp.code;
-                k.lower = sp.lower;
-                k.upper = sp.upper;
-                k.sym = sp.sym;
-                out.push_back(k);
-                x += w;
-            }
+// Keyboard layout (Settings): 0 = English (US QWERTY), 1 = German (QWERTZ).
+inline int gKeyboardLayout = 0;
+// Splits UTF-8 text into characters.
+inline std::vector<std::string> utf8Chars(const char* s) {
+    std::vector<std::string> out;
+    for (std::size_t i = 0; s[i];) {
+        std::size_t n = 1;
+        while (s[i + n] && (static_cast<unsigned char>(s[i + n]) & 0xC0) == 0x80) ++n;
+        out.emplace_back(s + i, n);
+        i += n;
+    }
+    return out;
+}
+inline std::vector<KbKey> buildKeyboard(int layout) {
+    struct Spec { int code; std::string lower, upper, sym; float units; };
+    const float pitch = 0.107f;
+    const float keyHalfH = 0.040f;
+    const float gap = 0.010f;
+    const float rowY[5] = {-0.080f, -0.174f, -0.268f, -0.362f, -0.456f};
+    // One key per character: letters, the same row with Shift, and symbols.
+    auto chars = [](const char* lo, const char* up, const char* sy) {
+        const auto l = utf8Chars(lo), u = utf8Chars(up), y = utf8Chars(sy);
+        std::vector<Spec> out;
+        for (std::size_t i = 0; i < l.size(); ++i) {
+            out.push_back({kKbChar, l[i], i < u.size() ? u[i] : l[i], i < y.size() ? y[i] : l[i], 1.0f});
         }
-        // Cancel button at the right end of the prompt line.
-        KbKey cancel;
-        cancel.r = {kKbFieldHalfW - 0.07f, kKbFieldY + 0.088f, 0.07f, 0.026f};
-        cancel.code = kKbCancel;
-        out.push_back(cancel);
         return out;
-    }();
-    return keys;
+    };
+    std::vector<std::vector<Spec>> rows(5);
+    if (layout == 1) {
+        rows[0] = chars("1234567890ß", "!\"§$%&/()=?", "1234567890ß");
+        rows[1] = chars("qwertzuiopü", "QWERTZUIOPÜ", "@#€[]{}<>|~");
+        rows[2] = chars("asdfghjklöä", "ASDFGHJKLÖÄ", "+*'^°_\\;:´`");
+        rows[3].push_back({kKbShift, "", "", "", 1.5f});
+        for (const Spec& sp : chars("yxcvbnm,.-@", "YXCVBNM;:_@", "!?\"§$%&/()=")) rows[3].push_back(sp);
+    } else {
+        rows[0] = chars("1234567890", "1234567890", "1234567890");
+        rows[1] = chars("qwertyuiop-", "QWERTYUIOP_", "!@#$%^&*()~");
+        rows[2] = chars("asdfghjkl.", "ASDFGHJKL.", "-=+[]{};:'");
+        rows[3].push_back({kKbShift, "", "", "", 1.5f});
+        for (const Spec& sp : chars("zxcvbnm/@", "ZXCVBNM/@", "<>?,\\|`/\"")) rows[3].push_back(sp);
+    }
+    rows[0].push_back({kKbBackspace, "", "", "", 1.5f});
+    rows[4] = {{kKbSymbols, "", "", "", 1.5f}, {kKbLeft, "", "", "", 1.0f},
+               {kKbSpace, " ", " ", " ", 5.0f}, {kKbRight, "", "", "", 1.0f},
+               {kKbDone, "", "", "", 2.5f}};
+    std::vector<KbKey> out;
+    for (int r = 0; r < 5; ++r) {
+        float units = 0.0f;
+        for (const Spec& sp : rows[r]) units += sp.units;
+        float x = -0.5f * units * pitch;
+        for (const Spec& sp : rows[r]) {
+            const float w = sp.units * pitch;
+            KbKey k;
+            k.r = {x + 0.5f * w, rowY[r], 0.5f * w - 0.5f * gap, keyHalfH};
+            k.code = sp.code;
+            k.lower = sp.lower;
+            k.upper = sp.upper;
+            k.sym = sp.sym;
+            out.push_back(k);
+            x += w;
+        }
+    }
+    // Cancel button at the right end of the prompt line.
+    KbKey cancel;
+    cancel.r = {kKbFieldHalfW - 0.07f, kKbFieldY + 0.088f, 0.07f, 0.026f};
+    cancel.code = kKbCancel;
+    out.push_back(cancel);
+    return out;
+}
+inline const std::vector<KbKey>& keyboardKeys() {
+    static const std::vector<KbKey> english = buildKeyboard(0);
+    static const std::vector<KbKey> german = buildKeyboard(1);
+    return gKeyboardLayout == 1 ? german : english;
 }
 // "Play on which screen?" picker (action menu page 6): three 16:9 tiles in a row
 // (index = left-to-right position) plus a Cancel button (option 3).
@@ -1849,9 +1871,11 @@ int VulkanRenderer::keyboardCursorAtPointer() const {
     return best;
 }
 
-char VulkanRenderer::keyboardKeyChar(int index, bool shift, bool symbols) {
+void VulkanRenderer::setKeyboardLayout(int layout) { hub::gKeyboardLayout = layout; }
+
+std::string VulkanRenderer::keyboardKeyText(int index, bool shift, bool symbols) {
     const auto& keys = hub::keyboardKeys();
-    if (index < 0 || index >= static_cast<int>(keys.size())) return 0;
+    if (index < 0 || index >= static_cast<int>(keys.size())) return {};
     const hub::KbKey& k = keys[static_cast<std::size_t>(index)];
     return symbols ? k.sym : (shift ? k.upper : k.lower);
 }
@@ -3613,6 +3637,13 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                       UiShape::RoundedBox, thumbCol, 1.0f, 0.18f, kGlassRim);
 
         // Floating scrub hover tooltip speech bubble
+        if (transportLive_ != 0 && transportDuration_ > 0.0) {
+            // "LIVE" readout dot: red at the live edge, grey when behind.
+            const float liveRed[4] = {0.93f, 0.16f, 0.16f, 1.0f};
+            const float liveGrey[4] = {0.62f, 0.66f, 0.72f, 1.0f};
+            drawUiElement(vpPanel, trackHalfW + 0.044f, trackY, 0.011f, 0.011f, UiShape::RoundedBox,
+                          transportLive_ == 2 ? liveRed : liveGrey, 1.0f);
+        }
         if (pointerOnTimeline_ && transportDuration_ > 0.0) {
             const float rawScrubX = -trackHalfW + 2.0f * trackHalfW * pointerScrub_;
             const float bubbleX = std::clamp(rawScrubX, -trackHalfW + 0.09f, trackHalfW - 0.09f);
@@ -3686,15 +3717,25 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                     drawFit(-trackHalfW - 0.026f - measureString(timeSc, leftStr),
                             trackY, 0.25f, timeSc, themeTextCol, leftStr);
                 });
-                const std::string rightStr = timeShowRemaining_
-                    ? "-" + format_time(transportDuration_ - transportElapsed_)
-                    : format_time(transportDuration_);
-                drawFit(trackHalfW + 0.026f, trackY, 0.25f, timeSc, themeAccentCol, rightStr);
+                if (transportLive_ != 0) {
+                    withHeadingFont([&] {
+                        drawFit(trackHalfW + 0.066f, trackY, 0.20f, timeSc, themeTextCol, "LIVE");
+                    });
+                } else {
+                    const std::string rightStr = timeShowRemaining_
+                        ? "-" + format_time(transportDuration_ - transportElapsed_)
+                        : format_time(transportDuration_);
+                    drawFit(trackHalfW + 0.026f, trackY, 0.25f, timeSc, themeAccentCol, rightStr);
+                }
 
                 if (pointerOnTimeline_) {
                     const float rawScrubX = -trackHalfW + 2.0f * trackHalfW * pointerScrub_;
                     const float bubbleX = std::clamp(rawScrubX, -trackHalfW + 0.09f, trackHalfW - 0.09f);
-                    const std::string tipStr = format_time(pointerScrub_ * transportDuration_);
+                    // Livestreams: how far behind live the hovered point is.
+                    const double behind = (1.0 - pointerScrub_) * transportDuration_;
+                    const std::string tipStr = transportLive_ == 0 ? format_time(pointerScrub_ * transportDuration_)
+                                             : behind < 5.0      ? std::string("LIVE")
+                                                                 : "-" + format_time(behind);
                     drawFitCentered(bubbleX, trackY + 0.062f, 0.16f, pillSc * 1.05f, themeTextCol, tipStr);
                 }
             }
@@ -5641,7 +5682,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 const float chw = (key.code == hub::kKbLeft) ? -0.010f : 0.010f;
                 drawUiElement(vpPanel, r.cx, r.cy, chw, 0.010f, UiShape::Chevron, themeTextCol);
             } else if (key.code == hub::kKbBackspace) {
-                drawUiElement(vpPanel, r.cx, r.cy, 0.011f, 0.011f, UiShape::Close, themeTextCol);
+                drawUiElement(vpPanel, r.cx, r.cy, 0.019f, 0.013f, UiShape::Backspace, themeTextCol);
             }
         }
 
@@ -5708,12 +5749,9 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             const UiRect& r = key.r;
             std::string label;
             switch (key.code) {
-                case hub::kKbChar: {
-                    const char c = keyboardModal_.symbols ? key.sym
-                                 : (keyboardModal_.shift ? key.upper : key.lower);
-                    label.assign(1, c);
+                case hub::kKbChar:
+                    label = keyboardModal_.symbols ? key.sym : (keyboardModal_.shift ? key.upper : key.lower);
                     break;
-                }
                 case hub::kKbShift: label = "Shift"; break;
                 case hub::kKbSymbols: label = keyboardModal_.symbols ? "ABC" : "?123"; break;
                 case hub::kKbSpace: label = "Space"; break;

@@ -1086,8 +1086,8 @@ void App::pressKeyboardKey(int key) {
         // it (corrected by the page's own value right after).
         BrowserHost& host = webHosts_[kbWebSlot_];
         if (code == 0 || code == 4) {
-            const char ch = VulkanRenderer::keyboardKeyChar(key, textEntry_.shift, textEntry_.symbols);
-            if (ch != 0) host.text(std::string(1, ch));
+            const std::string ch = VulkanRenderer::keyboardKeyText(key, textEntry_.shift, textEntry_.symbols);
+            if (!ch.empty()) host.text(ch);
         } else if (code == 1) {
             host.key("Backspace");
         } else if (code == 7) {
@@ -1098,10 +1098,10 @@ void App::pressKeyboardKey(int key) {
     switch (code) {
         case 0:    // character
         case 4: {  // space
-            const char ch = VulkanRenderer::keyboardKeyChar(key, textEntry_.shift, textEntry_.symbols);
-            if (ch != 0 && t.size() < kMaxChars) {
-                t.insert(c, 1, ch);
-                ++c;
+            const std::string ch = VulkanRenderer::keyboardKeyText(key, textEntry_.shift, textEntry_.symbols);
+            if (!ch.empty() && t.size() < kMaxChars) {
+                t.insert(c, ch);
+                c += ch.size();
                 if (!textEntry_.symbols) textEntry_.shift = false;  // one-shot shift
             }
             break;
@@ -1151,13 +1151,31 @@ double App::curPosition() {
 double App::curDuration() {
     if (cur().web) {
         const BrowserHost::Media& m = webHosts_[selectedScreen_].media();
-        return (m.present && !m.live) ? m.duration : 0.0;
+        if (!m.present) return 0.0;
+        if (m.live) return (m.seekEnd - m.seekStart > 30.0) ? m.seekEnd : 0.0;  // live edge at the end
+        return m.duration;
     }
 #ifdef PIXELVR_HAVE_MEDIA
     return cur().engine.duration();
 #else
     return 0.0;
 #endif
+}
+
+double App::curTimelineStart() {
+    if (cur().web) {
+        const BrowserHost::Media& m = webHosts_[selectedScreen_].media();
+        return (m.present && m.live) ? m.seekStart : 0.0;
+    }
+    return 0.0;
+}
+
+int App::curLive() {
+    if (!cur().web) return 0;
+    const BrowserHost::Media& m = webHosts_[selectedScreen_].media();
+    if (!m.present || !m.live) return 0;
+    // Like YouTube: "behind" once more than a few seconds from the edge.
+    return (m.seekEnd <= m.seekStart || m.seekEnd - m.position < 15.0) ? 2 : 1;
 }
 
 void App::curTogglePause() {
@@ -2675,6 +2693,7 @@ int App::run() {
                 VaultManager::instance().recordActivity(nowT);
             }
             pauseOnRemoval_.store(settings_.pauseOnRemoval(), std::memory_order_relaxed);
+            VulkanRenderer::setKeyboardLayout(settings_.keyboardLayout());
             pauseLivestreams_.store(settings_.pauseLivestreams(), std::memory_order_relaxed);
             if (VaultManager::instance().tick(nowT, in.headValid && xr_.sessionFocused())) {
                 performVaultLock();
@@ -4021,7 +4040,8 @@ int App::run() {
                     interacted = true;
                 }
                 if (in.select && renderer_.pointerOnTimeToggle()) {
-                    renderer_.toggleTimeDisplay();  // total <-> time remaining
+                    if (curLive() != 0) webHosts_[selectedScreen_].mediaGoLive();  // "LIVE": back to the edge
+                    else renderer_.toggleTimeDisplay();  // total <-> time remaining
                     interacted = true;
                 }
             }
@@ -4102,7 +4122,7 @@ int App::run() {
                     bool scrubInput = false;
                     if (!wasHudDismissed && renderer_.pointerOnTimeline() && in.selectHeld &&
                         curDuration() > 0.0) {
-                        scrubTarget_ = renderer_.pointerScrub() * curDuration();
+                        scrubTarget_ = curTimelineStart() + renderer_.pointerScrub() * (curDuration() - curTimelineStart());
                         scrubInput = true;
                     } else if (std::fabs(in.thumbstickLX) > 0.15f && dt > 0.0f &&
                                curDuration() > 0.0) {
@@ -4111,7 +4131,7 @@ int App::run() {
                         const float t = (std::fabs(ax) - 0.15f) / 0.85f;
                         const double rate =
                             std::copysign(static_cast<double>(t * t) * 60.0, ax);
-                        scrubTarget_ = std::clamp(scrubTarget_ + rate * dt, 0.0, curDuration());
+                        scrubTarget_ = std::clamp(scrubTarget_ + rate * dt, curTimelineStart(), curDuration());
                         scrubInput = true;
                     }
                     if (scrubInput) {
@@ -4133,10 +4153,13 @@ int App::run() {
                 float progress = 0.0f;
                 double elapsed = 0.0, total = 0.0;
                 if (cur().open && curDuration() > 0.0) {
-                    total = curDuration();
+                    // Livestreams: the rewind window, live edge on the right.
+                    const double start = curTimelineStart();
+                    total = std::max(curDuration() - start, 0.001);
                     elapsed = scrubbing_ ? scrubTarget_ : curPosition();
-                    progress = static_cast<float>(elapsed / total);
+                    progress = static_cast<float>(std::clamp((elapsed - start) / total, 0.0, 1.0));
                 }
+                renderer_.setTransportLive(cur().open ? curLive() : 0);
                 std::string fLabel = "2D FLAT";
                 if (settings_.projectionMode() == 0) {
                     fLabel = (settings_.stereoMode() == 0) ? "2D FLAT" :

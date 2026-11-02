@@ -284,6 +284,15 @@ void main() {
         float equator = max(abs(p.y) - 0.05, length(p) - 0.62);
         float parallels = max(abs(abs(p.y) - 0.31) - 0.045, length(p) - 0.62);
         d = min(min(rim, meridian), min(equator, parallels));
+    } else if (shape == 34) {
+        // Shape 34: Backspace (key outline pointing left, with a cross)
+        float body = min(sdRoundedBox(p - vec2(0.20, 0.0), vec2(0.52, 0.46), 0.08),
+                         sdTriangle(p, vec2(-0.84, 0.0), vec2(-0.28, 0.46), vec2(-0.28, -0.46)));
+        float outline = abs(body) - 0.07;
+        vec2 q = p - vec2(0.24, 0.0);
+        float cross = min(sdSegment(q, vec2(-0.19, -0.19), vec2(0.19, 0.19)),
+                          sdSegment(q, vec2(-0.19, 0.19), vec2(0.19, -0.19))) - 0.07;
+        d = min(outline, cross);
     } else {
         d = sdRoundedBox(p, vec2(1.0), 0.0);
     }
