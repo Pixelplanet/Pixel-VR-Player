@@ -158,10 +158,16 @@ struct UiRect {
 namespace hub {
 constexpr float kRailCx = -0.695f;
 constexpr float kRailItemHalfW = 0.172f;
-constexpr float kMainTabY[4] = {0.335f, 0.255f, 0.175f, 0.095f};  // Files, Downloads, Settings, Web
-constexpr float kMainTabHalfH = 0.034f;
-constexpr int kWebTabHoverId = 10;  // rail hover id of the Web tab
-constexpr float kSettingsSubY[5] = {0.02f, -0.07f, -0.16f, -0.25f, -0.34f};
+constexpr int kMainTabCount = 5;
+// Files, Downloads, Settings, YouTube, Browser
+constexpr float kMainTabY[kMainTabCount] = {0.365f, 0.295f, 0.225f, 0.155f, 0.085f};
+constexpr float kMainTabHalfH = 0.030f;
+constexpr float kRailDividerY = 0.035f;  // between the main tabs and the section tabs
+// Rail hover ids of the YouTube and Browser tabs (0..2 are the first tabs).
+constexpr int kYouTubeTabHoverId = 10;
+constexpr int kBrowserTabHoverId = 11;
+inline int mainTabHoverId(int s) { return s == 3 ? kYouTubeTabHoverId : (s == 4 ? kBrowserTabHoverId : s); }
+constexpr float kSettingsSubY[5] = {-0.01f, -0.10f, -0.19f, -0.28f, -0.37f};
 constexpr float kDownloadsSubY[3] = {-0.05f, -0.14f, -0.23f};
 constexpr float kFilesSubY[6] = {-0.04f, -0.11f, -0.18f, -0.25f, -0.32f, -0.39f};
 constexpr float kHitPad = 0.004f;  // laser targets are slightly larger than drawn
@@ -2107,9 +2113,9 @@ void VulkanRenderer::updatePointer() {
 
             // Left navigation rail
             if (hx <= kRailRight) {
-                for (int s = 0; s < 4; ++s) {
+                for (int s = 0; s < hub::kMainTabCount; ++s) {
                     if (hub::mainTab(s).contains(hx, hyy, hub::kHitPad)) {
-                        browserSidebarHovered_ = (s == 3) ? hub::kWebTabHoverId : s;
+                        browserSidebarHovered_ = hub::mainTabHoverId(s);
                         break;
                     }
                 }
@@ -3764,7 +3770,8 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         // Active primary section: 0=Files, 1=Downloads, 2=Settings
         const int activeMainTab = settingsVisible_ ? 2 : (downloadsVisible_ ? 1 : 0);
         const float* mainTabY = hub::kMainTabY;
-        const UiShape mainIcons[4] = {UiShape::Files, UiShape::Download, UiShape::Settings, UiShape::Globe};
+        const UiShape mainIcons[hub::kMainTabCount] = {UiShape::Files, UiShape::Download, UiShape::Settings,
+                                                       UiShape::Play, UiShape::Globe};
 
         const float tabActiveBg[4] = {
             themeAccentCol[0] * 0.30f, themeAccentCol[1] * 0.30f,
@@ -3778,9 +3785,9 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         const float* tabNormBg = glassControlT.data();
         const float* tabNormBord = kGlassRimFaint;
 
-        for (int s = 0; s < 4; ++s) {
+        for (int s = 0; s < hub::kMainTabCount; ++s) {
             const bool act = (s == activeMainTab);
-            const bool hov = (browserSidebarHovered_ == ((s == 3) ? hub::kWebTabHoverId : s));
+            const bool hov = (browserSidebarHovered_ == hub::mainTabHoverId(s));
             const float tabHh = hub::kMainTabHalfH;
             if (act) {
                 drawGlow(vpPanel, -0.695f, mainTabY[s], 0.172f, tabHh, 0.014f,
@@ -3805,7 +3812,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             }
         }
         // Thin separator between the primary tabs and the contextual sub-navigation
-        drawUiElement(vpPanel, -0.695f, 0.052f, 0.160f, 0.0012f,
+        drawUiElement(vpPanel, -0.695f, hub::kRailDividerY, 0.160f, 0.0012f,
                       UiShape::RoundedBox, kGlassDivider, 1.0f);
 
         // Sub-navigation items in rail (contextual to Files / Downloads / Settings)
@@ -3886,8 +3893,8 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 const UiRect lockR = hub::lockVaultButton(activeMainTab);
                 drawFitCentered(lockR.cx, lockR.cy, 0.28f, scSub, lockTextCol, "Lock Vault");
             }
-            const char* mainLabels[4] = {"Files", "Downloads", "Settings", "Web"};
-            for (int s = 0; s < 4; ++s) {
+            const char* mainLabels[hub::kMainTabCount] = {"Files", "Downloads", "Settings", "YouTube", "Browser"};
+            for (int s = 0; s < hub::kMainTabCount; ++s) {
                 drawFit(-0.790f, mainTabY[s], 0.23f, scStd,
                         (s == activeMainTab) ? themeTextCol : slateCol, mainLabels[s]);
                 if (s == 1 && activeDownloadCount_ > 0) {

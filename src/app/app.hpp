@@ -273,6 +273,7 @@ private:
     // close); each has its own Chromium window. "web://" is the pseudo path the
     // screen picker uses for "open a browser here".
     static constexpr const char* kWebPath = "web://";
+    static constexpr const char* kYouTubeUrl = "https://www.youtube.com";
     BrowserHost webHosts_[VulkanRenderer::kMaxVideoSlots];
     int webMouseSlot_ = -1;      // browser screen the press / hover belongs to
     bool webMouseDown_ = false;
@@ -283,8 +284,11 @@ private:
     float webDownY_ = 0.0f;
     bool webHoverValid_ = false;
     float webWheelAccum_ = 0.0f;
-    void openWebScreen();        // "Web" tab: pick a screen (or use the main one)
-    void loadWeb(int slot);
+    // YouTube / Browser tabs: pick a screen (or use the main one) for `url`.
+    void openWebScreen(const std::string& url);
+    // Opens `url` on `slot`; a browser already there navigates to it.
+    void loadWeb(int slot, const std::string& url);
+    std::string pendingWebUrl_;  // page waiting for the "play where?" choice
     float movingDistance_ = 3.0f;
     std::string pendingPlayPath_;  // file waiting for the "play where?" choice
 

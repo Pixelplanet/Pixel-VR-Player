@@ -1677,9 +1677,37 @@ void App::moveArrangementTo(int slot, const float target[3]) {
     applyArrangement(arrangement_);
 }
 
-void App::openWebScreen() {
+namespace {
+// What the user typed into the Browser tab's prompt as a URL: a full URL as
+// is, something that looks like a host ("example.com/x") over https, anything
+// else as a web search.
+std::string webAddressFor(const std::string& typed) {
+    const std::size_t a = typed.find_first_not_of(" \t");
+    if (a == std::string::npos) return {};
+    const std::string t = typed.substr(a, typed.find_last_not_of(" \t") + 1 - a);
+    if (t.find("://") != std::string::npos) return t;
+    const bool oneWord = t.find(' ') == std::string::npos;
+    if (oneWord && (t.find('.') != std::string::npos || t.rfind("localhost", 0) == 0)) return "https://" + t;
+    std::string q;
+    for (unsigned char c : t) {
+        if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            q += static_cast<char>(c);
+        } else if (c == ' ') {
+            q += '+';
+        } else {
+            char hex[4];
+            std::snprintf(hex, sizeof(hex), "%%%02X", c);
+            q += hex;
+        }
+    }
+    return "https://www.google.com/search?q=" + q;
+}
+}  // namespace
+
+void App::openWebScreen(const std::string& url) {
     settings_.close();
     downloadsWindow_ = false;
+    pendingWebUrl_ = url;
     if (multiScreenEnabled() && openScreenCount() > 0) {
         // The picker lives in the Files hub (it is dismissed without it), like
         // picking a screen for a file; choosing a screen closes the hub.
@@ -1687,23 +1715,24 @@ void App::openWebScreen() {
         browser_.setOpen(true);
 #endif
         openPlayTargetMenu(kWebPath);
-        actionMenu_.subtitle = "Web browser";
+        actionMenu_.subtitle = (url == kYouTubeUrl) ? "YouTube" : url;
         return;
     }
 #ifdef PIXELVR_HAVE_FREETYPE
     browser_.setOpen(false);
 #endif
-    loadWeb(0);
+    loadWeb(0, url);
 }
 
-void App::loadWeb(int slot) {
+void App::loadWeb(int slot, const std::string& url) {
     if (!multiScreenEnabled()) slot = 0;
-    if (screens_[slot].web) {  // already a browser: keep its page
+    if (screens_[slot].web) {  // already a browser: just go there
+        webHosts_[slot].navigate(url);
         selectScreen(slot);
         return;
     }
     if (screens_[slot].open) closeMedia(slot);
-    if (!webHosts_[slot].start("https://www.youtube.com", 1280, 720)) {
+    if (!webHosts_[slot].start(url, 1280, 720)) {
         PIXELVR_LOG_WARN("Web screen: browser helper unavailable");
         return;
     }
@@ -3090,8 +3119,14 @@ int App::run() {
             const int sbHover = renderer_.browserSidebarHovered();
             if (hubActive && (in.togglePlay || in.select) && sbHover >= 0) {
                 if (sbHover == 10) {
-                    // Main Tab: Web (browser screen)
-                    openWebScreen();
+                    // Main Tab: YouTube (browser screen on youtube.com)
+                    openWebScreen(kYouTubeUrl);
+                } else if (sbHover == 11) {
+                    // Main Tab: Browser (any site: address or search first)
+                    openKeyboard("Web address or search", "", false, in, [this](const std::string& typed) {
+                        const std::string url = webAddressFor(typed);
+                        if (!url.empty()) openWebScreen(url);
+                    });
                 } else if (sbHover == 0) {
                     // Main Tab: Files
                     downloadsWindow_ = false;
@@ -3131,6 +3166,10 @@ int App::run() {
                     }
                 }
                 interacted = true;
+                // The rail took this click: a menu it just opened (screen
+                // picker) must not take it too and pick a screen on its own.
+                in.select = false;
+                in.togglePlay = false;
             }
 
             // Downloads view interaction inside Unified Spatial Hub
@@ -3413,7 +3452,7 @@ int App::run() {
                                             actionMenu_.subtitle = "Not enough decoder capacity - close a screen first";
                                         } else {
                                             if (pendingPlayPath_ == kWebPath) {
-                                                loadWeb(chosen);
+                                                loadWeb(chosen, pendingWebUrl_);
                                             } else {
 #ifdef PIXELVR_HAVE_MEDIA
                                                 loadMedia(pendingPlayPath_, chosen);
