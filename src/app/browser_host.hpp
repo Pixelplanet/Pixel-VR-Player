@@ -70,6 +70,15 @@ public:
         double seekEnd = 0.0;
     };
     const Media& media() const { return media_; }
+    // The page video's details (stats overlay).
+    struct VideoInfo {
+        int width = 0;
+        int height = 0;
+        int frames = 0;   // decoded so far
+        int dropped = 0;  // decoded too late to show
+        std::string codecs;  // YouTube only, e.g. "av01.0.08M.08 (399) / opus (251)"
+    };
+    const VideoInfo& videoInfo() const { return videoInfo_; }
     void mediaToggle() { send("media toggle"); }
     void mediaGoLive() { send("media live"); }
     void mediaSeek(double t);
@@ -121,6 +130,7 @@ private:
     int frameW_ = 0;
     int frameH_ = 0;
     Media media_;
+    VideoInfo videoInfo_;
     int mutedState_ = -1;
     std::vector<FocusEvent> focusEvents_;
     bool fieldValueNew_ = false;

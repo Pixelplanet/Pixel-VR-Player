@@ -25,6 +25,7 @@
 //       pausemedia LIVE(0|1) | keyboard | quit
 //   - stdout, one event per line: ready | url URL | title TEXT | loading 0|1
 //     | media 0 | media 1 PAUSED POS DUR LIVE SEEKSTART SEEKEND
+//     | videoinfo W H FRAMES DROPPED "CODECS"
 //     | focus c|p 0 | focus c|p 1 PASSWORD CURSOR "VALUE" (c = after a click)
 //     | value CURSOR "VALUE" | download NAME | eval RESULT | error TEXT
 #include "browser_protocol.hpp"
@@ -960,6 +961,7 @@ int runScreen(const ScreenOptions& opt) {
     std::string lastToolbarState;
     bool toolbarReady = false;
     std::string lastMedia;
+    std::string lastVideoInfo;
     int lastPageEditable = 0;
     Clock::time_point probeAt{};
     std::string probeSession;
@@ -1701,7 +1703,12 @@ int runScreen(const ScreenOptions& opt) {
                                "if(isFinite(p.seekableStart)&&isFinite(p.seekableEnd)&&isFinite(o)){s0=p.seekableStart-o;"
                                "s1=p.seekableEnd-o}}catch(_){}}"
                                "md=[v.paused?1:0,v.currentTime||0,isFinite(v.duration)?v.duration:0,live?1:0,s0,s1]}"
-                               "return {f:document.fullscreenElement?1:0,e:" + kEditableJs + "?1:0,m:md}})()";
+                               // Video details for the stats overlay: codec (YouTube's
+                               // player knows it), size, decoded / dropped frames.
+                               "let vi=null;if(v){const q=v.getVideoPlaybackQuality?v.getVideoPlaybackQuality():null;"
+                               "let c='';try{const mp=document.getElementById('movie_player');if(mp&&mp.getStatsForNerds)c=mp.getStatsForNerds().codecs||''}catch(_){}"
+                               "vi=[v.videoWidth,v.videoHeight,q?q.totalVideoFrames:0,q?q.droppedVideoFrames:0,c]}"
+                               "return {f:document.fullscreenElement?1:0,e:" + kEditableJs + "?1:0,m:md,vi:vi}})()";
         evalIn(session, js, [&, session](const pvrjson::Value* v) {
             const Tab* cur = activeTab();
             if (!v || !cur || cur->session != session) return;
@@ -1726,6 +1733,15 @@ int runScreen(const ScreenOptions& opt) {
                 media = b;
             }
             if (media != lastMedia) emitLine(lastMedia = media);
+            const pvrjson::Value* vi = v->get("vi");
+            if (vi && vi->type == pvrjson::Value::Type::Array && vi->array.size() == 5) {
+                char b[96];
+                std::snprintf(b, sizeof(b), "videoinfo %d %d %d %d ", static_cast<int>(vi->array[0].number),
+                              static_cast<int>(vi->array[1].number), static_cast<int>(vi->array[2].number),
+                              static_cast<int>(vi->array[3].number));
+                const std::string line = b + pvrjson::quote(vi->array[4].str);
+                if (line != lastVideoInfo) emitLine(lastVideoInfo = line);
+            }
         });
     };
 

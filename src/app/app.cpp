@@ -658,7 +658,18 @@ void App::updateStats() {
                       settings_.resScale());
         statsLines_.emplace_back(buf);
     }
-    if (cur().open) {
+    if (cur().web) {
+        // Browser screen: Chromium decodes on the CPU.
+        const BrowserHost::VideoInfo& vi = webHosts_[selectedScreen_].videoInfo();
+        if (vi.width > 0) {
+            std::string codec = vi.codecs.substr(0, vi.codecs.find(" ("));  // "av01.0.08M.08"
+            std::snprintf(buf, sizeof(buf), "Web video %dx%d  %s (CPU)", vi.width, vi.height,
+                          codec.empty() ? "?" : codec.c_str());
+            statsLines_.emplace_back(buf);
+            std::snprintf(buf, sizeof(buf), "Dropped %d / %d frames", vi.dropped, vi.frames);
+            statsLines_.emplace_back(buf);
+        }
+    } else if (cur().open) {
         std::snprintf(buf, sizeof(buf), "Video %dx%d  %s", cur().engine.width(),
                       cur().engine.height(), cur().engine.codecName().c_str());
         statsLines_.emplace_back(buf);

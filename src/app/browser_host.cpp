@@ -194,6 +194,7 @@ bool BrowserHost::start(const std::string& url, int width, int height, const Opt
     frameW_ = width_;
     frameH_ = height_;
     media_ = {};
+    videoInfo_ = {};
     mutedState_ = -1;
     focusEvents_.clear();
     fieldValueNew_ = false;
@@ -343,6 +344,19 @@ void BrowserHost::handleLine(const std::string& line) {
             media_.position = pos;
             media_.duration = dur;
             media_.live = live != 0;
+        }
+    } else if (cmd == "videoinfo") {
+        VideoInfo vi;
+        int used = 0;
+        if (std::sscanf(rest.c_str(), "%d %d %d %d %n", &vi.width, &vi.height, &vi.frames, &vi.dropped, &used) >= 4 &&
+            used > 0) {
+            pvrjson::Value c;
+            if (pvrjson::parse(rest.c_str() + used, c)) vi.codecs = c.str;
+            if (vi.codecs != videoInfo_.codecs || vi.width != videoInfo_.width || vi.height != videoInfo_.height) {
+                PIXELVR_LOG_INFO("Browser: video %dx%d %s", vi.width, vi.height,
+                                 vi.codecs.empty() ? "(codec unknown)" : vi.codecs.c_str());
+            }
+            videoInfo_ = vi;
         }
     } else if (cmd == "focus") {
         // "c|p 0" | "c|p 1 PASSWORD CURSOR <json string>"
