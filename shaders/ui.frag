@@ -277,6 +277,13 @@ void main() {
         float lt = sdTriangle(q, vec2(-0.82, 0.0), vec2(-0.40, -0.34), vec2(-0.40, 0.34)) - 0.03;
         float rt = sdTriangle(q, vec2(0.82, 0.0), vec2(0.40, 0.34), vec2(0.40, -0.34)) - 0.03;
         d = min(bar, min(lt, rt));
+    } else if (shape == 33) {
+        // Shape 33: Globe (outline, a meridian ellipse, equator and two parallels)
+        float rim = abs(length(p) - 0.62) - 0.07;
+        float meridian = abs(length(p / vec2(0.42, 1.0)) - 0.62) * 0.42 - 0.05;
+        float equator = max(abs(p.y) - 0.05, length(p) - 0.62);
+        float parallels = max(abs(abs(p.y) - 0.31) - 0.045, length(p) - 0.62);
+        d = min(min(rim, meridian), min(equator, parallels));
     } else {
         d = sdRoundedBox(p, vec2(1.0), 0.0);
     }

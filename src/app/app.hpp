@@ -16,6 +16,7 @@
 
 #include "ui/settings_menu.hpp"
 #include "app/playback_memory.hpp"
+#include "app/browser_host.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -265,6 +266,15 @@ private:
     // Browser 'play' entry point: asks where to play when screens are in use.
     void playFromBrowser(const std::string& path);
     int movingScreen_ = -1;  // screen being placed with the laser, or -1
+    // Web browser screen (proof of concept): the pvr-browser helper's page on a
+    // floating screen; the laser acts as the mouse.
+    BrowserHost webHost_;
+    bool webMouseDown_ = false;
+    float webMouseX_ = 0.0f;
+    float webMouseY_ = 0.0f;
+    float webWheelAccum_ = 0.0f;
+    void openWebScreen();
+    void closeWebScreen();
     float movingDistance_ = 3.0f;
     std::string pendingPlayPath_;  // file waiting for the "play where?" choice
 

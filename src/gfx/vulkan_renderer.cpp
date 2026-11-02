@@ -158,8 +158,9 @@ struct UiRect {
 namespace hub {
 constexpr float kRailCx = -0.695f;
 constexpr float kRailItemHalfW = 0.172f;
-constexpr float kMainTabY[3] = {0.32f, 0.22f, 0.12f};  // Files, Downloads, Settings
-constexpr float kMainTabHalfH = 0.038f;
+constexpr float kMainTabY[4] = {0.335f, 0.255f, 0.175f, 0.095f};  // Files, Downloads, Settings, Web
+constexpr float kMainTabHalfH = 0.034f;
+constexpr int kWebTabHoverId = 10;  // rail hover id of the Web tab
 constexpr float kSettingsSubY[5] = {0.02f, -0.07f, -0.16f, -0.25f, -0.34f};
 constexpr float kDownloadsSubY[3] = {-0.05f, -0.14f, -0.23f};
 constexpr float kFilesSubY[6] = {-0.04f, -0.11f, -0.18f, -0.25f, -0.32f, -0.39f};
@@ -474,6 +475,25 @@ math::Mat4 orientFromYawPitch(float yaw, float pitch) {
                     fromQuat(Quat{std::sin(hp), 0.0f, 0.0f, std::cos(hp)}));
 }
 
+// Web browser screen: a little nearer than the main screen (so it sits in front
+// of a playing video) with the same apparent size, facing the viewer.
+struct WebScreenPose {
+    math::Vec3 center;
+    math::Mat4 rot;
+    float halfW = 1.6f;
+    float halfH = 0.9f;
+};
+WebScreenPose webScreenPose(const float pivot[3], const float forward[3], float yaw, float pitch,
+                            float screenDist) {
+    const float d = std::max(1.2f, screenDist * 0.85f);
+    WebScreenPose p;
+    p.center = math::Vec3{pivot[0] + forward[0] * d, pivot[1] + forward[1] * d, pivot[2] + forward[2] * d};
+    p.rot = orientFromYawPitch(yaw, pitch);
+    p.halfW = 1.6f * d / screenDist;
+    p.halfH = 0.9f * d / screenDist;
+    return p;
+}
+
 // Pose of the UI panel plane (hub, modals, transport dock) plus the distance
 // it sits from the viewer, shared by rendering and pointer hit-testing.
 struct PanelPlacement {
@@ -623,6 +643,8 @@ VulkanRenderer::~VulkanRenderer() {
         if (modelSetLayout_ != VK_NULL_HANDLE)
             vkDestroyDescriptorSetLayout(device_, modelSetLayout_, nullptr);
         clearCardThumbnails();
+        releaseWebTexture();
+        webTex_.set = VK_NULL_HANDLE;  // freed with the pool
         releaseThumbSlot(kScrubThumbSlot);
         if (thumbPipeline_ != VK_NULL_HANDLE)
             vkDestroyPipeline(device_, thumbPipeline_, nullptr);
@@ -1651,6 +1673,146 @@ void VulkanRenderer::updateCardThumbnail(int slot, const std::string& path,
     PIXELVR_LOG_INFO("VulkanRenderer: uploaded card thumbnail slot %d -> %s", slot, path.c_str());
 }
 
+void VulkanRenderer::releaseWebTexture() {
+    if (webTex_.view != VK_NULL_HANDLE) vkDestroyImageView(device_, webTex_.view, nullptr);
+    if (webTex_.image != VK_NULL_HANDLE) vkDestroyImage(device_, webTex_.image, nullptr);
+    if (webTex_.memory != VK_NULL_HANDLE) vkFreeMemory(device_, webTex_.memory, nullptr);
+    if (webTex_.staging != VK_NULL_HANDLE) vkDestroyBuffer(device_, webTex_.staging, nullptr);
+    if (webTex_.stagingMemory != VK_NULL_HANDLE) vkFreeMemory(device_, webTex_.stagingMemory, nullptr);
+    webTex_.view = VK_NULL_HANDLE;
+    webTex_.image = VK_NULL_HANDLE;
+    webTex_.memory = VK_NULL_HANDLE;
+    webTex_.staging = VK_NULL_HANDLE;
+    webTex_.stagingMemory = VK_NULL_HANDLE;
+    webTex_.stagingPtr = nullptr;
+    webTex_.width = webTex_.height = 0;
+    webTex_.initialized = false;
+}
+
+void VulkanRenderer::updateWebFrame(const uint8_t* rgba, int width, int height) {
+    if (!rgba || width <= 0 || height <= 0 || device_ == VK_NULL_HANDLE || textPool_ == VK_NULL_HANDLE ||
+        textSetLayout_ == VK_NULL_HANDLE) {
+        return;
+    }
+    const VkDeviceSize sz = static_cast<VkDeviceSize>(width) * height * 4;
+    if (webTex_.width != width || webTex_.height != height) {
+        // (Re)create a persistent image + mapped staging buffer for this size.
+        vkDeviceWaitIdle(device_);
+        releaseWebTexture();
+        VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        bi.size = sz;
+        bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+        bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (vkCreateBuffer(device_, &bi, nullptr, &webTex_.staging) != VK_SUCCESS) return;
+        VkMemoryRequirements req{};
+        vkGetBufferMemoryRequirements(device_, webTex_.staging, &req);
+        VkMemoryAllocateInfo alloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        alloc.allocationSize = req.size;
+        alloc.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                                                                       VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        if (vkAllocateMemory(device_, &alloc, nullptr, &webTex_.stagingMemory) != VK_SUCCESS) {
+            releaseWebTexture();
+            return;
+        }
+        vkBindBufferMemory(device_, webTex_.staging, webTex_.stagingMemory, 0);
+        vkMapMemory(device_, webTex_.stagingMemory, 0, sz, 0, &webTex_.stagingPtr);
+
+        VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        ii.imageType = VK_IMAGE_TYPE_2D;
+        ii.format = VK_FORMAT_R8G8B8A8_UNORM;
+        ii.extent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
+        ii.mipLevels = 1;
+        ii.arrayLayers = 1;
+        ii.samples = VK_SAMPLE_COUNT_1_BIT;
+        ii.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ii.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        ii.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        if (vkCreateImage(device_, &ii, nullptr, &webTex_.image) != VK_SUCCESS) {
+            releaseWebTexture();
+            return;
+        }
+        vkGetImageMemoryRequirements(device_, webTex_.image, &req);
+        alloc.allocationSize = req.size;
+        alloc.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        if (vkAllocateMemory(device_, &alloc, nullptr, &webTex_.memory) != VK_SUCCESS) {
+            releaseWebTexture();
+            return;
+        }
+        vkBindImageMemory(device_, webTex_.image, webTex_.memory, 0);
+        VkImageViewCreateInfo iv{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        iv.image = webTex_.image;
+        iv.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        iv.format = VK_FORMAT_R8G8B8A8_UNORM;
+        iv.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        if (vkCreateImageView(device_, &iv, nullptr, &webTex_.view) != VK_SUCCESS) {
+            releaseWebTexture();
+            return;
+        }
+        if (webTex_.set == VK_NULL_HANDLE) {
+            VkDescriptorSetAllocateInfo da{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
+            da.descriptorPool = textPool_;
+            da.descriptorSetCount = 1;
+            da.pSetLayouts = &textSetLayout_;
+            if (vkAllocateDescriptorSets(device_, &da, &webTex_.set) != VK_SUCCESS) {
+                releaseWebTexture();
+                return;
+            }
+        }
+        VkDescriptorImageInfo dii{};
+        dii.sampler = sampler_;
+        dii.imageView = webTex_.view;
+        dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkWriteDescriptorSet wr{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        wr.dstSet = webTex_.set;
+        wr.dstBinding = 0;
+        wr.descriptorCount = 1;
+        wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        wr.pImageInfo = &dii;
+        vkUpdateDescriptorSets(device_, 1, &wr, 0, nullptr);
+        webTex_.width = width;
+        webTex_.height = height;
+    }
+    std::memcpy(webTex_.stagingPtr, rgba, static_cast<std::size_t>(sz));
+
+    vkResetCommandBuffer(uploadCmd_, 0);
+    VkCommandBufferBeginInfo cb{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    cb.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    vkBeginCommandBuffer(uploadCmd_, &cb);
+    // Earlier frames may still be sampling it: wait for their fragment reads.
+    VkImageMemoryBarrier toDst{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+    toDst.oldLayout = webTex_.initialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
+    toDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+    toDst.image = webTex_.image;
+    toDst.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    toDst.srcAccessMask = 0;
+    toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    vkCmdPipelineBarrier(uploadCmd_, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                         0, nullptr, 0, nullptr, 1, &toDst);
+    VkBufferImageCopy region{};
+    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.imageExtent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
+    vkCmdCopyBufferToImage(uploadCmd_, webTex_.staging, webTex_.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+                           &region);
+    VkImageMemoryBarrier toRead = toDst;
+    toRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toRead.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    toRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+    toRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    vkCmdPipelineBarrier(uploadCmd_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
+                         0, nullptr, 0, nullptr, 1, &toRead);
+    vkEndCommandBuffer(uploadCmd_);
+    VkSubmitInfo su{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    su.commandBufferCount = 1;
+    su.pCommandBuffers = &uploadCmd_;
+    vkQueueSubmit(queue_, 1, &su, uploadFence_);
+    vkWaitForFences(device_, 1, &uploadFence_, VK_TRUE, UINT64_MAX);
+    vkResetFences(device_, 1, &uploadFence_);
+    webTex_.initialized = true;
+}
+
 void VulkanRenderer::screenOrderLeftToRight(int out[kMaxVideoSlots]) const {
     // Angle of each screen around the viewer relative to the recenter yaw
     // (positive = to the left). Unused extra slots take their default side.
@@ -1737,6 +1899,7 @@ void VulkanRenderer::updatePointer() {
     keyboardKeyHovered_ = -1;
     keyboardFieldHovered_ = false;
     pointerScreen_ = -1;
+    webPointerValid_ = false;
 
     if (pointerSuppressed_) {
         return;
@@ -1750,8 +1913,10 @@ void VulkanRenderer::updatePointer() {
     const bool controlBar = controlBarVisible_ && !hubOpen && !modalOpen && !actionMenuOpen && !kbOpen;
     const bool screensPointable = multiScreenActive_ && !hubOpen && !modalOpen &&
                                   !actionMenuOpen && !kbOpen;
+    const bool webPointable = webScreenVisible_ && webTex_.initialized && !hubOpen && !modalOpen &&
+                              !actionMenuOpen && !kbOpen;
     if (!kbOpen && !hubOpen && !modalOpen && !controlBar && !actionMenuOpen &&
-        !screensPointable) {
+        !screensPointable && !webPointable) {
         return;  // No UI surface to point at.
     }
 
@@ -1949,9 +2114,9 @@ void VulkanRenderer::updatePointer() {
 
             // Left navigation rail
             if (hx <= kRailRight) {
-                for (int s = 0; s < 3; ++s) {
+                for (int s = 0; s < 4; ++s) {
                     if (hub::mainTab(s).contains(hx, hyy, hub::kHitPad)) {
-                        browserSidebarHovered_ = s;
+                        browserSidebarHovered_ = (s == 3) ? hub::kWebTabHoverId : s;
                         break;
                     }
                 }
@@ -2084,6 +2249,28 @@ void VulkanRenderer::updatePointer() {
                 }
             }
         }
+        // Web browser screen (in front of the video screens).
+        auto takeWebHit = [&]() {
+            if (!webPointable) return false;
+            const WebScreenPose wp = webScreenPose(screenPivot_, screenForward_, screenYaw_,
+                                                   recenterPitch_, screenDistance_);
+            const Vec3 xAxis = transformDir(wp.rot, Vec3{1.0f, 0.0f, 0.0f});
+            const Vec3 yAxis = transformDir(wp.rot, Vec3{0.0f, 1.0f, 0.0f});
+            const Vec3 nAxis = transformDir(wp.rot, Vec3{0.0f, 0.0f, 1.0f});
+            const float denom = dot(dir, nAxis);
+            if (std::fabs(denom) < 1e-4f) return false;
+            const float t = dot(wp.center - origin, nAxis) / denom;
+            if (t <= 0.05f) return false;
+            const Vec3 p = origin + dir * t;
+            const float lx = dot(p - wp.center, xAxis);
+            const float ly = dot(p - wp.center, yAxis);
+            if (std::fabs(lx) > wp.halfW || std::fabs(ly) > wp.halfH) return false;
+            hitHere(p.x, p.y, p.z);
+            webPointerValid_ = true;
+            webPointerU_ = 0.5f + 0.5f * lx / wp.halfW;
+            webPointerV_ = 0.5f - 0.5f * ly / wp.halfH;
+            return true;
+        };
         auto takeScreenHit = [&]() {
             if (screenHitSlot < 0) return false;
             hitHere(screenHitWorld.x, screenHitWorld.y, screenHitWorld.z);
@@ -2093,7 +2280,7 @@ void VulkanRenderer::updatePointer() {
 
         // 5. In-Playback Floating Cinema Transport Dock (only when Hub is closed)
         if (!controlBar || !panelHit) {
-            if (takeScreenHit()) break;
+            if (takeWebHit() || takeScreenHit()) break;
             continue;
         }
 
@@ -2145,7 +2332,7 @@ void VulkanRenderer::updatePointer() {
             pointerButton_ = -1;
             break;
         }
-        if (takeScreenHit()) break;
+        if (takeWebHit() || takeScreenHit()) break;
     }
 }
 
@@ -3215,6 +3402,32 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 vkCmdDraw(commandBuffer_, 3, 1, 0, 0);
             }
         }
+
+        // Web browser screen, in front of the main screen position.
+        if (webScreenVisible_ && webTex_.initialized && webTex_.set != VK_NULL_HANDLE &&
+            thumbPipeline_ != VK_NULL_HANDLE) {
+            const WebScreenPose wp = webScreenPose(screenPivot_, screenForward_, screenYaw_,
+                                                   recenterPitch_, screenDistance_);
+            const Mat4 mvp = multiply(vpV, multiply(translation(wp.center), wp.rot));
+            vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, thumbPipeline_);
+            vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipelineLayout_, 0,
+                                    1, &webTex_.set, 0, nullptr);
+            TextPush push{};
+            std::memcpy(push.mvp, mvp.m, sizeof(push.mvp));
+            const float white4[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+            std::memcpy(push.color, white4, sizeof(push.color));
+            push.rect[0] = -wp.halfW;
+            push.rect[1] = -wp.halfH;
+            push.rect[2] = 2.0f * wp.halfW;
+            push.rect[3] = 2.0f * wp.halfH;
+            push.uv[2] = 1.0f;
+            push.uv[3] = 1.0f;
+            push.bend[1] = 1.0f;
+            vkCmdPushConstants(commandBuffer_, textPipelineLayout_,
+                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(TextPush),
+                               &push);
+            vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
+        }
     }
 
     // =========================================================================
@@ -3533,7 +3746,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         // Active primary section: 0=Files, 1=Downloads, 2=Settings
         const int activeMainTab = settingsVisible_ ? 2 : (downloadsVisible_ ? 1 : 0);
         const float* mainTabY = hub::kMainTabY;
-        const UiShape mainIcons[3] = {UiShape::Files, UiShape::Download, UiShape::Settings};
+        const UiShape mainIcons[4] = {UiShape::Files, UiShape::Download, UiShape::Settings, UiShape::Globe};
 
         const float tabActiveBg[4] = {
             themeAccentCol[0] * 0.30f, themeAccentCol[1] * 0.30f,
@@ -3547,19 +3760,20 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         const float* tabNormBg = glassControlT.data();
         const float* tabNormBord = kGlassRimFaint;
 
-        for (int s = 0; s < 3; ++s) {
+        for (int s = 0; s < 4; ++s) {
             const bool act = (s == activeMainTab);
-            const bool hov = (browserSidebarHovered_ == s);
+            const bool hov = (browserSidebarHovered_ == ((s == 3) ? hub::kWebTabHoverId : s));
+            const float tabHh = hub::kMainTabHalfH;
             if (act) {
-                drawGlow(vpPanel, -0.695f, mainTabY[s], 0.172f, 0.038f, 0.014f,
+                drawGlow(vpPanel, -0.695f, mainTabY[s], 0.172f, tabHh, 0.014f,
                          tabActiveGlow, 0.55f);
-                drawUiElement(vpPanel, -0.695f, mainTabY[s], 0.172f, 0.038f,
+                drawUiElement(vpPanel, -0.695f, mainTabY[s], 0.172f, tabHh,
                               UiShape::RoundedBox, tabActiveBg, 0.55f, 0.07f, tabActiveBord);
             } else if (hov) {
-                drawUiElement(vpPanel, -0.695f, mainTabY[s], 0.172f, 0.038f,
+                drawUiElement(vpPanel, -0.695f, mainTabY[s], 0.172f, tabHh,
                               UiShape::RoundedBox, tabHovBg, 0.55f, 0.05f, tabHovBord);
             } else {
-                drawUiElement(vpPanel, -0.695f, mainTabY[s], 0.172f, 0.038f,
+                drawUiElement(vpPanel, -0.695f, mainTabY[s], 0.172f, tabHh,
                               UiShape::RoundedBox, kGlassVeil, 0.55f, 0.04f, kGlassRimFaint);
             }
             drawUiElement(vpPanel, -0.825f, mainTabY[s], 0.017f, 0.017f, mainIcons[s],
@@ -3573,7 +3787,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             }
         }
         // Thin separator between the primary tabs and the contextual sub-navigation
-        drawUiElement(vpPanel, -0.695f, 0.060f, 0.160f, 0.0012f,
+        drawUiElement(vpPanel, -0.695f, 0.052f, 0.160f, 0.0012f,
                       UiShape::RoundedBox, kGlassDivider, 1.0f);
 
         // Sub-navigation items in rail (contextual to Files / Downloads / Settings)
@@ -3654,8 +3868,8 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 const UiRect lockR = hub::lockVaultButton(activeMainTab);
                 drawFitCentered(lockR.cx, lockR.cy, 0.28f, scSub, lockTextCol, "Lock Vault");
             }
-            const char* mainLabels[3] = {"Files", "Downloads", "Settings"};
-            for (int s = 0; s < 3; ++s) {
+            const char* mainLabels[4] = {"Files", "Downloads", "Settings", "Web"};
+            for (int s = 0; s < 4; ++s) {
                 drawFit(-0.790f, mainTabY[s], 0.23f, scStd,
                         (s == activeMainTab) ? themeTextCol : slateCol, mainLabels[s]);
                 if (s == 1 && activeDownloadCount_ > 0) {

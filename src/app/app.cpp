@@ -1634,6 +1634,25 @@ void App::moveArrangementTo(int slot, const float target[3]) {
     applyArrangement(arrangement_);
 }
 
+void App::openWebScreen() {
+    if (!webHost_.running() && !webHost_.start("https://www.youtube.com", 1280, 720)) {
+        PIXELVR_LOG_WARN("Web screen: browser helper unavailable");
+        return;
+    }
+    renderer_.setWebScreen(true);
+#ifdef PIXELVR_HAVE_FREETYPE
+    browser_.setOpen(false);
+#endif
+    settings_.close();
+    downloadsWindow_ = false;
+}
+
+void App::closeWebScreen() {
+    webHost_.stop();
+    renderer_.setWebScreen(false);
+    webMouseDown_ = false;
+}
+
 void App::openArrangeMenu() {
     if (screens_[0].open && screens_[0].projection != 0) return;  // immersive plays alone
     int order[VulkanRenderer::kMaxVideoSlots];
@@ -2015,6 +2034,56 @@ int App::run() {
                 in.buttonDown[XrInputState::BtnB] = false;
                 in.buttonDown[settings_.bindMenu()] = false;
                 lastControllerActivity_ = nowT;
+            }
+
+            // Web browser screen: page frames in, laser as the mouse. Trigger =
+            // click (hold to drag), thumbstick = scroll, B = back, Y = close.
+            if (webHost_.running()) {
+                webHost_.poll();
+                if (const uint8_t* rgba = webHost_.takeFrame()) {
+                    renderer_.updateWebFrame(rgba, webHost_.width(), webHost_.height());
+                }
+            }
+            if (!webHost_.running() && renderer_.webScreenVisible()) closeWebScreen();  // helper died
+            bool hubShown = settings_.isOpen() || downloadsWindow_;
+#ifdef PIXELVR_HAVE_FREETYPE
+            hubShown = hubShown || browser_.isOpen();
+#endif
+            if (renderer_.webScreenVisible() && !hubShown &&
+                !actionMenu_.visible && !textEntry_.active) {
+                float u = 0.0f, v = 0.0f;
+                if (renderer_.webPointer(u, v)) {
+                    webMouseX_ = u * static_cast<float>(webHost_.width());
+                    webMouseY_ = v * static_cast<float>(webHost_.height());
+                    webHost_.mouseMove(webMouseX_, webMouseY_);
+                    if (in.select) {
+                        webHost_.mouseDown(webMouseX_, webMouseY_);
+                        webMouseDown_ = true;
+                        in.select = false;
+                        in.togglePlay = false;
+                    }
+                    if (std::fabs(in.thumbstickY) > 0.2f) {
+                        webWheelAccum_ += in.thumbstickY * dt * 1800.0f;  // wheel units (120 per notch)
+                        const int steps = static_cast<int>(webWheelAccum_);
+                        if (steps != 0) {
+                            webHost_.wheel(webMouseX_, webMouseY_, steps);
+                            webWheelAccum_ -= static_cast<float>(steps);
+                        }
+                        in.thumbstickY = 0.0f;
+                    }
+                }
+                if (webMouseDown_ && !in.selectHeld) {
+                    webHost_.mouseUp(webMouseX_, webMouseY_);
+                    webMouseDown_ = false;
+                }
+                if (in.buttonDown[XrInputState::BtnB]) {
+                    webHost_.back();
+                    in.buttonDown[XrInputState::BtnB] = false;
+                }
+                if (in.buttonDown[XrInputState::BtnY]) {
+                    closeWebScreen();
+                    in.buttonDown[XrInputState::BtnY] = false;
+                }
             }
 
             // Custom combo recording listener (active while recording new 6-button combo in Vault & Privacy)
@@ -2899,7 +2968,10 @@ int App::run() {
                                    pendingDl_.empty() && !actionMenu_.visible;
             const int sbHover = renderer_.browserSidebarHovered();
             if (hubActive && (in.togglePlay || in.select) && sbHover >= 0) {
-                if (sbHover == 0) {
+                if (sbHover == 10) {
+                    // Main Tab: Web (browser screen)
+                    openWebScreen();
+                } else if (sbHover == 0) {
                     // Main Tab: Files
                     downloadsWindow_ = false;
                     settings_.close();

@@ -223,6 +223,18 @@ public:
                     const std::string& status);
     void updateCardThumbnail(int slot, const std::string& path, const uint8_t* rgba, int width, int height);
     void clearCardThumbnails();
+    // Web browser screen (proof of concept): a floating screen just in front of
+    // the main screen position showing the pvr-browser helper's page.
+    void setWebScreen(bool visible) { webScreenVisible_ = visible; }
+    bool webScreenVisible() const { return webScreenVisible_; }
+    void updateWebFrame(const uint8_t* rgba, int width, int height);
+    // Laser position on the web screen (u right, v down, 0..1); false when the
+    // laser is not on it.
+    bool webPointer(float& u, float& v) const {
+        u = webPointerU_;
+        v = webPointerV_;
+        return webPointerValid_;
+    }
     // Timeline hover preview image (RGBA), shown above the scrub time bubble.
     void updateScrubPreview(const uint8_t* rgba, int width, int height, double seconds);
     void clearScrubPreview();
@@ -434,6 +446,7 @@ public:
         Frame = 30,         // hollow screen outline
         SwapH = 31,         // double-headed arrow, horizontal
         SwapV = 32,         // double-headed arrow, vertical
+        Globe = 33,         // web: circle with meridian + parallels
         GlassPanel = 25, // rounded box with bevel + eye-dependent reflection sheen
     };
 
@@ -688,6 +701,24 @@ private:
     static constexpr int kScrubThumbSlot = 12;
     CardThumbnail cardThumbs_[13];
     void releaseThumbSlot(int slot);
+    void releaseWebTexture();
+    struct WebTexture {
+        VkImage image = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        VkImageView view = VK_NULL_HANDLE;
+        VkBuffer staging = VK_NULL_HANDLE;
+        VkDeviceMemory stagingMemory = VK_NULL_HANDLE;
+        void* stagingPtr = nullptr;
+        VkDescriptorSet set = VK_NULL_HANDLE;
+        int width = 0;
+        int height = 0;
+        bool initialized = false;  // image has been written once (layout is shader-read)
+    };
+    WebTexture webTex_;
+    bool webScreenVisible_ = false;
+    bool webPointerValid_ = false;
+    float webPointerU_ = 0.0f;
+    float webPointerV_ = 0.0f;
     float cardHoverAnim_[12]{};
     VkPipeline thumbPipeline_ = VK_NULL_HANDLE;
     VkDescriptorPool thumbPool_ = VK_NULL_HANDLE;
