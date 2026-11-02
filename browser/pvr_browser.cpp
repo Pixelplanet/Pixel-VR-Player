@@ -1,16 +1,22 @@
-// pvr-browser: drives the user's installed Chromium for PixelVR's browser screen.
+// pvr-browser: drives the user's installed Chromium for PixelVR's browser screens.
 //
-// Starts Chromium hidden (headless, the Flathub org.chromium.Chromium or a
-// `chromium` on PATH) with a persistent profile in ~/.config/pixelvr/chromium,
-// and remote-controls one page over the Chrome DevTools Protocol:
+// Two modes:
+//   pvr-browser --launch --width W --height H
+//     Starts Chromium hidden (headless; the Flathub org.chromium.Chromium or a
+//     `chromium` on PATH) on the user's own profile (falling back to
+//     ~/.config/pixelvr/chromium while their Chromium has it open), prints
+//     "port N" and keeps Chromium running until stdin closes or "quit".
+//   pvr-browser --port N --shm NAME --url URL --width W --height H
+//     Opens its own Chromium window on that port and remote-controls it over
+//     the Chrome DevTools Protocol; closes only that window when it exits:
 //   - Page.startScreencast frames (JPEG) are decoded into shared memory
 //     (--shm NAME, created by the app): BrowserShmHeader + RGBA pixels,
 //     published with a sequence counter (odd while writing),
 //   - stdin, one command per line (coordinates in page pixels):
 //       move X Y | down X Y | up X Y | wheel X Y DY | key NAME | text UTF8
-//       nav URL | back | forward | reload | quit
+//       nav URL | back | forward | reload | eval JS | quit
 //   - stdout, one event per line: ready | url URL | title TEXT | loading 0|1
-//     | error TEXT
+//     | eval RESULT | error TEXT
 #include "browser_protocol.hpp"
 #include "mini_json.hpp"
 
@@ -326,6 +332,9 @@ pid_t launchChromium(ChromiumKind kind, const std::string& profile, int width, i
         // user's existing logins can be read.
         "--password-store=basic",
         "--window-size=" + std::to_string(width) + "," + std::to_string(height),
+        // Headless pretends to have an 800x600 monitor; fullscreen video would
+        // shrink to that inside our frame.
+        "--screen-info={0,0 " + std::to_string(width) + "x" + std::to_string(height) + "}",
         "--no-first-run",
         "--no-default-browser-check",
         "--autoplay-policy=no-user-gesture-required",
@@ -377,21 +386,27 @@ int waitForDevToolsPort(const std::string& profile, pid_t pid, int timeoutMs) {
     return -1;
 }
 
-// WebSocket path of the first normal page target.
-std::string findPageTarget(int port) {
-    for (int attempt = 0; attempt < 50; ++attempt) {
-        pvrjson::Value list;
-        if (pvrjson::parse(httpGet(port, "/json/list"), list) && list.type == pvrjson::Value::Type::Array) {
-            for (const pvrjson::Value& t : list.array) {
-                if (t.getString("type") != "page") continue;
-                const std::string ws = t.getString("webSocketDebuggerUrl");
-                const size_t p = ws.find("/devtools/");
-                if (p != std::string::npos) return ws.substr(p);
-            }
+// Waits for the reply to request `id` on `ws` (other messages are dropped).
+bool waitForReply(WebSocket& ws, int id, pvrjson::Value& reply, int timeoutMs) {
+    const auto end = Clock::now() + std::chrono::milliseconds(timeoutMs);
+    while (Clock::now() < end) {
+        pollfd pfd{ws.fd(), POLLIN, 0};
+        poll(&pfd, 1, 100);
+        std::vector<std::string> messages;
+        if (!ws.receive(messages)) return false;
+        for (const std::string& m : messages) {
+            if (pvrjson::parse(m, reply) && reply.getNumber("id", -1) == id) return true;
         }
-        std::this_thread::sleep_for(std::chrono::milliseconds(100));
     }
-    return {};
+    return false;
+}
+
+std::string browserSocketPath(int port) {
+    pvrjson::Value version;
+    if (!pvrjson::parse(httpGet(port, "/json/version"), version)) return {};
+    const std::string ws = version.getString("webSocketDebuggerUrl");
+    const size_t p = ws.find("/devtools/");
+    return p == std::string::npos ? std::string() : ws.substr(p);
 }
 
 struct KeyInfo {
@@ -423,42 +438,8 @@ const KeyInfo* keyInfo(const std::string& name) {
 volatile std::sig_atomic_t gStop = 0;
 void onSignal(int) { gStop = 1; }
 
-}  // namespace
-
-int main(int argc, char** argv) {
-    std::string shmName;
-    std::string url = "https://www.youtube.com";
-    int width = 1280;
-    int height = 720;
-    for (int i = 1; i + 1 < argc; ++i) {
-        const std::string a = argv[i];
-        if (a == "--shm") shmName = argv[++i];
-        else if (a == "--url") url = argv[++i];
-        else if (a == "--width") width = std::atoi(argv[++i]);
-        else if (a == "--height") height = std::atoi(argv[++i]);
-    }
-    width = std::clamp(width, 320, kBrowserMaxWidth);
-    height = std::clamp(height, 240, kBrowserMaxHeight);
-    std::signal(SIGTERM, onSignal);
-    std::signal(SIGINT, onSignal);
-    std::signal(SIGPIPE, SIG_IGN);
-
-    // Shared memory from the app.
-    const int shmFd = shm_open(shmName.c_str(), O_RDWR, 0600);
-    if (shmName.empty() || shmFd < 0) {
-        emitLine("error cannot open shared memory");
-        return 2;
-    }
-    const size_t shmSize = browserShmSize(width, height);
-    void* shmMem = mmap(nullptr, shmSize, PROT_READ | PROT_WRITE, MAP_SHARED, shmFd, 0);
-    close(shmFd);
-    if (shmMem == MAP_FAILED) {
-        emitLine("error cannot map shared memory");
-        return 2;
-    }
-    auto* header = static_cast<BrowserShmHeader*>(shmMem);
-    uint8_t* pixels = static_cast<uint8_t*>(shmMem) + sizeof(BrowserShmHeader);
-
+// --launch: start the shared Chromium, report its port, keep it alive.
+int runLauncher(int width, int height) {
     // Prefer the user's own Chromium profile so desktop logins carry over. A
     // profile can only be open once: if their Chromium is running, it hands
     // our launch over and exits, and we fall back to a profile of our own.
@@ -493,11 +474,88 @@ int main(int argc, char** argv) {
         emitLine("error could not start Chromium");
         return 3;
     }
-    const std::string target = port > 0 ? findPageTarget(port) : std::string();
+    emitLine("port " + std::to_string(port));
+    while (!gStop) {
+        pollfd pfd{STDIN_FILENO, POLLIN, 0};
+        poll(&pfd, 1, 200);
+        if (pfd.revents & (POLLIN | POLLHUP)) {
+            char buf[256];
+            const ssize_t n = read(STDIN_FILENO, buf, sizeof(buf));
+            if (n <= 0 || std::string(buf, static_cast<size_t>(n)).find("quit") != std::string::npos) break;
+        }
+        if (waitpid(chrome, nullptr, WNOHANG) == chrome) {
+            emitLine("error Chromium exited");
+            return 6;
+        }
+    }
+    stopChromium(chrome);
+    return 0;
+}
+
+}  // namespace
+
+int main(int argc, char** argv) {
+    std::string shmName;
+    std::string url = "https://www.youtube.com";
+    int width = 1280;
+    int height = 720;
+    int port = -1;
+    bool launch = false;
+    for (int i = 1; i < argc; ++i) {
+        const std::string a = argv[i];
+        if (a == "--launch") launch = true;
+        else if (i + 1 >= argc) break;
+        else if (a == "--shm") shmName = argv[++i];
+        else if (a == "--url") url = argv[++i];
+        else if (a == "--width") width = std::atoi(argv[++i]);
+        else if (a == "--height") height = std::atoi(argv[++i]);
+        else if (a == "--port") port = std::atoi(argv[++i]);
+    }
+    width = std::clamp(width, 320, kBrowserMaxWidth);
+    height = std::clamp(height, 240, kBrowserMaxHeight);
+    std::signal(SIGTERM, onSignal);
+    std::signal(SIGINT, onSignal);
+    std::signal(SIGPIPE, SIG_IGN);
+    if (launch) return runLauncher(width, height);
+
+    // Shared memory from the app.
+    const int shmFd = shm_open(shmName.c_str(), O_RDWR, 0600);
+    if (shmName.empty() || shmFd < 0) {
+        emitLine("error cannot open shared memory");
+        return 2;
+    }
+    const size_t shmSize = browserShmSize(width, height);
+    void* shmMem = mmap(nullptr, shmSize, PROT_READ | PROT_WRITE, MAP_SHARED, shmFd, 0);
+    close(shmFd);
+    if (shmMem == MAP_FAILED) {
+        emitLine("error cannot map shared memory");
+        return 2;
+    }
+    auto* header = static_cast<BrowserShmHeader*>(shmMem);
+    uint8_t* pixels = static_cast<uint8_t*>(shmMem) + sizeof(BrowserShmHeader);
+
+    // Our own window in the shared Chromium (a separate window keeps every
+    // screen's page rendering, unlike background tabs).
+    if (port <= 0) {
+        emitLine("error no browser port");
+        return 3;
+    }
+    std::string targetId;
+    {
+        WebSocket bws;
+        const std::string browserPath = browserSocketPath(port);
+        pvrjson::Value reply;
+        if (!browserPath.empty() && bws.connectTo(port, browserPath) &&
+            bws.sendText("{\"id\":1,\"method\":\"Target.createTarget\",\"params\":{\"url\":\"about:blank\","
+                         "\"newWindow\":true}}") &&
+            waitForReply(bws, 1, reply, 10000)) {
+            const pvrjson::Value* result = reply.get("result");
+            if (result) targetId = result->getString("targetId");
+        }
+    }
     WebSocket ws;
-    if (target.empty() || !ws.connectTo(port, target)) {
-        emitLine("error could not connect to Chromium");
-        stopChromium(chrome);
+    if (targetId.empty() || !ws.connectTo(port, "/devtools/page/" + targetId)) {
+        emitLine("error could not open a Chromium window");
         return 4;
     }
 
@@ -523,8 +581,10 @@ int main(int argc, char** argv) {
     }
     // The headless window reserves room for (invisible) browser UI; pin the
     // page viewport to exactly our frame size so input maps 1:1.
-    cdp("Emulation.setDeviceMetricsOverride", "{\"width\":" + std::to_string(width) + ",\"height\":" +
-                                                  std::to_string(height) +
+    const std::string wStr = std::to_string(width);
+    const std::string hStr = std::to_string(height);
+    cdp("Emulation.setDeviceMetricsOverride", "{\"width\":" + wStr + ",\"height\":" + hStr +
+                                                  ",\"screenWidth\":" + wStr + ",\"screenHeight\":" + hStr +
                                                   ",\"deviceScaleFactor\":1,\"mobile\":false}");
     cdp("Page.startScreencast", "{\"format\":\"jpeg\",\"quality\":80,\"maxWidth\":" + std::to_string(width) +
                                     ",\"maxHeight\":" + std::to_string(height) + "}");
@@ -538,6 +598,7 @@ int main(int argc, char** argv) {
     std::string lastTitle;
     int lastLoading = -1;
     int stateRequest = -1;
+    int evalRequest = -1;
     auto nextStatePoll = Clock::now();
 
     auto mouse = [&](const char* type, double x, double y, const char* button, int clicks) {
@@ -595,6 +656,9 @@ int main(int argc, char** argv) {
             evaluate("history.forward()");
         } else if (cmd == "reload") {
             cdp("Page.reload");
+        } else if (cmd == "eval" && !rest.empty()) {
+            evalRequest = cdp("Runtime.evaluate", "{\"expression\":" + pvrjson::quote(rest) +
+                                                      ",\"returnByValue\":true,\"userGesture\":true}");
         } else if (cmd == "quit") {
             gStop = 1;
         }
@@ -628,6 +692,24 @@ int main(int argc, char** argv) {
             header->seq.store(seq + 2, std::memory_order_release);  // even: frame ready
             return;
         }
+        if (evalRequest >= 0 && msg.getNumber("id", -1) == evalRequest) {
+            const pvrjson::Value* result = msg.get("result");
+            const pvrjson::Value* inner = result ? result->get("result") : nullptr;
+            std::string out = "undefined";
+            if (inner) {
+                const pvrjson::Value* v = inner->get("value");
+                if (v && v->type == pvrjson::Value::Type::String) out = v->str;
+                else if (v && v->type == pvrjson::Value::Type::Number) out = std::to_string(v->number);
+                else if (v && v->type == pvrjson::Value::Type::Bool) out = v->boolean ? "true" : "false";
+                else out = inner->getString("description");
+            }
+            for (char& c : out) {
+                if (c == '\n') c = ' ';
+            }
+            emitLine("eval " + out);
+            evalRequest = -1;
+            return;
+        }
         if (msg.getNumber("id", -1) == stateRequest) {
             // [href, title, readyState] from the state poll.
             const pvrjson::Value* result = msg.get("result");
@@ -645,7 +727,6 @@ int main(int argc, char** argv) {
     };
 
     int rc = 0;
-    bool chromeGone = false;
     while (!gStop) {
         pollfd fds[2] = {{STDIN_FILENO, POLLIN, 0}, {ws.fd(), POLLIN, 0}};
         poll(fds, 2, 100);
@@ -673,16 +754,13 @@ int main(int argc, char** argv) {
             stateRequest = evaluate("JSON.stringify([location.href, document.title, document.readyState])");
             nextStatePoll = Clock::now() + std::chrono::milliseconds(500);
         }
-        if (waitpid(chrome, nullptr, WNOHANG) == chrome) {
-            emitLine("error Chromium exited");
-            rc = 6;
-            chromeGone = true;
-            break;
-        }
     }
 
     tjDestroy(jpeg);
-    if (!chromeGone) stopChromium(chrome);
+    if (rc == 0) {
+        cdp("Page.close");  // our window only; the launcher owns Chromium
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    }
     munmap(shmMem, shmSize);
     return rc;
 }

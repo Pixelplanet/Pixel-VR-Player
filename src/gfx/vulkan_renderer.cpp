@@ -624,8 +624,10 @@ VulkanRenderer::~VulkanRenderer() {
         if (modelSetLayout_ != VK_NULL_HANDLE)
             vkDestroyDescriptorSetLayout(device_, modelSetLayout_, nullptr);
         clearCardThumbnails();
-        releaseWebTexture();
-        webTex_.set = VK_NULL_HANDLE;  // freed with the pool
+        for (int slot = 0; slot < kMaxVideoSlots; ++slot) {
+            releaseWebTexture(slot);
+            webTex_[slot].set = VK_NULL_HANDLE;  // freed with the pool
+        }
         releaseThumbSlot(kScrubThumbSlot);
         if (thumbPipeline_ != VK_NULL_HANDLE)
             vkDestroyPipeline(device_, thumbPipeline_, nullptr);
@@ -1654,49 +1656,51 @@ void VulkanRenderer::updateCardThumbnail(int slot, const std::string& path,
     PIXELVR_LOG_INFO("VulkanRenderer: uploaded card thumbnail slot %d -> %s", slot, path.c_str());
 }
 
-void VulkanRenderer::releaseWebTexture() {
-    if (webTex_.view != VK_NULL_HANDLE) vkDestroyImageView(device_, webTex_.view, nullptr);
-    if (webTex_.image != VK_NULL_HANDLE) vkDestroyImage(device_, webTex_.image, nullptr);
-    if (webTex_.memory != VK_NULL_HANDLE) vkFreeMemory(device_, webTex_.memory, nullptr);
-    if (webTex_.staging != VK_NULL_HANDLE) vkDestroyBuffer(device_, webTex_.staging, nullptr);
-    if (webTex_.stagingMemory != VK_NULL_HANDLE) vkFreeMemory(device_, webTex_.stagingMemory, nullptr);
-    webTex_.view = VK_NULL_HANDLE;
-    webTex_.image = VK_NULL_HANDLE;
-    webTex_.memory = VK_NULL_HANDLE;
-    webTex_.staging = VK_NULL_HANDLE;
-    webTex_.stagingMemory = VK_NULL_HANDLE;
-    webTex_.stagingPtr = nullptr;
-    webTex_.width = webTex_.height = 0;
-    webTex_.initialized = false;
+void VulkanRenderer::releaseWebTexture(int slot) {
+    WebTexture& t = webTex_[slot];
+    if (t.view != VK_NULL_HANDLE) vkDestroyImageView(device_, t.view, nullptr);
+    if (t.image != VK_NULL_HANDLE) vkDestroyImage(device_, t.image, nullptr);
+    if (t.memory != VK_NULL_HANDLE) vkFreeMemory(device_, t.memory, nullptr);
+    if (t.staging != VK_NULL_HANDLE) vkDestroyBuffer(device_, t.staging, nullptr);
+    if (t.stagingMemory != VK_NULL_HANDLE) vkFreeMemory(device_, t.stagingMemory, nullptr);
+    t.view = VK_NULL_HANDLE;
+    t.image = VK_NULL_HANDLE;
+    t.memory = VK_NULL_HANDLE;
+    t.staging = VK_NULL_HANDLE;
+    t.stagingMemory = VK_NULL_HANDLE;
+    t.stagingPtr = nullptr;
+    t.width = t.height = 0;
+    t.initialized = false;
 }
 
-void VulkanRenderer::updateWebFrame(const uint8_t* rgba, int width, int height) {
-    if (!rgba || width <= 0 || height <= 0 || device_ == VK_NULL_HANDLE || textPool_ == VK_NULL_HANDLE ||
+void VulkanRenderer::updateWebFrame(int slot, const uint8_t* rgba, int width, int height) {
+    if (slot < 0 || slot >= kMaxVideoSlots || !rgba || width <= 0 || height <= 0 || device_ == VK_NULL_HANDLE || textPool_ == VK_NULL_HANDLE ||
         textSetLayout_ == VK_NULL_HANDLE) {
         return;
     }
+    WebTexture& t = webTex_[slot];
     const VkDeviceSize sz = static_cast<VkDeviceSize>(width) * height * 4;
-    if (webTex_.width != width || webTex_.height != height) {
+    if (t.width != width || t.height != height) {
         // (Re)create a persistent image + mapped staging buffer for this size.
         vkDeviceWaitIdle(device_);
-        releaseWebTexture();
+        releaseWebTexture(slot);
         VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
         bi.size = sz;
         bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
         bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-        if (vkCreateBuffer(device_, &bi, nullptr, &webTex_.staging) != VK_SUCCESS) return;
+        if (vkCreateBuffer(device_, &bi, nullptr, &t.staging) != VK_SUCCESS) return;
         VkMemoryRequirements req{};
-        vkGetBufferMemoryRequirements(device_, webTex_.staging, &req);
+        vkGetBufferMemoryRequirements(device_, t.staging, &req);
         VkMemoryAllocateInfo alloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
         alloc.allocationSize = req.size;
         alloc.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
                                                                        VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-        if (vkAllocateMemory(device_, &alloc, nullptr, &webTex_.stagingMemory) != VK_SUCCESS) {
-            releaseWebTexture();
+        if (vkAllocateMemory(device_, &alloc, nullptr, &t.stagingMemory) != VK_SUCCESS) {
+            releaseWebTexture(slot);
             return;
         }
-        vkBindBufferMemory(device_, webTex_.staging, webTex_.stagingMemory, 0);
-        vkMapMemory(device_, webTex_.stagingMemory, 0, sz, 0, &webTex_.stagingPtr);
+        vkBindBufferMemory(device_, t.staging, t.stagingMemory, 0);
+        vkMapMemory(device_, t.stagingMemory, 0, sz, 0, &t.stagingPtr);
 
         VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
         ii.imageType = VK_IMAGE_TYPE_2D;
@@ -1709,52 +1713,52 @@ void VulkanRenderer::updateWebFrame(const uint8_t* rgba, int width, int height) 
         ii.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
         ii.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-        if (vkCreateImage(device_, &ii, nullptr, &webTex_.image) != VK_SUCCESS) {
-            releaseWebTexture();
+        if (vkCreateImage(device_, &ii, nullptr, &t.image) != VK_SUCCESS) {
+            releaseWebTexture(slot);
             return;
         }
-        vkGetImageMemoryRequirements(device_, webTex_.image, &req);
+        vkGetImageMemoryRequirements(device_, t.image, &req);
         alloc.allocationSize = req.size;
         alloc.memoryTypeIndex = findMemoryType(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-        if (vkAllocateMemory(device_, &alloc, nullptr, &webTex_.memory) != VK_SUCCESS) {
-            releaseWebTexture();
+        if (vkAllocateMemory(device_, &alloc, nullptr, &t.memory) != VK_SUCCESS) {
+            releaseWebTexture(slot);
             return;
         }
-        vkBindImageMemory(device_, webTex_.image, webTex_.memory, 0);
+        vkBindImageMemory(device_, t.image, t.memory, 0);
         VkImageViewCreateInfo iv{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-        iv.image = webTex_.image;
+        iv.image = t.image;
         iv.viewType = VK_IMAGE_VIEW_TYPE_2D;
         iv.format = VK_FORMAT_R8G8B8A8_UNORM;
         iv.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-        if (vkCreateImageView(device_, &iv, nullptr, &webTex_.view) != VK_SUCCESS) {
-            releaseWebTexture();
+        if (vkCreateImageView(device_, &iv, nullptr, &t.view) != VK_SUCCESS) {
+            releaseWebTexture(slot);
             return;
         }
-        if (webTex_.set == VK_NULL_HANDLE) {
+        if (t.set == VK_NULL_HANDLE) {
             VkDescriptorSetAllocateInfo da{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
             da.descriptorPool = textPool_;
             da.descriptorSetCount = 1;
             da.pSetLayouts = &textSetLayout_;
-            if (vkAllocateDescriptorSets(device_, &da, &webTex_.set) != VK_SUCCESS) {
-                releaseWebTexture();
+            if (vkAllocateDescriptorSets(device_, &da, &t.set) != VK_SUCCESS) {
+                releaseWebTexture(slot);
                 return;
             }
         }
         VkDescriptorImageInfo dii{};
         dii.sampler = sampler_;
-        dii.imageView = webTex_.view;
+        dii.imageView = t.view;
         dii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         VkWriteDescriptorSet wr{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        wr.dstSet = webTex_.set;
+        wr.dstSet = t.set;
         wr.dstBinding = 0;
         wr.descriptorCount = 1;
         wr.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         wr.pImageInfo = &dii;
         vkUpdateDescriptorSets(device_, 1, &wr, 0, nullptr);
-        webTex_.width = width;
-        webTex_.height = height;
+        t.width = width;
+        t.height = height;
     }
-    std::memcpy(webTex_.stagingPtr, rgba, static_cast<std::size_t>(sz));
+    std::memcpy(t.stagingPtr, rgba, static_cast<std::size_t>(sz));
 
     vkResetCommandBuffer(uploadCmd_, 0);
     VkCommandBufferBeginInfo cb{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
@@ -1762,11 +1766,11 @@ void VulkanRenderer::updateWebFrame(const uint8_t* rgba, int width, int height) 
     vkBeginCommandBuffer(uploadCmd_, &cb);
     // Earlier frames may still be sampling it: wait for their fragment reads.
     VkImageMemoryBarrier toDst{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
-    toDst.oldLayout = webTex_.initialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
+    toDst.oldLayout = t.initialized ? VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL : VK_IMAGE_LAYOUT_UNDEFINED;
     toDst.newLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
     toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
-    toDst.image = webTex_.image;
+    toDst.image = t.image;
     toDst.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     toDst.srcAccessMask = 0;
     toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -1775,7 +1779,7 @@ void VulkanRenderer::updateWebFrame(const uint8_t* rgba, int width, int height) 
     VkBufferImageCopy region{};
     region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
     region.imageExtent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
-    vkCmdCopyBufferToImage(uploadCmd_, webTex_.staging, webTex_.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
+    vkCmdCopyBufferToImage(uploadCmd_, t.staging, t.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
                            &region);
     VkImageMemoryBarrier toRead = toDst;
     toRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
@@ -1791,7 +1795,7 @@ void VulkanRenderer::updateWebFrame(const uint8_t* rgba, int width, int height) 
     vkQueueSubmit(queue_, 1, &su, uploadFence_);
     vkWaitForFences(device_, 1, &uploadFence_, VK_TRUE, UINT64_MAX);
     vkResetFences(device_, 1, &uploadFence_);
-    webTex_.initialized = true;
+    t.initialized = true;
 }
 
 void VulkanRenderer::screenOrderLeftToRight(int out[kMaxVideoSlots]) const {
@@ -1880,7 +1884,7 @@ void VulkanRenderer::updatePointer() {
     keyboardKeyHovered_ = -1;
     keyboardFieldHovered_ = false;
     pointerScreen_ = -1;
-    webPointerValid_ = false;
+    webPointerSlot_ = -1;
 
     if (pointerSuppressed_) {
         return;
@@ -1892,7 +1896,9 @@ void VulkanRenderer::updatePointer() {
                          (downloadsVisible_ && !downloadsModal_)) && !actionMenuOpen && !kbOpen;
     const bool modalOpen = (downloadsVisible_ && downloadsModal_) && !actionMenuOpen && !kbOpen;
     const bool controlBar = controlBarVisible_ && !hubOpen && !modalOpen && !actionMenuOpen && !kbOpen;
-    const bool screensPointable = (multiScreenActive_ || webSlot_ >= 0) && !hubOpen && !modalOpen &&
+    bool anyWeb = false;
+    for (bool w : webSlots_) anyWeb = anyWeb || w;
+    const bool screensPointable = (multiScreenActive_ || anyWeb) && !hubOpen && !modalOpen &&
                                   !actionMenuOpen && !kbOpen;
     if (!kbOpen && !hubOpen && !modalOpen && !controlBar && !actionMenuOpen &&
         !screensPointable) {
@@ -2216,13 +2222,42 @@ void VulkanRenderer::updatePointer() {
                 const Vec3 xAxis = transformDir(rot, Vec3{1.0f, 0.0f, 0.0f});
                 const Vec3 yAxis = transformDir(rot, Vec3{0.0f, 1.0f, 0.0f});
                 const Vec3 nAxis = transformDir(rot, Vec3{0.0f, 0.0f, 1.0f});
-                const float denom = dot(dir, nAxis);
-                if (std::fabs(denom) < 1e-4f) continue;
-                const float t = dot(c - origin, nAxis) / denom;
+                // Ray in the screen's frame (x right, y up, z toward the viewer).
+                const Vec3 oS{dot(origin - c, xAxis), dot(origin - c, yAxis), dot(origin - c, nAxis)};
+                const Vec3 dS{dot(dir, xAxis), dot(dir, yAxis), dot(dir, nAxis)};
+                float t = -1.0f;
+                float lx = 0.0f;  // arc length from the centre line
+                if (sh.bendR > 0.0f) {
+                    // Curved: a cylinder of radius R around the vertical axis at
+                    // z = R (the viewer side); the screen is its far half.
+                    const float R = sh.bendR;
+                    const float ox = oS.x;
+                    const float oz = oS.z - R;
+                    const float qa = dS.x * dS.x + dS.z * dS.z;
+                    if (qa < 1e-8f) continue;
+                    const float qb = 2.0f * (ox * dS.x + oz * dS.z);
+                    const float qc = ox * ox + oz * oz - R * R;
+                    const float disc = qb * qb - 4.0f * qa * qc;
+                    if (disc < 0.0f) continue;
+                    const float sq = std::sqrt(disc);
+                    for (float root : {(-qb + sq) / (2.0f * qa), (-qb - sq) / (2.0f * qa)}) {
+                        const float px = oS.x + root * dS.x;
+                        const float pz = oS.z + root * dS.z;
+                        if (root > 0.05f && pz < R) {
+                            t = root;
+                            lx = R * std::atan2(px, R - pz);
+                            break;
+                        }
+                    }
+                    if (t < 0.0f) continue;
+                } else {
+                    if (std::fabs(dS.z) < 1e-4f) continue;
+                    t = -oS.z / dS.z;
+                    lx = oS.x + t * dS.x;
+                }
                 if (t <= 0.05f || t >= bestT) continue;
                 const Vec3 p = origin + dir * t;
-                const float lx = dot(p - c, xAxis);
-                const float ly = dot(p - c, yAxis);
+                const float ly = oS.y + t * dS.y;
                 if (std::fabs(lx) <= sh.halfW && std::fabs(ly) <= sh.halfH) {
                     bestT = t;
                     screenHitSlot = slot;
@@ -2236,8 +2271,8 @@ void VulkanRenderer::updatePointer() {
             if (screenHitSlot < 0) return false;
             hitHere(screenHitWorld.x, screenHitWorld.y, screenHitWorld.z);
             pointerScreen_ = screenHitSlot;
-            if (screenHitSlot == webSlot_) {
-                webPointerValid_ = true;
+            if (webSlots_[screenHitSlot]) {
+                webPointerSlot_ = screenHitSlot;
                 webPointerU_ = screenHitU;
                 webPointerV_ = screenHitV;
             }
@@ -3178,7 +3213,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         int visibleScreens = 0;
         for (int slot = 0; slot < kMaxVideoSlots; ++slot) {
             const bool flatMain = (projectionMode_ == ProjectionMode::Flat);
-            const bool picture = videoSlots_[slot].hasVideo || (slot == webSlot_ && webTex_.initialized);
+            const bool picture = videoSlots_[slot].hasVideo || (webSlots_[slot] && webTex_[slot].initialized);
             if (picture && flatMain && (slot == 0 || screenPlacements_[slot].active)) {
                 ++visibleScreens;
             }
@@ -3194,7 +3229,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             VideoSlot& v = videoSlots_[slot];
             const ScreenPlacement& pl = screenPlacements_[slot];
             // The web browser's slot shows the page texture instead of video.
-            const bool webHere = (slot == webSlot_) && webTex_.initialized && webTex_.set != VK_NULL_HANDLE &&
+            const bool webHere = webSlots_[slot] && webTex_[slot].initialized && webTex_[slot].set != VK_NULL_HANDLE &&
                                  thumbPipeline_ != VK_NULL_HANDLE;
             if (!v.hasVideo && !webHere) continue;
             if (slot > 0 && !pl.active) continue;  // extra slot not in use
@@ -3288,7 +3323,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                     // quad.vert (arc of radius 3.2 / (curvature * 1.75)).
                     vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, thumbPipeline_);
                     vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                            textPipelineLayout_, 0, 1, &webTex_.set, 0, nullptr);
+                                            textPipelineLayout_, 0, 1, &webTex_[slot].set, 0, nullptr);
                     TextPush tp{};
                     std::memcpy(tp.mvp, mvp.m, sizeof(tp.mvp));
                     const float white4[4] = {1.0f, 1.0f, 1.0f, 1.0f};
@@ -3338,6 +3373,9 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                     hit.pitch = (slot == 0 && !pl.active) ? recenterPitch_ : pl.pitch;
                     hit.halfW = 1.6f * widthScale * scale;
                     hit.halfH = 0.9f * scale;
+                    // quad.vert's arc radius, in world units (model x and z
+                    // are both scaled by widthScale * scale).
+                    hit.bendR = (curvature > 0.005f) ? widthScale * scale * 3.2f / (curvature * 1.75f) : 0.0f;
                 }
                 screenScaleX[slot] = widthScale * scale;
 
@@ -4847,11 +4885,11 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         // Live frame of a screen (left eye for 3D) with the video pipeline; `mvp`
         // maps the unscaled 3.2 x 1.8 screen model onto the panel.
         auto drawLivePreview = [&](int slot, const Mat4& mvp, float curvature) {
-            if (slot == webSlot_ && webTex_.initialized && webTex_.set != VK_NULL_HANDLE &&
+            if (webSlots_[slot] && webTex_[slot].initialized && webTex_[slot].set != VK_NULL_HANDLE &&
                 thumbPipeline_ != VK_NULL_HANDLE) {
                 bindPipe(thumbPipeline_);
                 vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipelineLayout_, 0,
-                                        1, &webTex_.set, 0, nullptr);
+                                        1, &webTex_[slot].set, 0, nullptr);
                 TextPush tp{};
                 std::memcpy(tp.mvp, mvp.m, sizeof(tp.mvp));
                 const float white4[4] = {1.0f, 1.0f, 1.0f, 1.0f};
@@ -5090,7 +5128,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 if (ghost) {
                     // Empty slot: where a new screen would open.
                     drawUiElement(mvp, 0.0f, 0.0f, 1.6f, 0.9f, UiShape::RoundedBox, glassWellT.data(), 0.0f);
-                } else if (videoSlots_[slot].hasVideo || slot == webSlot_) {
+                } else if (videoSlots_[slot].hasVideo || webSlots_[slot]) {
                     drawLivePreview(slot, mvp, t.curvature);
                 } else {
                     drawUiElement(mvp, 0.0f, 0.0f, 1.6f, 0.9f, UiShape::RoundedBox, glassControlT.data(), 0.0f);
@@ -5158,7 +5196,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 drawUiElement(vpPanel, r.cx, r.cy, r.hw + 0.008f, r.hh + 0.008f, UiShape::RoundedBox,
                               glassWellT.data(), 0.14f, hov ? 0.10f : 0.05f,
                               hov ? tabActiveBord : kGlassRimFaint);
-                if (occupied && (videoSlots_[slot].hasVideo || slot == webSlot_)) {
+                if (occupied && (videoSlots_[slot].hasVideo || webSlots_[slot])) {
                     drawLivePreview(slot, multiply(tileVp(r), scaling(Vec3{r.hw / 1.6f, r.hh / 0.9f, 1.0f})),
                                     0.0f);
                 } else {
@@ -5218,7 +5256,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 if (!t.valid) continue;
                 const Mat4 mvp = multiply(boxVp, t.model);
                 uiBendOverride = t.bend;
-                if (videoSlots_[slot].hasVideo || slot == webSlot_) {
+                if (videoSlots_[slot].hasVideo || webSlots_[slot]) {
                     drawLivePreview(slot, mvp, t.curvature);
                 } else {
                     drawUiElement(mvp, 0.0f, 0.0f, 1.6f, 0.9f, UiShape::RoundedBox, glassControlT.data(), 0.0f);

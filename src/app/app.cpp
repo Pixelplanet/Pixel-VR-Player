@@ -729,10 +729,13 @@ void App::closeMedia(int slot) {
     if (slot < 0) slot = selectedScreen_;
     ScreenState& sc = screens_[slot];
     if (sc.web) {
-        webHost_.stop();
-        renderer_.setWebSlot(-1);
+        webHosts_[slot].stop();
+        renderer_.setWebSlot(slot, false);
         sc.web = false;
-        webMouseDown_ = false;
+        if (webMouseSlot_ == slot) {
+            webMouseSlot_ = -1;
+            webMouseDown_ = false;
+        }
     } else {
 #ifdef PIXELVR_HAVE_MEDIA
         rememberPlaybackPosition(slot);
@@ -1647,12 +1650,6 @@ void App::openWebScreen() {
 #endif
     settings_.close();
     downloadsWindow_ = false;
-    for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
-        if (screens_[slot].web) {  // already open: select it
-            selectScreen(slot);
-            return;
-        }
-    }
     if (multiScreenEnabled() && openScreenCount() > 0) {
         openPlayTargetMenu(kWebPath);
         actionMenu_.subtitle = "Web browser";
@@ -1663,11 +1660,12 @@ void App::openWebScreen() {
 
 void App::loadWeb(int slot) {
     if (!multiScreenEnabled()) slot = 0;
-    for (int s = 0; s < VulkanRenderer::kMaxVideoSlots; ++s) {
-        if (screens_[s].web && s != slot) closeMedia(s);  // one browser at a time
+    if (screens_[slot].web) {  // already a browser: keep its page
+        selectScreen(slot);
+        return;
     }
-    if (screens_[slot].open && !screens_[slot].web) closeMedia(slot);
-    if (!webHost_.running() && !webHost_.start("https://www.youtube.com", 1280, 720)) {
+    if (screens_[slot].open) closeMedia(slot);
+    if (!webHosts_[slot].start("https://www.youtube.com", 1280, 720)) {
         PIXELVR_LOG_WARN("Web screen: browser helper unavailable");
         return;
     }
@@ -1691,7 +1689,7 @@ void App::loadWeb(int slot) {
         pl.stereo = VulkanRenderer::StereoMode::Mono;
         renderer_.setScreenPlacement(slot, pl);
     }
-    renderer_.setWebSlot(slot);
+    renderer_.setWebSlot(slot, true);
     joinArrangement(slot);
     selectScreen(slot);
     webMouseDown_ = false;
@@ -2086,27 +2084,38 @@ int App::run() {
             // Trigger = click (a press only becomes a drag after moving past a
             // small slop, so laser jitter doesn't select text), thumbstick =
             // scroll, B = back. Close it with the dock's X like any screen.
-            if (webHost_.running()) {
-                webHost_.poll();
-                if (const uint8_t* rgba = webHost_.takeFrame()) {
-                    renderer_.updateWebFrame(rgba, webHost_.width(), webHost_.height());
-                }
-            }
             for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
-                if (screens_[slot].web && !webHost_.running()) closeMedia(slot);  // helper died
+                if (!screens_[slot].web) continue;
+                BrowserHost& host = webHosts_[slot];
+                host.poll();
+                if (!host.running()) {  // helper or Chromium died
+                    closeMedia(slot);
+                    continue;
+                }
+                if (const uint8_t* rgba = host.takeFrame()) {
+                    renderer_.updateWebFrame(slot, rgba, host.width(), host.height());
+                }
             }
             bool hubShown = settings_.isOpen() || downloadsWindow_;
 #ifdef PIXELVR_HAVE_FREETYPE
             hubShown = hubShown || browser_.isOpen();
 #endif
-            if (renderer_.webSlot() >= 0 && !hubShown && !actionMenu_.visible && !textEntry_.active &&
-                !screensUnlocked_ && movingScreen_ < 0) {
+            if (!hubShown && !actionMenu_.visible && !textEntry_.active && !screensUnlocked_ &&
+                movingScreen_ < 0) {
                 constexpr float kClickSlop = 16.0f;  // page pixels
+                int ws = -1;
                 float u = 0.0f, v = 0.0f;
-                const bool onWeb = renderer_.webPointer(u, v);
-                if (onWeb) {
-                    const float rx = u * static_cast<float>(webHost_.width());
-                    const float ry = v * static_cast<float>(webHost_.height());
+                const bool onWeb = renderer_.webPointer(ws, u, v) && screens_[ws].web;
+                // A press stays with the screen it started on.
+                if (onWeb && !webMouseDown_ && ws != webMouseSlot_) {
+                    webMouseSlot_ = ws;
+                    webHoverValid_ = false;
+                }
+                BrowserHost* host = (webMouseSlot_ >= 0 && screens_[webMouseSlot_].web) ? &webHosts_[webMouseSlot_]
+                                                                                       : nullptr;
+                if (host && onWeb && ws == webMouseSlot_) {
+                    const float rx = u * static_cast<float>(host->width());
+                    const float ry = v * static_cast<float>(host->height());
                     if (!webHoverValid_) {
                         webMouseX_ = rx;
                         webMouseY_ = ry;
@@ -2116,12 +2125,12 @@ int App::run() {
                         webMouseY_ += (ry - webMouseY_) * 0.5f;
                     }
                     if (in.select) {
-                        if (renderer_.webSlot() != selectedScreen_) selectScreen(renderer_.webSlot());
+                        if (webMouseSlot_ != selectedScreen_) selectScreen(webMouseSlot_);
                         webDownX_ = webMouseX_;
                         webDownY_ = webMouseY_;
                         webDragging_ = false;
-                        webHost_.mouseMove(webDownX_, webDownY_);
-                        webHost_.mouseDown(webDownX_, webDownY_);
+                        host->mouseMove(webDownX_, webDownY_);
+                        host->mouseDown(webDownX_, webDownY_);
                         webMouseDown_ = true;
                         in.select = false;
                         in.togglePlay = false;
@@ -2129,30 +2138,30 @@ int App::run() {
                         const float dx = webMouseX_ - webDownX_;
                         const float dy = webMouseY_ - webDownY_;
                         if (!webDragging_ && dx * dx + dy * dy > kClickSlop * kClickSlop) webDragging_ = true;
-                        if (webDragging_) webHost_.mouseMove(webMouseX_, webMouseY_);
+                        if (webDragging_) host->mouseMove(webMouseX_, webMouseY_);
                     } else {
-                        webHost_.mouseMove(webMouseX_, webMouseY_);
+                        host->mouseMove(webMouseX_, webMouseY_);
                     }
                     if (std::fabs(in.thumbstickY) > 0.2f) {
                         webWheelAccum_ += in.thumbstickY * dt * 1800.0f;  // wheel units (120 per notch)
                         const int steps = static_cast<int>(webWheelAccum_);
                         if (steps != 0) {
-                            webHost_.wheel(webMouseX_, webMouseY_, steps);
+                            host->wheel(webMouseX_, webMouseY_, steps);
                             webWheelAccum_ -= static_cast<float>(steps);
                         }
                         in.thumbstickY = 0.0f;
                     }
                     if (in.buttonDown[XrInputState::BtnB]) {
-                        webHost_.back();
+                        host->back();
                         in.buttonDown[XrInputState::BtnB] = false;
                     }
-                } else {
+                } else if (!onWeb) {
                     webHoverValid_ = false;
                 }
-                if (webMouseDown_ && !in.selectHeld) {
+                if (host && webMouseDown_ && !in.selectHeld) {
                     // A press that never left the slop is a clean click where it started.
-                    if (webDragging_) webHost_.mouseUp(webMouseX_, webMouseY_);
-                    else webHost_.mouseUp(webDownX_, webDownY_);
+                    if (webDragging_) host->mouseUp(webMouseX_, webMouseY_);
+                    else host->mouseUp(webDownX_, webDownY_);
                     webMouseDown_ = false;
                     webDragging_ = false;
                 }

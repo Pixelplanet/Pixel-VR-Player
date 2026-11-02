@@ -269,10 +269,12 @@ private:
     int movingScreen_ = -1;  // screen being placed with the laser, or -1
     // Web browser screen (proof of concept): the pvr-browser helper's page on a
     // floating screen; the laser acts as the mouse.
-    // One browser at a time; it lives on a screen slot like a video (placement,
-    // arrangement, close). "web://" is its pseudo path in the screen picker.
+    // Browser screens live on screen slots like videos (placement, arrangement,
+    // close); each has its own Chromium window. "web://" is the pseudo path the
+    // screen picker uses for "open a browser here".
     static constexpr const char* kWebPath = "web://";
-    BrowserHost webHost_;
+    BrowserHost webHosts_[VulkanRenderer::kMaxVideoSlots];
+    int webMouseSlot_ = -1;      // browser screen the press / hover belongs to
     bool webMouseDown_ = false;
     bool webDragging_ = false;   // moved past the click slop while pressed
     float webMouseX_ = 0.0f;     // smoothed laser position, page pixels

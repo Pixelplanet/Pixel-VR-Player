@@ -24,8 +24,7 @@ namespace pixelvr {
 
 namespace {
 
-// Folder of the running executable (the helper and its libraries live in
-// <exe dir>/browser).
+// Folder of the running executable (the helper lives in <exe dir>/browser).
 std::string exeDir() {
     char buf[4096];
     const ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
@@ -36,63 +35,26 @@ std::string exeDir() {
     return slash == std::string::npos ? std::string(".") : p.substr(0, slash);
 }
 
-}  // namespace
-
-BrowserHost::~BrowserHost() { stop(); }
-
-bool BrowserHost::start(const std::string& url, int width, int height) {
-    stop();
-    width_ = std::min(width, kBrowserMaxWidth);
-    height_ = std::min(height, kBrowserMaxHeight);
-
-    // Shared memory for frames (the app owns and unlinks it).
-    shmName_ = "/pixelvr-browser-" + std::to_string(getpid());
-    shm_unlink(shmName_.c_str());
-    const int fd = shm_open(shmName_.c_str(), O_CREAT | O_RDWR, 0600);
-    if (fd < 0) {
-        PIXELVR_LOG_WARN("Browser: shm_open failed: %s", std::strerror(errno));
-        return false;
-    }
-    shmSize_ = browserShmSize(width_, height_);
-    if (ftruncate(fd, static_cast<off_t>(shmSize_)) != 0) {
-        close(fd);
-        shm_unlink(shmName_.c_str());
-        return false;
-    }
-    shm_ = mmap(nullptr, shmSize_, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
-    close(fd);
-    if (shm_ == MAP_FAILED) {
-        shm_ = nullptr;
-        shm_unlink(shmName_.c_str());
-        return false;
-    }
-    auto* hd = static_cast<BrowserShmHeader*>(shm_);
-    std::memcpy(hd->magic, "PVRBRW1", 8);
-    hd->seq.store(0);
-    lastSeq_ = 0;
-    frame_.assign(static_cast<size_t>(width_) * height_ * 4, 0);
-
+// Starts the helper with `args` (after the program path), stdin/stdout piped.
+pid_t spawnHelper(const std::vector<std::string>& args, int& toFd, int& fromFd) {
+    toFd = fromFd = -1;
     int inPipe[2];
     int outPipe[2];
-    if (pipe(inPipe) != 0) return false;
+    if (pipe(inPipe) != 0) return -1;
     if (pipe(outPipe) != 0) {
         close(inPipe[0]);
         close(inPipe[1]);
-        return false;
+        return -1;
     }
-
-    const std::string dir = exeDir() + "/browser";
-    const std::string helper = dir + "/pvr-browser";
-    const std::string widthStr = std::to_string(width_);
-    const std::string heightStr = std::to_string(height_);
-    std::vector<std::string> argStore = {helper, "--shm", shmName_, "--url", url,
-                                         "--width", widthStr, "--height", heightStr};
+    const std::string helper = exeDir() + "/browser/pvr-browser";
+    std::vector<std::string> argStore = {helper};
+    argStore.insert(argStore.end(), args.begin(), args.end());
     std::vector<char*> argv;
     for (std::string& a : argStore) argv.push_back(a.data());
     argv.push_back(nullptr);
 
-    // Environment: the player's own library path (SteamVR runtime libraries)
-    // must not leak into the browser.
+    // The player's own library path (SteamVR runtime libraries) must not leak
+    // into the browser.
     std::vector<std::string> envStore;
     for (char** e = environ; *e; ++e) {
         if (std::strncmp(*e, "LD_LIBRARY_PATH=", 16) == 0) continue;
@@ -108,50 +70,185 @@ bool BrowserHost::start(const std::string& url, int width, int height) {
     posix_spawn_file_actions_adddup2(&fa, outPipe[1], STDOUT_FILENO);
     posix_spawn_file_actions_addclose(&fa, inPipe[1]);
     posix_spawn_file_actions_addclose(&fa, outPipe[0]);
-    const int rc = posix_spawn(&pid_, helper.c_str(), &fa, nullptr, argv.data(), envp.data());
+    pid_t pid = -1;
+    const int rc = posix_spawn(&pid, helper.c_str(), &fa, nullptr, argv.data(), envp.data());
     posix_spawn_file_actions_destroy(&fa);
     close(inPipe[0]);
     close(outPipe[1]);
     if (rc != 0) {
         PIXELVR_LOG_WARN("Browser: cannot start %s: %s", helper.c_str(), std::strerror(rc));
-        pid_ = -1;
         close(inPipe[1]);
         close(outPipe[0]);
+        return -1;
+    }
+    toFd = inPipe[1];
+    fromFd = outPipe[0];
+    fcntl(fromFd, F_SETFL, fcntl(fromFd, F_GETFL) | O_NONBLOCK);
+    fcntl(toFd, F_SETFD, FD_CLOEXEC);
+    fcntl(fromFd, F_SETFD, FD_CLOEXEC);
+    std::signal(SIGPIPE, SIG_IGN);  // a dead helper must not kill the player
+    return pid;
+}
+
+// Sends "quit", waits up to `waitMs`, then kills.
+void stopHelper(pid_t& pid, int& toFd, int& fromFd, int waitMs) {
+    if (pid > 0) {
+        const char quit[] = "quit\n";
+        if (toFd >= 0) {
+            const ssize_t n = write(toFd, quit, sizeof(quit) - 1);
+            (void)n;
+        }
+        bool exited = false;
+        for (int i = 0; i < waitMs / 50 && !exited; ++i) {
+            exited = waitpid(pid, nullptr, WNOHANG) == pid;
+            if (!exited) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        }
+        if (!exited) {
+            kill(pid, SIGKILL);
+            waitpid(pid, nullptr, 0);
+        }
+        pid = -1;
+    }
+    if (toFd >= 0) close(toFd);
+    if (fromFd >= 0) close(fromFd);
+    toFd = fromFd = -1;
+}
+
+// The shared hidden Chromium: one launcher helper for all browser screens.
+struct Launcher {
+    pid_t pid = -1;
+    int toFd = -1;
+    int fromFd = -1;
+    std::string out;
+    int port = -1;
+    int users = 0;
+    bool failed = false;
+
+    bool ensureStarted(int width, int height) {
+        if (pid > 0) return true;
+        failed = false;
+        port = -1;
+        out.clear();
+        pid = spawnHelper({"--launch", "--width", std::to_string(width), "--height", std::to_string(height)},
+                          toFd, fromFd);
+        if (pid <= 0) {
+            failed = true;
+            return false;
+        }
+        PIXELVR_LOG_INFO("Browser: starting Chromium (launcher pid %d)", static_cast<int>(pid));
+        return true;
+    }
+    void poll() {
+        if (pid <= 0) return;
+        char buf[1024];
+        for (;;) {
+            const ssize_t n = read(fromFd, buf, sizeof(buf));
+            if (n <= 0) break;
+            out.append(buf, static_cast<size_t>(n));
+        }
+        size_t nl;
+        while ((nl = out.find('\n')) != std::string::npos) {
+            const std::string line = out.substr(0, nl);
+            out.erase(0, nl + 1);
+            if (line.rfind("port ", 0) == 0) {
+                port = std::atoi(line.c_str() + 5);
+                PIXELVR_LOG_INFO("Browser: Chromium ready on port %d", port);
+            } else if (line.rfind("error ", 0) == 0) {
+                PIXELVR_LOG_WARN("Browser: %s", line.c_str() + 6);
+            }
+        }
+        if (waitpid(pid, nullptr, WNOHANG) == pid) {
+            PIXELVR_LOG_WARN("Browser: Chromium launcher exited");
+            pid = -1;
+            port = -1;
+            failed = true;
+            stopHelper(pid, toFd, fromFd, 0);
+        }
+    }
+    void stop() {
+        stopHelper(pid, toFd, fromFd, 4000);  // Chromium may take ~3 s to quit
+        port = -1;
+    }
+};
+
+Launcher& launcher() {
+    static Launcher l;
+    return l;
+}
+
+int gShmCounter = 0;
+
+}  // namespace
+
+BrowserHost::~BrowserHost() { stop(); }
+
+bool BrowserHost::start(const std::string& url, int width, int height) {
+    stop();
+    width_ = std::min(width, kBrowserMaxWidth);
+    height_ = std::min(height, kBrowserMaxHeight);
+
+    // Shared memory for frames (the app owns and unlinks it).
+    shmName_ = "/pixelvr-browser-" + std::to_string(getpid()) + "-" + std::to_string(++gShmCounter);
+    shm_unlink(shmName_.c_str());
+    const int fd = shm_open(shmName_.c_str(), O_CREAT | O_RDWR, 0600);
+    if (fd < 0) {
+        PIXELVR_LOG_WARN("Browser: shm_open failed: %s", std::strerror(errno));
+        shmName_.clear();
+        return false;
+    }
+    shmSize_ = browserShmSize(width_, height_);
+    if (ftruncate(fd, static_cast<off_t>(shmSize_)) != 0) {
+        close(fd);
         stop();
         return false;
     }
-    toHelper_ = inPipe[1];
-    fromHelper_ = outPipe[0];
-    fcntl(fromHelper_, F_SETFL, fcntl(fromHelper_, F_GETFL) | O_NONBLOCK);
-    fcntl(toHelper_, F_SETFD, FD_CLOEXEC);
-    fcntl(fromHelper_, F_SETFD, FD_CLOEXEC);
-    std::signal(SIGPIPE, SIG_IGN);  // a dead helper must not kill the player
+    shm_ = mmap(nullptr, shmSize_, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    close(fd);
+    if (shm_ == MAP_FAILED) {
+        shm_ = nullptr;
+        stop();
+        return false;
+    }
+    auto* hd = static_cast<BrowserShmHeader*>(shm_);
+    std::memcpy(hd->magic, "PVRBRW1", 8);
+    hd->seq.store(0);
+    lastSeq_ = 0;
+    frame_.assign(static_cast<size_t>(width_) * height_ * 4, 0);
+
+    if (!launcher().ensureStarted(width_, height_)) {
+        stop();
+        return false;
+    }
+    ++launcher().users;
+    state_ = State::WaitingForBrowser;
+    startUrl_ = url;
     url_ = url;
     title_.clear();
     loading_ = true;
-    PIXELVR_LOG_INFO("Browser: started helper pid %d (%dx%d) on %s", static_cast<int>(pid_), width_,
-                     height_, url.c_str());
+    poll();
+    return true;
+}
+
+bool BrowserHost::spawnPage(int port) {
+    pid_ = spawnHelper({"--port", std::to_string(port), "--shm", shmName_, "--url", startUrl_, "--width",
+                        std::to_string(width_), "--height", std::to_string(height_)},
+                       toHelper_, fromHelper_);
+    if (pid_ <= 0) return false;
+    PIXELVR_LOG_INFO("Browser: page helper pid %d (%dx%d) on %s", static_cast<int>(pid_), width_, height_,
+                     startUrl_.c_str());
     return true;
 }
 
 void BrowserHost::stop() {
-    if (pid_ > 0) {
-        send("quit");
-        bool exited = false;
-        for (int i = 0; i < 40 && !exited; ++i) {  // up to ~2 s
-            int status = 0;
-            exited = waitpid(pid_, &status, WNOHANG) == pid_;
-            if (!exited) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    stopHelper(pid_, toHelper_, fromHelper_, 2000);
+    if (state_ != State::Idle) {
+        state_ = State::Idle;
+        Launcher& l = launcher();
+        if (--l.users <= 0) {
+            l.users = 0;
+            l.stop();  // last browser screen: shut Chromium down
         }
-        if (!exited) {
-            kill(pid_, SIGKILL);
-            waitpid(pid_, nullptr, 0);
-        }
-        pid_ = -1;
     }
-    if (toHelper_ >= 0) close(toHelper_);
-    if (fromHelper_ >= 0) close(fromHelper_);
-    toHelper_ = fromHelper_ = -1;
     if (shm_) munmap(shm_, shmSize_);
     shm_ = nullptr;
     if (!shmName_.empty()) shm_unlink(shmName_.c_str());
@@ -160,7 +257,24 @@ void BrowserHost::stop() {
 }
 
 void BrowserHost::poll() {
-    if (pid_ <= 0) return;
+    if (state_ == State::WaitingForBrowser) {
+        Launcher& l = launcher();
+        l.poll();
+        if (l.failed) {
+            stop();
+            return;
+        }
+        if (l.port > 0) {
+            if (!spawnPage(l.port)) {
+                stop();
+                return;
+            }
+            state_ = State::Running;
+        }
+        return;
+    }
+    if (state_ != State::Running) return;
+    launcher().poll();
     char buf[4096];
     for (;;) {
         const ssize_t n = read(fromHelper_, buf, sizeof(buf));
@@ -174,7 +288,7 @@ void BrowserHost::poll() {
     }
     int status = 0;
     if (waitpid(pid_, &status, WNOHANG) == pid_) {
-        PIXELVR_LOG_WARN("Browser: helper exited (status %d)", status);
+        PIXELVR_LOG_WARN("Browser: page helper exited (status %d)", status);
         pid_ = -1;
         stop();
     }
@@ -191,7 +305,7 @@ void BrowserHost::handleLine(const std::string& line) {
 }
 
 const uint8_t* BrowserHost::takeFrame() {
-    if (!shm_) return nullptr;
+    if (!shm_ || state_ != State::Running) return nullptr;
     auto* hd = static_cast<const BrowserShmHeader*>(shm_);
     const uint64_t seq = hd->seq.load(std::memory_order_acquire);
     if (seq == lastSeq_ || (seq & 1u)) return nullptr;

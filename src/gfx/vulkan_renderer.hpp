@@ -223,17 +223,19 @@ public:
                     const std::string& status);
     void updateCardThumbnail(int slot, const std::string& path, const uint8_t* rgba, int width, int height);
     void clearCardThumbnails();
-    // Web browser screen: screen slot `slot` (-1 = none) shows the pvr-browser
-    // helper's page instead of video, with the slot's usual placement.
-    void setWebSlot(int slot) { webSlot_ = slot; }
-    int webSlot() const { return webSlot_; }
-    void updateWebFrame(const uint8_t* rgba, int width, int height);
-    // Laser position on the web screen (u right, v down, 0..1); false when the
-    // laser is not on it.
-    bool webPointer(float& u, float& v) const {
+    // Web browser screens: a slot marked as web shows its pvr-browser page
+    // instead of video, with the slot's usual placement.
+    void setWebSlot(int slot, bool web) {
+        if (slot >= 0 && slot < kMaxVideoSlots) webSlots_[slot] = web;
+    }
+    void updateWebFrame(int slot, const uint8_t* rgba, int width, int height);
+    // Laser position on a web screen (u right, v down, 0..1) and which slot;
+    // false when the laser is not on one.
+    bool webPointer(int& slot, float& u, float& v) const {
+        slot = webPointerSlot_;
         u = webPointerU_;
         v = webPointerV_;
-        return webPointerValid_;
+        return webPointerSlot_ >= 0;
     }
     // Timeline hover preview image (RGBA), shown above the scrub time bubble.
     void updateScrubPreview(const uint8_t* rgba, int width, int height, double seconds);
@@ -701,7 +703,7 @@ private:
     static constexpr int kScrubThumbSlot = 12;
     CardThumbnail cardThumbs_[13];
     void releaseThumbSlot(int slot);
-    void releaseWebTexture();
+    void releaseWebTexture(int slot);
     struct WebTexture {
         VkImage image = VK_NULL_HANDLE;
         VkDeviceMemory memory = VK_NULL_HANDLE;
@@ -714,9 +716,9 @@ private:
         int height = 0;
         bool initialized = false;  // image has been written once (layout is shader-read)
     };
-    WebTexture webTex_;
-    int webSlot_ = -1;
-    bool webPointerValid_ = false;
+    WebTexture webTex_[kMaxVideoSlots];
+    bool webSlots_[kMaxVideoSlots] = {};
+    int webPointerSlot_ = -1;
     float webPointerU_ = 0.0f;
     float webPointerV_ = 0.0f;
     float cardHoverAnim_[12]{};
@@ -934,8 +936,9 @@ private:
         float center[3] = {0.0f, 0.0f, 0.0f};
         float yaw = 0.0f;
         float pitch = 0.0f;
-        float halfW = 0.0f;
+        float halfW = 0.0f;   // half the (arc) width
         float halfH = 0.0f;
+        float bendR = 0.0f;   // curved screens: radius of the arc (0 = flat)
     };
     ScreenHitInfo screenHit_[kMaxVideoSlots];
 
