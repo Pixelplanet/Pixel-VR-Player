@@ -1,7 +1,8 @@
 #pragma once
-// Runs the pvr-browser helper process (see browser/pvr_browser.cpp) and talks
-// to it: frames arrive through shared memory, input and navigation go out as
-// text commands on its stdin, page events come back on its stdout.
+// Runs the pvr-browser helper process (see browser/pvr_browser.cpp, which
+// drives the user's installed Chromium) and talks to it: frames arrive through
+// shared memory, input and navigation go out as text commands on its stdin,
+// page events come back on its stdout.
 
 #include <cstdint>
 #include <string>

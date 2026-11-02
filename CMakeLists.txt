@@ -235,6 +235,19 @@ target_link_libraries(pixelvr PRIVATE pixelvr_core)
 install(TARGETS pixelvr RUNTIME DESTINATION bin)
 install(DIRECTORY "${CMAKE_BINARY_DIR}/shaders/" DESTINATION bin/shaders)
 
+# Browser screen helper: drives the user's installed Chromium over the DevTools
+# protocol (deployed as <install>/browser/pvr-browser). Needs libjpeg-turbo.
+find_library(PIXELVR_TURBOJPEG_LIB turbojpeg)
+find_path(PIXELVR_TURBOJPEG_INCLUDE turbojpeg.h)
+if(UNIX AND PIXELVR_TURBOJPEG_LIB AND PIXELVR_TURBOJPEG_INCLUDE)
+    add_executable(pvr-browser browser/pvr_browser.cpp)
+    target_include_directories(pvr-browser PRIVATE "${PIXELVR_TURBOJPEG_INCLUDE}")
+    target_link_libraries(pvr-browser PRIVATE "${PIXELVR_TURBOJPEG_LIB}" rt)
+    install(TARGETS pvr-browser RUNTIME DESTINATION bin/browser)
+else()
+    message(STATUS "pvr-browser: libjpeg-turbo not found, browser screen disabled")
+endif()
+
 # ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------

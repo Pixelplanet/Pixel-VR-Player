@@ -91,16 +91,13 @@ bool BrowserHost::start(const std::string& url, int width, int height) {
     for (std::string& a : argStore) argv.push_back(a.data());
     argv.push_back(nullptr);
 
-    // Environment: offscreen Qt, the private FFmpeg 6 next to the helper.
+    // Environment: the player's own library path (SteamVR runtime libraries)
+    // must not leak into the browser.
     std::vector<std::string> envStore;
     for (char** e = environ; *e; ++e) {
-        if (std::strncmp(*e, "LD_LIBRARY_PATH=", 16) == 0 || std::strncmp(*e, "QT_QPA_PLATFORM=", 16) == 0) {
-            continue;
-        }
+        if (std::strncmp(*e, "LD_LIBRARY_PATH=", 16) == 0) continue;
         envStore.emplace_back(*e);
     }
-    envStore.push_back("LD_LIBRARY_PATH=" + dir + "/lib");
-    envStore.push_back("QT_QPA_PLATFORM=offscreen");
     std::vector<char*> envp;
     for (std::string& e : envStore) envp.push_back(e.data());
     envp.push_back(nullptr);
@@ -190,6 +187,7 @@ void BrowserHost::handleLine(const std::string& line) {
     if (cmd == "url") url_ = rest;
     else if (cmd == "title") title_ = rest;
     else if (cmd == "loading") loading_ = (rest == "1");
+    else if (cmd == "error") PIXELVR_LOG_WARN("Browser: %s", rest.c_str());
 }
 
 const uint8_t* BrowserHost::takeFrame() {
