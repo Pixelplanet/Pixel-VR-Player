@@ -74,6 +74,18 @@ In accordance with the LGPL:
 - The source code for FFmpeg and our specific V4L2 zero-copy DMA-BUF patch set is provided in the repository under `third_party/ffmpeg/`.
 - Full FFmpeg source code is available at https://ffmpeg.org.
 
+**Modified FFmpeg in release builds.** Release builds carry a modified FFmpeg 7.0
+`libavcodec`, `libavutil` and `libswresample` (the patches in `third_party/ffmpeg/`,
+built with `third_party/ffmpeg/build.sh`, with dav1d for AV1) inside the `pixelvr`
+executable. At start they are written as separate shared libraries to
+`~/.cache/pixelvr/ffmpeg/<id>/` and loaded dynamically from there. The patches, the
+build script and a description ship in every release package (`ffmpeg-source/`). You
+can rebuild and replace those libraries (replace the files in that folder), or run
+the player on the system FFmpeg instead with `PIXELVR_SYSTEM_FFMPEG=1`.
+
+dav1d (AV1 decoding, BSD 2-Clause, https://code.videolan.org/videolan/dav1d) is used
+as the system's shared library.
+
 ---
 
 ## 7. PulseAudio Client Library

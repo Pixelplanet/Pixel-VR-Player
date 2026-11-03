@@ -1,4 +1,5 @@
 #include "app/app.hpp"
+#include "app/bundled_ffmpeg.hpp"
 #include "util/logging.hpp"
 #include "xr/openxr_headers.hpp"
 
@@ -11,7 +12,13 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <thread>
+
+extern "C" {
+#include <libavcodec/avcodec.h>
+#include <libavutil/opt.h>
+}
 #endif
 
 namespace {
@@ -101,6 +108,8 @@ int main(int argc, char** argv) {
     // The browser-screen helper runs as this same executable (see BrowserHost).
     if (first == "--pvr-browser") return pvrBrowserMain(argc - 1, argv + 1);
 #endif
+    // Release builds: restart on the bundled, patched FFmpeg (zero-copy decode).
+    pixelvr::useBundledFfmpeg(argv);
 
     if (first == "--xrext") {
         return run_xrext();
@@ -110,9 +119,20 @@ int main(int argc, char** argv) {
     if (first == "--probe") {
         return run_probe(argc > 2 ? argv[2] : "");
     }
+    if (first == "--ffmpeg-info") {  // which FFmpeg this process runs on
+        const AVCodec* hw = avcodec_find_decoder_by_name("h264_v4l2m2m");
+        const AVClass* cls = hw ? hw->priv_class : nullptr;
+        const bool zeroCopy = cls && av_opt_find(&cls, "drm_prime", nullptr, 0, AV_OPT_SEARCH_FAKE_OBJ);
+        std::printf("libavcodec %u.%u.%u%s, zero-copy (drm_prime): %s, AV1 (dav1d): %s\n",
+                    avcodec_version() >> 16, (avcodec_version() >> 8) & 0xFF, avcodec_version() & 0xFF,
+                    pixelvr::usingBundledFfmpeg() ? " (bundled)" : "", zeroCopy ? "yes" : "no",
+                    avcodec_find_decoder_by_name("libdav1d") ? "yes" : "no");
+        return 0;
+    }
 #endif
 
     const std::string mediaPath = first;
+    if (pixelvr::usingBundledFfmpeg()) PIXELVR_LOG_INFO("Using the bundled FFmpeg (zero-copy decode)");
 
     pixelvr::App app;
     g_app = &app;

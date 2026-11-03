@@ -40,6 +40,10 @@ if compgen -G "${BUILD_DIR}/fonts/*.ttf" >/dev/null; then
     cp "${BUILD_DIR}/fonts/"*.ttf "${stage}/PixelVRPlayer/fonts/"
     cp assets/fonts/Inter-LICENSE.txt "${stage}/PixelVRPlayer/fonts/" 2>/dev/null || true
 fi
+# LGPL: the player embeds a patched FFmpeg; ship how to rebuild / replace it.
+mkdir -p "${stage}/PixelVRPlayer/ffmpeg-source"
+cp third_party/ffmpeg/README.txt third_party/ffmpeg/build.sh third_party/ffmpeg/*.patch \
+   "${stage}/PixelVRPlayer/ffmpeg-source/"
 cp tools/run.sh "${stage}/PixelVRPlayer/run.sh"
 cp tools/install.sh "${stage}/PixelVRPlayer/install.sh"
 if [[ -f "tools/update.sh" ]]; then
