@@ -259,7 +259,9 @@ bool ThumbnailCache::extractThumbnailAndMeta(const std::string& videoPath,
     outMeta.ready = true;
 
     // Find standard software decoder for thumbnail extraction so we never touch V4L2/DRM hardware slots
-    const AVCodec* dec = avcodec_find_decoder(st->codecpar->codec_id);
+    // AV1: only dav1d works here (FFmpeg's own decoder needs hardware support).
+    const AVCodec* dec = (st->codecpar->codec_id == AV_CODEC_ID_AV1) ? avcodec_find_decoder_by_name("libdav1d")
+                                                                     : avcodec_find_decoder(st->codecpar->codec_id);
     if (dec && dec->name && std::strstr(dec->name, "v4l2") != nullptr) {
         if (st->codecpar->codec_id == AV_CODEC_ID_HEVC) {
             if (const AVCodec* sw = avcodec_find_decoder_by_name("hevc")) dec = sw;
