@@ -980,6 +980,7 @@ private:
         VkDescriptorSet directSets[kDirectRing] = {};
         int directIdx = 0;
         bool directActive = false;
+        bool directMode = false;    // the clip is drawn straight from the decoder (180/360)
         VkPipelineLayout ycbcrSphereDirectLayout = VK_NULL_HANDLE;
         VkPipeline ycbcrSphereDirectPipeline = VK_NULL_HANDLE;
         struct RetiredFrame {

@@ -3595,7 +3595,10 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 // Straight from the decoder's frame (see updateVideoDmabuf), else
                 // the resolved RGBA copy / the CPU-uploaded texture.
                 const bool direct = v.usingDmabuf && v.directActive && v.ycbcrSphereDirectPipeline != VK_NULL_HANDLE;
-                if (v.usingDmabuf && !direct && !ycbcr) continue;  // between frames after a seek
+                // Between frames after a seek. A clip shown straight from the
+                // decoder never fills the resolved copy, which still holds an
+                // older clip's picture: show nothing rather than that.
+                if (v.usingDmabuf && !direct && (!ycbcr || v.directMode)) continue;
                 VkPipeline pipe = direct ? v.ycbcrSphereDirectPipeline
                                          : (ycbcr ? v.ycbcrSpherePipeline : spherePipeline_);
                 VkPipelineLayout layout =
@@ -7901,6 +7904,7 @@ void VulkanRenderer::updateVideoDmabuf(DrmVideoFrame& frame, int slot) {
         dw.pImageInfo = &di;
         vkUpdateDescriptorSets(device_, 1, &dw, 0, nullptr);
         v.directActive = true;
+        v.directMode = true;
         // Rendering in flight may still sample the previous frames: keep them
         // (and their decoder buffers) as long as their descriptor sets live.
         if (v.drmImage != VK_NULL_HANDLE) {
@@ -7917,6 +7921,7 @@ void VulkanRenderer::updateVideoDmabuf(DrmVideoFrame& frame, int slot) {
             destroyRetiredFrames(v, 0);
             v.directActive = false;
         }
+        v.directMode = false;
         // Point the ycbcr descriptor at the freshly imported frame so the resolve
         // pass samples it.
         VkDescriptorImageInfo info{};
