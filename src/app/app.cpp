@@ -424,6 +424,7 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
         detect_format(path, p, st, fromName);
         if (slot > 0 && p != VulkanRenderer::ProjectionMode::Flat) slot = 0;
     }
+    if (screens_[slot].web) clearSlotKeepLayout(slot);  // a file replaces a browser screen
     ScreenState& sc = screens_[slot];
     const bool sameFile = (path == sc.path);
     if (!sameFile) {
@@ -933,6 +934,21 @@ void App::rememberPlaybackPosition(int slot) {
 #endif
 }
 
+void App::clearSlotKeepLayout(int slot) {
+    const auto it = std::find(arrangement_.order.begin(), arrangement_.order.end(), slot);
+    const int pos = (it != arrangement_.order.end()) ? static_cast<int>(it - arrangement_.order.begin()) : -1;
+    const bool wasArranged = arrangementActive_;
+    const bool wasBroken = arrangementBroken_;
+    closeMedia(slot);  // takes it out of the layout
+    if (pos >= 0 && wasArranged) {
+        std::vector<int>& o = arrangement_.order;
+        o.insert(o.begin() + std::min<int>(pos, static_cast<int>(o.size())), slot);
+        arrangementActive_ = true;
+        arrangementBroken_ = wasBroken;
+        applyArrangement(arrangement_);
+    }
+}
+
 void App::closeMedia(int slot) {
     if (slot < 0) slot = selectedScreen_;
     ScreenState& sc = screens_[slot];
@@ -1417,10 +1433,16 @@ int App::freeScreenSlot() const {
     return -1;
 }
 
+void App::applyAudioFollow() {
+    if (!settings_.audioFollow() || !multiScreenEnabled()) return;
+    for (int s = 0; s < VulkanRenderer::kMaxVideoSlots; ++s) screens_[s].muted = (s != selectedScreen_);
+}
+
 void App::selectScreen(int slot) {
     if (slot < 0 || slot >= VulkanRenderer::kMaxVideoSlots) slot = 0;
     if (slot != selectedScreen_) renderer_.clearScrubPreview();
     selectedScreen_ = slot;
+    applyAudioFollow();
     ScreenState& sc = cur();
     // The settings mirror always describes the selected screen, so the HUD,
     // format picker and track lists act on it.
@@ -2031,7 +2053,7 @@ void App::loadWeb(int slot, const std::string& url, bool kiosk) {
         selectScreen(slot);
         return;
     }
-    if (screens_[slot].open) closeMedia(slot);
+    if (screens_[slot].open) clearSlotKeepLayout(slot);
     BrowserHost::Options opt;
     opt.kiosk = kiosk;
     opt.incognito = settings_.privateBrowsing();
@@ -2824,10 +2846,9 @@ int App::run() {
             for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
                 ScreenState& sc = screens_[slot];
                 if (!sc.open) continue;
-                const bool audioModeMutes = multiScreenEnabled() && settings_.screenAudioMode() == 0 &&
-                                            slot != selectedScreen_;
-                // The user's mute (screen row / VOLUME pill) and the audio mode.
-                const bool mute = sc.muted || audioModeMutes;
+                // Each screen plays its own audio; mute / volume per screen (the
+                // audio-follow button just sets the mutes on selection).
+                const bool mute = sc.muted;
                 if (sc.web) {
                     webHosts_[slot].setMuted(mute);
                     webHosts_[slot].setVolume(sc.volume);
@@ -2869,6 +2890,7 @@ int App::run() {
                 }
             }
             renderer_.setVolumeDisplay(cur().volume, cur().muted);
+            renderer_.setAudioFollow(settings_.audioFollow());
 #endif
             renderer_.setMultiScreen(multiScreenEnabled() && openScreenCount() > 0, selectedScreen_);
             if (!multiScreenEnabled() || openScreenCount() == 0) screensUnlocked_ = false;
@@ -4293,6 +4315,13 @@ int App::run() {
                     } else if (cb == VulkanRenderer::CtrlButton::ScreenMute ||
                                cb == VulkanRenderer::CtrlButton::Volume) {
                         cur().muted = !cur().muted;
+                    } else if (cb == VulkanRenderer::CtrlButton::ScreenAudioFollow) {
+                        settings_.setAudioFollow(!settings_.audioFollow());
+                        if (settings_.audioFollow()) {
+                            applyAudioFollow();
+                        } else {
+                            for (ScreenState& s : screens_) s.muted = false;  // back to all screens heard
+                        }
                     } else if (cb == VulkanRenderer::CtrlButton::ScreenLock) {
                         screensUnlocked_ = !screensUnlocked_;
                     } else if (cb == VulkanRenderer::CtrlButton::ScreenFrames) {
@@ -4331,7 +4360,9 @@ int App::run() {
                     std::fabs(in.thumbstickX) > 0.15f && dt > 0.0f) {
                     cur().volume = std::clamp(cur().volume + in.thumbstickX * dt * 0.6f, 0.0f, 1.0f);
                     if (cur().volume > 0.0f) cur().muted = false;
-                    in.thumbstickY = 0.0f;  // don't push the screen away meanwhile
+                    // The stick is taken: no screen push, scrubbing or seeking meanwhile.
+                    in.thumbstickY = 0.0f;
+                    in.thumbstickX = in.thumbstickLX = in.thumbstickRX = 0.0f;
                     interacted = true;
                 }
                 // Viewpoint: flat screens move nearer/farther (thumbstick Y);
@@ -4363,6 +4394,7 @@ int App::run() {
                     if (renderer_.pointerButton() == static_cast<int>(VulkanRenderer::CtrlButton::ScreenToggle) &&
                         std::fabs(in.thumbstickX) > 0.15f && dt > 0.0f) {
                         renderer_.adjustScreenCurvature(in.thumbstickX * dt * 0.65f);
+                        in.thumbstickX = in.thumbstickLX = in.thumbstickRX = 0.0f;  // no scrubbing too
                         interacted = true;
                     }
                 } else if (dt > 0.0f) {

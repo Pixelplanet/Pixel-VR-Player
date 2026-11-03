@@ -110,7 +110,7 @@ constexpr float kDockScreenRowExtra = 0.100f;
 inline bool is_screen_row_button(int b) {
     using Btn = VulkanRenderer::CtrlButton;
     const auto cb = static_cast<Btn>(b);
-    return cb == Btn::ScreenMute || cb == Btn::ScreenLock || cb == Btn::ScreenFrames ||
+    return cb == Btn::ScreenMute || cb == Btn::ScreenAudioFollow || cb == Btn::ScreenLock || cb == Btn::ScreenFrames ||
            cb == Btn::ScreenLayout || cb == Btn::ScreenClose;
 }
 
@@ -136,10 +136,11 @@ inline CtrlButtonRect get_ctrl_button_rect(int b) {
 
         // Multi-screen row (below the main controls, only while shown)
         case Btn::ScreenMute:   return {-0.03f, kBarY - 0.250f, 0.046f, 0.046f};
-        case Btn::ScreenLock:   return { 0.10f, kBarY - 0.250f, 0.046f, 0.046f};
-        case Btn::ScreenFrames: return { 0.23f, kBarY - 0.250f, 0.046f, 0.046f};
-        case Btn::ScreenLayout: return { 0.36f, kBarY - 0.250f, 0.046f, 0.046f};
-        case Btn::ScreenClose:  return { 0.49f, kBarY - 0.250f, 0.046f, 0.046f};
+        case Btn::ScreenAudioFollow: return { 0.10f, kBarY - 0.250f, 0.046f, 0.046f};
+        case Btn::ScreenLock:   return { 0.23f, kBarY - 0.250f, 0.046f, 0.046f};
+        case Btn::ScreenFrames: return { 0.36f, kBarY - 0.250f, 0.046f, 0.046f};
+        case Btn::ScreenLayout: return { 0.49f, kBarY - 0.250f, 0.046f, 0.046f};
+        case Btn::ScreenClose:  return { 0.62f, kBarY - 0.250f, 0.046f, 0.046f};
         default: return {0.0f, 0.0f, 0.0f, 0.0f};
     }
 }
@@ -3752,6 +3753,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 else if (cb == CtrlButton::HideHud) iconShape = UiShape::Close;
                 else if (cb == CtrlButton::ScreenMute)
                     iconShape = screenControlsMuted_ ? UiShape::SpeakerMuted : UiShape::Speaker;
+                else if (cb == CtrlButton::ScreenAudioFollow) iconShape = UiShape::AudioFollow;
                 else if (cb == CtrlButton::ScreenLock)
                     iconShape = screensUnlocked_ ? UiShape::Unlocked : UiShape::Lock;
                 else if (cb == CtrlButton::ScreenFrames) iconShape = UiShape::Frame;
@@ -3759,7 +3761,9 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 else if (cb == CtrlButton::ScreenClose) iconShape = UiShape::Close;
                 const float iconK = is_screen_row_button(b) ? 0.64f : 0.42f;
                 const float framesOffCol[4] = {themeTextCol[0], themeTextCol[1], themeTextCol[2], 0.38f};
-                const float* iconCol = (cb == CtrlButton::ScreenLock && screensUnlocked_) ? themeAccentCol
+                const float* iconCol = (cb == CtrlButton::ScreenAudioFollow && audioFollow_) ? themeAccentCol
+                                     : (cb == CtrlButton::ScreenAudioFollow) ? framesOffCol
+                                     : (cb == CtrlButton::ScreenLock && screensUnlocked_) ? themeAccentCol
                                      : (cb == CtrlButton::ScreenFrames && !screenFramesOn_) ? framesOffCol
                                                                                             : themeTextCol;
                 drawUiElement(vpPanel, r.cx, r.cy, r.hw * iconK, r.hh * iconK, iconShape, iconCol);
@@ -3942,6 +3946,8 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 const CtrlButtonRect rT = get_ctrl_button_rect(pointerButton_);
                 const auto cbT = static_cast<CtrlButton>(pointerButton_);
                 const char* tip = (cbT == CtrlButton::ScreenMute) ? (screenControlsMuted_ ? "Unmute" : "Mute")
+                                : (cbT == CtrlButton::ScreenAudioFollow)
+                                    ? (audioFollow_ ? "Audio follows selection: on" : "Audio follows selection: off")
                                 : (cbT == CtrlButton::ScreenLock) ? (screensUnlocked_ ? "Lock screens" : "Unlock screens")
                                 : (cbT == CtrlButton::ScreenFrames) ? (screenFramesOn_ ? "Hide borders" : "Show borders")
                                 : (cbT == CtrlButton::ScreenLayout) ? "Arrange" : "Close screen";

@@ -500,6 +500,7 @@ public:
         SkipBack = 36,      // previous track
         SkipFwd = 37,       // next track
         Repeat = 38,
+        AudioFollow = 39,   // speaker with an arrow: audio follows the selection
         GlassPanel = 25, // rounded box with bevel + eye-dependent reflection sheen
     };
 
@@ -523,6 +524,7 @@ public:
         Recenter,      // recenter screen/view from HUD
         HideHud,       // immediately hide player controls
         ScreenMute,    // multi-screen row: mute / unmute the selected screen
+        ScreenAudioFollow,  // multi-screen row: audio follows the selected screen
         ScreenLock,    // multi-screen row: unlock / lock all screens for grabbing
         ScreenFrames,  // multi-screen row: show / hide the borders around screens
         ScreenLayout,  // multi-screen row: arrange screens with a preset
@@ -540,6 +542,7 @@ public:
         screenFramesOn_ = frames;
     }
     void setControlBar(bool visible) { controlBarVisible_ = visible; }
+    void setAudioFollow(bool on) { audioFollow_ = on; }
     bool controlBarVisible() const { return controlBarVisible_; }
     void setHudLabels(const std::string& format, const std::string& audio,
                       const std::string& screen, bool formatEnabled = true,
@@ -983,6 +986,7 @@ private:
     int selectedScreen_ = 0;
     int pointerScreen_ = -1;
     bool screenControlsVisible_ = false;
+    bool audioFollow_ = false;
     int screenControlsNumber_ = 1;
     bool screenControlsMuted_ = false;
     bool screensUnlocked_ = false;  // screens can be grabbed with the laser

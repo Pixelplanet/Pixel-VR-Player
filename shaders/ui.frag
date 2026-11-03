@@ -313,6 +313,14 @@ void main() {
         float gap = sdRoundedBox(p - vec2(0.12, 0.34), vec2(0.14, 0.12), 0.0);
         float head = sdTriangle(p, vec2(0.10, 0.62), vec2(0.40, 0.34), vec2(0.10, 0.06)) - 0.02;
         d = min(max(loop, -gap), head);
+    } else if (shape == 39) {
+        // Shape 39: Audio follows selection (speaker + arrow toward the screen)
+        float box = sdRoundedBox(p - vec2(-0.56, 0.0), vec2(0.13, 0.17), 0.03);
+        float cone = sdTriangle(p, vec2(-0.48, 0.17), vec2(-0.12, 0.46), vec2(-0.48, -0.17));
+        cone = min(cone, sdTriangle(p, vec2(-0.48, -0.17), vec2(-0.12, 0.46), vec2(-0.12, -0.46)));
+        float shaft = sdRoundedBox(p - vec2(0.24, 0.0), vec2(0.18, 0.065), 0.03);
+        float head = sdTriangle(p, vec2(0.66, 0.0), vec2(0.36, 0.28), vec2(0.36, -0.28)) - 0.02;
+        d = min(min(box, cone), min(shaft, head));
     } else {
         d = sdRoundedBox(p, vec2(1.0), 0.0);
     }

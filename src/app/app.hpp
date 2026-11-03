@@ -328,6 +328,9 @@ private:
     // keeps the queue, and leaves open menus alone).
     void loadMedia(const std::string& path, int slot = -1, bool fromQueue = false);
     void buildMusicQueue(int slot, const std::string& path);  // audio file opened from a folder
+    // Empties `slot` for new content, keeping its place in the screen layout.
+    void clearSlotKeepLayout(int slot);
+    void applyAudioFollow();  // audio-follow on: only the selected screen is heard
     bool lastLoadFailed_ = false;  // the hub stays open to show why
     void playQueueTrack(int slot, int index);
     void updateMusicView(int slot);

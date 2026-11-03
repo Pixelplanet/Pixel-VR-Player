@@ -52,7 +52,6 @@ public:
         CycleKeyboardLayout,
         TogglePauseLivestreams,
         TogglePrivateBrowsing,
-        CycleScreenAudio,
         CycleBrowserSort,
         BackToUI,
     };
@@ -139,7 +138,10 @@ public:
     // Borders around the screens in multi-screen mode (dock toggle).
     bool screenFrames() const { return screenFrames_; }
     void setScreenFrames(bool on) { screenFrames_ = on; saveConfig(); }
-    int screenAudioMode() const { return screenAudioMode_; }
+    // Multi-screen: the selected screen is heard, the others are muted (dock
+    // button). Off: every screen plays its own audio (per-screen mute / volume).
+    bool audioFollow() const { return audioFollow_; }
+    void setAudioFollow(bool on) { audioFollow_ = on; saveConfig(); }
     // Panel transparency: 0 = solid .. 3 = clear; uiOpacity() is the renderer factor.
     int uiOpacityIdx() const { return uiOpacityIdx_; }
     float uiOpacity() const;
@@ -233,7 +235,7 @@ private:
     bool pauseLivestreams_ = false;
     bool privateBrowsing_ = false;
     bool screenFrames_ = true;
-    int screenAudioMode_ = 0;  // 0=Selected screen only, 1=All screens
+    bool audioFollow_ = false;
     int browserSort_ = 0;      // 0=Name, 1=Newest, 2=Largest
     bool listShowFormat_ = true;
     bool listShowRes_ = true;

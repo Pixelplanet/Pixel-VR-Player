@@ -203,15 +203,6 @@ void SettingsMenu::refresh() {
                Action::CycleDistance);
         toggle("Swap Left/Right Eye", swapEyes_, Action::ToggleSwapEyes);
         toggle("Multiple Screens", multiScreen_, Action::ToggleMultiScreen);
-        {
-            Row r{"Screen Audio", screenAudioMode_ ? "All screens" : "Selected screen",
-                  Action::CycleScreenAudio, multiScreen_};
-            r.kind = Kind::Segmented;
-            r.steps = 2;
-            r.stepIdx = screenAudioMode_ % 2;
-            r.options = {"Selected screen", "All screens"};
-            rows_.push_back(r);
-        }
         toggle("Pause When Headset Is Removed", pauseOnRemoval_, Action::TogglePauseOnRemoval);
         toggle("Pause Livestreams Too", pauseLivestreams_, Action::TogglePauseLivestreams, pauseOnRemoval_);
         toggle("Debug Statistics", showStats_, Action::ToggleStats);
@@ -540,11 +531,6 @@ SettingsMenu::Action SettingsMenu::activate() {
             saveConfig();
             refresh();
             break;
-        case Action::CycleScreenAudio:
-            screenAudioMode_ = (screenAudioMode_ + 1) % 2;
-            saveConfig();
-            refresh();
-            break;
         case Action::CycleUiOpacity:
             uiOpacityIdx_ = (uiOpacityIdx_ + 1) % kUiOpacityCount;
             saveConfig();
@@ -748,7 +734,7 @@ void SettingsMenu::loadConfig() {
             else if (key == "pause_livestreams") pauseLivestreams_ = (val == "1" || val == "true");
             else if (key == "private_browsing") privateBrowsing_ = (val == "1" || val == "true");
             else if (key == "screen_frames") screenFrames_ = (val == "1" || val == "true");
-            else if (key == "screen_audio") screenAudioMode_ = std::clamp(std::stoi(val), 0, 1);
+            else if (key == "audio_follow") audioFollow_ = (val == "1" || val == "true");
             else if (key == "ui_opacity") uiOpacityIdx_ = std::clamp(std::stoi(val), 0, kUiOpacityCount - 1);
             else if (key == "panel_curve") panelCurveIdx_ = std::clamp(std::stoi(val), 0, kPanelCurveCount - 1);
             else if (key == "browser_sort") browserSort_ = std::clamp(std::stoi(val), 0, 2);
@@ -803,7 +789,7 @@ void SettingsMenu::saveConfig() const {
             file << "pause_livestreams=" << (pauseLivestreams_ ? 1 : 0) << "\n";
             file << "private_browsing=" << (privateBrowsing_ ? 1 : 0) << "\n";
             file << "screen_frames=" << (screenFrames_ ? 1 : 0) << "\n";
-            file << "screen_audio=" << screenAudioMode_ << "\n";
+            file << "audio_follow=" << (audioFollow_ ? 1 : 0) << "\n";
             file << "browser_sort=" << browserSort_ << "\n";
             if (!quickPath_.empty()) {
                 file << "quick_path=" << quickPath_ << "\n";
