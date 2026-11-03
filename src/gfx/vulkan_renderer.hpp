@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <cstring>
+#include <deque>
 #include <memory>
 #include <string>
 #include <utility>
@@ -640,6 +641,7 @@ private:
     void destroyYcbcr(VideoSlot& v);
     // `mips`: a full mip chain (flat screens shown small); 180/360 needs none.
     bool createResolveTarget(VideoSlot& v, int width, int height, bool mips = true);
+    void destroyRetiredFrames(VideoSlot& v, std::size_t keep);  // oldest first, down to `keep`
     void destroyResolveTarget(VideoSlot& v);
     bool createModelPipeline();
     // Content-sized layout for the downloads-window buttons (centered, along the
@@ -649,7 +651,8 @@ private:
     bool importDmabufImage(VideoSlot& v, const DrmVideoFrame& frame, VkImage& image,
                            VkDeviceMemory& memory, VkImageView& view,
                            bool& fdConsumed);
-    void resolveFrame(VideoSlot& v, VkImage importedImage);
+    // `acquireOnly`: just hand the decoder's frame to the GPU (direct 180/360).
+    void resolveFrame(VideoSlot& v, VkImage importedImage, bool acquireOnly = false);
     void updatePointer();
     uint32_t findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags props) const;
     VkShaderModule loadShaderModule(const std::string& filename);
@@ -970,6 +973,22 @@ private:
         VkCommandBuffer resolveCmd = VK_NULL_HANDLE;
         VkFence resolveFence = VK_NULL_HANDLE;
         bool resolvePending = false;
+        // 180/360 draws straight from the decoder's frame (no resolve): one
+        // descriptor set per recent frame, and the frames that rendering in
+        // flight may still sample (destroyed a few frames later).
+        static constexpr int kDirectRing = 4;
+        VkDescriptorSet directSets[kDirectRing] = {};
+        int directIdx = 0;
+        bool directActive = false;
+        VkPipelineLayout ycbcrSphereDirectLayout = VK_NULL_HANDLE;
+        VkPipeline ycbcrSphereDirectPipeline = VK_NULL_HANDLE;
+        struct RetiredFrame {
+            VkImage image = VK_NULL_HANDLE;
+            VkDeviceMemory memory = VK_NULL_HANDLE;
+            VkImageView view = VK_NULL_HANDLE;
+            std::shared_ptr<void> keepAlive;  // the decoder's buffer
+        };
+        std::deque<RetiredFrame> retired;
     };
     VideoSlot videoSlots_[kMaxVideoSlots];
     ScreenPlacement screenPlacements_[kMaxVideoSlots];

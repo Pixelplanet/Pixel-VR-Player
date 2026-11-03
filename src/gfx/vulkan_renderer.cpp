@@ -3591,12 +3591,18 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                     uiBendOverride = -1.0f;
                 }
             } else {
-                VkPipeline pipe = ycbcr ? v.ycbcrSpherePipeline : spherePipeline_;
+                // Straight from the decoder's frame (see updateVideoDmabuf), else
+                // the resolved RGBA copy / the CPU-uploaded texture.
+                const bool direct = v.usingDmabuf && v.directActive && v.ycbcrSphereDirectPipeline != VK_NULL_HANDLE;
+                if (v.usingDmabuf && !direct && !ycbcr) continue;  // between frames after a seek
+                VkPipeline pipe = direct ? v.ycbcrSphereDirectPipeline
+                                         : (ycbcr ? v.ycbcrSpherePipeline : spherePipeline_);
                 VkPipelineLayout layout =
-                    ycbcr ? v.ycbcrSphereLayout : spherePipelineLayout_;
+                    direct ? v.ycbcrSphereDirectLayout : (ycbcr ? v.ycbcrSphereLayout : spherePipelineLayout_);
+                const VkDescriptorSet set = direct ? v.directSets[v.directIdx] : videoSet;
                 vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
                 vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                        layout, 0, 1, &videoSet, 0, nullptr);
+                                        layout, 0, 1, &set, 0, nullptr);
                 // Fold the recenter yaw + viewpoint tilt into the camera orientation
                 // and scale the FOV by the zoom so 360/180 content can be re-angled and
                 // pushed nearer/farther.
@@ -3626,6 +3632,10 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 push.mode[2] = static_cast<float>(viewIndex);
                 push.mode[3] = swapEyes_ ? 1.0f : 0.0f;
                 fillCommon(push.conversion, push.range);
+                if (direct) {  // crop the decoder's padding, as for the resolve
+                    push.conversion[0] = v.drmUvScaleX;
+                    push.conversion[1] = v.drmUvScaleY;
+                }
                 vkCmdPushConstants(
                     commandBuffer_, layout,
                     VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
@@ -6561,9 +6571,9 @@ bool VulkanRenderer::createYcbcrPipeline(VideoSlot& v, uint32_t fourcc, int colo
 
     VkDescriptorPoolSize ps{};
     ps.type = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    ps.descriptorCount = combinedCount;
+    ps.descriptorCount = combinedCount * (1 + VideoSlot::kDirectRing);
     VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    pi.maxSets = 1;
+    pi.maxSets = 1 + VideoSlot::kDirectRing;
     pi.poolSizeCount = 1;
     pi.pPoolSizes = &ps;
     PIXELVR_VK_CHECK(vkCreateDescriptorPool(device_, &pi, nullptr, &v.ycbcrPool));
@@ -6573,6 +6583,9 @@ bool VulkanRenderer::createYcbcrPipeline(VideoSlot& v, uint32_t fourcc, int colo
     ai.descriptorSetCount = 1;
     ai.pSetLayouts = &v.ycbcrSetLayout;
     PIXELVR_VK_CHECK(vkAllocateDescriptorSets(device_, &ai, &v.ycbcrSet));
+    for (VkDescriptorSet& set : v.directSets) {
+        PIXELVR_VK_CHECK(vkAllocateDescriptorSets(device_, &ai, &set));
+    }
 
     // --- Minification resolve target --------------------------------------
     // A plain (non-ycbcr) sampler with a full mip chain. The video pipelines
@@ -6683,6 +6696,19 @@ bool VulkanRenderer::createYcbcrPipeline(VideoSlot& v, uint32_t fourcc, int colo
     PIXELVR_VK_CHECK(
         vkCreatePipelineLayout(device_, &sl, nullptr, &v.ycbcrSphereLayout));
 
+    // 180/360 straight from the decoder's frame: the ycbcr set layout (its
+    // immutable sampler converts to R'G'B' on fetch), the same sphere shader.
+    VkPipelineLayoutCreateInfo dl{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+    dl.setLayoutCount = 1;
+    dl.pSetLayouts = &v.ycbcrSetLayout;
+    dl.pushConstantRangeCount = 1;
+    dl.pPushConstantRanges = &spherePush;
+    PIXELVR_VK_CHECK(vkCreatePipelineLayout(device_, &dl, nullptr, &v.ycbcrSphereDirectLayout));
+    if (!buildPipeline("sphere.vert.spv", "video_sphere.frag.spv", v.ycbcrSphereDirectLayout,
+                       v.ycbcrSphereDirectPipeline)) {
+        return false;
+    }
+
     if (!buildPipeline("quad.vert.spv", "video_quad.frag.spv", v.ycbcrQuadLayout,
                        v.ycbcrQuadPipeline) ||
         !buildPipeline("quad.vert.spv", "ambilight.frag.spv", v.ycbcrQuadLayout,
@@ -6700,7 +6726,27 @@ bool VulkanRenderer::createYcbcrPipeline(VideoSlot& v, uint32_t fourcc, int colo
     return true;
 }
 
+void VulkanRenderer::destroyRetiredFrames(VideoSlot& v, std::size_t keep) {
+    while (v.retired.size() > keep) {
+        VideoSlot::RetiredFrame& r = v.retired.front();
+        if (r.view != VK_NULL_HANDLE) vkDestroyImageView(device_, r.view, nullptr);
+        if (r.image != VK_NULL_HANDLE) vkDestroyImage(device_, r.image, nullptr);
+        if (r.memory != VK_NULL_HANDLE) vkFreeMemory(device_, r.memory, nullptr);
+        v.retired.pop_front();  // also releases the decoder's buffer
+    }
+}
+
 void VulkanRenderer::destroyYcbcr(VideoSlot& v) {
+    destroyRetiredFrames(v, 0);  // callers have waited for the GPU
+    v.directActive = false;
+    if (v.ycbcrSphereDirectPipeline != VK_NULL_HANDLE) {
+        vkDestroyPipeline(device_, v.ycbcrSphereDirectPipeline, nullptr);
+        v.ycbcrSphereDirectPipeline = VK_NULL_HANDLE;
+    }
+    if (v.ycbcrSphereDirectLayout != VK_NULL_HANDLE) {
+        vkDestroyPipelineLayout(device_, v.ycbcrSphereDirectLayout, nullptr);
+        v.ycbcrSphereDirectLayout = VK_NULL_HANDLE;
+    }
     if (device_ == VK_NULL_HANDLE) {
         return;
     }
@@ -7611,7 +7657,7 @@ bool VulkanRenderer::importDmabufImage(VideoSlot& v, const DrmVideoFrame& frame,
     return true;
 }
 
-void VulkanRenderer::resolveFrame(VideoSlot& v, VkImage importedImage) {
+void VulkanRenderer::resolveFrame(VideoSlot& v, VkImage importedImage, bool acquireOnly) {
     // Own command buffer + fence per screen, so the render thread doesn't wait
     // for the conversion (an 8K frame takes several ms of GPU time).
     if (v.resolveCmd == VK_NULL_HANDLE) {
@@ -7657,6 +7703,14 @@ void VulkanRenderer::resolveFrame(VideoSlot& v, VkImage importedImage) {
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                          VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
                          nullptr, 1, &acq);
+    if (acquireOnly) {  // drawn straight from this image: no conversion
+        vkEndCommandBuffer(cmd);
+        VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+        submit.commandBufferCount = 1;
+        submit.pCommandBuffers = &cmd;
+        v.resolvePending = vkQueueSubmit(queue_, 1, &submit, v.resolveFence) == VK_SUCCESS;
+        return;
+    }
 
     // 2. Convert YCbCr -> RGBA into mip 0 of the resolve image.
     VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
@@ -7785,51 +7839,86 @@ void VulkanRenderer::updateVideoDmabuf(DrmVideoFrame& frame, int slot) {
         return;  // keep the previous frame's image + descriptor valid
     }
 
-    // Point the ycbcr descriptor at the freshly imported frame so the resolve
-    // pass samples it.
-    VkDescriptorImageInfo info{};
-    info.imageView = view;
-    info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    write.dstSet = v.ycbcrSet;
-    write.dstBinding = 0;
-    write.descriptorCount = 1;
-    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    write.pImageInfo = &info;
-    vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
-
-    // (Re)create the resolve target at the coded frame size. 180/360 video is
-    // shown at about its own resolution: no mip chain (a third less GPU work
-    // per frame, which matters at 8K60).
-    const bool wantMips = !(slot == 0 && projectionMode_ != ProjectionMode::Flat);
-    if (v.resolveImage == VK_NULL_HANDLE || v.resolveW != frame.width ||
-        v.resolveH != frame.height || (v.resolveMips > 1) != wantMips) {
-        // Rare (new video, projection change): frames in flight may still
-        // sample the old target and its descriptor.
-        vkDeviceWaitIdle(device_);
-        if (!createResolveTarget(v, frame.width, frame.height, wantMips)) {
-            vkDestroyImageView(device_, view, nullptr);
-            vkDestroyImage(device_, image, nullptr);
-            vkFreeMemory(device_, memory, nullptr);
-            return;
+    // 180/360 on the main screen: draw straight from this frame (the sampler
+    // converts YCbCr on fetch). No 8K RGBA copy per frame, far less GPU work.
+    const bool direct = slot == 0 && projectionMode_ != ProjectionMode::Flat &&
+                        v.ycbcrSphereDirectPipeline != VK_NULL_HANDLE;
+    if (direct) {
+        resolveFrame(v, image, true);  // hand it from the decoder to the GPU
+        v.directIdx = (v.directIdx + 1) % VideoSlot::kDirectRing;
+        VkDescriptorImageInfo di{};
+        di.imageView = view;
+        di.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkWriteDescriptorSet dw{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        dw.dstSet = v.directSets[v.directIdx];  // not used by frames in flight
+        dw.dstBinding = 0;
+        dw.descriptorCount = 1;
+        dw.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        dw.pImageInfo = &di;
+        vkUpdateDescriptorSets(device_, 1, &dw, 0, nullptr);
+        v.directActive = true;
+        // Rendering in flight may still sample the previous frames: keep them
+        // (and their decoder buffers) as long as their descriptor sets live.
+        if (v.drmImage != VK_NULL_HANDLE) {
+            v.retired.push_back({v.drmImage, v.drmMemory, v.drmView, std::move(v.drmKeepAlive)});
         }
-    }
+        destroyRetiredFrames(v, VideoSlot::kDirectRing - 1);
+        v.drmImage = image;
+        v.drmMemory = memory;
+        v.drmView = view;
+        v.drmKeepAlive = std::move(frame.keepAlive);
+    } else {
+        if (v.directActive || !v.retired.empty()) {  // back from 180/360 (rare)
+            vkDeviceWaitIdle(device_);
+            destroyRetiredFrames(v, 0);
+            v.directActive = false;
+        }
+        // Point the ycbcr descriptor at the freshly imported frame so the resolve
+        // pass samples it.
+        VkDescriptorImageInfo info{};
+        info.imageView = view;
+        info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+        write.dstSet = v.ycbcrSet;
+        write.dstBinding = 0;
+        write.descriptorCount = 1;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+        write.pImageInfo = &info;
+        vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
 
-    // Acquire the imported frame, convert YCbCr -> RGBA, and build its mip chain.
-    resolveFrame(v, image);
+        // (Re)create the resolve target at the coded frame size. 180/360 video is
+        // shown at about its own resolution: no mip chain (a third less GPU work
+        // per frame, which matters at 8K60).
+        const bool wantMips = !(slot == 0 && projectionMode_ != ProjectionMode::Flat);
+        if (v.resolveImage == VK_NULL_HANDLE || v.resolveW != frame.width ||
+            v.resolveH != frame.height || (v.resolveMips > 1) != wantMips) {
+            // Rare (new video, projection change): frames in flight may still
+            // sample the old target and its descriptor.
+            vkDeviceWaitIdle(device_);
+            if (!createResolveTarget(v, frame.width, frame.height, wantMips)) {
+                vkDestroyImageView(device_, view, nullptr);
+                vkDestroyImage(device_, image, nullptr);
+                vkFreeMemory(device_, memory, nullptr);
+                return;
+            }
+        }
 
-    // Retire the previous frame's imported image (its resolve has completed).
-    if (v.drmImage != VK_NULL_HANDLE) {
-        vkDestroyImageView(device_, v.drmView, nullptr);
-        vkDestroyImage(device_, v.drmImage, nullptr);
-        vkFreeMemory(device_, v.drmMemory, nullptr);
+        // Acquire the imported frame, convert YCbCr -> RGBA, and build its mip chain.
+        resolveFrame(v, image);
+
+        // Retire the previous frame's imported image (its resolve has completed).
+        if (v.drmImage != VK_NULL_HANDLE) {
+            vkDestroyImageView(device_, v.drmView, nullptr);
+            vkDestroyImage(device_, v.drmImage, nullptr);
+            vkFreeMemory(device_, v.drmMemory, nullptr);
+        }
+        v.drmImage = image;
+        v.drmMemory = memory;
+        v.drmView = view;
+        // Hold the decoder's frame ref for this image's lifetime; this assignment
+        // also releases the previous frame, whose image was just retired.
+        v.drmKeepAlive = std::move(frame.keepAlive);
     }
-    v.drmImage = image;
-    v.drmMemory = memory;
-    v.drmView = view;
-    // Hold the decoder's frame ref for this image's lifetime; this assignment
-    // also releases the previous frame, whose image was just retired.
-    v.drmKeepAlive = std::move(frame.keepAlive);
 
     int visibleW = frame.width - frame.crop[0] - frame.crop[2];
     int visibleH = frame.height - frame.crop[1] - frame.crop[3];
@@ -7846,10 +7935,12 @@ void VulkanRenderer::updateVideoDmabuf(DrmVideoFrame& frame, int slot) {
 void VulkanRenderer::releaseVideoFrame(int slot) {
     if (slot < 0 || slot >= kMaxVideoSlots) slot = 0;
     VideoSlot& v = videoSlots_[slot];
-    if (v.drmImage == VK_NULL_HANDLE && !v.drmKeepAlive) {
+    if (v.drmImage == VK_NULL_HANDLE && !v.drmKeepAlive && v.retired.empty()) {
         return;
     }
     vkDeviceWaitIdle(device_);  // the GPU may still sample the imported image
+    destroyRetiredFrames(v, 0);
+    v.directActive = false;  // nothing to sample until the next frame arrives
     if (v.drmView != VK_NULL_HANDLE) vkDestroyImageView(device_, v.drmView, nullptr);
     if (v.drmImage != VK_NULL_HANDLE) vkDestroyImage(device_, v.drmImage, nullptr);
     if (v.drmMemory != VK_NULL_HANDLE) vkFreeMemory(device_, v.drmMemory, nullptr);
