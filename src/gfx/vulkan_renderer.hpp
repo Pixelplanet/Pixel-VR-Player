@@ -66,7 +66,9 @@ public:
     // Releases the imported dma-buf frame and the decoder's capture-buffer ref
     // while keeping the resolved image on screen; call before the decoder seeks
     // or a new clip opens so the hardware decoder can reclaim its buffers.
-    void releaseVideoFrame(int slot = 0);
+    // keepPicture (seeking): a 180/360 frame drawn straight from the decoder
+    // is first copied, so it stays on screen until the next frame arrives.
+    void releaseVideoFrame(int slot = 0, bool keepPicture = false);
     // Video slots: slot 0 is the main screen (also 360/180); slots 1..2 are the
     // extra flat screens of multi-screen mode.
     static constexpr int kMaxVideoSlots = 3;
@@ -652,7 +654,7 @@ private:
                            VkDeviceMemory& memory, VkImageView& view,
                            bool& fdConsumed);
     // `acquireOnly`: just hand the decoder's frame to the GPU (direct 180/360).
-    void resolveFrame(VideoSlot& v, VkImage importedImage, bool acquireOnly = false);
+    void resolveFrame(VideoSlot& v, VkImage importedImage, bool acquireOnly = false, bool acquired = false);
     void updatePointer();
     uint32_t findMemoryType(uint32_t typeBits, VkMemoryPropertyFlags props) const;
     VkShaderModule loadShaderModule(const std::string& filename);
@@ -981,6 +983,7 @@ private:
         int directIdx = 0;
         bool directActive = false;
         bool directMode = false;    // the clip is drawn straight from the decoder (180/360)
+        int directW = 0, directH = 0;  // its frame size
         VkPipelineLayout ycbcrSphereDirectLayout = VK_NULL_HANDLE;
         VkPipeline ycbcrSphereDirectPipeline = VK_NULL_HANDLE;
         struct RetiredFrame {

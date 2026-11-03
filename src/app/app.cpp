@@ -2372,7 +2372,7 @@ int App::run() {
                 ScreenState& sc = screens_[slot];
                 if (!sc.open || sc.web) continue;
                 if (sc.engine.needsFrameRelease()) {
-                    renderer_.releaseVideoFrame(slot);
+                    renderer_.releaseVideoFrame(slot, true);  // seeking: keep the picture up
                     sc.engine.confirmFrameRelease();
                 }
                 if (sc.engine.drmActive()) {

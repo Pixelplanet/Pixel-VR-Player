@@ -7704,7 +7704,7 @@ bool VulkanRenderer::importDmabufImage(VideoSlot& v, const DrmVideoFrame& frame,
     return true;
 }
 
-void VulkanRenderer::resolveFrame(VideoSlot& v, VkImage importedImage, bool acquireOnly) {
+void VulkanRenderer::resolveFrame(VideoSlot& v, VkImage importedImage, bool acquireOnly, bool acquired) {
     // Own command buffer + fence per screen, so the render thread doesn't wait
     // for the conversion (an 8K frame takes several ms of GPU time).
     if (v.resolveCmd == VK_NULL_HANDLE) {
@@ -7747,9 +7747,11 @@ void VulkanRenderer::resolveFrame(VideoSlot& v, VkImage importedImage, bool acqu
     acq.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     acq.srcAccessMask = 0;
     acq.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
-                         nullptr, 1, &acq);
+    if (!acquired) {  // (a frame drawn directly was acquired when it arrived)
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
+                             nullptr, 1, &acq);
+    }
     if (acquireOnly) {  // drawn straight from this image: no conversion
         vkEndCommandBuffer(cmd);
         VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
@@ -7905,6 +7907,8 @@ void VulkanRenderer::updateVideoDmabuf(DrmVideoFrame& frame, int slot) {
         vkUpdateDescriptorSets(device_, 1, &dw, 0, nullptr);
         v.directActive = true;
         v.directMode = true;
+        v.directW = frame.width;
+        v.directH = frame.height;
         // Rendering in flight may still sample the previous frames: keep them
         // (and their decoder buffers) as long as their descriptor sets live.
         if (v.drmImage != VK_NULL_HANDLE) {
@@ -7981,13 +7985,42 @@ void VulkanRenderer::updateVideoDmabuf(DrmVideoFrame& frame, int slot) {
     v.hasVideo = true;
 }
 
-void VulkanRenderer::releaseVideoFrame(int slot) {
+void VulkanRenderer::releaseVideoFrame(int slot, bool keepPicture) {
     if (slot < 0 || slot >= kMaxVideoSlots) slot = 0;
     VideoSlot& v = videoSlots_[slot];
     if (v.drmImage == VK_NULL_HANDLE && !v.drmKeepAlive && v.retired.empty()) {
         return;
     }
     vkDeviceWaitIdle(device_);  // the GPU may still sample the imported image
+    if (keepPicture && v.directMode && v.drmImage != VK_NULL_HANDLE && v.directW > 0 && v.directH > 0) {
+        // Seeking a clip drawn straight from the decoder: convert its current
+        // frame once into the resolve image (made on the first seek, no mips),
+        // which is drawn until the next frame arrives.
+        bool ok = true;
+        if (v.resolveImage == VK_NULL_HANDLE || v.resolveW != v.directW || v.resolveH != v.directH ||
+            v.resolveMips > 1) {
+            ok = createResolveTarget(v, v.directW, v.directH, false);
+        }
+        if (ok) {
+            VkDescriptorImageInfo info{};
+            info.imageView = v.drmView;
+            info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            VkWriteDescriptorSet write{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+            write.dstSet = v.ycbcrSet;
+            write.dstBinding = 0;
+            write.descriptorCount = 1;
+            write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+            write.pImageInfo = &info;
+            vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
+            resolveFrame(v, v.drmImage, false, true);
+            if (v.resolvePending) {  // done before the frame goes back
+                vkWaitForFences(device_, 1, &v.resolveFence, VK_TRUE, UINT64_MAX);
+                vkResetFences(device_, 1, &v.resolveFence);
+                v.resolvePending = false;
+            }
+            v.directMode = false;  // the resolve image holds the current picture
+        }
+    }
     destroyRetiredFrames(v, 0);
     v.directActive = false;  // nothing to sample until the next frame arrives
     if (v.drmView != VK_NULL_HANDLE) vkDestroyImageView(device_, v.drmView, nullptr);
