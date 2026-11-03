@@ -2490,7 +2490,14 @@ int App::run() {
                 BrowserHost& host = webHosts_[slot];
                 host.poll();
                 if (!host.running()) {  // helper or Chromium died
+                    const std::string why = host.lastError();
                     closeMedia(slot);
+#ifdef PIXELVR_HAVE_FREETYPE
+                    if (!why.empty()) {  // e.g. Chromium isn't installed: say so
+                        browser_.setStatus("Browser: " + why);
+                        browser_.setOpen(true);
+                    }
+#endif
                     continue;
                 }
                 if (const uint8_t* rgba = host.takeFrame()) {

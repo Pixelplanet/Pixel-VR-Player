@@ -29,7 +29,7 @@ jobs:
             build-essential cmake ninja-build git ca-certificates pkg-config file \
             glslang-tools libvulkan-dev \
             libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev \
-            libpulse-dev libfreetype-dev libsmbclient-dev \
+            libpulse-dev libfreetype-dev libsmbclient-dev libturbojpeg0-dev \
             libx11-dev libxrandr-dev libxxf86vm-dev libgl-dev
 
       - uses: actions/checkout@v4
@@ -74,6 +74,8 @@ jobs:
         run: |
           file build/bin/pixelvr
           file build/bin/pixelvr | grep -q 'ARM aarch64'
+          # The browser-screen helper is built in (needs libturbojpeg).
+          strings build/bin/pixelvr | grep -q -- '--pvr-browser'
           tar -tzf pixelvr-linux-arm64.tar.gz | grep -q '^PixelVRPlayer/run.sh$'
           tar -tzf pixelvr-linux-arm64.tar.gz | grep -q '^PixelVRPlayer/install.sh$'
           tar -tzf pixelvr-linux-arm64.tar.gz | grep -q '^PixelVRPlayer/VERSION$'

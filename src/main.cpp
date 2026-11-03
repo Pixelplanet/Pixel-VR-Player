@@ -91,8 +91,16 @@ int run_probe(const std::string& path) {
 
 } // namespace
 
+#ifdef PIXELVR_HAVE_BROWSER_HELPER
+int pvrBrowserMain(int argc, char** argv);  // browser/pvr_browser.cpp
+#endif
+
 int main(int argc, char** argv) {
     const std::string first = (argc > 1) ? argv[1] : "";
+#ifdef PIXELVR_HAVE_BROWSER_HELPER
+    // The browser-screen helper runs as this same executable (see BrowserHost).
+    if (first == "--pvr-browser") return pvrBrowserMain(argc - 1, argv + 1);
+#endif
 
     if (first == "--xrext") {
         return run_xrext();

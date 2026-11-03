@@ -1852,7 +1852,9 @@ int runScreen(const ScreenOptions& opt) {
 
 }  // namespace
 
-int main(int argc, char** argv) {
+// Built into the player (`pixelvr --pvr-browser ...`, so installs and updates
+// need no extra file) and as the standalone pvr-browser for development.
+int pvrBrowserMain(int argc, char** argv) {
     ScreenOptions opt;
     opt.url = "https://www.youtube.com";
     bool launch = false;
@@ -1878,3 +1880,7 @@ int main(int argc, char** argv) {
     if (launch) return runLauncher(opt.width, opt.height);
     return runScreen(opt);
 }
+
+#ifdef PVR_BROWSER_STANDALONE
+int main(int argc, char** argv) { return pvrBrowserMain(argc, argv); }
+#endif

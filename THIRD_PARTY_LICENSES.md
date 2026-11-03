@@ -92,6 +92,16 @@ Dynamically linked for SMB network share streaming and discovery.
 
 ---
 
+## 8a. libjpeg-turbo (TurboJPEG)
+- **License:** BSD 3-Clause / IJG License
+- **Website:** https://libjpeg-turbo.org
+
+Dynamically linked by the player's browser-screen helper mode to decode the page
+frames Chromium sends. The browser screens use the Chromium the user
+installs themselves (Flathub `org.chromium.Chromium`); it is not bundled.
+
+---
+
 ## 9. Vulkan
 - **Copyright:** (c) 2015-2024 The Khronos Group Inc.
 - **License:** Apache License, Version 2.0

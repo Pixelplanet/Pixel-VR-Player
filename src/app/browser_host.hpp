@@ -102,6 +102,8 @@ public:
 
     const std::string& url() const { return url_; }
     const std::string& title() const { return title_; }
+    // The helper's last error (e.g. "Chromium is not installed ..."), for the user.
+    const std::string& lastError() const { return lastError_; }
     bool loading() const { return loading_; }
 
 private:
@@ -128,6 +130,7 @@ private:
     std::string title_;
     bool loading_ = false;
     Options options_;
+    std::string lastError_;
     int frameW_ = 0;
     int frameH_ = 0;
     Media media_;

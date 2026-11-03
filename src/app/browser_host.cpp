@@ -25,6 +25,7 @@ namespace pixelvr {
 
 namespace {
 
+#ifndef PIXELVR_HAVE_BROWSER_HELPER
 // Folder of the running executable (the helper lives in <exe dir>/browser).
 std::string exeDir() {
     char buf[4096];
@@ -35,6 +36,7 @@ std::string exeDir() {
     const size_t slash = p.rfind('/');
     return slash == std::string::npos ? std::string(".") : p.substr(0, slash);
 }
+#endif
 
 // Starts the helper with `args` (after the program path), stdin/stdout piped.
 pid_t spawnHelper(const std::vector<std::string>& args, int& toFd, int& fromFd) {
@@ -47,8 +49,19 @@ pid_t spawnHelper(const std::vector<std::string>& args, int& toFd, int& fromFd) 
         close(inPipe[1]);
         return -1;
     }
+#ifdef PIXELVR_HAVE_BROWSER_HELPER
+    // The helper is built into the player: run this executable in helper mode.
+    std::string helper = "/proc/self/exe";
+    {
+        char buf[4096];
+        const ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+        if (n > 0) helper.assign(buf, static_cast<size_t>(n));
+    }
+    std::vector<std::string> argStore = {helper, "--pvr-browser"};
+#else
     const std::string helper = exeDir() + "/browser/pvr-browser";
     std::vector<std::string> argStore = {helper};
+#endif
     argStore.insert(argStore.end(), args.begin(), args.end());
     std::vector<char*> argv;
     for (std::string& a : argStore) argv.push_back(a.data());
@@ -123,12 +136,14 @@ struct Launcher {
     std::string out;
     int port = -1;
     std::string profile;  // Chromium profile in use (bookmarks)
+    std::string error;    // last error the launcher reported
     int users = 0;
     bool failed = false;
 
     bool ensureStarted(int width, int height) {
         if (pid > 0) return true;
         failed = false;
+        error.clear();
         port = -1;
         out.clear();
         pid = spawnHelper({"--launch", "--width", std::to_string(width), "--height", std::to_string(height)},
@@ -159,6 +174,7 @@ struct Launcher {
                 PIXELVR_LOG_INFO("Browser: Chromium ready on port %d", port);
             } else if (line.rfind("error ", 0) == 0) {
                 PIXELVR_LOG_WARN("Browser: %s", line.c_str() + 6);
+                error = line.substr(6);
             }
         }
         if (waitpid(pid, nullptr, WNOHANG) == pid) {
@@ -189,6 +205,7 @@ BrowserHost::~BrowserHost() { stop(); }
 bool BrowserHost::start(const std::string& url, int width, int height, const Options& opt) {
     stop();
     options_ = opt;
+    lastError_.clear();
     width_ = std::min(width, kBrowserMaxWidth);
     height_ = std::min(height, kBrowserMaxHeight);
     frameW_ = width_;
@@ -287,6 +304,7 @@ void BrowserHost::poll() {
         Launcher& l = launcher();
         l.poll();
         if (l.failed) {
+            lastError_ = l.error.empty() ? "could not start Chromium" : l.error;
             stop();
             return;
         }
@@ -386,6 +404,7 @@ void BrowserHost::handleLine(const std::string& line) {
         PIXELVR_LOG_INFO("Browser: downloaded %s", rest.c_str());
     } else if (cmd == "error") {
         PIXELVR_LOG_WARN("Browser: %s", rest.c_str());
+        lastError_ = rest;
     }
 }
 
