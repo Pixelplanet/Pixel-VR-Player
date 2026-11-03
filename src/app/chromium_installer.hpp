@@ -30,6 +30,7 @@ private:
     int out_ = -1;
     std::string buffer_;
     std::string lastLine_;
+    bool inEscape_ = false;  // inside a terminal escape sequence
     int percent_ = -1;
     std::string error_;
 };

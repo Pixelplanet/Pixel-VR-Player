@@ -7,7 +7,9 @@
 #include <cstring>
 #include <fcntl.h>
 #include <spawn.h>
+#include <sys/ioctl.h>
 #include <sys/wait.h>
+#include <termios.h>
 #include <unistd.h>
 #include <vector>
 
@@ -19,10 +21,25 @@ ChromiumInstaller::~ChromiumInstaller() { cancel(); }
 
 bool ChromiumInstaller::start() {
     if (state_ == State::Running) return true;
-    int pipeFd[2];
-    if (pipe(pipeFd) != 0) return false;
-    std::vector<std::string> args = {"flatpak", "install", "--system", "-y", "--noninteractive",
-                                     "flathub", "org.chromium.Chromium"};
+    // A pseudo-terminal, not a pipe: flatpak only shows progress (and flushes
+    // its output as it goes) when writing to a terminal.
+    const int master = posix_openpt(O_RDWR | O_NOCTTY);
+    if (master < 0 || grantpt(master) != 0 || unlockpt(master) != 0) {
+        if (master >= 0) close(master);
+        return false;
+    }
+    const char* slaveName = ptsname(master);
+    const int slave = slaveName ? open(slaveName, O_RDWR | O_NOCTTY) : -1;
+    if (slave < 0) {
+        close(master);
+        return false;
+    }
+    winsize ws{};
+    ws.ws_col = 160;  // wide enough that progress lines aren't cut
+    ws.ws_row = 40;
+    ioctl(slave, TIOCSWINSZ, &ws);
+    // -y answers its questions; not --noninteractive, which hides the progress.
+    std::vector<std::string> args = {"flatpak", "install", "--system", "-y", "flathub", "org.chromium.Chromium"};
     std::vector<char*> argv;
     for (std::string& a : args) argv.push_back(a.data());
     argv.push_back(nullptr);
@@ -37,24 +54,25 @@ bool ChromiumInstaller::start() {
     posix_spawn_file_actions_t fa;
     posix_spawn_file_actions_init(&fa);
     posix_spawn_file_actions_addopen(&fa, STDIN_FILENO, "/dev/null", O_RDONLY, 0);
-    posix_spawn_file_actions_adddup2(&fa, pipeFd[1], STDOUT_FILENO);
-    posix_spawn_file_actions_adddup2(&fa, pipeFd[1], STDERR_FILENO);
-    posix_spawn_file_actions_addclose(&fa, pipeFd[0]);
+    posix_spawn_file_actions_adddup2(&fa, slave, STDOUT_FILENO);
+    posix_spawn_file_actions_adddup2(&fa, slave, STDERR_FILENO);
+    posix_spawn_file_actions_addclose(&fa, master);
     const int rc = posix_spawnp(&pid_, "flatpak", &fa, nullptr, argv.data(), envp.data());
     posix_spawn_file_actions_destroy(&fa);
-    close(pipeFd[1]);
+    close(slave);
     if (rc != 0) {
-        close(pipeFd[0]);
+        close(master);
         pid_ = -1;
         state_ = State::Failed;
         error_ = "flatpak is not available";
         return false;
     }
-    out_ = pipeFd[0];
+    out_ = master;
     fcntl(out_, F_SETFL, fcntl(out_, F_GETFL) | O_NONBLOCK);
     fcntl(out_, F_SETFD, FD_CLOEXEC);
     state_ = State::Running;
     percent_ = -1;
+    inEscape_ = false;
     error_.clear();
     buffer_.clear();
     lastLine_.clear();
@@ -80,25 +98,35 @@ void ChromiumInstaller::poll() {
     if (state_ != State::Running) return;
     char buf[4096];
     for (;;) {
-        const ssize_t n = read(out_, buf, sizeof(buf));
+        const ssize_t n = read(out_, buf, sizeof(buf));  // EIO once flatpak is gone
         if (n <= 0) break;
-        buffer_.append(buf, static_cast<size_t>(n));
+        // Drop the terminal's escape sequences (the progress table redraws
+        // itself with cursor moves), keep the text.
+        for (ssize_t i = 0; i < n; ++i) {
+            const char c = buf[i];
+            if (c == '\x1b') {
+                inEscape_ = true;
+            } else if (inEscape_) {
+                if ((c >= '@' && c <= '~') && c != '[') inEscape_ = false;
+            } else {
+                buffer_ += c;
+            }
+        }
     }
-    // Progress lines end in \r (redrawn) or \n; keep the newest percentage
-    // and the last line (the error, if it fails).
+    // The newest "NN%" anywhere in the text is the progress; whole lines are
+    // kept for the error message if it fails.
+    for (size_t pct = buffer_.find('%'); pct != std::string::npos; pct = buffer_.find('%', pct + 1)) {
+        size_t start = pct;
+        while (start > 0 && buffer_[start - 1] >= '0' && buffer_[start - 1] <= '9') --start;
+        if (start < pct && pct - start <= 3) percent_ = std::atoi(buffer_.c_str() + start);
+    }
     size_t end;
     while ((end = buffer_.find_first_of("\r\n")) != std::string::npos) {
         const std::string line = buffer_.substr(0, end);
         buffer_.erase(0, end + 1);
-        if (line.empty()) continue;
-        lastLine_ = line;
-        const size_t pct = line.rfind('%');
-        if (pct != std::string::npos && pct > 0) {
-            size_t start = pct;
-            while (start > 0 && line[start - 1] >= '0' && line[start - 1] <= '9') --start;
-            if (start < pct) percent_ = std::atoi(line.c_str() + start);
-        }
+        if (line.find_first_not_of(" \t") != std::string::npos) lastLine_ = line;
     }
+    if (buffer_.size() > 4096) buffer_.erase(0, buffer_.size() - 1024);  // a line that never ends
     int status = 0;
     if (waitpid(pid_, &status, WNOHANG) == pid_) {
         pid_ = -1;
