@@ -134,6 +134,7 @@ add_library(pixelvr_core STATIC
     src/app/vault_manager.cpp
     src/app/playback_memory.cpp
     src/app/browser_host.cpp
+    src/app/chromium_installer.cpp
     src/app/app.cpp)
 
 target_include_directories(pixelvr_core PUBLIC

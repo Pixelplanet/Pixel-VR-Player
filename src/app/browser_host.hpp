@@ -31,6 +31,7 @@ public:
     void stop();
     bool running() const { return state_ != State::Idle; }
     bool kiosk() const { return options_.kiosk; }
+    const std::string& startUrl() const { return startUrl_; }
     // Size of the last frame (page plus toolbar); input uses these pixels.
     int frameWidth() const { return frameW_; }
     int frameHeight() const { return frameH_; }

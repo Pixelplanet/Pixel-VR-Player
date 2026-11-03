@@ -17,6 +17,7 @@
 #include "ui/settings_menu.hpp"
 #include "app/playback_memory.hpp"
 #include "app/browser_host.hpp"
+#include "app/chromium_installer.hpp"
 #include "app/music_queue.hpp"
 
 #include <atomic>
@@ -332,6 +333,13 @@ private:
     void clearSlotKeepLayout(int slot);
     void applyAudioFollow();  // audio-follow on: only the selected screen is heard
     bool lastLoadFailed_ = false;  // the hub stays open to show why
+    // Chromium missing: the install dialog (action menu page 9), and the
+    // browser screen to open once it is installed.
+    ChromiumInstaller chromiumInstaller_;
+    int installWebSlot_ = -1;
+    std::string installWebUrl_;
+    bool installWebKiosk_ = false;
+    void showChromiumDialog();  // (re)builds page 9 for the installer's state
     // Perf log accumulators (milliseconds since the last PERF line).
     double perfFeedMs_ = 0.0;
     double perfFrameMs_ = 0.0;

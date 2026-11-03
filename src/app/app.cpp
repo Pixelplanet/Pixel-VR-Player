@@ -2037,6 +2037,31 @@ void App::moveArrangementTo(int slot, const float target[3]) {
     applyArrangement(arrangement_);
 }
 
+void App::showChromiumDialog() {
+    actionMenu_.visible = true;
+    actionMenu_.page = 9;
+    actionMenu_.title = "Chromium needed";
+    actionMenu_.options.clear();
+    switch (chromiumInstaller_.state()) {
+        case ChromiumInstaller::State::Running: {
+            const int pct = chromiumInstaller_.percent();
+            actionMenu_.subtitle = pct >= 0 ? "Installing Chromium... " + std::to_string(pct) + "%"
+                                            : std::string("Installing Chromium...");
+            actionMenu_.options = {"Hide", "Cancel install"};
+            break;
+        }
+        case ChromiumInstaller::State::Failed:
+            actionMenu_.subtitle = "Install failed: " + chromiumInstaller_.error();
+            actionMenu_.options = {"Try again", "Close"};
+            break;
+        default:
+            actionMenu_.subtitle = "YouTube and the web browser use Chromium. Install it from Flathub (about 185 MB)?";
+            actionMenu_.options = {"Install Chromium", "Cancel"};
+            break;
+    }
+    if (actionMenu_.selectedOption >= static_cast<int>(actionMenu_.options.size())) actionMenu_.selectedOption = 0;
+}
+
 void App::openWebScreen(const std::string& url, bool kiosk) {
     settings_.close();
     downloadsWindow_ = false;
@@ -2498,15 +2523,44 @@ int App::run() {
             // small slop, so laser jitter doesn't select text), thumbstick =
             // scroll, B = back. Close it with the dock's X like any screen.
             BrowserHost::tickIdle();
+            // Chromium install: progress in its dialog; when done, open the
+            // browser screen that asked for it.
+            {
+                const ChromiumInstaller::State before = chromiumInstaller_.state();
+                chromiumInstaller_.poll();
+                const ChromiumInstaller::State now = chromiumInstaller_.state();
+                const bool dialogUp = actionMenu_.visible && actionMenu_.page == 9;
+                if (now == ChromiumInstaller::State::Done) {
+                    chromiumInstaller_.reset();
+                    if (dialogUp) actionMenu_.visible = false;
+#ifdef PIXELVR_HAVE_FREETYPE
+                    browser_.setOpen(false);
+#endif
+                    if (installWebSlot_ >= 0) loadWeb(installWebSlot_, installWebUrl_, installWebKiosk_);
+                    installWebSlot_ = -1;
+                } else if (now == ChromiumInstaller::State::Failed && before == ChromiumInstaller::State::Running) {
+                    showChromiumDialog();  // show why, offer to try again
+                } else if (now == ChromiumInstaller::State::Running && dialogUp) {
+                    showChromiumDialog();  // progress
+                }
+            }
             for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
                 if (!screens_[slot].web) continue;
                 BrowserHost& host = webHosts_[slot];
                 host.poll();
                 if (!host.running()) {  // helper or Chromium died
                     const std::string why = host.lastError();
+                    const bool missing = why.rfind("Chromium is not installed", 0) == 0;
+                    if (missing) {  // remember what to open once it is installed
+                        installWebSlot_ = slot;
+                        installWebUrl_ = host.startUrl();
+                        installWebKiosk_ = host.kiosk();
+                    }
                     closeMedia(slot);
 #ifdef PIXELVR_HAVE_FREETYPE
-                    if (!why.empty()) {  // e.g. Chromium isn't installed: say so
+                    if (missing) {
+                        showChromiumDialog();  // offer to install it right here
+                    } else if (!why.empty()) {
                         browser_.setStatus("Browser: " + why);
                         browser_.setOpen(true);
                     }
@@ -3684,7 +3738,8 @@ int App::run() {
 
             // File Action Submenu or Files view interaction inside Unified Spatial Hub
             if (actionMenu_.visible) {
-                if ((!browser_.isOpen() && actionMenu_.page != 5 && actionMenu_.page != 8) || downloadsWindow_ || settings_.isOpen() || !pendingDl_.empty()) {
+                if ((!browser_.isOpen() && actionMenu_.page != 5 && actionMenu_.page != 8 && actionMenu_.page != 9) ||
+                    downloadsWindow_ || settings_.isOpen() || !pendingDl_.empty()) {
                     actionMenu_.visible = false;
                 } else {
                     const Browser::Entry* fe = browser_.focused();
@@ -3853,6 +3908,24 @@ int App::run() {
                                                 xr_.triggerHaptic(0, 0.050f, 0.0f, 0.7f);
                                                 xr_.triggerHaptic(1, 0.050f, 0.0f, 0.7f);
                                             }
+                                        }
+                                        actionMenu_.visible = false;
+                                    }
+                                } else if (actionMenu_.page == 9) {
+                                    // Chromium install dialog.
+                                    if (opt == "Install Chromium" || opt == "Try again") {
+                                        chromiumInstaller_.reset();
+                                        chromiumInstaller_.start();
+                                        showChromiumDialog();
+                                    } else if (opt == "Cancel install") {
+                                        chromiumInstaller_.cancel();
+                                        chromiumInstaller_.reset();
+                                        installWebSlot_ = -1;
+                                        actionMenu_.visible = false;
+                                    } else {  // Cancel / Close / Hide (the install keeps going)
+                                        if (chromiumInstaller_.state() != ChromiumInstaller::State::Running) {
+                                            chromiumInstaller_.reset();
+                                            installWebSlot_ = -1;
                                         }
                                         actionMenu_.visible = false;
                                     }
