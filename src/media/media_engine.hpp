@@ -1,6 +1,7 @@
 #pragma once
 
 #include "media/cover_art.hpp"
+#include "media/stereo_detect.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -60,6 +61,8 @@ public:
     MediaEngine& operator=(const MediaEngine&) = delete;
 
     bool open(const std::string& path);
+    // Why the last open() failed, for the user (e.g. "no decoder for av1").
+    const std::string& lastError() const;
     void close();
 
     int width() const;
@@ -97,6 +100,8 @@ public:
 
     // Audio files (no video stream): the screen shows a still cover card.
     bool audioOnly() const;
+    // 3D / VR layout from the container's metadata (unknown = -1).
+    FormatHint formatHint() const;
     const AudioTags& audioTags() const;  // title / artist / album (audio files)
 
     // Seeking (thread-safe; applied on the decode thread).

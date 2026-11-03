@@ -375,6 +375,8 @@ struct MediaEngine::Impl {
     // Audio files: no video decoder; audio anchors the clock and the screen
     // shows a still "now playing" card (cover art), delivered once.
     bool audioOnly = false;
+    FormatHint formatHint;
+    std::string lastError;  // set when open() fails
     AudioTags tags;
     std::atomic<float> volume{1.0f};
     VideoFrame card;
@@ -989,8 +991,11 @@ MediaEngine::~MediaEngine() {
     close();
 }
 
+const std::string& MediaEngine::lastError() const { return impl_->lastError; }
+
 bool MediaEngine::open(const std::string& path) {
     close();
+    impl_->lastError = "the file could not be opened";
 
 #ifdef PIXELVR_HAVE_SMB
     if (path.rfind("smb://", 0) == 0) {
@@ -1054,6 +1059,7 @@ bool MediaEngine::open(const std::string& path) {
         return false;
     }
     if (avformat_find_stream_info(impl_->format, nullptr) < 0) {
+        impl_->lastError = "unknown or damaged file format";
         PIXELVR_LOG_ERROR("MediaEngine: no stream info in %s", path.c_str());
         close();
         return false;
@@ -1097,6 +1103,7 @@ bool MediaEngine::open(const std::string& path) {
     impl_->audioOnly = false;
     if (impl_->videoStream < 0) {
         if (av_find_best_stream(impl_->format, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0) < 0) {
+            impl_->lastError = "no video or audio in the file";
             PIXELVR_LOG_ERROR("MediaEngine: no video or audio stream in %s", path.c_str());
             close();
             return false;
@@ -1145,6 +1152,7 @@ bool MediaEngine::open(const std::string& path) {
 
     if (!impl_->audioOnly) {
         AVStream* stream = impl_->format->streams[impl_->videoStream];
+        impl_->formatHint = formatFromMetadata(stream);
         impl_->timeBase = stream->time_base;
         impl_->frameRate = av_q2d(av_guess_frame_rate(impl_->format, stream, nullptr));
         PIXELVR_LOG_INFO("MediaEngine: source frame rate %.3f fps", impl_->frameRate);
@@ -1173,9 +1181,13 @@ bool MediaEngine::open(const std::string& path) {
                                      : nullptr;
         bool hardware = decoder != nullptr;
         if (decoder == nullptr) {
-            decoder = avcodec_find_decoder(codecId);
+            // FFmpeg's own "av1" decoder needs a hardware accelerator, which this
+            // device lacks: AV1 plays only through dav1d (software).
+            decoder = (codecId == AV_CODEC_ID_AV1) ? avcodec_find_decoder_by_name("libdav1d")
+                                                   : avcodec_find_decoder(codecId);
         }
         if (decoder == nullptr) {
+            impl_->lastError = std::string("no decoder for ") + avcodec_get_name(codecId) + " video";
             PIXELVR_LOG_ERROR("MediaEngine: no decoder for %s", path.c_str());
             close();
             return false;
@@ -1228,12 +1240,14 @@ bool MediaEngine::open(const std::string& path) {
                 hardware = false;
                 decoder = avcodec_find_decoder(codecId);
                 if (decoder == nullptr || !open_with(decoder)) {
+                    impl_->lastError = std::string("cannot decode ") + avcodec_get_name(codecId) + " video";
                     PIXELVR_LOG_ERROR("MediaEngine: failed to open decoder for %s",
                                       path.c_str());
                     close();
                     return false;
                 }
             } else {
+                impl_->lastError = std::string("cannot decode ") + avcodec_get_name(codecId) + " video";
                 PIXELVR_LOG_ERROR("MediaEngine: failed to open decoder for %s",
                                   path.c_str());
                 close();
@@ -1316,6 +1330,7 @@ bool MediaEngine::open(const std::string& path) {
     }
 #endif
 
+    impl_->lastError.clear();
     impl_->eof.store(false);
     impl_->paused.store(false);
     impl_->running.store(true);
@@ -1353,6 +1368,7 @@ void MediaEngine::close() {
     }
     impl_->teardown();
     impl_->audioOnly = false;
+    impl_->formatHint = {};
     impl_->tags = {};
     impl_->cardPending = false;
     impl_->card = {};
@@ -1390,6 +1406,7 @@ void MediaEngine::setVolume(float volume) {
 }
 
 bool MediaEngine::audioOnly() const { return impl_ && impl_->audioOnly; }
+FormatHint MediaEngine::formatHint() const { return impl_->formatHint; }
 const AudioTags& MediaEngine::audioTags() const { return impl_->tags; }
 
 bool MediaEngine::muted() const {

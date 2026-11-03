@@ -1141,7 +1141,12 @@ void Browser::startDownloadFolder(const std::string& uri,
     dlDone_.store(false);
     dlOk_.store(false);
     dlBytes_.store(0);
+    dlBaseBytes_.store(0);  // the previous folder's finished files must not count
     dlTotal_.store(0);
+    {
+        std::lock_guard<std::mutex> lk(dlCurMutex_);
+        dlCurFile_.clear();
+    }
     dlLocalPath_ = destDir;
     dlSpeed_ = 0.0;
     speedBytes_ = 0;

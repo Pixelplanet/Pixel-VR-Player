@@ -202,6 +202,9 @@ private:
         MusicQueue queue;    // audio files: the folder they were opened from
 #endif
         int musicFirst = 0;  // first queue row shown in the music view
+        std::string fingerprint;     // file identity for the playback memory
+        bool formatPending = false;  // 3D layout still to come from the picture check
+        bool formatByHand = false;   // the viewer's remembered choice applies
     };
     ScreenState screens_[VulkanRenderer::kMaxVideoSlots];
     int selectedScreen_ = 0;
@@ -325,6 +328,7 @@ private:
     // keeps the queue, and leaves open menus alone).
     void loadMedia(const std::string& path, int slot = -1, bool fromQueue = false);
     void buildMusicQueue(int slot, const std::string& path);  // audio file opened from a folder
+    bool lastLoadFailed_ = false;  // the hub stays open to show why
     void playQueueTrack(int slot, int index);
     void updateMusicView(int slot);
     float musicScrollAccum_ = 0.0f;

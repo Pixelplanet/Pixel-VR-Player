@@ -21,6 +21,7 @@ extern "C" {
 #include <libswscale/swscale.h>
 }
 #include "media/cover_art.hpp"
+#include "media/stereo_detect.hpp"
 #endif
 
 namespace fs = std::filesystem;
@@ -39,12 +40,20 @@ struct DiskMetaHeader {
     double durationSec = 0.0;
 };
 
-// .meta files: the header, then the source file's path (since the cleanup
-// sweep; older files are just the header).
+// .meta files: the header ('PVR2': followed by the format hints), then the
+// source file's path. Older files: 'PVRM' header, then the path or nothing.
+constexpr uint32_t kMetaMagicV1 = 0x5056524D;  // 'PVRM'
+constexpr uint32_t kMetaMagicV2 = 0x32525650;  // 'PVR2'
+struct DiskMetaHints {
+    int32_t projection = -1;
+    int32_t stereo = -1;
+};
 static void writeMeta(const std::string& metaFile, const ThumbnailCache::MediaMeta& meta, const std::string& sourcePath) {
-    const DiskMetaHeader hdr{0x5056524D, meta.width, meta.height, meta.fps, meta.durationSec};
+    const DiskMetaHeader hdr{kMetaMagicV2, meta.width, meta.height, meta.fps, meta.durationSec};
+    const DiskMetaHints hints{meta.projectionHint, meta.stereoHint};
     std::ofstream out(metaFile, std::ios::binary | std::ios::trunc);
     out.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
+    out.write(reinterpret_cast<const char*>(&hints), sizeof(hints));
     out.write(sourcePath.data(), static_cast<std::streamsize>(sourcePath.size()));
 }
 
@@ -84,7 +93,9 @@ static void pruneThumbnails(const std::string& dir) {
         std::string source;
         if (fs::file_size(meta, te) > sizeof(DiskMetaHeader)) {
             std::ifstream in(meta, std::ios::binary);
-            in.seekg(sizeof(DiskMetaHeader));
+            uint32_t magic = 0;
+            in.read(reinterpret_cast<char*>(&magic), sizeof(magic));
+            in.seekg(sizeof(DiskMetaHeader) + (magic == kMetaMagicV2 ? sizeof(DiskMetaHints) : 0));
             source.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
         }
         bool drop;
@@ -130,7 +141,7 @@ ThumbnailCache::~ThumbnailCache() {
 void ThumbnailCache::request(const std::string& videoPath, bool highPriority) {
     if (videoPath.empty() || videoPath[0] != '/') return;
     std::lock_guard<std::mutex> lk(mutex_);
-    if (cache_.find(videoPath) != cache_.end()) {
+    if (cache_.find(videoPath) != cache_.end() || failed_.count(videoPath) != 0) {
         return;
     }
     if (highPriority) {
@@ -232,6 +243,9 @@ bool ThumbnailCache::extractThumbnailAndMeta(const std::string& videoPath,
     AVStream* st = fmt->streams[vIdx];
     outMeta.width = st->codecpar->width;
     outMeta.height = st->codecpar->height;
+    const FormatHint hint = formatFromMetadata(st);
+    outMeta.projectionHint = hint.projection;
+    outMeta.stereoHint = hint.stereo;
     if (st->avg_frame_rate.den > 0 && st->avg_frame_rate.num > 0) {
         outMeta.fps = av_q2d(st->avg_frame_rate);
     } else if (st->r_frame_rate.den > 0 && st->r_frame_rate.num > 0) {
@@ -309,6 +323,8 @@ bool ThumbnailCache::extractThumbnailAndMeta(const std::string& videoPath,
         decodeAttempt();
     }
 
+    // No stereo metadata: look at the picture (stereo pairs repeat in halves).
+    if (gotFrame && outMeta.stereoHint < 0) outMeta.stereoHint = std::max(0, stereoFromPicture(frame));
     bool ok = false;
     if (gotFrame && frame->width > 0 && frame->height > 0) {
         // For Side-by-Side (SBS) 3D or VR180 videos (aspect >= 1.95 or width == 2*height),
@@ -392,21 +408,24 @@ void ThumbnailCache::workerLoop() {
             if (in.read(reinterpret_cast<char*>(data.data()), kThumbBytes)) {
                 MediaMeta meta{};
                 const auto metaSize = fs::is_regular_file(metaFile, ec) ? fs::file_size(metaFile, ec) : 0;
-                if (metaSize >= sizeof(DiskMetaHeader)) {
+                // Older .meta files lack the format hints: probe those again.
+                if (metaSize >= sizeof(DiskMetaHeader) + sizeof(DiskMetaHints)) {
                     std::ifstream min(metaFile, std::ios::binary);
                     DiskMetaHeader hdr{};
-                    if (min.read(reinterpret_cast<char*>(&hdr), sizeof(hdr)) &&
-                        hdr.magic == 0x5056524D) {
+                    DiskMetaHints hints{};
+                    if (min.read(reinterpret_cast<char*>(&hdr), sizeof(hdr)) && hdr.magic == kMetaMagicV2 &&
+                        min.read(reinterpret_cast<char*>(&hints), sizeof(hints))) {
                         meta.width = hdr.width;
                         meta.height = hdr.height;
                         meta.fps = hdr.fps;
                         meta.durationSec = hdr.durationSec;
+                        meta.projectionHint = hints.projection;
+                        meta.stereoHint = hints.stereo;
                         meta.ready = true;
-                        if (metaSize == sizeof(DiskMetaHeader)) writeMeta(metaFile, meta, path);  // add the path
                     }
                 }
                 if (!meta.ready) {
-                    // Quick metadata probe if .meta was not cached yet
+                    // Quick metadata probe if .meta was not cached yet (or is old)
                     std::vector<uint8_t> dummy;
                     extractThumbnailAndMeta(path, dummy, meta);
                     if (meta.ready) writeMeta(metaFile, meta, path);
@@ -438,6 +457,8 @@ void ThumbnailCache::workerLoop() {
                              path.c_str(), meta.width, meta.height, meta.durationSec);
         } else {
             PIXELVR_LOG_WARN("Thumbnail generation failed for %s", path.c_str());
+            std::lock_guard<std::mutex> lk(mutex_);
+            failed_[path] = true;  // e.g. no decoder: asking again every frame floods the log
         }
     }
 }

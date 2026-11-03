@@ -20,6 +20,10 @@ public:
         double fps = 0.0;
         double durationSec = 0.0;
         bool ready = false;
+        // 3D / VR layout found in the file (metadata, else the picture):
+        // projection 0 flat / 1 360 / 2 180, stereo 0 mono / 1 SBS / 2 TB, -1 unknown.
+        int projectionHint = -1;
+        int stereoHint = -1;
     };
 
     ThumbnailCache();
@@ -51,6 +55,7 @@ private:
     std::unordered_map<std::string, bool> queuedPaths_;
     std::unordered_map<std::string, std::vector<uint8_t>> cache_;
     std::unordered_map<std::string, MediaMeta> metaCache_;
+    std::unordered_map<std::string, bool> failed_;  // not retried until the next start
     std::atomic<bool> stop_{false};
     std::thread worker_;
 };

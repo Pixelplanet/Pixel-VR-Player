@@ -414,6 +414,7 @@ void App::applyResolutionScale(float scale) {
 
 #ifdef PIXELVR_HAVE_MEDIA
 void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
+    lastLoadFailed_ = false;
     if (slot < 0 || !multiScreenEnabled()) slot = multiScreenEnabled() ? selectedScreen_ : 0;
     {
         // 360/180 is immersive: it always plays on the main screen.
@@ -432,7 +433,8 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
     if (!sameFile) renderer_.clearScrubPreview();  // stale frame from the previous clip
     sc.path = path;
     const bool privatePath = VaultManager::instance().isVaultPath(path);
-    const PlaybackMemory::Entry* remembered = privatePath ? nullptr : playbackMemory_.find(path);
+    if (!sameFile) sc.fingerprint = privatePath ? std::string() : PlaybackMemory::fingerprintOf(path);
+    const PlaybackMemory::Entry* remembered = privatePath ? nullptr : playbackMemory_.find(path, sc.fingerprint);
     VulkanRenderer::ProjectionMode proj = VulkanRenderer::ProjectionMode::Flat;
     VulkanRenderer::StereoMode stereo = VulkanRenderer::StereoMode::Mono;
     bool stereoFromName = false;
@@ -452,8 +454,15 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
     if (!sc.open) {
         // Clear stale video from the previous clip so the renderer shows black
         // instead of the last decoded frame of the old file.
+        const std::string why = sc.engine.lastError();
+        lastLoadFailed_ = true;
         closeMedia(slot);
-        PIXELVR_LOG_WARN("Failed to open %s", path.c_str());
+        PIXELVR_LOG_WARN("Failed to open %s: %s", path.c_str(), why.c_str());
+#ifdef PIXELVR_HAVE_FREETYPE
+        // Say so in the file browser instead of silently doing nothing.
+        browser_.setStatus("Can't play " + std::filesystem::path(path).filename().string() + ": " + why);
+        if (!fromQueue) browser_.setOpen(true);
+#endif
         return;
     }
     sc.engine.setPaused(false);
@@ -501,10 +510,38 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
         }
     }
 
+    // No layout in the name: the file's own 3D / VR metadata, else what the
+    // picture check found (now, or once the thumbnail worker has looked).
+    sc.formatPending = false;
+    if (!stereoFromName && !sc.engine.audioOnly()) {
+        const FormatHint meta = sc.engine.formatHint();
+        int hintStereo = meta.stereo;
+        if (meta.projection > 0 && proj == VulkanRenderer::ProjectionMode::Flat) {
+            proj = static_cast<VulkanRenderer::ProjectionMode>(meta.projection);
+            if (meta.stereo < 0) hintStereo = (meta.projection == 2) ? 1 : 0;  // VR180 is usually SBS
+        }
+        if (hintStereo < 0 && proj == VulkanRenderer::ProjectionMode::Flat &&
+            stereo == VulkanRenderer::StereoMode::Mono) {
+            ThumbnailCache::MediaMeta tm;
+            if (thumbnailCache_.getMeta(path, tm) && tm.stereoHint >= 0) {
+                hintStereo = tm.stereoHint;
+            } else {
+                sc.formatPending = true;
+                thumbnailCache_.request(path, true);
+            }
+        }
+        if (hintStereo >= 0) {
+            stereo = static_cast<VulkanRenderer::StereoMode>(hintStereo);
+            if (hintStereo > 0) PIXELVR_LOG_INFO("Format from the file: stereo %d", hintStereo);
+        }
+    }
     // A format the viewer picked by hand for this file wins over detection.
+    sc.formatByHand = false;
     if (remembered != nullptr && remembered->projection >= 0 && remembered->stereo >= 0) {
         proj = static_cast<VulkanRenderer::ProjectionMode>(remembered->projection);
         stereo = static_cast<VulkanRenderer::StereoMode>(remembered->stereo);
+        sc.formatByHand = true;
+        sc.formatPending = false;
     }
     // Dimension-based detection can turn a file immersive only after opening:
     // move it to the main screen in that case.
@@ -890,7 +927,7 @@ void App::rememberPlaybackPosition(int slot) {
     }
     // Songs start from the top; long audio (audiobooks, mixes) resumes.
     if (sc.engine.audioOnly() && sc.engine.duration() < 20.0 * 60.0) return;
-    playbackMemory_.setPosition(sc.path, sc.engine.position(), sc.engine.duration());
+    playbackMemory_.setPosition(sc.path, sc.engine.position(), sc.engine.duration(), sc.fingerprint);
 #else
     (void)slot;
 #endif
@@ -1626,7 +1663,7 @@ void App::playFromBrowser(const std::string& path) {
         loadMedia(path, 0);
 #endif
 #ifdef PIXELVR_HAVE_FREETYPE
-        browser_.setOpen(false);
+        if (!lastLoadFailed_) browser_.setOpen(false);
 #endif
         return;
     }
@@ -1638,7 +1675,7 @@ void App::playFromBrowser(const std::string& path) {
     loadMedia(path);
 #endif
 #ifdef PIXELVR_HAVE_FREETYPE
-    browser_.setOpen(false);
+    if (!lastLoadFailed_) browser_.setOpen(false);
 #endif
 }
 
@@ -2808,7 +2845,29 @@ int App::run() {
                     }
                 }
             }
-            for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) updateMusicView(slot);
+            for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
+                updateMusicView(slot);
+                ScreenState& sc = screens_[slot];
+                ThumbnailCache::MediaMeta tm;
+                if (sc.formatPending && sc.open && thumbnailCache_.getMeta(sc.path, tm)) {
+                    // The picture check finished after the file opened.
+                    sc.formatPending = false;
+                    if (tm.stereoHint > 0 && sc.stereo == 0 && sc.projection == 0 && !sc.formatByHand) {
+                        PIXELVR_LOG_INFO("Format from the picture: stereo %d for %s", tm.stereoHint, sc.path.c_str());
+                        sc.stereo = tm.stereoHint;
+                        const auto st = static_cast<VulkanRenderer::StereoMode>(tm.stereoHint);
+                        if (slot == 0) {
+                            renderer_.setStereoMode(st);  // the main screen uses the global mode
+                        } else {
+                            VulkanRenderer::ScreenPlacement pl = renderer_.screenPlacement(slot);
+                            pl.stereo = st;
+                            renderer_.setScreenPlacement(slot, pl);
+                        }
+                        if (slot == selectedScreen_) settings_.setStereoMode(sc.stereo);
+                        if (arrangementActive_ && inArrangement(slot)) applyArrangement(arrangement_);
+                    }
+                }
+            }
             renderer_.setVolumeDisplay(cur().volume, cur().muted);
 #endif
             renderer_.setMultiScreen(multiScreenEnabled() && openScreenCount() > 0, selectedScreen_);
@@ -3764,8 +3823,10 @@ int App::run() {
                                         !VaultManager::instance().isVaultPath(cur().path)) {
                                         playbackMemory_.setFormat(cur().path,
                                                                   settings_.projectionMode(),
-                                                                  settings_.stereoMode());
+                                                                  settings_.stereoMode(), cur().fingerprint);
                                         playbackMemory_.save();
+                                        cur().formatByHand = true;
+                                        cur().formatPending = false;
                                     }
 #endif
                                     xr_.triggerHaptic(0, 0.040f, 0.0f, 0.6f);
@@ -3808,7 +3869,7 @@ int App::run() {
 #endif
                                             }
                                             actionMenu_.visible = false;
-                                            browser_.setOpen(false);
+                                            if (!lastLoadFailed_) browser_.setOpen(false);
                                         }
                                     } else {
                                         actionMenu_.visible = false;

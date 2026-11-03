@@ -190,7 +190,8 @@ if(PIXELVR_ENABLE_MEDIA)
     pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
         libavcodec libavformat libavutil libswscale libswresample)
     target_sources(pixelvr_core PRIVATE src/media/media_engine.cpp src/media/scrub_preview.cpp
-                                        src/media/cover_art.cpp src/app/music_queue.cpp)
+                                        src/media/cover_art.cpp src/media/stereo_detect.cpp
+                                        src/app/music_queue.cpp)
     target_link_libraries(pixelvr_core PUBLIC PkgConfig::FFMPEG)
     target_compile_definitions(pixelvr_core PUBLIC PIXELVR_HAVE_MEDIA=1)
 
