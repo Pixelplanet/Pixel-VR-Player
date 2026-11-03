@@ -42,7 +42,10 @@ rm -rf build && mkdir build && cd build
     --disable-autodetect --disable-doc --disable-programs --disable-network \
     --disable-debug --disable-avdevice --disable-avformat --disable-avfilter \
     --disable-swscale --disable-postproc --disable-encoders --disable-muxers \
-    --enable-v4l2-m2m --enable-shared --disable-static --extra-cflags=-std=gnu17
+    --enable-v4l2-m2m --enable-shared --disable-static --extra-cflags=-std=gnu17 \
+    --enable-libdav1d
+# libdav1d: AV1 in software (the Iris hardware decoder has no AV1 yet);
+# needs dav1d installed (SteamOS ships it).
 make -j"$jobs"
 
 echo
