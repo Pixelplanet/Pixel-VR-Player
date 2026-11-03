@@ -571,9 +571,11 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
         renderer_.setProjectionMode(proj);
         renderer_.setStereoMode(stereo);
         if (proj != VulkanRenderer::ProjectionMode::Flat) {
-            // Immersive plays alone: pause the extra screens (they are hidden).
+            // Immersive plays alone: the other screens close (usually asked
+            // first, see playFromBrowser; this catches a format found only
+            // now, from the picture size).
             for (int i = 1; i < VulkanRenderer::kMaxVideoSlots; ++i) {
-                if (screens_[i].open) screens_[i].engine.setPaused(true);
+                if (screens_[i].open) closeMedia(i);
             }
         }
     } else {
@@ -1688,6 +1690,28 @@ void App::openPlayTargetMenu(const std::string& path) {
     renderer_.setPickerSpatial(spatial);
 }
 
+bool App::looksImmersive(const std::string& path) {
+    // What is known before opening: a format picked by hand, the name, then
+    // the thumbnail worker's probe (metadata or picture size).
+    if (!VaultManager::instance().isVaultPath(path)) {
+        const PlaybackMemory::Entry* rem = playbackMemory_.find(path, PlaybackMemory::fingerprintOf(path));
+        if (rem != nullptr && rem->projection >= 0) return rem->projection != 0;
+    }
+    VulkanRenderer::ProjectionMode p = VulkanRenderer::ProjectionMode::Flat;
+    VulkanRenderer::StereoMode st = VulkanRenderer::StereoMode::Mono;
+    bool fromName = false;
+    detect_format(path, p, st, fromName);
+    if (p != VulkanRenderer::ProjectionMode::Flat) return true;
+#ifdef PIXELVR_HAVE_FREETYPE
+    ThumbnailCache::MediaMeta tm;
+    if (thumbnailCache_.getMeta(path, tm)) {
+        if (tm.projectionHint > 0) return true;
+        if (tm.height > 0 && is_vr180_media(path, tm.width, tm.height)) return true;
+    }
+#endif
+    return false;
+}
+
 void App::playFromBrowser(const std::string& path) {
     // With several screens available and something already playing, ask where.
     // While a 180/360 video plays it is alone, so a new file replaces it.
@@ -1699,6 +1723,18 @@ void App::playFromBrowser(const std::string& path) {
 #ifdef PIXELVR_HAVE_FREETYPE
         if (!lastLoadFailed_) browser_.setOpen(false);
 #endif
+        return;
+    }
+    if (multiScreenEnabled() && openScreenCount() > 0 && looksImmersive(path)) {
+        // 180/360 plays alone, so there is no screen to pick: say what happens.
+        pendingPlayPath_ = path;
+        actionMenu_.visible = true;
+        actionMenu_.page = 10;
+        actionMenu_.title = "Play the VR video?";
+        actionMenu_.subtitle = openScreenCount() > 1 ? "180 and 360 videos play alone: the other screens close."
+                                                     : "180 and 360 videos play alone: it replaces what is playing.";
+        actionMenu_.options = {"Play", "Cancel"};
+        actionMenu_.selectedOption = 0;
         return;
     }
     if (multiScreenEnabled() && openScreenCount() > 0) {
@@ -3929,6 +3965,20 @@ int App::run() {
                                             }
                                         }
                                         actionMenu_.visible = false;
+                                    }
+                                } else if (actionMenu_.page == 10) {
+                                    // 180/360 with other screens open.
+                                    actionMenu_.visible = false;
+                                    if (opt == "Play") {
+                                        for (int i = 0; i < VulkanRenderer::kMaxVideoSlots; ++i) {
+                                            if (screens_[i].open) closeMedia(i);
+                                        }
+#ifdef PIXELVR_HAVE_MEDIA
+                                        loadMedia(pendingPlayPath_, 0);
+#endif
+#ifdef PIXELVR_HAVE_FREETYPE
+                                        if (!lastLoadFailed_) browser_.setOpen(false);
+#endif
                                     }
                                 } else if (actionMenu_.page == 9) {
                                     // Chromium install dialog.

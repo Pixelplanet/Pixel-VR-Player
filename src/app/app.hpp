@@ -276,6 +276,7 @@ private:
     float screenEyeAspect(int slot) const;  // per-eye width / height of a screen's video
     // Browser 'play' entry point: asks where to play when screens are in use.
     void playFromBrowser(const std::string& path);
+    bool looksImmersive(const std::string& path);  // 180/360, judged before opening it
     int movingScreen_ = -1;  // screen being placed with the laser, or -1
     // Web browser screen (proof of concept): the pvr-browser helper's page on a
     // floating screen; the laser acts as the mouse.
