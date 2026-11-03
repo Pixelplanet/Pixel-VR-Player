@@ -2538,8 +2538,25 @@ int App::run() {
 #ifdef PIXELVR_HAVE_FREETYPE
                     browser_.setOpen(false);
 #endif
-                    if (installWebSlot_ >= 0) loadWeb(installWebSlot_, installWebUrl_, installWebKiosk_);
-                    installWebSlot_ = -1;
+                    if (installWebSlot_ >= 0 && !screens_[installWebSlot_].open) {
+                        loadWeb(installWebSlot_, installWebUrl_, installWebKiosk_);
+                        installWebSlot_ = -1;
+                    } else if (installWebSlot_ >= 0) {
+                        // Something plays there now (the dialog was hidden):
+                        // don't replace it, ask.
+                        installWebSlot_ = -1;
+                        if (multiScreenEnabled()) {
+                            openWebScreen(installWebUrl_, installWebKiosk_);  // which screen?
+                        } else {
+                            actionMenu_.visible = true;
+                            actionMenu_.page = 9;
+                            actionMenu_.title = "Chromium is installed";
+                            actionMenu_.subtitle = installWebKiosk_ ? "Open YouTube now? It replaces what is playing."
+                                                                    : "Open the browser now? It replaces what is playing.";
+                            actionMenu_.options = {installWebKiosk_ ? "Open YouTube" : "Open browser", "Not now"};
+                            actionMenu_.selectedOption = 0;
+                        }
+                    }
                 } else if (now == ChromiumInstaller::State::Failed && before == ChromiumInstaller::State::Running) {
                     showChromiumDialog();  // show why, offer to try again
                 } else if (now == ChromiumInstaller::State::Running && dialogUp) {
@@ -3915,7 +3932,10 @@ int App::run() {
                                     }
                                 } else if (actionMenu_.page == 9) {
                                     // Chromium install dialog.
-                                    if (opt == "Install Chromium" || opt == "Try again") {
+                                    if (opt == "Open YouTube" || opt == "Open browser") {
+                                        actionMenu_.visible = false;
+                                        openWebScreen(installWebUrl_, installWebKiosk_);
+                                    } else if (opt == "Install Chromium" || opt == "Try again") {
                                         chromiumInstaller_.reset();
                                         chromiumInstaller_.start();
                                         showChromiumDialog();
