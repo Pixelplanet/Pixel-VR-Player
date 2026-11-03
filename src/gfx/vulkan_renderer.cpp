@@ -5222,24 +5222,32 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 if (st == StereoMode::SideBySide && eyeAspect >= 2.6f) eyeAspect *= 0.5f;
                 else if (st == StereoMode::TopBottom && eyeAspect <= 1.2f) eyeAspect *= 2.0f;
                 const float ws = eyeAspect / (16.0f / 9.0f);
-                // Unwrapped around the viewer: each screen sits at its direction
-                // (angle x distance) and keeps only its turn relative to facing
-                // the viewer, so screens to the side don't flatten into slivers
-                // that overlap their neighbours, as a straight projection would.
+                // Every tile is shown face-on (only a sideways tilt is kept), at
+                // the spot the screen takes from where the user stands: a screen
+                // turned to face the user (curved wall, freely placed) at its
+                // direction unwrapped around them (angle x distance); a screen
+                // facing straight ahead (flat wall) at its straight-ahead spot,
+                // so snapped edges still touch. A plain projection would show
+                // screens to the side as overlapping slivers.
                 const Vec3 cv = transformPoint(toView, Vec3{pl.center[0], pl.center[1], pl.center[2]});
+                const Vec3 o0 = transformPoint(toView, Vec3{0.0f, 0.0f, 0.0f});
+                const Mat4 orient = orientFromYawPitchRoll(pl.yaw, pl.pitch, pl.roll);
+                const Vec3 nW = transformPoint(orient, Vec3{0.0f, 0.0f, 1.0f});
+                const Vec3 uW = transformPoint(orient, Vec3{0.0f, 1.0f, 0.0f});
+                const Vec3 nV = transformPoint(toView, nW);
+                const Vec3 uV = transformPoint(toView, uW);
+                const float nx = nV.x - o0.x, nz = nV.z - o0.z;   // screen normal (toward its viewer)
+                const float ux = uV.x - o0.x, uy = uV.y - o0.y;   // screen up
                 const float horiz = std::max(std::sqrt(cv.x * cv.x + cv.z * cv.z), 1e-3f);
                 const float dist = std::max(std::sqrt(horiz * horiz + cv.y * cv.y), 1e-3f);
                 const float az = std::atan2(cv.x, -cv.z);
                 const float el = std::atan2(cv.y, horiz);
-                const float dx = pl.center[0] - arrangePivot_[0];
-                const float dy = pl.center[1] - arrangePivot_[1];
-                const float dz = pl.center[2] - arrangePivot_[2];
-                const float dLen = std::max(std::sqrt(dx * dx + dy * dy + dz * dz), 1e-3f);
-                float relYaw = pl.yaw - std::atan2(-dx, -dz);
-                relYaw = std::atan2(std::sin(relYaw), std::cos(relYaw));
-                const float relPitch = pl.pitch - std::asin(std::clamp(dy / dLen, -1.0f, 1.0f));
-                local[slot] = multiply(multiply(translation(Vec3{az * dist, el * dist, -dist}),
-                                                orientFromYawPitchRoll(relYaw, relPitch, pl.roll)),
+                const float facing = std::atan2(-nx, nz);  // 0 = faces straight back at the user
+                const bool towardUser = std::fabs(facing - az) < std::fabs(facing);
+                const Vec3 at = towardUser ? Vec3{az * dist, el * dist, -dist} : Vec3{cv.x, cv.y, cv.z};
+                const float roll = std::atan2(-ux, uy);
+                local[slot] = multiply(multiply(translation(at), fromQuat(Quat{0.0f, 0.0f, std::sin(0.5f * roll),
+                                                                               std::cos(0.5f * roll)})),
                                        scaling(Vec3{ws * pl.scale, pl.scale, ws * pl.scale}));
                 edgeX[slot] = 1.6f;
                 if (pl.curvature > 0.005f) {  // quad.vert's arc
