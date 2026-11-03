@@ -2288,6 +2288,7 @@ int App::run() {
             // Feed every open screen's newest frame into its renderer slot. Held
             // dma-buf frames are released when a decoder is about to seek so it
             // can reclaim its V4L2 capture buffers (otherwise it wedges).
+            const auto feedT0 = std::chrono::steady_clock::now();
             for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
                 ScreenState& sc = screens_[slot];
                 if (!sc.open || sc.web) continue;
@@ -2306,11 +2307,16 @@ int App::run() {
                                                  sc.frame.colorspace, sc.frame.fullRange, slot);
                 }
             }
+            perfFeedMs_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - feedT0).count();
 #endif
+            const auto frameT0 = std::chrono::steady_clock::now();
             xr_.renderFrame([this](uint32_t viewIndex, uint32_t imageIndex,
                                    const XrView& view, const ViewSwapchain& swapchain) {
+                const auto viewT0 = std::chrono::steady_clock::now();
                 renderer_.renderView(viewIndex, imageIndex, view, swapchain);
+                perfViewCpuMs_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - viewT0).count();
             });
+            perfFrameMs_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - frameT0).count();
 
             // Apply controller input that renderFrame synced this frame.
             const auto nowT = std::chrono::steady_clock::now();
@@ -4578,9 +4584,30 @@ int App::run() {
                             (dec >= perfLastDecoded_)
                                 ? static_cast<double>(dec - perfLastDecoded_) / since
                                 : 0.0;
+                        // Where a frame's time goes (per rendered frame): feeding video
+                        // frames (import + resolve), the whole XR frame (incl. the
+                        // runtime's wait), waiting for the GPU, and drawing on the CPU.
+                        double gpuWaitMs = 0.0, unusedMs = 0.0;
+                        renderer_.takePerfTimes(gpuWaitMs, unusedMs);
+                        const double n = std::max(1, perfFrames_);
+                        long gpuMhz = 0;
+                        {
+                            std::ifstream cf("/sys/class/devfreq/3d00000.gpu/cur_freq");
+                            long hz = 0;
+                            if (cf >> hz) gpuMhz = hz / 1000000;
+                        }
+                        const uint64_t late = cur().engine.lateFrames();
+                        const uint64_t waits = cur().engine.clockWaits();
                         PIXELVR_LOG_INFO(
-                            "PERF: render %.1f fps, decode %.1f/%.2f fps",
-                            perfFrames_ / since, decFps, cur().engine.frameRate());
+                            "PERF: render %.1f fps, decode %.1f/%.2f fps | per frame: feed %.1f ms, frame %.1f ms, "
+                            "gpu wait %.1f ms, draw %.1f ms | gpu %ld MHz | late %llu, clock waits %llu",
+                            perfFrames_ / since, decFps, cur().engine.frameRate(), perfFeedMs_ / n,
+                            perfFrameMs_ / n, gpuWaitMs / n, perfViewCpuMs_ / n, gpuMhz,
+                            static_cast<unsigned long long>(late - perfLastLate_),
+                            static_cast<unsigned long long>(waits - perfLastWaits_));
+                        perfLastLate_ = late;
+                        perfLastWaits_ = waits;
+                        perfFeedMs_ = perfFrameMs_ = perfViewCpuMs_ = 0.0;
                         perfFrames_ = 0;
                         perfLastDecoded_ = dec;
                         perfLastLog_ = now;

@@ -71,6 +71,8 @@ public:
     double frameRate() const;  // source frames per second; 0 if unknown
     std::string codecName() const;   // decoder name + (hw)/(sw)
     uint64_t decodedFrames() const;  // total frames decoded since open
+    uint64_t lateFrames() const;     // decoded but skipped: too late to show
+    uint64_t clockWaits() const;     // times the clock waited for lagging video
 
     // Copies the newest decoded frame into `out` when it is newer than
     // out.serial. Returns true if `out` was updated. Thread-safe; call every

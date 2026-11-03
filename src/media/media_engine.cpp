@@ -375,6 +375,8 @@ struct MediaEngine::Impl {
     // Audio files: no video decoder; audio anchors the clock and the screen
     // shows a still "now playing" card (cover art), delivered once.
     bool audioOnly = false;
+    std::atomic<uint64_t> lateCount{0};
+    std::atomic<uint64_t> clockWaitCount{0};
     FormatHint formatHint;
     std::string lastError;  // set when open() fails
     AudioTags tags;
@@ -1218,7 +1220,7 @@ bool MediaEngine::open(const std::string& path) {
                 const int64_t px = static_cast<int64_t>(stream->codecpar->width) *
                                    stream->codecpar->height;
                 const int64_t frameBytes = highBitDepth ? px * 3 : px * 3 / 2;  // P010/NV12
-                constexpr int64_t kBudget = 320ll << 20;  // ~320 MiB capture pool
+                constexpr int64_t kBudget = 640ll << 20;  // ~640 MiB: 8K gets 12 buffers (6 left no slack)
                 impl_->captureBuffers = static_cast<int>(std::clamp<int64_t>(
                     kBudget / std::max<int64_t>(frameBytes, 1), 4, 20));
                 av_opt_set_int(impl_->codec->priv_data, "num_capture_buffers",
@@ -1385,6 +1387,8 @@ std::string MediaEngine::codecName() const { return impl_->codecName; }
 uint64_t MediaEngine::decodedFrames() const {
     return impl_->decodedCount.load(std::memory_order_relaxed);
 }
+uint64_t MediaEngine::lateFrames() const { return impl_->lateCount.load(std::memory_order_relaxed); }
+uint64_t MediaEngine::clockWaits() const { return impl_->clockWaitCount.load(std::memory_order_relaxed); }
 double MediaEngine::duration() const { return impl_->duration; }
 double MediaEngine::frameRate() const { return impl_ ? impl_->frameRate : 0.0; }
 bool MediaEngine::eof() const { return impl_->eof.load(); }
@@ -1519,12 +1523,21 @@ bool MediaEngine::latestFrame(VideoFrame& out) {
         impl_->playClock.start(q.front().pts);
         clock = q.front().pts;
     }
+    // Decoding slower than real time: let the clock wait for the video (a
+    // hitch) instead of running away from it. Audio is read in the same loop,
+    // so it would fall behind too and be dropped as late, for good.
+    if (impl_->primed && q.back().pts < clock - 0.5) {
+        impl_->playClock.start(q.front().pts);
+        clock = q.front().pts;
+        impl_->clockWaitCount.fetch_add(1, std::memory_order_relaxed);
+    }
     const std::size_t due = selectDueIndex(
         clock, impl_->primed,
         [&](std::size_t i) { return q[i].pts; }, q.size());
     if (due == static_cast<std::size_t>(-1)) {
         return false;  // all queued frames are still in the future
     }
+    impl_->lateCount.fetch_add(due, std::memory_order_relaxed);
     for (std::size_t i = 0; i < due; ++i) {
         q.pop_front();  // drop superseded (late) frames
     }
@@ -1562,12 +1575,20 @@ bool MediaEngine::latestDrmFrame(DrmVideoFrame& out) {
         impl_->playClock.start(q.front().pts);
         clock = q.front().pts;
     }
+    // Decoding slower than real time: the clock waits for the video (see
+    // latestFrame) so audio is not dropped as late for good.
+    if (impl_->primed && q.back().pts < clock - 0.5) {
+        impl_->playClock.start(q.front().pts);
+        clock = q.front().pts;
+        impl_->clockWaitCount.fetch_add(1, std::memory_order_relaxed);
+    }
     const std::size_t due = selectDueIndex(
         clock, impl_->primed,
         [&](std::size_t i) { return q[i].pts; }, q.size());
     if (due == static_cast<std::size_t>(-1)) {
         return false;  // all queued frames are still in the future
     }
+    impl_->lateCount.fetch_add(due, std::memory_order_relaxed);
     for (std::size_t i = 0; i < due; ++i) {
         if (q.front().fd >= 0) ::close(q.front().fd);  // release dropped dma-buf
         q.pop_front();

@@ -332,6 +332,12 @@ private:
     void clearSlotKeepLayout(int slot);
     void applyAudioFollow();  // audio-follow on: only the selected screen is heard
     bool lastLoadFailed_ = false;  // the hub stays open to show why
+    // Perf log accumulators (milliseconds since the last PERF line).
+    double perfFeedMs_ = 0.0;
+    double perfFrameMs_ = 0.0;
+    double perfViewCpuMs_ = 0.0;
+    uint64_t perfLastLate_ = 0;
+    uint64_t perfLastWaits_ = 0;
     void playQueueTrack(int slot, int index);
     void updateMusicView(int slot);
     float musicScrollAccum_ = 0.0f;

@@ -543,6 +543,13 @@ public:
     }
     void setControlBar(bool visible) { controlBarVisible_ = visible; }
     void setAudioFollow(bool on) { audioFollow_ = on; }
+    // Perf log: milliseconds spent waiting for the GPU (a view's previous use)
+    // and in renderView overall since the last call; then reset.
+    void takePerfTimes(double& gpuWaitMs, double& viewCpuMs) {
+        gpuWaitMs = perfGpuWaitMs_;
+        viewCpuMs = perfViewMs_;
+        perfGpuWaitMs_ = perfViewMs_ = 0.0;
+    }
     bool controlBarVisible() const { return controlBarVisible_; }
     void setHudLabels(const std::string& format, const std::string& audio,
                       const std::string& screen, bool formatEnabled = true,
@@ -993,6 +1000,8 @@ private:
     int pointerScreen_ = -1;
     bool screenControlsVisible_ = false;
     bool audioFollow_ = false;
+    double perfGpuWaitMs_ = 0.0;
+    double perfViewMs_ = 0.0;
     int screenControlsNumber_ = 1;
     bool screenControlsMuted_ = false;
     bool screensUnlocked_ = false;  // screens can be grabbed with the laser

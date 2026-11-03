@@ -2737,7 +2737,9 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
     // of the last frame, but guard anyway in case a frame was cut short.
     const uint32_t slot = viewIndex % 2;
     if (viewFenceInFlight_[slot]) {
+        const auto fenceT0 = std::chrono::steady_clock::now();
         vkWaitForFences(device_, 1, &viewFences_[slot], VK_TRUE, UINT64_MAX);
+        perfGpuWaitMs_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - fenceT0).count();
         vkResetFences(device_, 1, &viewFences_[slot]);
         viewFenceInFlight_[slot] = false;
     }
