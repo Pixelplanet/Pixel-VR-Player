@@ -2045,8 +2045,10 @@ void App::showChromiumDialog() {
     switch (chromiumInstaller_.state()) {
         case ChromiumInstaller::State::Running: {
             const int pct = chromiumInstaller_.percent();
-            actionMenu_.subtitle = pct >= 0 ? "Installing Chromium... " + std::to_string(pct) + "%"
-                                            : std::string("Installing Chromium...");
+            // At 100% flatpak still sets the app up for a few seconds.
+            actionMenu_.subtitle = pct >= 100 ? std::string("Finishing the install...")
+                                   : pct >= 0 ? "Installing Chromium... " + std::to_string(pct) + "%"
+                                              : std::string("Installing Chromium...");
             actionMenu_.options = {"Hide", "Cancel install"};
             break;
         }

@@ -31,7 +31,10 @@ private:
     std::string buffer_;
     std::string lastLine_;
     bool inEscape_ = false;  // inside a terminal escape sequence
-    int percent_ = -1;
+    int percent_ = -1;      // overall, never goes back
+    int rawPercent_ = -1;   // newest percentage while no part counter shows
+    int part_ = 0, parts_ = 0;  // flatpak's "Installing 2/3"
+    int partPercent_ = 0;
     std::string error_;
 };
 

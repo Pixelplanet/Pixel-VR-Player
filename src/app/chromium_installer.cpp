@@ -3,6 +3,7 @@
 #include "util/logging.hpp"
 
 #include <csignal>
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <fcntl.h>
@@ -72,6 +73,9 @@ bool ChromiumInstaller::start() {
     fcntl(out_, F_SETFD, FD_CLOEXEC);
     state_ = State::Running;
     percent_ = -1;
+    rawPercent_ = -1;
+    part_ = parts_ = 0;
+    partPercent_ = 0;
     inEscape_ = false;
     error_.clear();
     buffer_.clear();
@@ -113,13 +117,39 @@ void ChromiumInstaller::poll() {
             }
         }
     }
-    // The newest "NN%" anywhere in the text is the progress; whole lines are
-    // kept for the error message if it fails.
-    for (size_t pct = buffer_.find('%'); pct != std::string::npos; pct = buffer_.find('%', pct + 1)) {
-        size_t start = pct;
-        while (start > 0 && buffer_[start - 1] >= '0' && buffer_[start - 1] <= '9') --start;
-        if (start < pct && pct - start <= 3) percent_ = std::atoi(buffer_.c_str() + start);
+    // flatpak shows "Installing 2/3... 45%": the percentage is per part
+    // (runtime pieces, locales, the app), so it is combined with the part
+    // counter into one bar that only moves forward. A percentage before the
+    // first counter (metadata) is ignored, unless no counter ever shows.
+    auto digitAt = [&](size_t i) { return i < buffer_.size() && buffer_[i] >= '0' && buffer_[i] <= '9'; };
+    for (size_t i = 0; i < buffer_.size(); ++i) {
+        if (buffer_[i] == '/' && i > 0 && digitAt(i - 1) && digitAt(i + 1)) {
+            size_t s = i;
+            while (s > 0 && digitAt(s - 1)) --s;
+            size_t e = i + 1;
+            while (digitAt(e)) ++e;
+            const int n = std::atoi(buffer_.c_str() + s);
+            const int m = std::atoi(buffer_.c_str() + i + 1);
+            // "2/3" after a space; not "MB/s" or a long object count
+            if ((s == 0 || buffer_[s - 1] == ' ') && n >= 1 && n <= m && m <= 20) {
+                if (n != part_ || m != parts_) partPercent_ = 0;
+                part_ = n;
+                parts_ = m;
+            }
+            i = e - 1;
+        } else if (buffer_[i] == '%' && i > 0 && digitAt(i - 1)) {
+            size_t s = i;
+            while (s > 0 && digitAt(s - 1)) --s;
+            if (i - s <= 3) {
+                const int p = std::min(100, std::atoi(buffer_.c_str() + s));
+                if (parts_ > 0) partPercent_ = p;
+                else rawPercent_ = p;
+            }
+        }
     }
+    int overall = parts_ > 0 ? ((part_ - 1) * 100 + partPercent_) / parts_ : rawPercent_;
+    if (overall > percent_) percent_ = overall;
+    // Whole lines are kept for the error message if it fails.
     size_t end;
     while ((end = buffer_.find_first_of("\r\n")) != std::string::npos) {
         const std::string line = buffer_.substr(0, end);
