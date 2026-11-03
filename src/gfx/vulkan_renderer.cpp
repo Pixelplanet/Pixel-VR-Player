@@ -5656,7 +5656,24 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         }
         if (!actionMenu_.subtitle.empty() && actionMenu_.page != 2 && actionMenu_.page != 4 &&
             actionMenu_.page != 6 && actionMenu_.page != 8) {
-            drawFitCentered(0.0f, mHalfH - 0.090f, mHalfW * 1.8f, sc * 0.85f, slateCol, actionMenu_.subtitle);
+            // Too long for one line: break at the space nearest the middle and
+            // use a second line (then cut, if even that is too long).
+            const std::string& sub = actionMenu_.subtitle;
+            const float maxW = mHalfW * 1.8f;
+            size_t cut = std::string::npos;
+            if (measureString(sc * 0.85f, sub) > maxW) {
+                for (size_t i = 0; i < sub.size(); ++i) {
+                    if (sub[i] != ' ') continue;
+                    const auto dist = [&](size_t p) { return p > sub.size() / 2 ? p - sub.size() / 2 : sub.size() / 2 - p; };
+                    if (cut == std::string::npos || dist(i) < dist(cut)) cut = i;
+                }
+            }
+            if (cut == std::string::npos) {
+                drawFitCentered(0.0f, mHalfH - 0.090f, maxW, sc * 0.85f, slateCol, sub);
+            } else {
+                drawFitCentered(0.0f, mHalfH - 0.085f, maxW, sc * 0.85f, slateCol, sub.substr(0, cut));
+                drawFitCentered(0.0f, mHalfH - 0.117f, maxW, sc * 0.85f, slateCol, sub.substr(cut + 1));
+            }
         }
 
         if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5 || actionMenu_.page == 9 ||

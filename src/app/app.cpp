@@ -981,6 +981,9 @@ void App::closeMedia(int slot) {
         playbackMemory_.save();
         if (slot == selectedScreen_) scrubPreview_.setSource(std::string(), 0);
         sc.engine.close();
+        // Hand the last frame back to the hardware decoder, so it can free
+        // the closed clip's buffers (else the next big video finds no room).
+        renderer_.releaseVideoFrame(slot);
 #endif
     }
 #ifdef PIXELVR_HAVE_MEDIA
@@ -1731,8 +1734,9 @@ void App::playFromBrowser(const std::string& path) {
         actionMenu_.visible = true;
         actionMenu_.page = 10;
         actionMenu_.title = "Play the VR video?";
-        actionMenu_.subtitle = openScreenCount() > 1 ? "180 and 360 videos play alone: the other screens close."
-                                                     : "180 and 360 videos play alone: it replaces what is playing.";
+        actionMenu_.subtitle = openScreenCount() > 1
+                                   ? "180° and 360° videos play on their own, so the other screens close."
+                                   : "180° and 360° videos play on their own, so this replaces what is playing.";
         actionMenu_.options = {"Play", "Cancel"};
         actionMenu_.selectedOption = 0;
         return;
