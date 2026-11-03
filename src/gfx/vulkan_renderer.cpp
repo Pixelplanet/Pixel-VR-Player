@@ -5222,9 +5222,25 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 if (st == StereoMode::SideBySide && eyeAspect >= 2.6f) eyeAspect *= 0.5f;
                 else if (st == StereoMode::TopBottom && eyeAspect <= 1.2f) eyeAspect *= 2.0f;
                 const float ws = eyeAspect / (16.0f / 9.0f);
-                local[slot] = multiply(toView, multiply(multiply(translation(Vec3{pl.center[0], pl.center[1], pl.center[2]}),
-                                                                 orientFromYawPitchRoll(pl.yaw, pl.pitch, pl.roll)),
-                                                        scaling(Vec3{ws * pl.scale, pl.scale, ws * pl.scale})));
+                // Unwrapped around the viewer: each screen sits at its direction
+                // (angle x distance) and keeps only its turn relative to facing
+                // the viewer, so screens to the side don't flatten into slivers
+                // that overlap their neighbours, as a straight projection would.
+                const Vec3 cv = transformPoint(toView, Vec3{pl.center[0], pl.center[1], pl.center[2]});
+                const float horiz = std::max(std::sqrt(cv.x * cv.x + cv.z * cv.z), 1e-3f);
+                const float dist = std::max(std::sqrt(horiz * horiz + cv.y * cv.y), 1e-3f);
+                const float az = std::atan2(cv.x, -cv.z);
+                const float el = std::atan2(cv.y, horiz);
+                const float dx = pl.center[0] - arrangePivot_[0];
+                const float dy = pl.center[1] - arrangePivot_[1];
+                const float dz = pl.center[2] - arrangePivot_[2];
+                const float dLen = std::max(std::sqrt(dx * dx + dy * dy + dz * dz), 1e-3f);
+                float relYaw = pl.yaw - std::atan2(-dx, -dz);
+                relYaw = std::atan2(std::sin(relYaw), std::cos(relYaw));
+                const float relPitch = pl.pitch - std::asin(std::clamp(dy / dLen, -1.0f, 1.0f));
+                local[slot] = multiply(multiply(translation(Vec3{az * dist, el * dist, -dist}),
+                                                orientFromYawPitchRoll(relYaw, relPitch, pl.roll)),
+                                       scaling(Vec3{ws * pl.scale, pl.scale, ws * pl.scale}));
                 edgeX[slot] = 1.6f;
                 if (pl.curvature > 0.005f) {  // quad.vert's arc
                     const float ang = pl.curvature * 1.75f;
