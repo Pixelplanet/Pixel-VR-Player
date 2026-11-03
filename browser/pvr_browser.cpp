@@ -1699,6 +1699,15 @@ int runScreen(const ScreenOptions& opt) {
 
     // ---- Periodic page state: fullscreen, focused field, media.
     auto pollState = [&]() {
+        if (!toolbarReady && !toolbar.empty()) {
+            // The load event can pass while a tab is being set up; ask directly.
+            evalIn(toolbar, "typeof window.pvr", [&](const pvrjson::Value* v) {
+                if (toolbarReady || !v || v->str != "object") return;
+                toolbarReady = true;
+                pushToolbar(true);
+                compose();
+            });
+        }
         const Tab* t = activeTab();
         if (!t) return;
         const std::string session = t->session;
