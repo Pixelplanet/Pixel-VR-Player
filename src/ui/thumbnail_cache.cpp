@@ -4,12 +4,14 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 
 #ifdef PIXELVR_HAVE_MEDIA
 extern "C" {
@@ -18,6 +20,7 @@ extern "C" {
 #include <libavutil/imgutils.h>
 #include <libswscale/swscale.h>
 }
+#include "media/cover_art.hpp"
 #endif
 
 namespace fs = std::filesystem;
@@ -35,6 +38,67 @@ struct DiskMetaHeader {
     double fps = 0.0;
     double durationSec = 0.0;
 };
+
+// .meta files: the header, then the source file's path (since the cleanup
+// sweep; older files are just the header).
+static void writeMeta(const std::string& metaFile, const ThumbnailCache::MediaMeta& meta, const std::string& sourcePath) {
+    const DiskMetaHeader hdr{0x5056524D, meta.width, meta.height, meta.fps, meta.durationSec};
+    std::ofstream out(metaFile, std::ios::binary | std::ios::trunc);
+    out.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
+    out.write(sourcePath.data(), static_cast<std::streamsize>(sourcePath.size()));
+}
+
+// Removes thumbnails nobody needs any more: ones whose source file is gone,
+// and ones not shown for a long time (unknown source, network shares).
+// Local path whose file is known to be gone. Files on removable drives
+// (/run/media/<user>/<drive>/...) only count while that drive is mounted.
+static bool sourceDeleted(const std::string& path) {
+    std::error_code ec;
+    if (path.rfind("/run/media/", 0) == 0 || path.rfind("/media/", 0) == 0) {
+        const int depth = path.rfind("/run/media/", 0) == 0 ? 4 : 2;  // slashes after the leading one, up to the drive folder
+        size_t pos = 0;
+        for (int i = 0; i < depth && pos != std::string::npos; ++i) pos = path.find('/', pos + 1);
+        if (pos == std::string::npos || !fs::exists(path.substr(0, pos), ec)) return false;
+    }
+    return !fs::exists(path, ec);
+}
+
+static void pruneThumbnails(const std::string& dir) {
+    std::error_code ec;
+    if (dir.empty() || !fs::is_directory(dir, ec)) return;
+    using namespace std::chrono_literals;
+    const auto now = fs::file_time_type::clock::now();
+    constexpr auto kUnknownMaxAge = 30 * 24h;   // no recorded source
+    constexpr auto kUnusedMaxAge = 180 * 24h;   // e.g. SMB paths we can't check cheaply
+    int removed = 0;
+    std::vector<fs::path> files;
+    for (const auto& e : fs::directory_iterator(dir, ec)) files.push_back(e.path());
+    for (const fs::path& p : files) {
+        if (p.extension() != ".rgba" && p.extension() != ".meta") continue;
+        const fs::path rgba = fs::path(p).replace_extension(".rgba");
+        const fs::path meta = fs::path(p).replace_extension(".meta");
+        if (p.extension() == ".meta" && fs::exists(rgba, ec)) continue;  // handled with its .rgba
+        std::error_code te;
+        const fs::path stamp = fs::exists(rgba, te) ? rgba : meta;
+        const auto age = now - fs::last_write_time(stamp, te);
+        std::string source;
+        if (fs::file_size(meta, te) > sizeof(DiskMetaHeader)) {
+            std::ifstream in(meta, std::ios::binary);
+            in.seekg(sizeof(DiskMetaHeader));
+            source.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+        }
+        bool drop;
+        if (!source.empty() && source[0] == '/') drop = sourceDeleted(source) || age > kUnusedMaxAge;
+        else if (!source.empty()) drop = age > kUnusedMaxAge;
+        else drop = age > kUnknownMaxAge;
+        if (drop) {
+            fs::remove(rgba, te);
+            fs::remove(meta, te);
+            ++removed;
+        }
+    }
+    if (removed > 0) PIXELVR_LOG_INFO("Thumbnails: removed %d unused from %s", removed, dir.c_str());
+}
 
 static uint64_t fnv1a64(const std::string& str) {
     uint64_t hash = 14695981039346656037ULL;
@@ -149,10 +213,20 @@ bool ThumbnailCache::extractThumbnailAndMeta(const std::string& videoPath,
         return false;
     }
 
-    int vIdx = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
+    int vIdx = findVideoStream(fmt);  // cover art is not video
     if (vIdx < 0) {
+        // Audio file: the same card the player shows (cover art or a note).
+        const bool audio = av_find_best_stream(fmt, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0) >= 0;
+        if (audio) {
+            if (fmt->duration > 0) outMeta.durationSec = static_cast<double>(fmt->duration) / AV_TIME_BASE;
+            outMeta.ready = true;
+            std::vector<uint8_t> cover;
+            int cw = 0, ch = 0;
+            decodeCoverArt(fmt, cover, cw, ch);
+            composeAudioCard(cover, cw, ch, kThumbW, kThumbH, outRgba);
+        }
         avformat_close_input(&fmt);
-        return false;
+        return audio;
     }
 
     AVStream* st = fmt->streams[vIdx];
@@ -287,6 +361,9 @@ bool ThumbnailCache::extractThumbnailAndMeta(const std::string& videoPath,
 }
 
 void ThumbnailCache::workerLoop() {
+    // Once per start, before any thumbnails are made.
+    pruneThumbnails(cacheDir_);
+    pruneThumbnails(VaultManager::instance().thumbsDir());
     while (!stop_.load()) {
         std::string path;
         {
@@ -314,8 +391,8 @@ void ThumbnailCache::workerLoop() {
             std::vector<uint8_t> data(kThumbBytes);
             if (in.read(reinterpret_cast<char*>(data.data()), kThumbBytes)) {
                 MediaMeta meta{};
-                if (fs::is_regular_file(metaFile, ec) &&
-                    fs::file_size(metaFile, ec) == sizeof(DiskMetaHeader)) {
+                const auto metaSize = fs::is_regular_file(metaFile, ec) ? fs::file_size(metaFile, ec) : 0;
+                if (metaSize >= sizeof(DiskMetaHeader)) {
                     std::ifstream min(metaFile, std::ios::binary);
                     DiskMetaHeader hdr{};
                     if (min.read(reinterpret_cast<char*>(&hdr), sizeof(hdr)) &&
@@ -325,18 +402,16 @@ void ThumbnailCache::workerLoop() {
                         meta.fps = hdr.fps;
                         meta.durationSec = hdr.durationSec;
                         meta.ready = true;
+                        if (metaSize == sizeof(DiskMetaHeader)) writeMeta(metaFile, meta, path);  // add the path
                     }
                 }
                 if (!meta.ready) {
                     // Quick metadata probe if .meta was not cached yet
                     std::vector<uint8_t> dummy;
                     extractThumbnailAndMeta(path, dummy, meta);
-                    if (meta.ready) {
-                        DiskMetaHeader hdr{0x5056524D, meta.width, meta.height, meta.fps, meta.durationSec};
-                        std::ofstream mout(metaFile, std::ios::binary);
-                        mout.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
-                    }
+                    if (meta.ready) writeMeta(metaFile, meta, path);
                 }
+                fs::last_write_time(cacheFile, fs::file_time_type::clock::now(), ec);  // recently used
                 std::lock_guard<std::mutex> lk(mutex_);
                 cache_[path] = std::move(data);
                 if (meta.ready) metaCache_[path] = meta;
@@ -348,9 +423,7 @@ void ThumbnailCache::workerLoop() {
         MediaMeta meta{};
         const bool ok = extractThumbnailAndMeta(path, rgba, meta);
         if (meta.ready) {
-            DiskMetaHeader hdr{0x5056524D, meta.width, meta.height, meta.fps, meta.durationSec};
-            std::ofstream mout(metaFile, std::ios::binary);
-            mout.write(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
+            writeMeta(metaFile, meta, path);
             std::lock_guard<std::mutex> lk(mutex_);
             metaCache_[path] = meta;
         }

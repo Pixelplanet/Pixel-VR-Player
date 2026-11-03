@@ -189,7 +189,8 @@ if(PIXELVR_ENABLE_MEDIA)
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
         libavcodec libavformat libavutil libswscale libswresample)
-    target_sources(pixelvr_core PRIVATE src/media/media_engine.cpp src/media/scrub_preview.cpp)
+    target_sources(pixelvr_core PRIVATE src/media/media_engine.cpp src/media/scrub_preview.cpp
+                                        src/media/cover_art.cpp)
     target_link_libraries(pixelvr_core PUBLIC PkgConfig::FFMPEG)
     target_compile_definitions(pixelvr_core PUBLIC PIXELVR_HAVE_MEDIA=1)
 

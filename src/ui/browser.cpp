@@ -6,6 +6,7 @@
 #include "util/smb_lock.hpp"
 
 #include <algorithm>
+#include <initializer_list>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -34,20 +35,29 @@ namespace fs = std::filesystem;
 
 namespace {
 
-bool is_video(const std::string& name) {
-    static const char* const kExts[] = {".mp4", ".mkv",  ".mov", ".webm",
-                                        ".m4v", ".avi",  ".ts",  ".m2ts",
-                                        ".wmv", ".flv",  ".mpg", ".m3u8"};
+bool has_extension(const std::string& name, std::initializer_list<const char*> exts) {
     std::string lower = name;
     std::transform(lower.begin(), lower.end(), lower.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    for (const char* e : kExts) {
+    for (const char* e : exts) {
         const std::size_t n = std::char_traits<char>::length(e);
         if (lower.size() >= n && lower.compare(lower.size() - n, n, e) == 0) {
             return true;
         }
     }
     return false;
+}
+
+bool is_audio(const std::string& name) {
+    return has_extension(name, {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".oga", ".opus", ".wav", ".wma",
+                                ".alac", ".aiff", ".aif", ".ape", ".mka"});
+}
+
+// Anything the player opens: videos and audio files (shown with cover art).
+bool is_video(const std::string& name) {
+    return is_audio(name) ||
+           has_extension(name, {".mp4", ".mkv", ".mov", ".webm", ".m4v", ".avi", ".ts", ".m2ts", ".wmv", ".flv",
+                                ".mpg", ".m3u8"});
 }
 
 #ifdef PIXELVR_HAVE_SMB
@@ -234,6 +244,7 @@ void Browser::scanLocalInto(const std::string& dir, ScanResult& out) {
             std::string preview;
             long long bestPreviewSize = -1;
             int videoCount = 0;
+            int audioCount = 0;
             std::error_code sec;
             for (fs::directory_iterator subIt(p, sec), subEnd; !sec && subIt != subEnd; subIt.increment(sec)) {
                 const std::string subName = subIt->path().filename().string();
@@ -247,7 +258,7 @@ void Browser::scanLocalInto(const std::string& dir, ScanResult& out) {
                         bestPreviewSize = score;
                         preview = subIt->path().string();
                     }
-                    ++videoCount;
+                    ++(is_audio(subName) ? audioCount : videoCount);
                 } else if (subIt->is_directory(sdec)) {
                     // Check one level deeper (e.g. ~/Videos/MovieFolder/movie.mp4)
                     std::error_code ssec2;
@@ -263,14 +274,19 @@ void Browser::scanLocalInto(const std::string& dir, ScanResult& out) {
                                 bestPreviewSize = score2;
                                 preview = subIt2->path().string();
                             }
-                            ++videoCount;
+                            ++(is_audio(subName2) ? audioCount : videoCount);
                         }
                     }
                 }
             }
-            std::string detail = (videoCount > 0)
-                ? (std::to_string(videoCount) + (videoCount == 1 ? " video" : " videos") +
-                   (bestPreviewSize > 0 ? "  \xB7  " + format_size(bestPreviewSize) : ""))
+            std::string counts;
+            if (videoCount > 0) counts = std::to_string(videoCount) + (videoCount == 1 ? " video" : " videos");
+            if (audioCount > 0) {
+                if (!counts.empty()) counts += ", ";
+                counts += std::to_string(audioCount) + (audioCount == 1 ? " track" : " tracks");
+            }
+            std::string detail = !counts.empty()
+                ? (counts + (bestPreviewSize > 0 ? "  \xB7  " + format_size(bestPreviewSize) : ""))
                 : "Folder";
             dirs.push_back({name + "/", p.string(), true, false, false, false, detail,
                             bestPreviewSize > 0 ? bestPreviewSize : 0, preview, mtime_of(p)});

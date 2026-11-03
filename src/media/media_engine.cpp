@@ -1,11 +1,14 @@
 #include "media/media_engine.hpp"
 
+#include "media/cover_art.hpp"
+
 #include "util/logging.hpp"
 #include "util/smb_lock.hpp"
 
 #include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
 #include <condition_variable>
 #include <cstdint>
 #include <cstdio>
@@ -369,6 +372,11 @@ struct MediaEngine::Impl {
     std::size_t maxQueue = kMaxQueue;    // effective cap; reduced for huge frames
     std::atomic<bool> usingDrm{false};
     PlaybackClock playClock;  // video-epoch clock, anchored on the first frame
+    // Audio files: no video decoder; audio anchors the clock and the screen
+    // shows a still "now playing" card (cover art), delivered once.
+    bool audioOnly = false;
+    VideoFrame card;
+    bool cardPending = false;  // guarded by mutex
 
     ~Impl() { teardown(); }
 
@@ -710,8 +718,9 @@ void MediaEngine::Impl::decodeLoop() {
         const std::size_t bytes = static_cast<std::size_t>(got) * kOutChannels * 2;
         pcm.resize(bytes);
         // Mute while actively scrubbing so audio writes don't block video previews
-        // and the sound doesn't stutter across seek positions.
-        if (std::chrono::duration<double>(clock::now() - lastSeekWall).count() < 0.25) {
+        // and the sound doesn't stutter across seek positions. (Not for audio
+        // files: nothing paces their decoding, so this would skip far ahead.)
+        if (!audioOnly && std::chrono::duration<double>(clock::now() - lastSeekWall).count() < 0.25) {
             return;
         }
         if (!pa) {
@@ -725,6 +734,17 @@ void MediaEngine::Impl::decodeLoop() {
         const double pts = (ts != AV_NOPTS_VALUE) ? (ts * av_q2d(audioTimeBase)) : -1.0;
         const double dur = static_cast<double>(got) / static_cast<double>(kOutSampleRate);
 
+        if (audioOnly) {
+            // No video to pace the loop: hold decoding ~1.5 s ahead of playback.
+            for (;;) {
+                {
+                    std::lock_guard<std::mutex> lk(audioMutex);
+                    if (audioQueue.size() < 64) break;
+                }
+                if (!running.load() || seekTarget.load() >= 0.0) return;
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+        }
         {
             std::lock_guard<std::mutex> lk(audioMutex);
             // Keep up to ~5s of decoded audio in RAM; never block the video decode loop.
@@ -782,7 +802,7 @@ void MediaEngine::Impl::decodeLoop() {
             }
             const int64_t ts = static_cast<int64_t>(seekTo * AV_TIME_BASE);
             avformat_seek_file(format, -1, INT64_MIN, ts, INT64_MAX, 0);
-            const bool reopened = reopenDecoder();  // fresh decoder avoids HW wedge
+            const bool reopened = audioOnly || reopenDecoder();  // fresh decoder avoids HW wedge
             if (!reopened) {
                 PIXELVR_LOG_ERROR("MediaEngine: video decoder reopen failed on seek");
             }
@@ -834,8 +854,10 @@ void MediaEngine::Impl::decodeLoop() {
         const int readResult = av_read_frame(format, packet);
         if (readResult < 0) {
             if (!eofFlushed) {
-                avcodec_send_packet(codec, nullptr);  // flush video
-                drain(codec, true);
+                if (codec != nullptr) {
+                    avcodec_send_packet(codec, nullptr);  // flush video
+                    drain(codec, true);
+                }
 #ifdef PIXELVR_HAVE_PULSE
                 if (audioEnabled) {
                     avcodec_send_packet(audioCodec, nullptr);
@@ -843,8 +865,17 @@ void MediaEngine::Impl::decodeLoop() {
                 }
 #endif
                 eofFlushed = true;
-                eof.store(true);
+                if (!audioOnly) eof.store(true);
             }
+#ifdef PIXELVR_HAVE_PULSE
+            if (audioOnly && !eof.load()) {
+                // Audio files end once the queued sound has played.
+                std::lock_guard<std::mutex> lk(audioMutex);
+                if (audioQueue.empty()) eof.store(true);
+            }
+#else
+            eof.store(true);
+#endif
             // Stay alive so a seek can resume instead of ending the thread.
             std::this_thread::sleep_for(std::chrono::milliseconds(15));
             continue;
@@ -876,6 +907,15 @@ void MediaEngine::Impl::audioThreadLoop() {
     constexpr double kAudioLeadSec = 0.045;
 
     while (running.load()) {
+        if (audioOnly && !paused.load()) {
+            // No video frame anchors the clock: the first queued sound does
+            // (again after a seek, when the clock restarts from zero).
+            std::lock_guard<std::mutex> lk(audioMutex);
+            if (!audioQueue.empty() && audioQueue.front().pts >= 0.0) {
+                const double first = audioQueue.front().pts;
+                if (!playClock.running.load() || std::abs(playClock.now() - first) > 0.5) playClock.start(first);
+            }
+        }
         if (paused.load() || !playClock.running.load(std::memory_order_relaxed)) {
             std::unique_lock<std::mutex> lk(audioMutex);
             audioCv.wait_for(lk, std::chrono::milliseconds(10));
@@ -928,6 +968,7 @@ void MediaEngine::Impl::audioThreadLoop() {
                 std::fill(chunk.pcm.begin(), chunk.pcm.end(), 0);
             }
             pa_simple_write(pa, chunk.pcm.data(), chunk.pcm.size(), &err);
+            if (audioOnly) masterClock.store(playClock.now(), std::memory_order_relaxed);
         }
     }
 #endif
@@ -1044,124 +1085,167 @@ bool MediaEngine::open(const std::string& path) {
         impl_->format->streams[wantVideo]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
         impl_->videoStream = wantVideo;
     } else {
-        impl_->videoStream = av_find_best_stream(impl_->format, AVMEDIA_TYPE_VIDEO,
-                                                 wantVideo, -1, nullptr, 0);
+        impl_->videoStream = findVideoStream(impl_->format);  // cover art is not video
     }
+    impl_->audioOnly = false;
     if (impl_->videoStream < 0) {
-        PIXELVR_LOG_ERROR("MediaEngine: no video stream in %s", path.c_str());
-        close();
-        return false;
-    }
-
-    AVStream* stream = impl_->format->streams[impl_->videoStream];
-    impl_->timeBase = stream->time_base;
-    impl_->frameRate = av_q2d(av_guess_frame_rate(impl_->format, stream, nullptr));
-    PIXELVR_LOG_INFO("MediaEngine: source frame rate %.3f fps", impl_->frameRate);
-    const AVCodecID codecId = stream->codecpar->codec_id;
-
-    // The Iris V4L2-M2M hardware path (H.264/HEVC/VP9) handles 8-bit here; route
-    // 10-bit+ to software (swscale downconverts to NV12) until dmabuf/P010 import
-    // lands. Prefer the hardware decoder by name; fall back to software so the
-    // same build also runs on a desktop for development.
-    const bool forceSoftware = std::getenv("PIXELVR_FORCE_SW") != nullptr;
-    const bool drmPrime = std::getenv("PIXELVR_DRM_PRIME") != nullptr;
-    const AVPixFmtDescriptor* srcDesc =
-        av_pix_fmt_desc_get(static_cast<AVPixelFormat>(stream->codecpar->format));
-    const bool highBitDepth = srcDesc != nullptr && srcDesc->comp[0].depth > 8;
-    // Hardware handles 8-bit for all codecs; 10-bit only for HEVC and only via the
-    // dmabuf/P010 path (drm_prime). Otherwise route high-bit-depth to software.
-    const bool hwEligible =
-        !highBitDepth || (drmPrime && codecId == AV_CODEC_ID_HEVC);
-    const char* hwName = !hwEligible ? nullptr
-                         : (codecId == AV_CODEC_ID_H264) ? "h264_v4l2m2m"
-                         : (codecId == AV_CODEC_ID_HEVC) ? "hevc_v4l2m2m"
-                         : (codecId == AV_CODEC_ID_VP9)  ? "vp9_v4l2m2m"
-                                                         : nullptr;
-    const AVCodec* decoder = (hwName != nullptr && !forceSoftware)
-                                 ? avcodec_find_decoder_by_name(hwName)
-                                 : nullptr;
-    bool hardware = decoder != nullptr;
-    if (decoder == nullptr) {
-        decoder = avcodec_find_decoder(codecId);
-    }
-    if (decoder == nullptr) {
-        PIXELVR_LOG_ERROR("MediaEngine: no decoder for %s", path.c_str());
-        close();
-        return false;
-    }
-
-    auto open_with = [&](const AVCodec* dec) -> bool {
-        if (impl_->codec != nullptr) {
-            avcodec_free_context(&impl_->codec);
-        }
-        impl_->codec = avcodec_alloc_context3(dec);
-        if (impl_->codec == nullptr ||
-            avcodec_parameters_to_context(impl_->codec, stream->codecpar) < 0) {
+        if (av_find_best_stream(impl_->format, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0) < 0) {
+            PIXELVR_LOG_ERROR("MediaEngine: no video or audio stream in %s", path.c_str());
+            close();
             return false;
         }
-        impl_->codec->pkt_timebase = stream->time_base;
-        impl_->codec->thread_count = 0;  // Auto-detect and utilize all CPU cores
-        impl_->codec->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
-        impl_->videoDecoder = dec;  // retained so the decode thread can reopen on seek
-        if (std::strstr(dec->name, "v4l2m2m") != nullptr) {
-            av_opt_set_int(impl_->codec->priv_data, "num_output_buffers", 4, 0);
+        // Audio file: the screen shows its cover art (or a placeholder) as a
+        // single NV12 frame; playback runs on the audio clock.
+        impl_->audioOnly = true;
+        constexpr int kCardW = 1280, kCardH = 720;
+        std::vector<uint8_t> cover, rgba;
+        int cw = 0, ch = 0;
+        decodeCoverArt(impl_->format, cover, cw, ch);
+        composeAudioCard(cover, cw, ch, kCardW, kCardH, rgba);
+        VideoFrame& card = impl_->card;
+        card.width = kCardW;
+        card.height = kCardH;
+        card.y.assign(static_cast<size_t>(kCardW) * kCardH, 0);
+        card.uv.assign(static_cast<size_t>(kCardW) * kCardH / 2, 128);
+        if (SwsContext* sws = sws_getContext(kCardW, kCardH, AV_PIX_FMT_RGBA, kCardW, kCardH, AV_PIX_FMT_NV12,
+                                             SWS_BILINEAR, nullptr, nullptr, nullptr)) {
+            const uint8_t* src[4] = {rgba.data(), nullptr, nullptr, nullptr};
+            const int srcStride[4] = {kCardW * 4, 0, 0, 0};
+            uint8_t* dst[4] = {card.y.data(), card.uv.data(), nullptr, nullptr};
+            const int dstStride[4] = {kCardW, kCardW, 0, 0};
+            sws_scale(sws, src, srcStride, 0, kCardH, dst, dstStride);
+            sws_freeContext(sws);
         }
-        impl_->decoderDrm = drmPrime && std::strstr(dec->name, "v4l2m2m") != nullptr;
-        if (impl_->decoderDrm) {
-            // Export decoder output as DMA-BUF (AV_PIX_FMT_DRM_PRIME) for zero-copy
-            // Vulkan import; requires the dmabuf-patched libavcodec. Bound the
-            // decoded-buffer memory: at 8K a frame is ~40-80 MiB, so a fixed large
-            // count exhausts the decoder's DMA pool and REQBUFS fails -> POLLERR.
-            const int64_t px = static_cast<int64_t>(stream->codecpar->width) *
-                               stream->codecpar->height;
-            const int64_t frameBytes = highBitDepth ? px * 3 : px * 3 / 2;  // P010/NV12
-            constexpr int64_t kBudget = 320ll << 20;  // ~320 MiB capture pool
-            impl_->captureBuffers = static_cast<int>(std::clamp<int64_t>(
-                kBudget / std::max<int64_t>(frameBytes, 1), 4, 20));
-            av_opt_set_int(impl_->codec->priv_data, "num_capture_buffers",
-                           impl_->captureBuffers, 0);
-            av_opt_set_int(impl_->codec->priv_data, "drm_prime", 1, 0);
-            impl_->codec->apply_cropping = 0;
-            // Leave buffers free for the decoder's DPB; the queue holds the rest.
-            // A deeper queue absorbs bursty decode output (B-frame reorder, SMB
-            // jitter) so low-framerate playback doesn't underrun and judder.
-            impl_->maxQueue =
-                static_cast<std::size_t>(std::clamp(impl_->captureBuffers - 5, 1, 14));
+        card.colorspace = AVCOL_SPC_BT709;
+        card.fullRange = false;
+        card.pts = 0.0;
+        {
+            std::lock_guard<std::mutex> lock(impl_->mutex);
+            card.serial = ++impl_->serial;
+            impl_->cardPending = true;
         }
-        return avcodec_open2(impl_->codec, dec, nullptr) >= 0;
-    };
+        impl_->width = kCardW;
+        impl_->height = kCardH;
+        impl_->frameRate = 0.0;
+        impl_->duration = (impl_->format->duration > 0)
+                              ? impl_->format->duration / static_cast<double>(AV_TIME_BASE)
+                              : 0.0;
+        impl_->decodedCount.store(0);
+        PIXELVR_LOG_INFO("MediaEngine: %s  audio only  %.1fs  cover=%s", path.c_str(), impl_->duration,
+                         cover.empty() ? "none" : "yes");
+    }
 
-    if (!open_with(decoder)) {
-        if (hardware) {
-            PIXELVR_LOG_WARN("MediaEngine: hardware decoder failed, trying software");
-            hardware = false;
+    if (!impl_->audioOnly) {
+        AVStream* stream = impl_->format->streams[impl_->videoStream];
+        impl_->timeBase = stream->time_base;
+        impl_->frameRate = av_q2d(av_guess_frame_rate(impl_->format, stream, nullptr));
+        PIXELVR_LOG_INFO("MediaEngine: source frame rate %.3f fps", impl_->frameRate);
+        const AVCodecID codecId = stream->codecpar->codec_id;
+
+        // The Iris V4L2-M2M hardware path (H.264/HEVC/VP9) handles 8-bit here; route
+        // 10-bit+ to software (swscale downconverts to NV12) until dmabuf/P010 import
+        // lands. Prefer the hardware decoder by name; fall back to software so the
+        // same build also runs on a desktop for development.
+        const bool forceSoftware = std::getenv("PIXELVR_FORCE_SW") != nullptr;
+        const bool drmPrime = std::getenv("PIXELVR_DRM_PRIME") != nullptr;
+        const AVPixFmtDescriptor* srcDesc =
+            av_pix_fmt_desc_get(static_cast<AVPixelFormat>(stream->codecpar->format));
+        const bool highBitDepth = srcDesc != nullptr && srcDesc->comp[0].depth > 8;
+        // Hardware handles 8-bit for all codecs; 10-bit only for HEVC and only via the
+        // dmabuf/P010 path (drm_prime). Otherwise route high-bit-depth to software.
+        const bool hwEligible =
+            !highBitDepth || (drmPrime && codecId == AV_CODEC_ID_HEVC);
+        const char* hwName = !hwEligible ? nullptr
+                             : (codecId == AV_CODEC_ID_H264) ? "h264_v4l2m2m"
+                             : (codecId == AV_CODEC_ID_HEVC) ? "hevc_v4l2m2m"
+                             : (codecId == AV_CODEC_ID_VP9)  ? "vp9_v4l2m2m"
+                                                             : nullptr;
+        const AVCodec* decoder = (hwName != nullptr && !forceSoftware)
+                                     ? avcodec_find_decoder_by_name(hwName)
+                                     : nullptr;
+        bool hardware = decoder != nullptr;
+        if (decoder == nullptr) {
             decoder = avcodec_find_decoder(codecId);
-            if (decoder == nullptr || !open_with(decoder)) {
+        }
+        if (decoder == nullptr) {
+            PIXELVR_LOG_ERROR("MediaEngine: no decoder for %s", path.c_str());
+            close();
+            return false;
+        }
+
+        auto open_with = [&](const AVCodec* dec) -> bool {
+            if (impl_->codec != nullptr) {
+                avcodec_free_context(&impl_->codec);
+            }
+            impl_->codec = avcodec_alloc_context3(dec);
+            if (impl_->codec == nullptr ||
+                avcodec_parameters_to_context(impl_->codec, stream->codecpar) < 0) {
+                return false;
+            }
+            impl_->codec->pkt_timebase = stream->time_base;
+            impl_->codec->thread_count = 0;  // Auto-detect and utilize all CPU cores
+            impl_->codec->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
+            impl_->videoDecoder = dec;  // retained so the decode thread can reopen on seek
+            if (std::strstr(dec->name, "v4l2m2m") != nullptr) {
+                av_opt_set_int(impl_->codec->priv_data, "num_output_buffers", 4, 0);
+            }
+            impl_->decoderDrm = drmPrime && std::strstr(dec->name, "v4l2m2m") != nullptr;
+            if (impl_->decoderDrm) {
+                // Export decoder output as DMA-BUF (AV_PIX_FMT_DRM_PRIME) for zero-copy
+                // Vulkan import; requires the dmabuf-patched libavcodec. Bound the
+                // decoded-buffer memory: at 8K a frame is ~40-80 MiB, so a fixed large
+                // count exhausts the decoder's DMA pool and REQBUFS fails -> POLLERR.
+                const int64_t px = static_cast<int64_t>(stream->codecpar->width) *
+                                   stream->codecpar->height;
+                const int64_t frameBytes = highBitDepth ? px * 3 : px * 3 / 2;  // P010/NV12
+                constexpr int64_t kBudget = 320ll << 20;  // ~320 MiB capture pool
+                impl_->captureBuffers = static_cast<int>(std::clamp<int64_t>(
+                    kBudget / std::max<int64_t>(frameBytes, 1), 4, 20));
+                av_opt_set_int(impl_->codec->priv_data, "num_capture_buffers",
+                               impl_->captureBuffers, 0);
+                av_opt_set_int(impl_->codec->priv_data, "drm_prime", 1, 0);
+                impl_->codec->apply_cropping = 0;
+                // Leave buffers free for the decoder's DPB; the queue holds the rest.
+                // A deeper queue absorbs bursty decode output (B-frame reorder, SMB
+                // jitter) so low-framerate playback doesn't underrun and judder.
+                impl_->maxQueue =
+                    static_cast<std::size_t>(std::clamp(impl_->captureBuffers - 5, 1, 14));
+            }
+            return avcodec_open2(impl_->codec, dec, nullptr) >= 0;
+        };
+
+        if (!open_with(decoder)) {
+            if (hardware) {
+                PIXELVR_LOG_WARN("MediaEngine: hardware decoder failed, trying software");
+                hardware = false;
+                decoder = avcodec_find_decoder(codecId);
+                if (decoder == nullptr || !open_with(decoder)) {
+                    PIXELVR_LOG_ERROR("MediaEngine: failed to open decoder for %s",
+                                      path.c_str());
+                    close();
+                    return false;
+                }
+            } else {
                 PIXELVR_LOG_ERROR("MediaEngine: failed to open decoder for %s",
                                   path.c_str());
                 close();
                 return false;
             }
-        } else {
-            PIXELVR_LOG_ERROR("MediaEngine: failed to open decoder for %s",
-                              path.c_str());
-            close();
-            return false;
         }
+
+        impl_->width = impl_->codec->width;
+        impl_->height = impl_->codec->height;
+        impl_->duration = (impl_->format->duration > 0)
+                              ? impl_->format->duration / static_cast<double>(AV_TIME_BASE)
+                              : 0.0;
+
+        PIXELVR_LOG_INFO("MediaEngine: %s  %dx%d  %.1fs  codec=%s (%s)", path.c_str(),
+                         impl_->width, impl_->height, impl_->duration, decoder->name,
+                         hardware ? "hardware" : "software");
+        impl_->codecName =
+            std::string(decoder->name) + (hardware ? " (hw)" : " (sw)");
+        impl_->decodedCount.store(0);
     }
-
-    impl_->width = impl_->codec->width;
-    impl_->height = impl_->codec->height;
-    impl_->duration = (impl_->format->duration > 0)
-                          ? impl_->format->duration / static_cast<double>(AV_TIME_BASE)
-                          : 0.0;
-
-    PIXELVR_LOG_INFO("MediaEngine: %s  %dx%d  %.1fs  codec=%s (%s)", path.c_str(),
-                     impl_->width, impl_->height, impl_->duration, decoder->name,
-                     hardware ? "hardware" : "software");
-    impl_->codecName =
-        std::string(decoder->name) + (hardware ? " (hw)" : " (sw)");
-    impl_->decodedCount.store(0);
 
 #ifdef PIXELVR_HAVE_PULSE
     const AVCodec* adec = nullptr;
@@ -1214,6 +1298,7 @@ bool MediaEngine::open(const std::string& path) {
             }
             av_channel_layout_uninit(&outLayout);
         }
+        if (impl_->audioOnly) impl_->codecName = std::string(adec->name) + " (audio)";
         if (impl_->audioEnabled) {
             PIXELVR_LOG_INFO("MediaEngine: audio %d Hz stereo",
                              MediaEngine::Impl::kOutSampleRate);
@@ -1259,6 +1344,9 @@ void MediaEngine::close() {
         impl_->thread.join();
     }
     impl_->teardown();
+    impl_->audioOnly = false;
+    impl_->cardPending = false;
+    impl_->card = {};
     impl_->videoStream = -1;
     impl_->width = impl_->height = 0;
     impl_->duration = 0.0;
@@ -1381,6 +1469,12 @@ static std::size_t selectDueIndex(double clock, bool primed,
 
 bool MediaEngine::latestFrame(VideoFrame& out) {
     std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (impl_->audioOnly) {  // audio file: the still card, once
+        if (!impl_->cardPending) return false;
+        impl_->cardPending = false;
+        out = impl_->card;
+        return true;
+    }
     auto& q = impl_->swQueue;
     if (q.empty()) {
         return false;
