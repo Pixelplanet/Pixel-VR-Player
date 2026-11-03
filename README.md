@@ -5,7 +5,8 @@
 # Pixel VR Player
 
 A native VR video player for the **Valve Steam Frame**, playing flat 2D, 180°, and
-360° video (mono and stereoscopic 3D) from local storage and the local network.
+360° video (mono and stereoscopic 3D) from local storage and the local network, plus
+music, YouTube and a full web browser on floating screens.
 
 - **Platform:** SteamOS (Arch Linux, ARM64) on Snapdragon 8 Gen 3
 - **Stack:** C++20 · OpenXR (SteamVR runtime) · Vulkan · FFmpeg (V4L2 M2M HW decode)
@@ -19,8 +20,9 @@ A native VR video player for the **Valve Steam Frame**, playing flat 2D, 180°, 
 > audio with a master clock. In-headset UI: file browser (with file type and
 > size), transport bar, settings menu, downloads manager, bookmarks overview,
 > protected SMB network share manager with a built-in keyboard, multi-screen
-> playback (up to three videos arranged around you), and an encrypted hidden
-> vault. Native Valve
+> playback (up to three videos arranged around you) with per-screen volume,
+> YouTube and web browser screens, a music player with playlists, and an
+> encrypted hidden vault. Native Valve
 > Steam Frame controller support (`XR_VALVE_frame_controller_interaction`) using
 > the runtime's own render model, with per-button animation on the model and
 > press-to-bind remapping.
@@ -212,6 +214,27 @@ the file browser rather than stacking on top of it.
 All button bindings can be changed in **Settings ▸ Controls** (press-to-bind).
 
 
+## YouTube and the web browser
+
+The hub's **YouTube** and **Browser** tabs open a web page on a floating screen, like
+any video: pick the screen, move it, resize it, arrange it, open several.
+
+- **Needs Chromium from Discover** (Flathub `org.chromium.Chromium`). Sites you signed
+  in to in desktop Chromium are signed in here too (while desktop Chromium is closed).
+- The laser is the mouse (trigger clicks, thumbstick scrolls, **B** goes back). Clicking
+  a text field opens the keyboard, which types straight into the page.
+- The full browser has tabs, an address bar, your Chromium bookmarks and fullscreen.
+- The dock's play / pause, seek and timeline control the page's video, including a
+  **LIVE** marker for livestreams.
+- Video inside web pages is decoded on the CPU, so very high resolutions or several web
+  videos at once can stutter.
+
+## Music
+
+Audio files (MP3, FLAC, M4A, OGG, Opus, WAV, ...) play with their album cover. Opening a
+track queues its whole folder, with shuffle, repeat and a queue shown on the screen.
+
+
 ## Discreet Media Vault
 
 Pixel VR Player includes a private, zero-trace local storage vault (`~/.pixelvr_vault`) hidden from the standard file browser and startup directory scans.
@@ -371,10 +394,15 @@ accordingly (or pass a plain 2D clip for flat playback):
 | `...180...`/`vr180`, `_tb`/`_ou` | 180° | top-bottom |
 | (none)                   | flat 2D    | mono          |
 
+Without a hint in the name, the layout comes from the file's own 3D / VR metadata
+(MKV `StereoMode`, MP4 stereo / spherical boxes) or from the picture itself (the two
+halves of a 3D frame nearly match). A format chosen by hand is remembered per file,
+also after renaming it.
+
 Requirements and tips:
 
-- **8-bit H.264 or HEVC** with even width/height (4:2:0). 10-bit / Main10 is not
-  supported by the V4L2 M2M decoder path.
+- **8-bit H.264, HEVC or VP9** play on the hardware decoder (4:2:0). 10-bit / Main10
+  and **AV1** are decoded on the CPU (AV1 4K at 25-30 fps runs smoothly).
 - `PIXELVR_FORCE_SW=1` forces software decode (useful for debugging).
 - `PIXELVR_LOG=debug` raises log verbosity.
 
