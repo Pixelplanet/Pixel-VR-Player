@@ -699,6 +699,7 @@ void XrContext::syncActions() {
     if (!profileLogged_) {
         bool allBound = true;
         for (int h = 0; h < 2; ++h) {
+            if (profileLoggedHand_[h]) continue;
             XrInteractionProfileState ips{XR_TYPE_INTERACTION_PROFILE_STATE};
             if (XR_SUCCEEDED(xrGetCurrentInteractionProfile(
                     session_, handPaths_[h], &ips)) &&
@@ -709,6 +710,7 @@ void XrContext::syncActions() {
                                                 sizeof(buf), &len, buf))) {
                     PIXELVR_LOG_INFO("Active interaction profile [%s]: %s",
                                      h == 0 ? "left" : "right", buf);
+                    profileLoggedHand_[h] = true;  // a hand never bound (one controller) retries quietly
                 }
             } else {
                 allBound = false;  // retry next frame until the runtime binds it

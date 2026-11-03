@@ -61,7 +61,12 @@ bool RenderModelSystem::fetchModels() {
         return false;
     }
 
-    PIXELVR_LOG_INFO("OpenXR enumerated %u render model IDs", idCount);
+    // Retried every frame while a controller is missing: log changes only.
+    static uint32_t lastLoggedCount = 0;
+    if (idCount != lastLoggedCount) {
+        PIXELVR_LOG_INFO("OpenXR enumerated %u render model IDs", idCount);
+        lastLoggedCount = idCount;
+    }
 
     for (uint32_t i = 0; i < idCount; ++i) {
         XrRenderModelIdEXT id = ids[i];
