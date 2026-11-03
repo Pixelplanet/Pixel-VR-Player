@@ -631,7 +631,8 @@ private:
     void destroyVideoResources(VideoSlot& v);
     bool createYcbcrPipeline(VideoSlot& v, uint32_t fourcc, int colorspace, bool fullRange);
     void destroyYcbcr(VideoSlot& v);
-    bool createResolveTarget(VideoSlot& v, int width, int height);
+    // `mips`: a full mip chain (flat screens shown small); 180/360 needs none.
+    bool createResolveTarget(VideoSlot& v, int width, int height, bool mips = true);
     void destroyResolveTarget(VideoSlot& v);
     bool createModelPipeline();
     // Content-sized layout for the downloads-window buttons (centered, along the
@@ -957,6 +958,11 @@ private:
         int resolveW = 0;
         int resolveH = 0;
         uint32_t resolveMips = 1;
+        // The resolve runs asynchronously on its own command buffer: the next
+        // one waits for this fence (long done by then), the render thread never.
+        VkCommandBuffer resolveCmd = VK_NULL_HANDLE;
+        VkFence resolveFence = VK_NULL_HANDLE;
+        bool resolvePending = false;
     };
     VideoSlot videoSlots_[kMaxVideoSlots];
     ScreenPlacement screenPlacements_[kMaxVideoSlots];

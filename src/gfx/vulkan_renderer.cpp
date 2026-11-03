@@ -6433,6 +6433,16 @@ void VulkanRenderer::destroyVideoResources(VideoSlot& v) {
     if (device_ == VK_NULL_HANDLE) {
         return;
     }
+    if (v.resolveFence != VK_NULL_HANDLE) {
+        if (v.resolvePending) vkWaitForFences(device_, 1, &v.resolveFence, VK_TRUE, UINT64_MAX);
+        vkDestroyFence(device_, v.resolveFence, nullptr);
+        v.resolveFence = VK_NULL_HANDLE;
+        v.resolvePending = false;
+    }
+    if (v.resolveCmd != VK_NULL_HANDLE) {
+        vkFreeCommandBuffers(device_, commandPool_, 1, &v.resolveCmd);
+        v.resolveCmd = VK_NULL_HANDLE;
+    }
     if (v.stagingMapped != nullptr) {
         vkUnmapMemory(device_, v.stagingMemory);
         v.stagingMapped = nullptr;
@@ -6774,10 +6784,10 @@ void VulkanRenderer::destroyYcbcr(VideoSlot& v) {
     v.usingDmabuf = false;
 }
 
-bool VulkanRenderer::createResolveTarget(VideoSlot& v, int width, int height) {
+bool VulkanRenderer::createResolveTarget(VideoSlot& v, int width, int height, bool withMips) {
     destroyResolveTarget(v);
     uint32_t mips = 1;
-    for (int d = std::min(width, height); d > 1; d >>= 1) ++mips;
+    for (int d = std::min(width, height); withMips && d > 1; d >>= 1) ++mips;
     v.resolveMips = mips;
 
     VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
@@ -7600,10 +7610,33 @@ bool VulkanRenderer::importDmabufImage(VideoSlot& v, const DrmVideoFrame& frame,
 }
 
 void VulkanRenderer::resolveFrame(VideoSlot& v, VkImage importedImage) {
-    vkResetCommandBuffer(uploadCmd_, 0);
+    // Own command buffer + fence per screen, so the render thread doesn't wait
+    // for the conversion (an 8K frame takes several ms of GPU time).
+    if (v.resolveCmd == VK_NULL_HANDLE) {
+        VkCommandBufferAllocateInfo ai{VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
+        ai.commandPool = commandPool_;
+        ai.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
+        ai.commandBufferCount = 1;
+        if (vkAllocateCommandBuffers(device_, &ai, &v.resolveCmd) != VK_SUCCESS) return;
+        VkFenceCreateInfo fi{VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+        if (vkCreateFence(device_, &fi, nullptr, &v.resolveFence) != VK_SUCCESS) return;
+    }
+    if (v.resolvePending) {  // the previous frame's resolve (finished long ago)
+        vkWaitForFences(device_, 1, &v.resolveFence, VK_TRUE, UINT64_MAX);
+        vkResetFences(device_, 1, &v.resolveFence);
+        v.resolvePending = false;
+    }
+    const VkCommandBuffer cmd = v.resolveCmd;
+    vkResetCommandBuffer(cmd, 0);
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(uploadCmd_, &begin);
+    vkBeginCommandBuffer(cmd, &begin);
+    // Earlier frames may still be sampling the resolve image: wait for their
+    // fragment shaders before writing it again (later frames are ordered by the
+    // barrier at the end).
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
+                         VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
+                         nullptr, 0, nullptr, 0, nullptr);
 
     // 1. Acquire the decoder-written buffer from the foreign (V4L2) producer and
     // move it into a shader-readable layout. The DRM modifier fixes the memory
@@ -7619,7 +7652,7 @@ void VulkanRenderer::resolveFrame(VideoSlot& v, VkImage importedImage) {
     acq.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
     acq.srcAccessMask = 0;
     acq.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(uploadCmd_, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                          VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
                          nullptr, 1, &acq);
 
@@ -7629,19 +7662,19 @@ void VulkanRenderer::resolveFrame(VideoSlot& v, VkImage importedImage) {
     rp.framebuffer = v.resolveFbo;
     rp.renderArea.extent = {static_cast<uint32_t>(v.resolveW),
                             static_cast<uint32_t>(v.resolveH)};
-    vkCmdBeginRenderPass(uploadCmd_, &rp, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBeginRenderPass(cmd, &rp, VK_SUBPASS_CONTENTS_INLINE);
     VkViewport vp{0.0f, 0.0f, static_cast<float>(v.resolveW),
                   static_cast<float>(v.resolveH), 0.0f, 1.0f};
-    vkCmdSetViewport(uploadCmd_, 0, 1, &vp);
+    vkCmdSetViewport(cmd, 0, 1, &vp);
     VkRect2D scissor{{0, 0},
                      {static_cast<uint32_t>(v.resolveW),
                       static_cast<uint32_t>(v.resolveH)}};
-    vkCmdSetScissor(uploadCmd_, 0, 1, &scissor);
-    vkCmdBindPipeline(uploadCmd_, VK_PIPELINE_BIND_POINT_GRAPHICS, v.resolvePipeline);
-    vkCmdBindDescriptorSets(uploadCmd_, VK_PIPELINE_BIND_POINT_GRAPHICS,
+    vkCmdSetScissor(cmd, 0, 1, &scissor);
+    vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS, v.resolvePipeline);
+    vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_GRAPHICS,
                             v.resolveLayout, 0, 1, &v.ycbcrSet, 0, nullptr);
-    vkCmdDraw(uploadCmd_, 3, 1, 0, 0);
-    vkCmdEndRenderPass(uploadCmd_);  // mip 0 now in TRANSFER_SRC_OPTIMAL
+    vkCmdDraw(cmd, 3, 1, 0, 0);
+    vkCmdEndRenderPass(cmd);  // mip 0 now in TRANSFER_SRC_OPTIMAL
 
     // 3. Build the mip chain by blitting each level from the previous one.
     int32_t mw = v.resolveW, mh = v.resolveH;
@@ -7655,7 +7688,7 @@ void VulkanRenderer::resolveFrame(VideoSlot& v, VkImage importedImage) {
         td.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, level, 1, 0, 1};
         td.srcAccessMask = 0;
         td.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-        vkCmdPipelineBarrier(uploadCmd_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
                              nullptr, 1, &td);
 
@@ -7666,7 +7699,7 @@ void VulkanRenderer::resolveFrame(VideoSlot& v, VkImage importedImage) {
         blit.srcOffsets[1] = {mw, mh, 1};
         blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1};
         blit.dstOffsets[1] = {nw, nh, 1};
-        vkCmdBlitImage(uploadCmd_, v.resolveImage,
+        vkCmdBlitImage(cmd, v.resolveImage,
                        VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, v.resolveImage,
                        VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit,
                        VK_FILTER_LINEAR);
@@ -7680,7 +7713,7 @@ void VulkanRenderer::resolveFrame(VideoSlot& v, VkImage importedImage) {
         ts.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, level, 1, 0, 1};
         ts.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         ts.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
-        vkCmdPipelineBarrier(uploadCmd_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+        vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
                              nullptr, 1, &ts);
         mw = nw;
@@ -7697,18 +7730,15 @@ void VulkanRenderer::resolveFrame(VideoSlot& v, VkImage importedImage) {
     sr.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, v.resolveMips, 0, 1};
     sr.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
     sr.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    vkCmdPipelineBarrier(uploadCmd_, VK_PIPELINE_STAGE_TRANSFER_BIT,
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                          VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
                          nullptr, 1, &sr);
 
-    vkEndCommandBuffer(uploadCmd_);
+    vkEndCommandBuffer(cmd);
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
-    submit.pCommandBuffers = &uploadCmd_;
-    if (vkQueueSubmit(queue_, 1, &submit, uploadFence_) == VK_SUCCESS) {
-        vkWaitForFences(device_, 1, &uploadFence_, VK_TRUE, UINT64_MAX);
-    }
-    vkResetFences(device_, 1, &uploadFence_);
+    submit.pCommandBuffers = &cmd;
+    v.resolvePending = vkQueueSubmit(queue_, 1, &submit, v.resolveFence) == VK_SUCCESS;
 }
 
 void VulkanRenderer::updateVideoDmabuf(DrmVideoFrame& frame, int slot) {
@@ -7766,10 +7796,16 @@ void VulkanRenderer::updateVideoDmabuf(DrmVideoFrame& frame, int slot) {
     write.pImageInfo = &info;
     vkUpdateDescriptorSets(device_, 1, &write, 0, nullptr);
 
-    // (Re)create the mipmapped resolve target at the coded frame size.
+    // (Re)create the resolve target at the coded frame size. 180/360 video is
+    // shown at about its own resolution: no mip chain (a third less GPU work
+    // per frame, which matters at 8K60).
+    const bool wantMips = !(slot == 0 && projectionMode_ != ProjectionMode::Flat);
     if (v.resolveImage == VK_NULL_HANDLE || v.resolveW != frame.width ||
-        v.resolveH != frame.height) {
-        if (!createResolveTarget(v, frame.width, frame.height)) {
+        v.resolveH != frame.height || (v.resolveMips > 1) != wantMips) {
+        // Rare (new video, projection change): frames in flight may still
+        // sample the old target and its descriptor.
+        vkDeviceWaitIdle(device_);
+        if (!createResolveTarget(v, frame.width, frame.height, wantMips)) {
             vkDestroyImageView(device_, view, nullptr);
             vkDestroyImage(device_, image, nullptr);
             vkFreeMemory(device_, memory, nullptr);
