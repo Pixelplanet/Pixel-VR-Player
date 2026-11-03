@@ -137,10 +137,12 @@ struct Launcher {
     int port = -1;
     std::string profile;  // Chromium profile in use (bookmarks)
     std::string error;    // last error the launcher reported
+    std::chrono::steady_clock::time_point stopAt{};  // idle shutdown, when set
     int users = 0;
     bool failed = false;
 
     bool ensureStarted(int width, int height) {
+        stopAt = {};  // in use again
         if (pid > 0) return true;
         failed = false;
         error.clear();
@@ -186,8 +188,14 @@ struct Launcher {
         }
     }
     void stop() {
-        stopHelper(pid, toFd, fromFd, 4000);  // Chromium may take ~3 s to quit
+        // Chromium takes ~3 s to quit: don't hold up the frame loop (the
+        // headset watchdog would take a stall that long for an absent user).
+        pid_t p = pid;
+        int to = toFd, from = fromFd;
+        pid = -1;
+        toFd = fromFd = -1;
         port = -1;
+        if (p > 0) std::thread([p, to, from]() mutable { stopHelper(p, to, from, 4000); }).detach();
     }
 };
 
@@ -201,6 +209,15 @@ int gShmCounter = 0;
 }  // namespace
 
 BrowserHost::~BrowserHost() { stop(); }
+
+void BrowserHost::tickIdle() {
+    Launcher& l = launcher();
+    if (l.users == 0 && l.stopAt != std::chrono::steady_clock::time_point{} &&
+        std::chrono::steady_clock::now() >= l.stopAt) {
+        l.stopAt = {};
+        l.stop();
+    }
+}
 
 bool BrowserHost::start(const std::string& url, int width, int height, const Options& opt) {
     stop();
@@ -288,8 +305,11 @@ void BrowserHost::stop() {
         state_ = State::Idle;
         Launcher& l = launcher();
         if (--l.users <= 0) {
+            // Last browser screen: shut Chromium down a little later, so a new
+            // screen soon after (e.g. YouTube -> Browser) reuses it with the
+            // user's profile instead of finding it still locked.
             l.users = 0;
-            l.stop();  // last browser screen: shut Chromium down
+            l.stopAt = std::chrono::steady_clock::now() + std::chrono::seconds(20);
         }
     }
     if (shm_) munmap(shm_, shmSize_);
@@ -419,7 +439,8 @@ const uint8_t* BrowserHost::takeFrame() {
     const auto* pixels = static_cast<const uint8_t*>(shm_) + sizeof(BrowserShmHeader);
     std::memcpy(frame_.data(), pixels, static_cast<size_t>(w) * h * 4);
     // Discard it if the helper started the next frame while we copied.
-    if (hd->seq.load(std::memory_order_acquire) != seq) return nullptr;
+    std::atomic_thread_fence(std::memory_order_acquire);  // the copy happens before the re-check
+    if (hd->seq.load(std::memory_order_relaxed) != seq) return nullptr;
     lastSeq_ = seq;
     frameW_ = w;
     frameH_ = h;

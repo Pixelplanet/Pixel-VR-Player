@@ -349,6 +349,8 @@ private:
     std::atomic<int64_t> lastFrameHeartbeatMs_{0};
     std::atomic<bool> pendingAutoLock_{false};
     std::atomic<bool> pauseOnRemoval_{true};  // settings mirrors for the watchdog thread
+    // What each screen shows, for the watchdog thread: 0 none, 1 media, 2 web.
+    std::atomic<int> screenKind_[VulkanRenderer::kMaxVideoSlots] = {};
     std::atomic<bool> pauseLivestreams_{false};
     std::chrono::steady_clock::time_point lastGripFullRelease_{};
     void watchdogLoop();

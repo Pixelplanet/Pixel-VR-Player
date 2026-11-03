@@ -35,6 +35,7 @@
 #include <turbojpeg.h>
 
 #include <algorithm>
+#include <atomic>
 #include <arpa/inet.h>
 #include <cctype>
 #include <cerrno>
@@ -995,7 +996,8 @@ int runScreen(const ScreenOptions& opt) {
     auto compose = [&]() {
         const int fh = std::min(frameH(), kBrowserMaxHeight);
         const uint64_t seq = header->seq.load(std::memory_order_relaxed);
-        header->seq.store(seq + 1, std::memory_order_release);  // odd: writing
+        header->seq.store(seq + 1, std::memory_order_relaxed);  // odd: writing
+        std::atomic_thread_fence(std::memory_order_release);    // ...before any pixel write
         const size_t rowBytes = static_cast<size_t>(W) * 4;
         auto blit = [&](const Pixels& src, int dstY, int rows) {
             rows = std::min({rows, src.h, fh - dstY});
@@ -1144,6 +1146,7 @@ int runScreen(const ScreenOptions& opt) {
         if (Tab* old = activeTab()) send("Page.stopScreencast", "{}", old->session);
         active = i;
         Tab& t = tabs[i];
+        if (keySession != toolbar) keySession = t.session;  // typing follows the shown tab
         send("Page.startScreencast",
              "{\"format\":\"jpeg\",\"quality\":80,\"maxWidth\":" + std::to_string(W) +
                  ",\"maxHeight\":" + std::to_string(pageH) + "}",

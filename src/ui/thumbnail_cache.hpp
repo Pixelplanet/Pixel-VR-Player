@@ -55,7 +55,7 @@ private:
     std::unordered_map<std::string, bool> queuedPaths_;
     std::unordered_map<std::string, std::vector<uint8_t>> cache_;
     std::unordered_map<std::string, MediaMeta> metaCache_;
-    std::unordered_map<std::string, bool> failed_;  // not retried until the next start
+    std::unordered_map<std::string, long long> failed_;  // path -> size+mtime when it failed
     std::atomic<bool> stop_{false};
     std::thread worker_;
 };

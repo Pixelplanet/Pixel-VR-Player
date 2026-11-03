@@ -35,6 +35,11 @@ public:
     int frameWidth() const { return frameW_; }
     int frameHeight() const { return frameH_; }
 
+    // Shared Chromium: shuts it down once no browser screen used it for a
+    // while (call once per frame). At app exit the launcher sees its input
+    // close and quits Chromium itself.
+    static void tickIdle();
+
     // Advances startup, reads helper events and notices exits; once per frame.
     void poll();
     // Latest complete frame (RGBA, frameWidth*frameHeight*4), or nullptr if

@@ -305,14 +305,15 @@ void App::watchdogLoop() {
                 // From here, not the frame loop: that may be stalled while the
                 // headset is off, and a page's audio would keep playing.
                 if (pauseOnRemoval_.load(std::memory_order_relaxed)) {
+                    // screenKind_ mirrors the screens (the main thread owns them);
+                    // pausing an engine / host is thread-safe.
                     for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
-                        ScreenState& sc = screens_[slot];
-                        if (!sc.open) continue;
-                        if (sc.web) {
+                        const int kind = screenKind_[slot].load(std::memory_order_acquire);
+                        if (kind == 2) {
                             webHosts_[slot].pauseMedia(pauseLivestreams_.load(std::memory_order_relaxed));
-                        } else {
+                        } else if (kind == 1) {
 #ifdef PIXELVR_HAVE_MEDIA
-                            sc.engine.setPaused(true);
+                            screens_[slot].engine.setPaused(true);
 #endif
                         }
                     }
@@ -457,6 +458,10 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
         // instead of the last decoded frame of the old file.
         const std::string why = sc.engine.lastError();
         lastLoadFailed_ = true;
+        if (fromQueue) {  // the queue moves on to the next track (playQueueTrack)
+            PIXELVR_LOG_WARN("Failed to open %s: %s", path.c_str(), why.c_str());
+            return;
+        }
         closeMedia(slot);
         PIXELVR_LOG_WARN("Failed to open %s: %s", path.c_str(), why.c_str());
 #ifdef PIXELVR_HAVE_FREETYPE
@@ -873,10 +878,17 @@ void App::buildMusicQueue(int slot, const std::string& path) {
 
 void App::playQueueTrack(int slot, int index) {
 #ifdef PIXELVR_HAVE_MEDIA
-    const std::string next = screens_[slot].queue.track(index).path;
-    if (next.empty()) return;
-    screens_[slot].queue.setCurrent(index);
-    loadMedia(next, slot, true);
+    MusicQueue& q = screens_[slot].queue;
+    // Tracks that can't be opened are skipped; give up once every track failed.
+    for (int tries = 0; tries < q.size() && index >= 0; ++tries) {
+        const std::string next = q.track(index).path;
+        if (next.empty()) break;
+        q.setCurrent(index);
+        loadMedia(next, slot, true);
+        if (!lastLoadFailed_) return;
+        index = q.next(false);
+    }
+    closeMedia(slot);  // nothing in the queue plays
 #else
     (void)slot;
     (void)index;
@@ -2485,6 +2497,7 @@ int App::run() {
             // Trigger = click (a press only becomes a drag after moving past a
             // small slop, so laser jitter doesn't select text), thumbstick =
             // scroll, B = back. Close it with the dock's X like any screen.
+            BrowserHost::tickIdle();
             for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
                 if (!screens_[slot].web) continue;
                 BrowserHost& host = webHosts_[slot];
@@ -2999,6 +3012,10 @@ int App::run() {
                 VaultManager::instance().recordActivity(nowT);
             }
             pauseOnRemoval_.store(settings_.pauseOnRemoval(), std::memory_order_relaxed);
+            for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
+                const ScreenState& sc = screens_[slot];
+                screenKind_[slot].store(!sc.open ? 0 : (sc.web ? 2 : 1), std::memory_order_release);
+            }
             VulkanRenderer::setKeyboardLayout(settings_.keyboardLayout());
             pauseLivestreams_.store(settings_.pauseLivestreams(), std::memory_order_relaxed);
             if (VaultManager::instance().tick(nowT, in.headValid && xr_.sessionFocused())) {

@@ -111,6 +111,14 @@ static void pruneThumbnails(const std::string& dir) {
     if (removed > 0) PIXELVR_LOG_INFO("Thumbnails: removed %d unused from %s", removed, dir.c_str());
 }
 
+// Size and modification time in one number: tells whether a file changed.
+static long long fileStamp(const std::string& path) {
+    std::error_code ec;
+    const auto size = fs::file_size(path, ec);
+    const auto mtime = fs::last_write_time(path, ec).time_since_epoch().count();
+    return ec ? -1 : static_cast<long long>(size) * 1000003LL ^ static_cast<long long>(mtime);
+}
+
 static uint64_t fnv1a64(const std::string& str) {
     uint64_t hash = 14695981039346656037ULL;
     for (char c : str) {
@@ -141,8 +149,12 @@ ThumbnailCache::~ThumbnailCache() {
 void ThumbnailCache::request(const std::string& videoPath, bool highPriority) {
     if (videoPath.empty() || videoPath[0] != '/') return;
     std::lock_guard<std::mutex> lk(mutex_);
-    if (cache_.find(videoPath) != cache_.end() || failed_.count(videoPath) != 0) {
+    if (cache_.find(videoPath) != cache_.end()) {
         return;
+    }
+    if (const auto f = failed_.find(videoPath); f != failed_.end()) {
+        if (f->second == fileStamp(videoPath)) return;  // unchanged: it would fail again
+        failed_.erase(f);  // changed since (e.g. its download finished): try again
     }
     if (highPriority) {
         // If already queued, move it to the front so visible items decode immediately
@@ -460,7 +472,7 @@ void ThumbnailCache::workerLoop() {
         } else {
             PIXELVR_LOG_WARN("Thumbnail generation failed for %s", path.c_str());
             std::lock_guard<std::mutex> lk(mutex_);
-            failed_[path] = true;  // e.g. no decoder: asking again every frame floods the log
+            failed_[path] = fileStamp(path);  // e.g. no decoder: asking again every frame floods the log
         }
     }
 }

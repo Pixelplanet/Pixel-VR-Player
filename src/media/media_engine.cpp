@@ -1331,6 +1331,14 @@ bool MediaEngine::open(const std::string& path) {
         }
     }
 #endif
+    if (impl_->audioOnly && !impl_->audioEnabled) {
+        // Nothing would pace playback: it would end at once (and a music queue
+        // would race through the folder).
+        impl_->lastError = "no audio output available";
+        PIXELVR_LOG_ERROR("MediaEngine: audio file without audio output: %s", path.c_str());
+        close();
+        return false;
+    }
 
     impl_->lastError.clear();
     impl_->eof.store(false);
