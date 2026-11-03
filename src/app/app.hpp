@@ -17,6 +17,7 @@
 #include "ui/settings_menu.hpp"
 #include "app/playback_memory.hpp"
 #include "app/browser_host.hpp"
+#include "app/music_queue.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -196,6 +197,11 @@ private:
         int projection = 0;  // 0 flat, 1 360, 2 180 (extra screens: always 0)
         int stereo = 0;      // 0 mono, 1 SBS, 2 TB
         bool web = false;    // shows the web browser instead of a video
+        float volume = 1.0f; // this screen's own volume (on top of the system volume)
+#ifdef PIXELVR_HAVE_MEDIA
+        MusicQueue queue;    // audio files: the folder they were opened from
+#endif
+        int musicFirst = 0;  // first queue row shown in the music view
     };
     ScreenState screens_[VulkanRenderer::kMaxVideoSlots];
     int selectedScreen_ = 0;
@@ -315,7 +321,13 @@ private:
 
 #ifdef PIXELVR_HAVE_MEDIA
     ScrubPreview scrubPreview_;  // timeline hover keyframe preview (selected screen)
-    void loadMedia(const std::string& path, int slot = -1);
+    // `fromQueue`: the music queue picked this track (it starts from the top,
+    // keeps the queue, and leaves open menus alone).
+    void loadMedia(const std::string& path, int slot = -1, bool fromQueue = false);
+    void buildMusicQueue(int slot, const std::string& path);  // audio file opened from a folder
+    void playQueueTrack(int slot, int index);
+    void updateMusicView(int slot);
+    float musicScrollAccum_ = 0.0f;
     void switchTracks(bool byLanguage);  // reload current media at its position
 #endif
 

@@ -375,6 +375,8 @@ struct MediaEngine::Impl {
     // Audio files: no video decoder; audio anchors the clock and the screen
     // shows a still "now playing" card (cover art), delivered once.
     bool audioOnly = false;
+    AudioTags tags;
+    std::atomic<float> volume{1.0f};
     VideoFrame card;
     bool cardPending = false;  // guarded by mutex
 
@@ -966,6 +968,11 @@ void MediaEngine::Impl::audioThreadLoop() {
             if (muted.load(std::memory_order_relaxed)) {
                 // Write silence of the same length so pacing / A-V sync is unchanged.
                 std::fill(chunk.pcm.begin(), chunk.pcm.end(), 0);
+            } else if (const float vol = volume.load(std::memory_order_relaxed); vol < 0.999f) {
+                auto* s16 = reinterpret_cast<int16_t*>(chunk.pcm.data());
+                const size_t n = chunk.pcm.size() / 2;
+                const float g = vol * vol;  // roughly even loudness steps
+                for (size_t i = 0; i < n; ++i) s16[i] = static_cast<int16_t>(static_cast<float>(s16[i]) * g);
             }
             pa_simple_write(pa, chunk.pcm.data(), chunk.pcm.size(), &err);
             if (audioOnly) masterClock.store(playClock.now(), std::memory_order_relaxed);
@@ -1101,7 +1108,8 @@ bool MediaEngine::open(const std::string& path) {
         std::vector<uint8_t> cover, rgba;
         int cw = 0, ch = 0;
         decodeCoverArt(impl_->format, cover, cw, ch);
-        composeAudioCard(cover, cw, ch, kCardW, kCardH, rgba);
+        composeAudioCard(cover, cw, ch, kCardW, kCardH, rgba, true);
+        readAudioTags(impl_->format, impl_->tags);
         VideoFrame& card = impl_->card;
         card.width = kCardW;
         card.height = kCardH;
@@ -1345,6 +1353,7 @@ void MediaEngine::close() {
     }
     impl_->teardown();
     impl_->audioOnly = false;
+    impl_->tags = {};
     impl_->cardPending = false;
     impl_->card = {};
     impl_->videoStream = -1;
@@ -1375,6 +1384,13 @@ void MediaEngine::togglePause() {
 void MediaEngine::setMuted(bool muted) {
     impl_->muted.store(muted);
 }
+
+void MediaEngine::setVolume(float volume) {
+    if (impl_) impl_->volume.store(std::clamp(volume, 0.0f, 1.0f), std::memory_order_relaxed);
+}
+
+bool MediaEngine::audioOnly() const { return impl_ && impl_->audioOnly; }
+const AudioTags& MediaEngine::audioTags() const { return impl_->tags; }
 
 bool MediaEngine::muted() const {
     return impl_->muted.load();

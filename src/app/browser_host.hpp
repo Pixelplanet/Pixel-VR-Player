@@ -84,6 +84,7 @@ public:
     void mediaSeek(double t);
     void mediaSeekRelative(double d);
     void setMuted(bool muted);
+    void setVolume(float volume);  // 0..1, the page's media elements
 
     // Text fields: the page reports focus changes; the app types into
     // whatever is focused.
@@ -132,6 +133,7 @@ private:
     Media media_;
     VideoInfo videoInfo_;
     int mutedState_ = -1;
+    int volumeState_ = -1;  // percent last sent
     std::vector<FocusEvent> focusEvents_;
     bool fieldValueNew_ = false;
     int fieldCursor_ = 0;

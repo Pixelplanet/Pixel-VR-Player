@@ -1,5 +1,7 @@
 #include "gfx/vulkan_renderer.hpp"
 
+#include "media/cover_art.hpp"
+
 #include "gfx/gltf_mesh.hpp"
 #include "media/media_engine.hpp"
 #include "xr/xr_context.hpp"
@@ -122,9 +124,10 @@ inline CtrlButtonRect get_ctrl_button_rect(int b) {
         case Btn::SeekFwd:      return { 0.130f, kBarY - 0.045f, 0.050f, 0.050f};
         case Btn::HideHud:      return { 0.26f, kBarY - 0.045f, 0.046f, 0.046f};
 
-        // Left flank pills: HUB (top), RECENTER (bottom)
-        case Btn::Files:        return {-0.62f, kBarY - 0.005f, 0.185f, 0.040f};
-        case Btn::Recenter:     return {-0.62f, kBarY - 0.098f, 0.185f, 0.040f};
+        // Left flank pills: HUB, RECENTER, VOLUME (rows match the right flank)
+        case Btn::Files:        return {-0.62f, kBarY + 0.040f, 0.185f, 0.036f};
+        case Btn::Recenter:     return {-0.62f, kBarY - 0.044f, 0.185f, 0.036f};
+        case Btn::Volume:       return {-0.62f, kBarY - 0.128f, 0.185f, 0.036f};
 
         // Right flank pills: Projection/Format, Audio, Screen
         case Btn::FormatToggle: return { 0.62f, kBarY + 0.040f, 0.210f, 0.036f};
@@ -451,6 +454,24 @@ inline const std::vector<KbKey>& keyboardKeys() {
     static const std::vector<KbKey> german = buildKeyboard(1);
     return gKeyboardLayout == 1 ? german : english;
 }
+// Music view on a screen (model units: x -1.6..1.6, y -0.9..0.9). The cover is
+// part of the video frame (music::kCover*); this is everything drawn on top.
+namespace musicui {
+constexpr float kInfoCx = -0.80f;
+constexpr float kTitleY = -0.35f, kArtistY = -0.45f, kAlbumY = -0.535f;
+constexpr float kButtonsY = -0.71f;
+constexpr float kButtonX[5] = {-1.22f, -1.01f, -0.80f, -0.59f, -0.38f};  // shuffle, prev, play, next, repeat
+constexpr float kButtonR = 0.062f, kPlayR = 0.085f;
+constexpr UiRect kPanel{0.73f, 0.0f, 0.79f, 0.82f};
+constexpr float kHeaderY = 0.705f;
+constexpr float kRowsTop = 0.62f, kRowH = 0.128f;
+inline UiRect row(int i) { return {kPanel.cx, kRowsTop - kRowH * (static_cast<float>(i) + 0.5f), kPanel.hw - 0.04f, kRowH * 0.5f - 0.006f}; }
+inline UiRect button(int i) {
+    const float r = (i == 2) ? kPlayR : kButtonR;
+    return {kButtonX[i], kButtonsY, r, r};
+}
+}  // namespace musicui
+
 // "Play on which screen?" picker (action menu page 6): three 16:9 tiles in a row
 // (index = left-to-right position) plus a Cancel button (option 3).
 constexpr float kPickHalfW = 0.68f;
@@ -1936,6 +1957,9 @@ void VulkanRenderer::updatePointer() {
     const bool controlBar = controlBarVisible_ && !hubOpen && !modalOpen && !actionMenuOpen && !kbOpen;
     bool anyWeb = false;
     for (bool w : webSlots_) anyWeb = anyWeb || w;
+    for (const MusicView& mv : musicViews_) anyWeb = anyWeb || mv.active;  // laser targets too
+    musicHoverSlot_ = -1;
+    musicHoverId_ = kMusicNone;
     const bool screensPointable = (multiScreenActive_ || anyWeb) && !hubOpen && !modalOpen &&
                                   !actionMenuOpen && !kbOpen;
     if (!kbOpen && !hubOpen && !modalOpen && !controlBar && !actionMenuOpen &&
@@ -2313,6 +2337,23 @@ void VulkanRenderer::updatePointer() {
                 webPointerSlot_ = screenHitSlot;
                 webPointerU_ = screenHitU;
                 webPointerV_ = screenHitV;
+            }
+            const MusicView& mv = musicViews_[screenHitSlot];
+            if (mv.active) {
+                // Back to the screen's model units (the card is 16:9, so unscaled).
+                const float mx = (screenHitU - 0.5f) * 3.2f;
+                const float my = (0.5f - screenHitV) * 1.8f;
+                musicHoverSlot_ = screenHitSlot;
+                for (int i = 0; i < 5; ++i) {
+                    if (hub::musicui::button(i).contains(mx, my, 0.015f)) musicHoverId_ = kMusicShuffle + i;
+                }
+                if (hub::musicui::kPanel.contains(mx, my)) {
+                    musicHoverId_ = kMusicList;
+                    const int rows = std::min<int>(kMusicRows, static_cast<int>(mv.rows.size()));
+                    for (int i = 0; i < rows; ++i) {
+                        if (hub::musicui::row(i).contains(mx, my, 0.003f)) musicHoverId_ = mv.first + i;
+                    }
+                }
             }
             return true;
         };
@@ -3424,6 +3465,114 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 }
                 screenScaleX[slot] = widthScale * scale;
 
+                const MusicView& mv = musicViews_[slot];
+                if (mv.active && textReady_ && uiPipeline_ != VK_NULL_HANDLE && glyphOut != nullptr) {
+                    // On the screen surface, lifted a hair toward the viewer.
+                    const Mat4 mvpUi = multiply(mvp, translation(Vec3{0.0f, 0.0f, 0.004f}));
+                    uiBendOverride = screenBend[slot];
+                    bindPipe(uiPipeline_);
+                    int hovSlot = -1;
+                    const int hov = musicHover(hovSlot);
+                    const bool hovHere = hovSlot == slot;
+                    const float panelBg[4] = {0.025f, 0.03f, 0.05f, 0.62f};
+                    const float rowCur[4] = {themeAccentCol[0] * 0.35f, themeAccentCol[1] * 0.35f,
+                                             themeAccentCol[2] * 0.42f, 0.85f};
+                    const float rowHov[4] = {1.0f, 1.0f, 1.0f, 0.08f};
+                    const float btnBg[4] = {1.0f, 1.0f, 1.0f, 0.10f};
+                    const float btnHov[4] = {1.0f, 1.0f, 1.0f, 0.22f};
+                    const float dim[4] = {themeTextCol[0] * 0.72f, themeTextCol[1] * 0.76f, themeTextCol[2] * 0.84f, 0.9f};
+                    const float off[4] = {themeTextCol[0], themeTextCol[1], themeTextCol[2], 0.38f};
+                    drawUiElement(mvpUi, hub::musicui::kPanel.cx, hub::musicui::kPanel.cy, hub::musicui::kPanel.hw, hub::musicui::kPanel.hh,
+                                  UiShape::RoundedBox, panelBg, 0.05f, 0.004f, kGlassRimFaint);
+                    const int rows = std::min<int>(kMusicRows, static_cast<int>(mv.rows.size()));
+                    for (int i = 0; i < rows; ++i) {
+                        const UiRect r = hub::musicui::row(i);
+                        if (mv.rows[static_cast<size_t>(i)].current) {
+                            drawUiElement(mvpUi, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox, rowCur, 0.25f);
+                        } else if (hovHere && hov == mv.first + i) {
+                            drawUiElement(mvpUi, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox, rowHov, 0.25f);
+                        }
+                        if (mv.rows[static_cast<size_t>(i)].current) {
+                            drawUiElement(mvpUi, r.cx - r.hw + 0.055f, r.cy, 0.022f, 0.022f,
+                                          mv.paused ? UiShape::Pause : UiShape::Play, themeAccentCol);
+                        }
+                    }
+                    // Scroll position when the queue is longer than the list.
+                    if (mv.count > kMusicRows) {
+                        const float trackH = kMusicRows * hub::musicui::kRowH;
+                        const float thumbH = std::max(0.06f, trackH * kMusicRows / mv.count);
+                        const float t = static_cast<float>(mv.first) / static_cast<float>(mv.count - kMusicRows);
+                        const float x = hub::musicui::kPanel.cx + hub::musicui::kPanel.hw - 0.022f;
+                        const float y = hub::musicui::kRowsTop - 0.5f * thumbH - t * (trackH - thumbH);
+                        drawUiElement(mvpUi, x, y, 0.007f, 0.5f * thumbH, UiShape::RoundedBox, off, 1.0f);
+                    }
+                    // Buttons: shuffle, previous, play/pause, next, repeat.
+                    for (int i = 0; i < 5; ++i) {
+                        const UiRect b = hub::musicui::button(i);
+                        const bool h = hovHere && hov == kMusicShuffle + i;
+                        if (i == 2) {
+                            drawUiElement(mvpUi, b.cx, b.cy, b.hw, b.hh, UiShape::RoundedBox,
+                                          h ? themeAccentCol : btnHov, 1.0f);
+                        } else {
+                            drawUiElement(mvpUi, b.cx, b.cy, b.hw, b.hh, UiShape::RoundedBox, h ? btnHov : btnBg, 1.0f);
+                        }
+                        const bool lit = (i == 0 && mv.shuffle) || (i == 4 && mv.repeat != 0);
+                        const float* col = (i == 0 || i == 4) ? (lit ? themeAccentCol : off) : themeTextCol;
+                        const float k = (i == 2) ? 0.42f : 0.48f;
+                        UiShape icon = UiShape::Shuffle;
+                        if (i == 1) icon = UiShape::SkipBack;
+                        else if (i == 2) icon = mv.paused ? UiShape::Play : UiShape::Pause;
+                        else if (i == 3) icon = UiShape::SkipFwd;
+                        else if (i == 4) icon = UiShape::Repeat;
+                        drawUiElement(mvpUi, b.cx, b.cy, b.hw * k, b.hh * k, icon, col);
+                    }
+                    // Text.
+                    const Mat4* prevVp = curTextVp;
+                    const float prevBend = curTextBend;
+                    curTextVp = &mvpUi;
+                    curTextBend = screenBend[slot];
+                    const float lh = fontAtlas_.lineHeight;
+                    const float infoW = 2.0f * music::kCoverHalf + 0.10f;
+                    withHeadingFont([&] {
+                        drawFitCentered(hub::musicui::kInfoCx, hub::musicui::kTitleY, infoW, 0.080f / lh, themeTextCol,
+                                        mv.title);
+                        drawFit(hub::musicui::kPanel.cx - hub::musicui::kPanel.hw + 0.06f, hub::musicui::kHeaderY, 0.6f, 0.058f / lh,
+                                themeTextCol, "Queue");
+                    });
+                    drawFitCentered(hub::musicui::kInfoCx, hub::musicui::kArtistY, infoW, 0.056f / lh, themeTextCol, mv.artist);
+                    drawFitCentered(hub::musicui::kInfoCx, hub::musicui::kAlbumY, infoW, 0.046f / lh, dim, mv.album);
+                    {
+                        const float sc = 0.040f / lh;
+                        const float w = measureString(sc, mv.queueInfo);
+                        drawFit(hub::musicui::kPanel.cx + hub::musicui::kPanel.hw - 0.06f - w, hub::musicui::kHeaderY, 0.9f, sc, dim,
+                                mv.queueInfo);
+                    }
+                    if (mv.repeat == 2) {  // "1" on the repeat button: repeat this track
+                        const UiRect b = hub::musicui::button(4);
+                        drawFitCentered(b.cx + 0.040f, b.cy + 0.040f, 0.05f, 0.032f / lh, themeAccentCol, "1");
+                    }
+                    for (int i = 0; i < rows; ++i) {
+                        const UiRect r = hub::musicui::row(i);
+                        const MusicView::Row& row = mv.rows[static_cast<size_t>(i)];
+                        const float left = r.cx - r.hw + 0.11f;
+                        if (!row.current) {
+                            drawFitCentered(r.cx - r.hw + 0.055f, r.cy, 0.08f, 0.036f / lh, dim,
+                                            std::to_string(mv.first + i + 1));
+                        }
+                        const float durSc = 0.038f / lh;
+                        const float durW = measureString(durSc, row.duration);
+                        const float maxW = 2.0f * r.hw - 0.16f - durW - 0.05f;
+                        drawFit(left, r.cy + (row.artist.empty() ? 0.0f : 0.022f), maxW, 0.047f / lh,
+                                row.current ? themeAccentCol : themeTextCol, row.title);
+                        if (!row.artist.empty()) drawFit(left, r.cy - 0.030f, maxW, 0.034f / lh, dim, row.artist);
+                        drawFit(r.cx + r.hw - 0.03f - durW, r.cy, durW + 0.01f, durSc, dim, row.duration);
+                    }
+                    flushText();
+                    curTextVp = prevVp;
+                    curTextBend = prevBend;
+                    uiBendOverride = -1.0f;
+                }
+
                 if (drawFrames) {
                     vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipeline_);
                     const bool sel = (slot == selectedScreen_);
@@ -3561,13 +3710,27 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh,
                               UiShape::RoundedBox, enabled ? bg : disabledBg,
                               1.0f, 0.03f, enabled ? border : kGlassRimFaint);
-            } else if (cb == CtrlButton::Files || cb == CtrlButton::Recenter) {
+            } else if (cb == CtrlButton::Files || cb == CtrlButton::Recenter || cb == CtrlButton::Volume) {
                 if (hovered) {
                     drawGlow(vpPanel, r.cx, r.cy, r.hw, r.hh, 0.014f, hoverGlow);
                 }
                 drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh,
                               UiShape::RoundedBox, bg, 1.0f, 0.03f, border);
                 UiShape iconShape = (cb == CtrlButton::Recenter) ? UiShape::Recenter : UiShape::Files;
+                if (cb == CtrlButton::Volume) {
+                    iconShape = volumeMuted_ ? UiShape::SpeakerMuted : UiShape::Speaker;
+                    // Level bar on the right half of the pill.
+                    const float x0 = r.cx + 0.010f, x1 = r.cx + r.hw - 0.030f;
+                    const float level = volumeMuted_ ? 0.0f : std::clamp(volumeDisplay_, 0.0f, 1.0f);
+                    const float barBg[4] = {1.0f, 1.0f, 1.0f, 0.16f};
+                    drawUiElement(vpPanel, 0.5f * (x0 + x1), r.cy, 0.5f * (x1 - x0), 0.0055f,
+                                  UiShape::RoundedBox, barBg, 1.0f);
+                    if (level > 0.01f) {
+                        const float xe = x0 + (x1 - x0) * level;
+                        drawUiElement(vpPanel, 0.5f * (x0 + xe), r.cy, 0.5f * (xe - x0), 0.0055f,
+                                      UiShape::RoundedBox, themeAccentCol, 1.0f);
+                    }
+                }
                 drawUiElement(vpPanel, r.cx - r.hw + 0.034f, r.cy, 0.017f, 0.017f,
                               iconShape, themeAccentCol);
                 if (cb == CtrlButton::Files && activeDownloadCount_ > 0) {
@@ -3745,6 +3908,13 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             drawFitCentered(rHub.cx + 0.012f, rHub.cy, rHub.hw * 1.6f, pillSc, themeTextCol, "HUB");
             const CtrlButtonRect rRec = get_ctrl_button_rect(static_cast<int>(CtrlButton::Recenter));
             drawFitCentered(rRec.cx + 0.012f, rRec.cy, rRec.hw * 1.6f, pillSc, themeTextCol, "RECENTER");
+            {
+                const CtrlButtonRect rV = get_ctrl_button_rect(static_cast<int>(CtrlButton::Volume));
+                char vol[16];
+                std::snprintf(vol, sizeof(vol), "%d%%", static_cast<int>(std::lround(volumeDisplay_ * 100.0f)));
+                drawFitCentered(rV.cx - 0.070f, rV.cy, 0.10f, pillSc, volumeMuted_ ? pillDisabledCol : themeTextCol,
+                                volumeMuted_ ? "MUTED" : vol);
+            }
 
             // Right flank pills: PROJECTION, AUDIO, SCREEN
             const CtrlButtonRect rF = get_ctrl_button_rect(static_cast<int>(CtrlButton::FormatToggle));

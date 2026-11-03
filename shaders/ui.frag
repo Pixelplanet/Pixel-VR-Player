@@ -293,6 +293,26 @@ void main() {
         float cross = min(sdSegment(q, vec2(-0.19, -0.19), vec2(0.19, 0.19)),
                           sdSegment(q, vec2(-0.19, 0.19), vec2(0.19, -0.19))) - 0.07;
         d = min(outline, cross);
+    } else if (shape == 35) {
+        // Shape 35: Shuffle (two crossing arrows pointing right)
+        float a = sdSegment(p, vec2(-0.62, -0.38), vec2(0.30, 0.38)) - 0.075;
+        float b = sdSegment(p, vec2(-0.62, 0.38), vec2(-0.20, 0.03)) - 0.075;
+        float c = sdSegment(p, vec2(0.02, -0.15), vec2(0.30, -0.38)) - 0.075;
+        float h1 = sdTriangle(p, vec2(0.66, 0.38), vec2(0.30, 0.62), vec2(0.30, 0.14)) - 0.02;
+        float h2 = sdTriangle(p, vec2(0.66, -0.38), vec2(0.30, -0.14), vec2(0.30, -0.62)) - 0.02;
+        d = min(min(a, min(b, c)), min(h1, h2));
+    } else if (shape == 36 || shape == 37) {
+        // Shapes 36 / 37: previous / next track (bar + triangle)
+        vec2 q = (shape == 36) ? vec2(-p.x, p.y) : p;
+        float tri = sdTriangle(q, vec2(-0.48, 0.48), vec2(0.30, 0.0), vec2(-0.48, -0.48)) - 0.04;
+        float bar = sdRoundedBox(q - vec2(0.44, 0.0), vec2(0.08, 0.50), 0.03);
+        d = min(tri, bar);
+    } else if (shape == 38) {
+        // Shape 38: Repeat (rounded loop with an arrow head)
+        float loop = abs(sdRoundedBox(p, vec2(0.56, 0.34), 0.30)) - 0.075;
+        float gap = sdRoundedBox(p - vec2(0.12, 0.34), vec2(0.14, 0.12), 0.0);
+        float head = sdTriangle(p, vec2(0.10, 0.62), vec2(0.40, 0.34), vec2(0.10, 0.06)) - 0.02;
+        d = min(max(loop, -gap), head);
     } else {
         d = sdRoundedBox(p, vec2(1.0), 0.0);
     }

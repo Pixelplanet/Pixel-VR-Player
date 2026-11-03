@@ -22,7 +22,7 @@
 //       move X Y | down X Y | up X Y | wheel X Y DY | key NAME | text UTF8
 //       nav URL | tab URL | back | forward | reload | fullscreen | eval JS
 //       media toggle|play|pause|live|seek T|seekrel D | mute 0|1
-//       pausemedia LIVE(0|1) | keyboard | quit
+//       volume PERCENT | pausemedia LIVE(0|1) | keyboard | quit
 //   - stdout, one event per line: ready | url URL | title TEXT | loading 0|1
 //     | media 0 | media 1 PAUSED POS DUR LIVE SEEKSTART SEEKEND
 //     | videoinfo W H FRAMES DROPPED "CODECS"
@@ -954,6 +954,7 @@ int runScreen(const ScreenOptions& opt) {
     std::string selectSession;  // page whose <select> is open as a menu
     std::string selectJson;     // its options (from kSelectJs), empty = none
     bool muted = false;
+    int volumePct = 100;
     std::string pressSession;  // where the current press went
     double pressOffsetY = 0.0;
     bool mouseDown = false;
@@ -1225,6 +1226,14 @@ int runScreen(const ScreenOptions& opt) {
         evalIn(session, std::string("(()=>{const M=") + (muted ? "1" : "0") +
                             ";for(const m of document.querySelectorAll('video,audio')){"
                             "if(M&&!m.muted){m.muted=true;m.__pvrM=1}else if(!M&&m.__pvrM){m.muted=false;delete m.__pvrM}}})()");
+    };
+
+    // Screen volume: set on the page's media once per change (or when new
+    // ones appear), so the site's own volume control still works in between.
+    auto applyVolume = [&](const std::string& session) {
+        evalIn(session, "(()=>{const V=" + std::to_string(volumePct) +
+                            "/100;for(const m of document.querySelectorAll('video,audio')){"
+                            "if(m.__pvrV!==V){m.volume=V;m.__pvrV=V}}})()");
     };
 
     auto toggleFullscreen = [&]() {
@@ -1632,6 +1641,9 @@ int runScreen(const ScreenOptions& opt) {
         } else if (cmd == "mute") {
             muted = rest == "1";
             for (const Tab& t : tabs) applyMute(t.session);
+        } else if (cmd == "volume") {
+            volumePct = std::clamp(std::atoi(rest.c_str()), 0, 100);
+            for (const Tab& t : tabs) applyVolume(t.session);
         } else if (cmd == "pausemedia") {
             // Headset off: pause everything, livestreams only when asked to.
             const std::string js = std::string("(()=>{const L=") + (rest == "1" ? "1" : "0") +
@@ -1692,7 +1704,9 @@ int runScreen(const ScreenOptions& opt) {
         const std::string session = t->session;
         const std::string js = std::string("(()=>{const M=") + (muted ? "1" : "0") +
                                ";for(const m of document.querySelectorAll('video,audio')){"
-                               "if(M&&!m.muted){m.muted=true;m.__pvrM=1}else if(!M&&m.__pvrM){m.muted=false;delete m.__pvrM}}"
+                               "if(M&&!m.muted){m.muted=true;m.__pvrM=1}else if(!M&&m.__pvrM){m.muted=false;delete m.__pvrM}"
+                               "if(m.__pvrV!==" + std::to_string(volumePct) + "/100){m.volume=" + std::to_string(volumePct) +
+                               "/100;m.__pvrV=m.volume}}"
                                "const v=" + kBestVideoJs +
                                ";let md=null;if(v){const live=" + kIsLiveJs + "(v);"
                                "const s=v.seekable,n=s.length;let s0=n?s.start(0):0,s1=n?s.end(n-1):0;"

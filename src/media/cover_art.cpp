@@ -92,9 +92,41 @@ bool decodeCoverArt(AVFormatContext* fmt, std::vector<uint8_t>& rgba, int& width
     return false;
 }
 
+void readAudioTags(AVFormatContext* fmt, AudioTags& out) {
+    if (!fmt) return;
+    auto tag = [&](const char* key) -> std::string {
+        if (AVDictionaryEntry* e = av_dict_get(fmt->metadata, key, nullptr, 0)) return e->value;
+        for (unsigned i = 0; i < fmt->nb_streams; ++i) {
+            if (fmt->streams[i]->codecpar->codec_type != AVMEDIA_TYPE_AUDIO) continue;
+            if (AVDictionaryEntry* e = av_dict_get(fmt->streams[i]->metadata, key, nullptr, 0)) return e->value;
+        }
+        return {};
+    };
+    out.title = tag("title");
+    out.artist = tag("artist");
+    if (out.artist.empty()) out.artist = tag("album_artist");
+    out.album = tag("album");
+    if (fmt->duration > 0) out.duration = static_cast<double>(fmt->duration) / AV_TIME_BASE;
+}
+
+bool probeAudioTags(const std::string& path, AudioTags& out) {
+    AVFormatContext* fmt = nullptr;
+    if (avformat_open_input(&fmt, path.c_str(), nullptr, nullptr) < 0 || !fmt) return false;
+    // Durations of tag-only headers (MP3 without stream info) need a short look.
+    if (fmt->duration <= 0) avformat_find_stream_info(fmt, nullptr);
+    readAudioTags(fmt, out);
+    avformat_close_input(&fmt);
+    return true;
+}
+
 void composeAudioCard(const std::vector<uint8_t>& cover, int coverW, int coverH, int w, int h,
-                      std::vector<uint8_t>& out) {
+                      std::vector<uint8_t>& out, bool musicLayout) {
     out.assign(static_cast<size_t>(w) * h * 4, 255);
+    // Music view: a square box in the left column (screen model units -> px).
+    const float boxCx = musicLayout ? (music::kCoverCx + 1.6f) / 3.2f * w : 0.5f * w;
+    const float boxCy = musicLayout ? (0.9f - music::kCoverCy) / 1.8f * h : 0.5f * h;
+    const float boxW = musicLayout ? 2.0f * music::kCoverHalf / 3.2f * w : 0.86f * w;
+    const float boxH = musicLayout ? 2.0f * music::kCoverHalf / 1.8f * h : 0.80f * h;
     if (!cover.empty() && coverW > 0 && coverH > 0) {
         // Background: the cover blurred (tiny, then scaled back up) and darkened.
         std::vector<uint8_t> tiny, bg;
@@ -103,13 +135,13 @@ void composeAudioCard(const std::vector<uint8_t>& cover, int coverW, int coverH,
                 for (int c = 0; c < 3; ++c) out[i + c] = static_cast<uint8_t>(bg[i + c] * 0.42f);
             }
         }
-        // Foreground: the cover itself, as large as fits with a margin.
-        const float fit = std::min(0.80f * h / coverH, 0.86f * w / coverW);
+        // Foreground: the cover itself, as large as fits its box.
+        const float fit = std::min(boxH / coverH, boxW / coverW);
         const int fw = std::max(1, static_cast<int>(coverW * fit));
         const int fh = std::max(1, static_cast<int>(coverH * fit));
         std::vector<uint8_t> fg;
         if (scaleRgba(cover, coverW, coverH, fw, fh, fg)) {
-            const int x0 = (w - fw) / 2, y0 = (h - fh) / 2;
+            const int x0 = static_cast<int>(boxCx) - fw / 2, y0 = static_cast<int>(boxCy) - fh / 2;
             // Soft shadow under the cover.
             const int sh = std::max(4, h / 60);
             for (int y = std::max(0, y0 - sh); y < std::min(h, y0 + fh + 2 * sh); ++y) {
@@ -130,8 +162,8 @@ void composeAudioCard(const std::vector<uint8_t>& cover, int coverW, int coverH,
         return;
     }
     // No cover: a dark gradient with a large beamed music note.
-    const float u = static_cast<float>(h) / 100.0f;  // drawing unit
-    const float cx = w * 0.5f, cy = h * 0.5f;
+    const float u = std::min(boxW, boxH) / 80.0f;  // drawing unit
+    const float cx = boxCx, cy = boxCy;
     for (int y = 0; y < h; ++y) {
         for (int x = 0; x < w; ++x) {
             const float t = (static_cast<float>(x) / w + static_cast<float>(y) / h) * 0.5f;

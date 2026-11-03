@@ -196,6 +196,7 @@ bool BrowserHost::start(const std::string& url, int width, int height, const Opt
     media_ = {};
     videoInfo_ = {};
     mutedState_ = -1;
+    volumeState_ = -1;
     focusEvents_.clear();
     fieldValueNew_ = false;
 
@@ -433,6 +434,13 @@ void BrowserHost::setMuted(bool muted) {
     if (mutedState_ == (muted ? 1 : 0)) return;
     mutedState_ = muted ? 1 : 0;
     send(muted ? "mute 1" : "mute 0");
+}
+
+void BrowserHost::setVolume(float volume) {
+    const int pct = static_cast<int>(std::lround(std::clamp(volume, 0.0f, 1.0f) * 100.0f));
+    if (pct == volumeState_) return;
+    volumeState_ = pct;
+    send("volume " + std::to_string(pct));
 }
 
 bool BrowserHost::takeFocusEvent(FocusEvent& out) {

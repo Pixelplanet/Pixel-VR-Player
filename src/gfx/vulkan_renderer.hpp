@@ -188,6 +188,47 @@ public:
         transportElapsed_ = elapsedSec;
         transportDuration_ = durationSec;
     }
+    // The VOLUME pill: the selected screen's volume (0..1) and mute.
+    void setVolumeDisplay(float volume, bool muted) {
+        volumeDisplay_ = volume;
+        volumeMuted_ = muted;
+    }
+
+    // Music view, drawn on a screen that plays an audio file: track info and
+    // buttons beside the cover (part of the video frame), the queue on the
+    // right. Rows hold only the visible window of the queue.
+    struct MusicView {
+        bool active = false;
+        std::string title;
+        std::string artist;
+        std::string album;
+        std::string queueInfo;  // e.g. "12 tracks  ·  48 min"
+        struct Row {
+            std::string title;
+            std::string artist;
+            std::string duration;
+            bool current = false;
+        };
+        std::vector<Row> rows;
+        int first = 0;   // queue index of rows[0]
+        int count = 0;   // whole queue
+        bool shuffle = false;
+        int repeat = 0;  // 0 off, 1 all, 2 one
+        bool paused = false;
+    };
+    static constexpr int kMusicRows = 10;
+    // musicHover() ids besides queue indices (0..count-1).
+    enum MusicHit { kMusicNone = -1, kMusicShuffle = 100000, kMusicPrev, kMusicPlay, kMusicNext, kMusicRepeat,
+                    kMusicList };
+    void setMusicView(int slot, const MusicView& view) {
+        if (slot >= 0 && slot < kMaxVideoSlots) musicViews_[slot] = view;
+    }
+    // What the laser points at on a music view (and on which screen).
+    int musicHover(int& slot) const {
+        slot = musicHoverSlot_;
+        return musicHoverId_;
+    }
+
     // Livestream: 0 = no, 1 = live but behind, 2 = at the live edge. The
     // timeline's right end is then live and the readout shows "LIVE".
     void setTransportLive(int live) { transportLive_ = live; }
@@ -455,6 +496,10 @@ public:
         SwapV = 32,         // double-headed arrow, vertical
         Globe = 33,         // web: circle with meridian + parallels
         Backspace = 34,     // key pointing left with a cross
+        Shuffle = 35,
+        SkipBack = 36,      // previous track
+        SkipFwd = 37,       // next track
+        Repeat = 38,
         GlassPanel = 25, // rounded box with bevel + eye-dependent reflection sheen
     };
 
@@ -482,6 +527,7 @@ public:
         ScreenFrames,  // multi-screen row: show / hide the borders around screens
         ScreenLayout,  // multi-screen row: arrange screens with a preset
         ScreenClose,   // multi-screen row: close the selected screen
+        Volume,        // left pill: this screen's volume (stick = adjust, click = mute)
         Count
     };
     // Multi-screen row under the dock (shown while Multiple Screens is on and a
@@ -689,6 +735,11 @@ private:
     bool timeShowRemaining_ = false;  // right readout shows time-left vs. total
     bool pointerOnTimeToggle_ = false;
     int transportLive_ = 0;
+    float volumeDisplay_ = 1.0f;
+    bool volumeMuted_ = false;
+    MusicView musicViews_[kMaxVideoSlots];
+    int musicHoverSlot_ = -1;
+    int musicHoverId_ = kMusicNone;
     std::string hudFormat_ = "2D FLAT";
     std::string hudAudio_ = "AUDIO";
     std::string hudScreen_ = "CURVED";

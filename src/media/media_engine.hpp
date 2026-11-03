@@ -1,5 +1,7 @@
 #pragma once
 
+#include "media/cover_art.hpp"
+
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -90,6 +92,12 @@ public:
     // (multi-screen: only one screen is usually audible).
     void setMuted(bool muted);
     bool muted() const;
+    // This screen's own volume (0..1), applied on top of the system volume.
+    void setVolume(float volume);
+
+    // Audio files (no video stream): the screen shows a still cover card.
+    bool audioOnly() const;
+    const AudioTags& audioTags() const;  // title / artist / album (audio files)
 
     // Seeking (thread-safe; applied on the decode thread).
     void seek(double seconds);        // absolute, clamped to [0, duration]

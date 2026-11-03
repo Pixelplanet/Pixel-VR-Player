@@ -5,6 +5,7 @@
 #include "util/ipv4.hpp"
 
 #include "util/logging.hpp"
+#include "util/media_files.hpp"
 
 #include <cctype>
 #include <chrono>
@@ -412,7 +413,7 @@ void App::applyResolutionScale(float scale) {
 }
 
 #ifdef PIXELVR_HAVE_MEDIA
-void App::loadMedia(const std::string& path, int slot) {
+void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
     if (slot < 0 || !multiScreenEnabled()) slot = multiScreenEnabled() ? selectedScreen_ : 0;
     {
         // 360/180 is immersive: it always plays on the main screen.
@@ -456,15 +457,17 @@ void App::loadMedia(const std::string& path, int slot) {
         return;
     }
     sc.engine.setPaused(false);
-    hudDismissed_ = false;
-    lastControllerActivity_ = std::chrono::steady_clock::now();
-    if (textEntry_.active) cancelKeyboard();
-    actionMenu_.visible = false;
-    smbModal_.active = false;
-    smbModal_.editingField = SmbModalState::Field::None;
-    browser_.setOpen(false);
-    downloadsWindow_ = false;
-    pendingDl_.clear();
+    if (!fromQueue) {  // a track change of the queue leaves the UI alone
+        hudDismissed_ = false;
+        lastControllerActivity_ = std::chrono::steady_clock::now();
+        if (textEntry_.active) cancelKeyboard();
+        actionMenu_.visible = false;
+        smbModal_.active = false;
+        smbModal_.editingField = SmbModalState::Field::None;
+        browser_.setOpen(false);
+        downloadsWindow_ = false;
+        pendingDl_.clear();
+    }
 
     // Refine the stereo layout from the frame aspect ratio when the filename did
     // not state it: once the projection is a VR type the aspect is unambiguous
@@ -543,14 +546,25 @@ void App::loadMedia(const std::string& path, int slot) {
     if (proj == VulkanRenderer::ProjectionMode::Flat) joinArrangement(slot);
     // Resume where this file was left (track switches reopen the same file and
     // restore their own position).
-    if (!sameFile && remembered != nullptr && remembered->position > 0.0 &&
+    if (!sameFile && !fromQueue && remembered != nullptr && remembered->position > 0.0 &&
         (sc.engine.duration() <= 0.0 || remembered->position < sc.engine.duration())) {
         sc.engine.seek(remembered->position);
         PIXELVR_LOG_INFO("Resuming %s at %.1fs", path.c_str(), remembered->position);
     }
+    // Audio files play through the folder they came from.
+    if (sc.engine.audioOnly()) {
+        if (!fromQueue || sc.queue.indexOf(path) < 0) buildMusicQueue(slot, path);
+        else sc.queue.setCurrent(sc.queue.indexOf(path));
+        const int curTrack = sc.queue.current();
+        if (curTrack < sc.musicFirst || curTrack >= sc.musicFirst + VulkanRenderer::kMusicRows) {
+            sc.musicFirst = std::max(0, curTrack - 2);  // keep the playing track in view
+        }
+    } else if (!sc.queue.empty()) {
+        sc.queue.clear();
+    }
     // The loaded screen becomes the selected one (publishes its track lists and
-    // format to the settings / HUD).
-    selectScreen(slot);
+    // format to the settings / HUD). The queue moving on keeps the selection.
+    if (!fromQueue) selectScreen(slot);
     static const char* const kProj[] = {"flat", "360", "180"};
     static const char* const kStereo[] = {"mono", "SBS", "TB"};
     PIXELVR_LOG_INFO("Loaded %s on screen %d (%dx%d, %s/%s)", path.c_str(), slot + 1, w, h,
@@ -747,6 +761,126 @@ int App::navStepX(float axisX, std::chrono::steady_clock::time_point now) {
     return 0;
 }
 
+namespace {
+// File-name order with numbers compared by value ("2 x" before "10 x").
+bool naturalLess(const std::string& a, const std::string& b) {
+    size_t i = 0, j = 0;
+    while (i < a.size() && j < b.size()) {
+        if (std::isdigit(static_cast<unsigned char>(a[i])) && std::isdigit(static_cast<unsigned char>(b[j]))) {
+            size_t ie = i, je = j;
+            while (ie < a.size() && std::isdigit(static_cast<unsigned char>(a[ie]))) ++ie;
+            while (je < b.size() && std::isdigit(static_cast<unsigned char>(b[je]))) ++je;
+            const std::string na = a.substr(i, ie - i), nb = b.substr(j, je - j);
+            const unsigned long long va = std::strtoull(na.c_str(), nullptr, 10);
+            const unsigned long long vb = std::strtoull(nb.c_str(), nullptr, 10);
+            if (va != vb) return va < vb;
+            i = ie;
+            j = je;
+            continue;
+        }
+        const int ca = std::tolower(static_cast<unsigned char>(a[i]));
+        const int cb = std::tolower(static_cast<unsigned char>(b[j]));
+        if (ca != cb) return ca < cb;
+        ++i;
+        ++j;
+    }
+    return a.size() - i < b.size() - j;
+}
+
+std::string formatClock(double sec) {
+    if (sec <= 0.0) return {};
+    const int s = static_cast<int>(sec + 0.5);
+    char buf[24];
+    if (s >= 3600) std::snprintf(buf, sizeof(buf), "%d:%02d:%02d", s / 3600, (s / 60) % 60, s % 60);
+    else std::snprintf(buf, sizeof(buf), "%d:%02d", s / 60, s % 60);
+    return buf;
+}
+}  // namespace
+
+void App::buildMusicQueue(int slot, const std::string& path) {
+#ifdef PIXELVR_HAVE_MEDIA
+    // The audio files next to it: as listed in the file browser when it is
+    // showing that folder (its sort order, SMB too), else from the disk.
+    std::vector<std::string> paths;
+    bool fromBrowser = false;
+    for (const Browser::Entry& e : browser_.entries()) {
+        if (e.path == path) fromBrowser = true;
+    }
+    if (fromBrowser) {
+        for (const Browser::Entry& e : browser_.entries()) {
+            if (!e.isDir && isAudioFile(e.path)) paths.push_back(e.path);
+        }
+    } else if (!path.empty() && path[0] == '/') {
+        std::error_code ec;
+        const std::filesystem::path dir = std::filesystem::path(path).parent_path();
+        for (const auto& it : std::filesystem::directory_iterator(dir, ec)) {
+            const std::string name = it.path().filename().string();
+            if (!name.empty() && name[0] != '.' && it.is_regular_file(ec) && isAudioFile(name)) {
+                paths.push_back(it.path().string());
+            }
+        }
+        std::sort(paths.begin(), paths.end(), [](const std::string& a, const std::string& b) {
+            return naturalLess(std::filesystem::path(a).filename().string(), std::filesystem::path(b).filename().string());
+        });
+    }
+    if (std::find(paths.begin(), paths.end(), path) == paths.end()) paths = {path};
+    const int at = static_cast<int>(std::find(paths.begin(), paths.end(), path) - paths.begin());
+    screens_[slot].queue.set(paths, at);
+    PIXELVR_LOG_INFO("Music: %d tracks queued on screen %d", static_cast<int>(paths.size()), slot + 1);
+#else
+    (void)slot;
+    (void)path;
+#endif
+}
+
+void App::playQueueTrack(int slot, int index) {
+#ifdef PIXELVR_HAVE_MEDIA
+    const std::string next = screens_[slot].queue.track(index).path;
+    if (next.empty()) return;
+    screens_[slot].queue.setCurrent(index);
+    loadMedia(next, slot, true);
+#else
+    (void)slot;
+    (void)index;
+#endif
+}
+
+void App::updateMusicView(int slot) {
+#ifdef PIXELVR_HAVE_MEDIA
+    ScreenState& sc = screens_[slot];
+    VulkanRenderer::MusicView v;
+    if (!sc.open || sc.web || !sc.engine.audioOnly()) {
+        renderer_.setMusicView(slot, v);
+        return;
+    }
+    const MusicQueue& q = sc.queue;
+    const int count = q.size();
+    const int current = q.current();
+    const AudioTags& tags = sc.engine.audioTags();
+    const MusicQueue::Track playing = q.track(current);
+    v.active = true;
+    v.title = !tags.title.empty() ? tags.title : playing.title;
+    v.artist = tags.artist;
+    v.album = tags.album;
+    v.count = count;
+    v.shuffle = q.shuffle();
+    v.repeat = static_cast<int>(q.repeat());
+    v.paused = sc.engine.paused();
+    const double total = q.totalDuration();
+    v.queueInfo = std::to_string(count) + (count == 1 ? " track" : " tracks");
+    if (total > 0.0) v.queueInfo += "  \xB7  " + formatClock(total);
+    sc.musicFirst = std::clamp(sc.musicFirst, 0, std::max(0, count - VulkanRenderer::kMusicRows));
+    v.first = sc.musicFirst;
+    for (int i = v.first; i < std::min(count, v.first + VulkanRenderer::kMusicRows); ++i) {
+        const MusicQueue::Track t = q.track(i);
+        v.rows.push_back({t.title, t.artist, formatClock(t.duration), i == current});
+    }
+    renderer_.setMusicView(slot, v);
+#else
+    (void)slot;
+#endif
+}
+
 void App::rememberPlaybackPosition(int slot) {
 #ifdef PIXELVR_HAVE_MEDIA
     if (slot < 0) slot = selectedScreen_;
@@ -754,6 +888,8 @@ void App::rememberPlaybackPosition(int slot) {
     if (!sc.open || sc.web || sc.path.empty() || VaultManager::instance().isVaultPath(sc.path)) {
         return;
     }
+    // Songs start from the top; long audio (audiobooks, mixes) resumes.
+    if (sc.engine.audioOnly() && sc.engine.duration() < 20.0 * 60.0) return;
     playbackMemory_.setPosition(sc.path, sc.engine.position(), sc.engine.duration());
 #else
     (void)slot;
@@ -780,6 +916,11 @@ void App::closeMedia(int slot) {
         sc.engine.close();
 #endif
     }
+#ifdef PIXELVR_HAVE_MEDIA
+    sc.queue.clear();
+#endif
+    sc.musicFirst = 0;
+    renderer_.setMusicView(slot, {});
     sc.open = false;
     sc.path.clear();
     sc.muted = false;  // the next clip on this screen starts audible
@@ -2382,6 +2523,51 @@ int App::run() {
                 }
             }
 
+#ifdef PIXELVR_HAVE_MEDIA
+            // Music view on a screen: buttons and queue rows; the stick scrolls
+            // the queue while pointing at it.
+            if (!hubShown && !actionMenu_.visible && !textEntry_.active && !screensUnlocked_ && movingScreen_ < 0) {
+                int ms = -1;
+                const int mh = renderer_.musicHover(ms);
+                if (ms >= 0 && screens_[ms].open && screens_[ms].engine.audioOnly()) {
+                    ScreenState& sc = screens_[ms];
+                    using VR = VulkanRenderer;
+                    if (in.select && mh != VR::kMusicNone && mh != VR::kMusicList) {
+                        if (ms != selectedScreen_) selectScreen(ms);
+                        if (mh == VR::kMusicShuffle) {
+                            sc.queue.setShuffle(!sc.queue.shuffle());
+                        } else if (mh == VR::kMusicRepeat) {
+                            sc.queue.cycleRepeat();
+                        } else if (mh == VR::kMusicPlay) {
+                            sc.engine.togglePause();
+                        } else if (mh == VR::kMusicPrev) {
+                            // Like any player: back to the start, unless just started.
+                            const int prev = sc.queue.previous();
+                            if (sc.engine.position() > 3.0 || prev < 0 || prev == sc.queue.current()) sc.engine.seek(0.0);
+                            else playQueueTrack(ms, prev);
+                        } else if (mh == VR::kMusicNext) {
+                            const int next = sc.queue.next(false);
+                            if (next >= 0) playQueueTrack(ms, next);
+                        } else if (mh >= 0) {
+                            playQueueTrack(ms, mh);  // a queue row
+                        }
+                        xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.015f, 0.0f, 0.4f);
+                        in.select = false;
+                        in.togglePlay = false;
+                    }
+                    if ((mh == VR::kMusicList || (mh >= 0 && mh < VR::kMusicShuffle)) && std::fabs(in.thumbstickY) > 0.3f) {
+                        musicScrollAccum_ += in.thumbstickY * dt * 9.0f;  // rows per second at full tilt
+                        const int steps = static_cast<int>(musicScrollAccum_);
+                        if (steps != 0) {
+                            sc.musicFirst -= steps;  // stick up = toward the start
+                            musicScrollAccum_ -= static_cast<float>(steps);
+                        }
+                        in.thumbstickY = 0.0f;
+                    }
+                }
+            }
+#endif
+
             // Custom combo recording listener (active while recording new 6-button combo in Vault & Privacy)
             if (VaultManager::instance().isRecordingCombo()) {
                 for (int b : {XrInputState::BtnA, XrInputState::BtnB, XrInputState::BtnX, XrInputState::BtnY}) {
@@ -2603,12 +2789,27 @@ int App::run() {
                 if (!sc.open) continue;
                 const bool audioModeMutes = multiScreenEnabled() && settings_.screenAudioMode() == 0 &&
                                             slot != selectedScreen_;
-                // Per-screen mute only exists in multi-screen mode (its button is
-                // hidden otherwise), so it never silences the single screen.
-                const bool mute = (sc.muted && multiScreenEnabled()) || audioModeMutes;
-                if (sc.web) webHosts_[slot].setMuted(mute);
-                else sc.engine.setMuted(mute);
+                // The user's mute (screen row / VOLUME pill) and the audio mode.
+                const bool mute = sc.muted || audioModeMutes;
+                if (sc.web) {
+                    webHosts_[slot].setMuted(mute);
+                    webHosts_[slot].setVolume(sc.volume);
+                    continue;
+                }
+                sc.engine.setMuted(mute);
+                sc.engine.setVolume(sc.volume);
+                // Music: the next track when one ends.
+                if (sc.engine.audioOnly() && sc.engine.eof() && !sc.queue.empty()) {
+                    const int next = sc.queue.next(true);
+                    if (next >= 0) {
+                        playQueueTrack(slot, next);
+                    } else if (!sc.engine.paused()) {
+                        sc.engine.setPaused(true);  // end of the queue: stop on the last track
+                    }
+                }
             }
+            for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) updateMusicView(slot);
+            renderer_.setVolumeDisplay(cur().volume, cur().muted);
 #endif
             renderer_.setMultiScreen(multiScreenEnabled() && openScreenCount() > 0, selectedScreen_);
             if (!multiScreenEnabled() || openScreenCount() == 0) screensUnlocked_ = false;
@@ -4028,7 +4229,8 @@ int App::run() {
                         }
                     } else if (cb == VulkanRenderer::CtrlButton::HideHud) {
                         dismissHud(in, nowT);
-                    } else if (cb == VulkanRenderer::CtrlButton::ScreenMute) {
+                    } else if (cb == VulkanRenderer::CtrlButton::ScreenMute ||
+                               cb == VulkanRenderer::CtrlButton::Volume) {
                         cur().muted = !cur().muted;
                     } else if (cb == VulkanRenderer::CtrlButton::ScreenLock) {
                         screensUnlocked_ = !screensUnlocked_;
@@ -4061,6 +4263,14 @@ int App::run() {
             if (barOk && !browserOpen) {
                 if (in.recenter && in.headValid) {
                     recenterView(in);
+                    interacted = true;
+                }
+                // Pointing at the VOLUME pill, the stick sets this screen's volume.
+                if (renderer_.pointerButton() == static_cast<int>(VulkanRenderer::CtrlButton::Volume) &&
+                    std::fabs(in.thumbstickX) > 0.15f && dt > 0.0f) {
+                    cur().volume = std::clamp(cur().volume + in.thumbstickX * dt * 0.6f, 0.0f, 1.0f);
+                    if (cur().volume > 0.0f) cur().muted = false;
+                    in.thumbstickY = 0.0f;  // don't push the screen away meanwhile
                     interacted = true;
                 }
                 // Viewpoint: flat screens move nearer/farther (thumbstick Y);

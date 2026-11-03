@@ -1,12 +1,13 @@
 #include "ui/browser.hpp"
+
 #include "app/vault_manager.hpp"
 #include "net/smb_credentials.hpp"
 
 #include "util/logging.hpp"
+#include "util/media_files.hpp"
 #include "util/smb_lock.hpp"
 
 #include <algorithm>
-#include <initializer_list>
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -35,30 +36,8 @@ namespace fs = std::filesystem;
 
 namespace {
 
-bool has_extension(const std::string& name, std::initializer_list<const char*> exts) {
-    std::string lower = name;
-    std::transform(lower.begin(), lower.end(), lower.begin(),
-                   [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-    for (const char* e : exts) {
-        const std::size_t n = std::char_traits<char>::length(e);
-        if (lower.size() >= n && lower.compare(lower.size() - n, n, e) == 0) {
-            return true;
-        }
-    }
-    return false;
-}
-
-bool is_audio(const std::string& name) {
-    return has_extension(name, {".mp3", ".flac", ".m4a", ".aac", ".ogg", ".oga", ".opus", ".wav", ".wma",
-                                ".alac", ".aiff", ".aif", ".ape", ".mka"});
-}
-
-// Anything the player opens: videos and audio files (shown with cover art).
-bool is_video(const std::string& name) {
-    return is_audio(name) ||
-           has_extension(name, {".mp4", ".mkv", ".mov", ".webm", ".m4v", ".avi", ".ts", ".m2ts", ".wmv", ".flv",
-                                ".mpg", ".m3u8"});
-}
+bool is_audio(const std::string& name) { return isAudioFile(name); }
+bool is_video(const std::string& name) { return isPlayableFile(name); }  // anything playable
 
 #ifdef PIXELVR_HAVE_SMB
 void smb_auth(const char* srv, const char* shr, char* wg, int wgLen, char* user, int userLen,
