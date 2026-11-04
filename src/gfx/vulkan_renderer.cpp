@@ -3790,7 +3790,10 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         const float trackHalfW = 0.56f;
         const float trackHalfH = 0.009f;
         const float trackY = kBarY + 0.130f;
-        const float trackBg[4] = {0.16f, 0.19f, 0.25f, 0.95f};
+        // Brighter with chapters, so the dark gaps between them stand out.
+        const bool chapterTrack = !transportChapters_.empty() && transportLive_ == 0;
+        const float trackBg[4] = {chapterTrack ? 0.38f : 0.16f, chapterTrack ? 0.42f : 0.19f,
+                                  chapterTrack ? 0.50f : 0.25f, 0.95f};
         const float thumbCol[4] = {0.95f, 0.97f, 1.0f, 1.0f};
         const float tickCol[4] = {0.45f, 0.52f, 0.62f, 0.45f};
 
@@ -3826,7 +3829,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             return c;
         };
         if (chaptersOn) {
-            const float gapCol[4] = {0.03f, 0.04f, 0.07f, 1.0f};
+            const float gapCol[4] = {0.02f, 0.025f, 0.04f, 1.0f};
             for (const Chapter& ch : transportChapters_) {
                 if (ch.start <= 0.5 || ch.start >= transportDuration_ - 0.5) continue;
                 const float cx = -trackHalfW + 2.0f * trackHalfW * static_cast<float>(ch.start / transportDuration_);
