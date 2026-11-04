@@ -2,6 +2,7 @@
 
 #include "media/cover_art.hpp"
 #include "media/stereo_detect.hpp"
+#include "util/chapter.hpp"
 
 #include <cstdint>
 #include <memory>
@@ -104,6 +105,8 @@ public:
     bool audioOnly() const;
     // 3D / VR layout from the container's metadata (unknown = -1).
     FormatHint formatHint() const;
+    // The file's chapters (MKV / MP4), sorted by start; empty when it has none.
+    const ChapterList& chapters() const;
     const AudioTags& audioTags() const;  // title / artist / album (audio files)
 
     // Seeking (thread-safe; applied on the decode thread).

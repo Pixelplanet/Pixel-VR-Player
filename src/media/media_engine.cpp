@@ -378,6 +378,7 @@ struct MediaEngine::Impl {
     std::atomic<uint64_t> lateCount{0};
     std::atomic<uint64_t> clockWaitCount{0};
     FormatHint formatHint;
+    ChapterList chapters;
     std::string lastError;  // set when open() fails
     AudioTags tags;
     std::atomic<float> volume{1.0f};
@@ -1067,6 +1068,17 @@ bool MediaEngine::open(const std::string& path) {
         return false;
     }
 
+    impl_->chapters.clear();
+    for (unsigned ci = 0; ci < impl_->format->nb_chapters; ++ci) {
+        const AVChapter* ch = impl_->format->chapters[ci];
+        Chapter c;
+        c.start = std::max(0.0, static_cast<double>(ch->start) * av_q2d(ch->time_base));
+        if (const AVDictionaryEntry* t = av_dict_get(ch->metadata, "title", nullptr, 0)) c.title = t->value;
+        impl_->chapters.push_back(std::move(c));
+    }
+    std::sort(impl_->chapters.begin(), impl_->chapters.end(),
+              [](const Chapter& a, const Chapter& b) { return a.start < b.start; });
+
     // Enumerate selectable video/audio tracks (with language metadata) so the UI
     // can offer track + language selection.
     impl_->videoStreamList.clear();
@@ -1379,6 +1391,7 @@ void MediaEngine::close() {
     impl_->teardown();
     impl_->audioOnly = false;
     impl_->formatHint = {};
+    impl_->chapters.clear();
     impl_->tags = {};
     impl_->cardPending = false;
     impl_->card = {};
@@ -1419,6 +1432,7 @@ void MediaEngine::setVolume(float volume) {
 
 bool MediaEngine::audioOnly() const { return impl_ && impl_->audioOnly; }
 FormatHint MediaEngine::formatHint() const { return impl_->formatHint; }
+const ChapterList& MediaEngine::chapters() const { return impl_->chapters; }
 const AudioTags& MediaEngine::audioTags() const { return impl_->tags; }
 
 bool MediaEngine::muted() const {

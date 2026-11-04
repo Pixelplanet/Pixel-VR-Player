@@ -1,6 +1,7 @@
 #pragma once
 
 #include "gfx/text_atlas.hpp"
+#include "util/chapter.hpp"
 #include "xr/openxr_headers.hpp"
 
 #include <cstdint>
@@ -235,6 +236,9 @@ public:
     // Livestream: 0 = no, 1 = live but behind, 2 = at the live edge. The
     // timeline's right end is then live and the readout shows "LIVE".
     void setTransportLive(int live) { transportLive_ = live; }
+    // Chapters of the selected screen's video: marks on the timeline, the
+    // current chapter's title above it, the hovered one's in the scrub bubble.
+    void setTransportChapters(const ChapterList& chapters) { transportChapters_ = chapters; }
     // True when the pointer is over the clickable total/remaining time readout.
     bool pointerOnTimeToggle() const { return pointerOnTimeToggle_; }
     void toggleTimeDisplay() { timeShowRemaining_ = !timeShowRemaining_; }
@@ -751,6 +755,7 @@ private:
     bool timeShowRemaining_ = false;  // right readout shows time-left vs. total
     bool pointerOnTimeToggle_ = false;
     int transportLive_ = 0;
+    ChapterList transportChapters_;
     float volumeDisplay_ = 1.0f;
     bool volumeMuted_ = false;
     MusicView musicViews_[kMaxVideoSlots];

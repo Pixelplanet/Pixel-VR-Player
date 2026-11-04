@@ -5,6 +5,8 @@
 // its stdout. All browser screens share one hidden Chromium, started by a
 // launcher helper with the first screen and stopped with the last.
 
+#include "util/chapter.hpp"
+
 #include <cstdint>
 #include <mutex>
 #include <string>
@@ -85,6 +87,9 @@ public:
         std::string codecs;  // YouTube only, e.g. "av01.0.08M.08 (399) / opus (251)"
     };
     const VideoInfo& videoInfo() const { return videoInfo_; }
+    // YouTube's chapters of the playing video; chaptersVersion() changes with them.
+    const ChapterList& chapters() const { return chapters_; }
+    unsigned chaptersVersion() const { return chaptersVersion_; }
     void mediaToggle() { send("media toggle"); }
     void mediaGoLive() { send("media live"); }
     void mediaSeek(double t);
@@ -141,6 +146,8 @@ private:
     int frameH_ = 0;
     Media media_;
     VideoInfo videoInfo_;
+    ChapterList chapters_;
+    unsigned chaptersVersion_ = 0;
     int mutedState_ = -1;
     int volumeState_ = -1;  // percent last sent
     std::vector<FocusEvent> focusEvents_;

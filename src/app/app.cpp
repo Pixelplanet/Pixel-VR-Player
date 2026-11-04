@@ -4653,6 +4653,26 @@ int App::run() {
                     progress = static_cast<float>(std::clamp((elapsed - start) / total, 0.0, 1.0));
                 }
                 renderer_.setTransportLive(cur().open ? curLive() : 0);
+                {
+                    // Chapters of the selected screen (handed over when they change).
+                    const ChapterList* chapters = nullptr;
+                    std::string key;
+                    if (cur().open && cur().web) {
+                        chapters = &webHosts_[selectedScreen_].chapters();
+                        key = "w" + std::to_string(selectedScreen_) + ":" +
+                              std::to_string(webHosts_[selectedScreen_].chaptersVersion());
+                    }
+#ifdef PIXELVR_HAVE_MEDIA
+                    else if (cur().open) {
+                        chapters = &cur().engine.chapters();
+                        key = "f" + std::to_string(selectedScreen_) + ":" + cur().path;
+                    }
+#endif
+                    if (key != chapterKey_) {
+                        chapterKey_ = key;
+                        renderer_.setTransportChapters(chapters ? *chapters : ChapterList{});
+                    }
+                }
                 std::string fLabel = "2D FLAT";
                 if (settings_.projectionMode() == 0) {
                     fLabel = (settings_.stereoMode() == 0) ? "2D FLAT" :

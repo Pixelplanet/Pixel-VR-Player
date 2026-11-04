@@ -229,6 +229,8 @@ bool BrowserHost::start(const std::string& url, int width, int height, const Opt
     frameH_ = height_;
     media_ = {};
     videoInfo_ = {};
+    chapters_.clear();
+    ++chaptersVersion_;
     mutedState_ = -1;
     volumeState_ = -1;
     focusEvents_.clear();
@@ -384,6 +386,22 @@ void BrowserHost::handleLine(const std::string& line) {
             media_.duration = dur;
             media_.live = live != 0;
         }
+    } else if (cmd == "chapters") {
+        // "" | '{"v":VIDEO_ID,"c":[[START,TITLE],...]}'
+        ChapterList list;
+        pvrjson::Value v;
+        if (!rest.empty() && pvrjson::parse(rest.c_str(), v)) {
+            if (const pvrjson::Value* c = v.get("c"); c && c->type == pvrjson::Value::Type::Array) {
+                for (const pvrjson::Value& e : c->array) {
+                    if (e.type != pvrjson::Value::Type::Array || e.array.size() < 2) continue;
+                    list.push_back({std::max(0.0, e.array[0].number), e.array[1].str});
+                }
+            }
+        }
+        std::sort(list.begin(), list.end(), [](const Chapter& a, const Chapter& b) { return a.start < b.start; });
+        chapters_ = std::move(list);
+        ++chaptersVersion_;
+        if (!chapters_.empty()) PIXELVR_LOG_INFO("Browser: %zu chapters", chapters_.size());
     } else if (cmd == "videoinfo") {
         VideoInfo vi;
         int used = 0;

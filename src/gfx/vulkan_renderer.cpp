@@ -3815,6 +3815,36 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
             drawUiElement(vpPanel, fillCx, trackY, fillW, trackHalfH,
                           UiShape::RoundedBox, themeAccentCol, 1.0f);
         }
+        // Chapters: a gap in the track where each one starts (like YouTube).
+        const bool chaptersOn = !transportChapters_.empty() && transportLive_ == 0 && transportDuration_ > 0.0;
+        auto chapterAt = [&](double t) -> const Chapter* {
+            const Chapter* c = nullptr;
+            for (const Chapter& ch : transportChapters_) {
+                if (ch.start > t + 0.05) break;
+                c = &ch;
+            }
+            return c;
+        };
+        if (chaptersOn) {
+            const float gapCol[4] = {0.03f, 0.04f, 0.07f, 1.0f};
+            for (const Chapter& ch : transportChapters_) {
+                if (ch.start <= 0.5 || ch.start >= transportDuration_ - 0.5) continue;
+                const float cx = -trackHalfW + 2.0f * trackHalfW * static_cast<float>(ch.start / transportDuration_);
+                drawUiElement(vpPanel, cx, trackY, 0.0022f, trackHalfH * 1.5f, UiShape::RoundedBox, gapCol, 0.0f);
+            }
+        }
+        // The scrub bubble grows a second line for the hovered chapter's title.
+        const float tipSc = (0.029f * tScale) / fontAtlas_.lineHeight * 1.05f;
+        std::string hoverChapter;
+        if (chaptersOn && pointerOnTimeline_) {
+            if (const Chapter* c = chapterAt(pointerScrub_ * transportDuration_)) hoverChapter = c->title;
+        }
+        const float bubbleHw = hoverChapter.empty()
+                                   ? 0.086f
+                                   : std::clamp(0.5f * measureString(tipSc * 0.9f, hoverChapter) + 0.024f, 0.086f, 0.26f);
+        const float bubbleHh = hoverChapter.empty() ? 0.028f : 0.046f;
+        const float bubbleY = trackY + 0.034f + bubbleHh;
+
         const float thumbX = -trackHalfW + 2.0f * trackHalfW * p;
         drawUiElement(vpPanel, thumbX, trackY, 0.011f, 0.024f,
                       UiShape::RoundedBox, thumbCol, 1.0f, 0.18f, kGlassRim);
@@ -3829,13 +3859,13 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         }
         if (pointerOnTimeline_ && transportDuration_ > 0.0) {
             const float rawScrubX = -trackHalfW + 2.0f * trackHalfW * pointerScrub_;
-            const float bubbleX = std::clamp(rawScrubX, -trackHalfW + 0.09f, trackHalfW - 0.09f);
+            const float bubbleX = std::clamp(rawScrubX, -trackHalfW + bubbleHw + 0.004f, trackHalfW - bubbleHw - 0.004f);
             // Stem notch connecting bubble to timeline track
             drawUiElement(vpPanel, rawScrubX, trackY + 0.032f, 0.0035f, 0.010f,
                           UiShape::RoundedBox, kGlassRim, 1.0f);
             // Main bubble capsule
-            drawUiElement(vpPanel, bubbleX, trackY + 0.062f, 0.086f, 0.028f,
-                          UiShape::RoundedBox, glassControlT.data(), 1.0f, 0.06f, kGlassRim);
+            drawUiElement(vpPanel, bubbleX, bubbleY, bubbleHw, bubbleHh,
+                          UiShape::RoundedBox, glassControlT.data(), 0.028f / bubbleHh, 0.06f, kGlassRim);
 
             // Keyframe preview above the bubble (mockup #4), once decoded
             const CardThumbnail& scrub = cardThumbs_[kScrubThumbSlot];
@@ -3843,7 +3873,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                 const float pvHalfW = 0.100f;
                 const float pvHalfH = pvHalfW * 9.0f / 16.0f;
                 const float pvX = std::clamp(rawScrubX, -trackHalfW + pvHalfW, trackHalfW - pvHalfW);
-                const float pvY = trackY + 0.062f + 0.028f + 0.012f + pvHalfH;
+                const float pvY = bubbleY + bubbleHh + 0.012f + pvHalfH;
                 drawUiElement(vpPanel, pvX, pvY, pvHalfW + 0.006f, pvHalfH + 0.006f,
                               UiShape::RoundedBox, glassControlT.data(), 0.024f / (pvHalfH + 0.006f),
                               0.004f / (pvHalfH + 0.006f), kGlassRim);
@@ -3913,13 +3943,27 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
 
                 if (pointerOnTimeline_) {
                     const float rawScrubX = -trackHalfW + 2.0f * trackHalfW * pointerScrub_;
-                    const float bubbleX = std::clamp(rawScrubX, -trackHalfW + 0.09f, trackHalfW - 0.09f);
+                    const float bubbleX =
+                        std::clamp(rawScrubX, -trackHalfW + bubbleHw + 0.004f, trackHalfW - bubbleHw - 0.004f);
                     // Livestreams: how far behind live the hovered point is.
                     const double behind = (1.0 - pointerScrub_) * transportDuration_;
                     const std::string tipStr = transportLive_ == 0 ? format_time(pointerScrub_ * transportDuration_)
                                              : behind < 5.0      ? std::string("LIVE")
                                                                  : "-" + format_time(behind);
-                    drawFitCentered(bubbleX, trackY + 0.062f, 0.16f, pillSc * 1.05f, themeTextCol, tipStr);
+                    if (hoverChapter.empty()) {
+                        drawFitCentered(bubbleX, bubbleY, 0.16f, tipSc, themeTextCol, tipStr);
+                    } else {
+                        drawFitCentered(bubbleX, bubbleY + 0.016f, 0.16f, tipSc, themeTextCol, tipStr);
+                        drawFitCentered(bubbleX, bubbleY - 0.018f, 2.0f * bubbleHw - 0.03f, tipSc * 0.9f,
+                                        themeAccentCol, hoverChapter);
+                    }
+                } else if (chaptersOn) {
+                    // The chapter playing now, above the timeline.
+                    if (const Chapter* c = chapterAt(transportElapsed_); c && !c->title.empty()) {
+                        const float chapCol[4] = {themeTextCol[0] * 0.80f, themeTextCol[1] * 0.85f,
+                                                  themeTextCol[2] * 0.95f, 0.92f};
+                        drawFitCentered(0.0f, trackY + 0.042f, 2.0f * trackHalfW, pillSc, chapCol, c->title);
+                    }
                 }
             }
 

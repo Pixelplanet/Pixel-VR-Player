@@ -819,6 +819,27 @@ const char* const kIsLiveJs =
     "return !!(document.querySelector('.ytp-time-display.ytp-live')||(b&&b.offsetParent!==null&&"
     "getComputedStyle(b).display!=='none'))})";
 
+// YouTube's chapters of the video playing now (the creator's, else YouTube's
+// automatic ones): '{"v":ID,"c":[[START_S,TITLE],...]}', or '' elsewhere. From
+// the page's data (ytd-app keeps it current across in-page navigation; the
+// first page's ytInitialData as a fallback), checked against the player's
+// video id.
+const char* const kChaptersJs =
+    "(()=>{if(!/(^|\.)youtube\.com$/.test(location.hostname))return '';"
+    "const p=document.getElementById('movie_player');"
+    "const vid=p&&p.getVideoData?(p.getVideoData()||{}).video_id:'';if(!vid)return '';"
+    "const app=document.querySelector('ytd-app');"
+    "for(const r of [app&&app.data&&app.data.response,window.ytInitialData]){"
+    "const we=r&&r.currentVideoEndpoint&&r.currentVideoEndpoint.watchEndpoint;if(!we||we.videoId!==vid)continue;"
+    "let mm=null;try{mm=r.playerOverlays.playerOverlayRenderer.decoratedPlayerBarRenderer"
+    ".decoratedPlayerBarRenderer.playerBar.multiMarkersPlayerBarRenderer.markersMap}catch(_){}"
+    "const e=mm&&(mm.find(m=>m.key==='DESCRIPTION_CHAPTERS')||mm.find(m=>m.key==='AUTO_CHAPTERS'));"
+    "const c=((e&&e.value&&e.value.chapters)||[]).map(x=>x.chapterRenderer).filter(Boolean)"
+    ".map(x=>[(x.timeRangeStartMillis||0)/1000,(x.title&&(x.title.simpleText||"
+    "(x.title.runs||[]).map(y=>y.text).join('')))||'']);"
+    "return JSON.stringify({v:vid,c:c})}"
+    "return JSON.stringify({v:vid,c:[]})})()";
+
 int runScreen(const ScreenOptions& opt) {
     const int W = opt.width;
     const int pageH = opt.height;
@@ -964,6 +985,7 @@ int runScreen(const ScreenOptions& opt) {
     bool toolbarReady = false;
     std::string lastMedia;
     std::string lastVideoInfo;
+    std::string lastChapters;
     int lastPageEditable = 0;
     Clock::time_point probeAt{};
     std::string probeSession;
@@ -1734,7 +1756,8 @@ int runScreen(const ScreenOptions& opt) {
                                "let vi=null;if(v){const q=v.getVideoPlaybackQuality?v.getVideoPlaybackQuality():null;"
                                "let c='';try{const mp=document.getElementById('movie_player');if(mp&&mp.getStatsForNerds)c=mp.getStatsForNerds().codecs||''}catch(_){}"
                                "vi=[v.videoWidth,v.videoHeight,q?q.totalVideoFrames:0,q?q.droppedVideoFrames:0,c]}"
-                               "return {f:document.fullscreenElement?1:0,e:" + kEditableJs + "?1:0,m:md,vi:vi}})()";
+                               "let ch='';try{ch=" + kChaptersJs + "}catch(_){}"
+                               "return {f:document.fullscreenElement?1:0,e:" + kEditableJs + "?1:0,m:md,vi:vi,ch:ch}})()";
         evalIn(session, js, [&, session](const pvrjson::Value* v) {
             const Tab* cur = activeTab();
             if (!v || !cur || cur->session != session) return;
@@ -1768,6 +1791,9 @@ int runScreen(const ScreenOptions& opt) {
                 const std::string line = b + pvrjson::quote(vi->array[4].str);
                 if (line != lastVideoInfo) emitLine(lastVideoInfo = line);
             }
+            const pvrjson::Value* ch = v->get("ch");
+            const std::string chapters = "chapters " + (ch ? ch->str : std::string());
+            if (chapters != lastChapters) emitLine(lastChapters = chapters);
         });
     };
 
