@@ -106,6 +106,13 @@ back to the system FFmpeg with CPU colour conversion.
 
 ## Updating
 
+> [!IMPORTANT]
+> **After the November 2026 SteamOS update (build 20261103 or newer) you must install
+> Pixel VR Player v1.11.0 or later.** That SteamOS update replaced the system FFmpeg 7 with
+> FFmpeg 8, and every earlier release fails to start on it
+> (`libavformat.so.61: cannot open shared object file`). Since v1.11.0 the player ships
+> its own FFmpeg, so later SteamOS updates cannot break it this way again.
+
 Updating Pixel VR Player is seamless, fast, and 100% non-destructive.
 
 > [!NOTE]
