@@ -227,11 +227,12 @@ void SettingsMenu::refresh() {
                   Action::CycleUiFollowMode);
         segmented("Download Folder", {kDownloadDirs[0], kDownloadDirs[1], kDownloadDirs[2]},
                   downloadDirIdx_ % kDownloadDirCount, Action::CycleDownloadDir);
-        // Web shortcuts on the hub's rail (up to 4; shown in this order).
-        for (int i = 0; i < kRailShortcutCount; ++i) {
-            const bool on = (railShortcutMask_ >> i) & 1;
-            toggle(std::string("Rail: ") + kRailShortcuts[i].name, on,
-                   static_cast<Action>(static_cast<int>(Action::ToggleRailShortcut0) + i));
+        {
+            std::string on;
+            for (int i = 0; i < kRailShortcutCount; ++i) {
+                if ((railShortcutMask_ >> i) & 1) on += (on.empty() ? "" : ", ") + std::string(kRailShortcuts[i].name);
+            }
+            rows_.push_back({"Rail Shortcuts", on.empty() ? "None" : on, Action::EnterRailShortcuts});
         }
         rows_.push_back({"List View Columns", "Customize", Action::EnterListColsConfig});
     } else if (section_ == 2) {
@@ -296,6 +297,15 @@ void SettingsMenu::refresh() {
             comboLabel = VaultManager::instance().comboString();
         }
         binding("Unlock Combo Sequence", comboLabel, Action::RecordVaultCombo);
+    } else if (section_ == 22) {
+        title_ = "Settings > UI & Appearance > Rail Shortcuts";
+        status_ = "Up to four appear as tabs on the hub's rail, in this order.";
+        for (int i = 0; i < kRailShortcutCount; ++i) {
+            const bool on = (railShortcutMask_ >> i) & 1;
+            toggle(kRailShortcuts[i].name, on,
+                   static_cast<Action>(static_cast<int>(Action::ToggleRailShortcut0) + i));
+        }
+        rows_.push_back({"Back to UI & Appearance", "", Action::BackToUI});
     } else if (section_ == 21) {
         title_ = "Settings > UI & Appearance > List Columns";
         toggle("Format / VR Badge", listShowFormat_, Action::ToggleListColFormat);
@@ -500,6 +510,11 @@ SettingsMenu::Action SettingsMenu::activate() {
             break;
         case Action::EnterListColsConfig:
             section_ = 21;
+            selected_ = 0;
+            refresh();
+            break;
+        case Action::EnterRailShortcuts:
+            section_ = 22;
             selected_ = 0;
             refresh();
             break;

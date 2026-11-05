@@ -4974,7 +4974,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         if (activeMainTab == 1) {
             activeSubTab = downloadsFilter_;
         } else if (activeMainTab == 2) {
-            activeSubTab = (settingsSection_ >= 10 && settingsSection_ <= 12) ? 2 : (settingsSection_ == 21 ? 1 : settingsSection_);
+            activeSubTab = (settingsSection_ >= 10 && settingsSection_ <= 12) ? 2 : ((settingsSection_ == 21 || settingsSection_ == 22) ? 1 : settingsSection_);
         }
         const float subActBg[4] = {0.85f, 0.90f, 1.00f, 0.14f};
         const float slateIconCol[4] = {
@@ -5868,7 +5868,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             drawRailText();
             const char* setSubLabels[5] = {"Display & Cinema", "UI & Appearance",
                                            "Audio & Tracks", "Controls & Input", "Vault & Privacy"};
-            const int effSec = (settingsSection_ >= 10 && settingsSection_ <= 12) ? 2 : (settingsSection_ == 21 ? 1 : settingsSection_);
+            const int effSec = (settingsSection_ >= 10 && settingsSection_ <= 12) ? 2 : ((settingsSection_ == 21 || settingsSection_ == 22) ? 1 : settingsSection_);
             const int sCount = vaultUnlocked_ ? 5 : 4;
             for (int sub = 0; sub < sCount; ++sub) {
                 drawFit(-0.84f, setSubY[sub], 0.30f, scSub * 0.92f,

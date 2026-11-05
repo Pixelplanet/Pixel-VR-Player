@@ -43,6 +43,7 @@ public:
         ListenVaultMoveBtn,
         RecordVaultCombo,
         EnterListColsConfig,
+        EnterRailShortcuts,
         ToggleListColFormat,
         ToggleListColRes,
         ToggleListColSize,
