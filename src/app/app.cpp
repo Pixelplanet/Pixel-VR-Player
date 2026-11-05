@@ -432,6 +432,16 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
         bool fromName = false;
         detect_format(path, p, st, fromName);
         if (slot > 0 && p != VulkanRenderer::ProjectionMode::Flat) slot = 0;
+        // Immersive plays alone, and its decoder must open with the hardware
+        // to itself: every other screen (a 1080p clip, a browser page with a
+        // playing video) still holds a decoder session, and an 8K session on
+        // top of one is refused ("current session not supported") so the clip
+        // would silently fall back to software decoding. Close them first.
+        if (p != VulkanRenderer::ProjectionMode::Flat) {
+            for (int i = 1; i < VulkanRenderer::kMaxVideoSlots; ++i) {
+                if (screens_[i].open) closeMedia(i);
+            }
+        }
     }
     if (screens_[slot].web) clearSlotKeepLayout(slot);  // a file replaces a browser screen
     ScreenState& sc = screens_[slot];

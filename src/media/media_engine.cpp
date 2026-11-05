@@ -1248,7 +1248,18 @@ bool MediaEngine::open(const std::string& path) {
             return avcodec_open2(impl_->codec, dec, nullptr) >= 0;
         };
 
-        if (!open_with(decoder)) {
+        bool opened = open_with(decoder);
+        if (!opened && hardware) {
+            // The previous session (ours or a just-closed browser page's) may
+            // still be winding down in the driver; give it a moment before
+            // settling for software, which can't keep up with 8K.
+            for (int attempt = 0; attempt < 4 && !opened; ++attempt) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                opened = open_with(decoder);
+            }
+            if (opened) PIXELVR_LOG_INFO("MediaEngine: hardware decoder opened on retry");
+        }
+        if (!opened) {
             if (hardware) {
                 PIXELVR_LOG_WARN("MediaEngine: hardware decoder failed, trying software");
                 hardware = false;

@@ -835,6 +835,7 @@ private:
         VkDescriptorSet set = VK_NULL_HANDLE;
         int width = 0;
         int height = 0;
+        uint32_t mipLevels = 1;    // full chain: a small browser screen minifies cleanly
         bool initialized = false;  // image has been written once (layout is shader-read)
     };
     WebTexture webTex_[kMaxVideoSlots];

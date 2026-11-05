@@ -1916,15 +1916,21 @@ void VulkanRenderer::updateWebFrame(int slot, const uint8_t* rgba, int width, in
         vkBindBufferMemory(device_, t.staging, t.stagingMemory, 0);
         vkMapMemory(device_, t.stagingMemory, 0, sz, 0, &t.stagingPtr);
 
+        // Full mip chain: the page is often shown much smaller than its pixel
+        // size (a browser screen far away, at 1.0x render scale), and sampling
+        // a 1080p page with bilinear alone shimmers badly.
+        t.mipLevels = 1;
+        for (int d = std::max(width, height); d > 1; d >>= 1) ++t.mipLevels;
         VkImageCreateInfo ii{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
         ii.imageType = VK_IMAGE_TYPE_2D;
         ii.format = VK_FORMAT_R8G8B8A8_UNORM;
         ii.extent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
-        ii.mipLevels = 1;
+        ii.mipLevels = t.mipLevels;
         ii.arrayLayers = 1;
         ii.samples = VK_SAMPLE_COUNT_1_BIT;
         ii.tiling = VK_IMAGE_TILING_OPTIMAL;
-        ii.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+        ii.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                   VK_IMAGE_USAGE_SAMPLED_BIT;
         ii.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
         ii.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
         if (vkCreateImage(device_, &ii, nullptr, &t.image) != VK_SUCCESS) {
@@ -1943,7 +1949,7 @@ void VulkanRenderer::updateWebFrame(int slot, const uint8_t* rgba, int width, in
         iv.image = t.image;
         iv.viewType = VK_IMAGE_VIEW_TYPE_2D;
         iv.format = VK_FORMAT_R8G8B8A8_UNORM;
-        iv.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+        iv.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, t.mipLevels, 0, 1};
         if (vkCreateImageView(device_, &iv, nullptr, &t.view) != VK_SUCCESS) {
             releaseWebTexture(slot);
             return;
@@ -1985,7 +1991,7 @@ void VulkanRenderer::updateWebFrame(int slot, const uint8_t* rgba, int width, in
     toDst.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     toDst.image = t.image;
-    toDst.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+    toDst.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, t.mipLevels, 0, 1};
     toDst.srcAccessMask = 0;
     toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     vkCmdPipelineBarrier(uploadCmd_, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
@@ -1995,13 +2001,47 @@ void VulkanRenderer::updateWebFrame(int slot, const uint8_t* rgba, int width, in
     region.imageExtent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
     vkCmdCopyBufferToImage(uploadCmd_, t.staging, t.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1,
                            &region);
-    VkImageMemoryBarrier toRead = toDst;
-    toRead.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
-    toRead.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    toRead.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
-    toRead.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    // Mip chain: each level is blitted from the one above (source levels move
+    // to TRANSFER_SRC as they are finished).
+    int32_t mw = width, mh = height;
+    for (uint32_t level = 1; level < t.mipLevels; ++level) {
+        VkImageMemoryBarrier src{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+        src.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        src.newLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+        src.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        src.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        src.image = t.image;
+        src.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, level - 1, 1, 0, 1};
+        src.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        src.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+        vkCmdPipelineBarrier(uploadCmd_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0,
+                             0, nullptr, 0, nullptr, 1, &src);
+        const int32_t nw = mw > 1 ? mw / 2 : 1;
+        const int32_t nh = mh > 1 ? mh / 2 : 1;
+        VkImageBlit blit{};
+        blit.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level - 1, 0, 1};
+        blit.srcOffsets[1] = {mw, mh, 1};
+        blit.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, 0, 1};
+        blit.dstOffsets[1] = {nw, nh, 1};
+        vkCmdBlitImage(uploadCmd_, t.image, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, t.image,
+                       VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &blit, VK_FILTER_LINEAR);
+        mw = nw;
+        mh = nh;
+    }
+    // Levels 0..n-2 are TRANSFER_SRC, the last one TRANSFER_DST: both to shader-read.
+    VkImageMemoryBarrier toRead[2]{};
+    for (int i = 0; i < 2; ++i) {
+        toRead[i] = toDst;
+        toRead[i].newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+        toRead[i].srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_TRANSFER_READ_BIT;
+        toRead[i].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
+    }
+    toRead[0].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL;
+    toRead[0].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, t.mipLevels - 1, 0, 1};
+    toRead[1].oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+    toRead[1].subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, t.mipLevels - 1, 1, 0, 1};
     vkCmdPipelineBarrier(uploadCmd_, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0,
-                         0, nullptr, 0, nullptr, 1, &toRead);
+                         0, nullptr, 0, nullptr, t.mipLevels > 1 ? 2 : 1, t.mipLevels > 1 ? toRead : &toRead[1]);
     vkEndCommandBuffer(uploadCmd_);
     VkSubmitInfo su{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     su.commandBufferCount = 1;
