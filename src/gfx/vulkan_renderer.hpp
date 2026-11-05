@@ -799,9 +799,9 @@ private:
     MusicView musicViews_[kMaxVideoSlots];
     int musicHoverSlot_ = -1;
     int musicHoverId_ = kMusicNone;
-    std::string hudFormat_ = "2D FLAT";
-    std::string hudAudio_ = "AUDIO";
-    std::string hudScreen_ = "CURVED";
+    std::string hudFormat_ = "2D Flat";
+    std::string hudAudio_ = "Audio";
+    std::string hudScreen_ = "Curved";
     bool hudFormatEnabled_ = true;
     bool hudAudioEnabled_ = true;
     float sphereFollowYaw_ = 0.0f;

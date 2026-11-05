@@ -4689,18 +4689,18 @@ int App::run() {
                         renderer_.setTransportChapters(chapters ? *chapters : ChapterList{});
                     }
                 }
-                std::string fLabel = "2D FLAT";
+                std::string fLabel = "2D Flat";
                 if (settings_.projectionMode() == 0) {
-                    fLabel = (settings_.stereoMode() == 0) ? "2D FLAT" :
+                    fLabel = (settings_.stereoMode() == 0) ? "2D Flat" :
                              (settings_.stereoMode() == 1) ? "3D SBS" : "3D TB";
                 } else if (settings_.projectionMode() == 2) {
-                    fLabel = (settings_.stereoMode() == 1) ? "VR 180 SBS" :
-                             (settings_.stereoMode() == 2) ? "VR 180 TB" : "180 MONO";
+                    fLabel = (settings_.stereoMode() == 1) ? "VR180 SBS" :
+                             (settings_.stereoMode() == 2) ? "VR180 TB" : "180 Mono";
                 } else {
-                    fLabel = (settings_.stereoMode() == 1) ? "360 SBS" : "360 MONO";
+                    fLabel = (settings_.stereoMode() == 1) ? "360 SBS" : "360 Mono";
                 }
 
-                std::string aLabel = "AUDIO";
+                std::string aLabel = "Audio";
                 bool aEnabled = false;
                 if (cur().open) {
                     const auto aStreams = cur().engine.audioStreams();
@@ -4710,12 +4710,14 @@ int App::run() {
                             std::string l = as.language;
                             for (char& c : l) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
                             if (l.empty() || l == "und" || l == "undef" || l == "undefined") {
-                                aLabel = (as.label.empty() || as.label == "und" || as.label == "undef") ? "DEFAULT" : as.label;
+                                aLabel = (as.label.empty() || as.label == "und" || as.label == "undef") ? "Default" : as.label;
                             } else {
+                                // Language codes read best in capitals ("ENG").
                                 aLabel = as.language;
+                                for (char& c : aLabel) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
                             }
-                            for (char& c : aLabel) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
                             if (aLabel.size() > 8) aLabel = aLabel.substr(0, 8);
+                            aLabel = "Audio: " + aLabel;
                             break;
                         }
                     }
@@ -4723,24 +4725,24 @@ int App::run() {
                     aEnabled = (aStreams.size() > 1);
                 }
 
-                std::string sLabel = "RESET HORIZON";
+                std::string sLabel = "Reset Horizon";
                 if (settings_.projectionMode() == 0) {
                     const VulkanRenderer::ScreenPlacement& selPl = renderer_.screenPlacement(selectedScreen_);
                     const float curv = (selectedScreen_ > 0 || selPl.active) ? selPl.curvature
                                                                             : renderer_.screenCurvature();
                     const int cPct = static_cast<int>(curv * 100.0f + 0.5f);
                     if (cPct <= 2) {
-                        sLabel = "SCREEN: FLAT";
+                        sLabel = "Screen: Flat";
                     } else {
                         char cbuf[32];
-                        std::snprintf(cbuf, sizeof(cbuf), "CURVED: %d%%", cPct);
+                        std::snprintf(cbuf, sizeof(cbuf), "Curved %d%%", cPct);
                         sLabel = cbuf;
                     }
                 }
 
                 if (cur().web) {  // browser screens: F11 and the keyboard instead
-                    fLabel = "FULLSCREEN";
-                    aLabel = "KEYBOARD";
+                    fLabel = "Fullscreen";
+                    aLabel = "Keyboard";
                     aEnabled = true;
                 }
                 renderer_.setHudLabels(fLabel, aLabel, sLabel, true, aEnabled);

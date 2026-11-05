@@ -3242,22 +3242,38 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         flushText();
         vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, passPipeline(pipe));
     };
+    // Small text (line height under ~2.8 cm on the panel) is set in the
+    // SemiBold face: at that angular size the Medium strokes thin out and lose
+    // legibility in VR. Headings already select the bold face explicitly.
+    constexpr float kSmallTextLine = 0.028f;
+    struct TextFace {
+        const FontAtlas* font;
+        VkDescriptorSet set;
+    };
+    auto faceFor = [&](float scale) -> TextFace {
+        if (curFont == &fontAtlas_ && fontAtlasBold_.ok &&
+            scale * fontAtlas_.lineHeight < kSmallTextLine) {
+            return {&fontAtlasBold_, textSetBold_};
+        }
+        return {curFont, curTextSet};
+    };
     auto drawString = [&](float x, float baseline, float scale, const float col[4],
                           const std::string& s) {
         if (glyphOut == nullptr) return;
-        if (!glyphBatchValid || glyphBatchBend != curTextBend || glyphBatchSet != curTextSet ||
+        const TextFace face = faceFor(scale);
+        if (!glyphBatchValid || glyphBatchBend != curTextBend || glyphBatchSet != face.set ||
             std::memcmp(glyphBatchMvp.m, curTextVp->m, sizeof(glyphBatchMvp.m)) != 0) {
             flushText();
             glyphBatchMvp = *curTextVp;
             glyphBatchValid = true;
             glyphBatchBend = curTextBend;
-            glyphBatchSet = curTextSet;
+            glyphBatchSet = face.set;
         }
         float penX = x;
         std::size_t idx = 0;
         while (idx < s.size()) {
             unsigned char c = nextGlyphIndex(s, idx);
-            const Glyph& g = curFont->glyphs[c];
+            const Glyph& g = face.font->glyphs[c];
             if (g.width > 0.0f && g.height > 0.0f && glyphCount < kMaxGlyphsPerView) {
                 GlyphInstance& gi = glyphOut[glyphCount++];
                 gi.rect[0] = penX + g.bearingX * scale;
@@ -3274,11 +3290,12 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         }
     };
     auto measureString = [&](float scale, const std::string& s) -> float {
+        const FontAtlas* font = faceFor(scale).font;
         float tw = 0.0f;
         std::size_t idx = 0;
         while (idx < s.size()) {
             unsigned char c = nextGlyphIndex(s, idx);
-            tw += curFont->glyphs[c].advance * scale;
+            tw += font->glyphs[c].advance * scale;
         }
         return tw;
     };
@@ -4223,34 +4240,32 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
 
             // Left flank pills: HUB and RECENTER
             const CtrlButtonRect rHub = get_ctrl_button_rect(static_cast<int>(CtrlButton::Files));
-            drawFitCentered(rHub.cx + 0.012f, rHub.cy, rHub.hw * 1.6f, pillSc, themeTextCol, "HUB");
+            drawFitCentered(rHub.cx + 0.012f, rHub.cy, rHub.hw * 1.6f, pillSc, themeTextCol, "Hub");
             const CtrlButtonRect rRec = get_ctrl_button_rect(static_cast<int>(CtrlButton::Recenter));
-            drawFitCentered(rRec.cx + 0.012f, rRec.cy, rRec.hw * 1.6f, pillSc, themeTextCol, "RECENTER");
+            drawFitCentered(rRec.cx + 0.012f, rRec.cy, rRec.hw * 1.6f, pillSc, themeTextCol, "Recenter");
             {
                 const CtrlButtonRect rV = get_ctrl_button_rect(static_cast<int>(CtrlButton::Volume));
                 char vol[16];
                 std::snprintf(vol, sizeof(vol), "%d%%", static_cast<int>(std::lround(volumeDisplay_ * 100.0f)));
                 drawFitCentered(rV.cx - 0.070f, rV.cy, 0.10f, pillSc, volumeMuted_ ? pillDisabledCol : themeTextCol,
-                                volumeMuted_ ? "MUTED" : vol);
+                                volumeMuted_ ? "Muted" : vol);
             }
 
-            // Right flank pills: PROJECTION, AUDIO, SCREEN
+            // Right flank pills: projection / format, audio, screen
             const CtrlButtonRect rF = get_ctrl_button_rect(static_cast<int>(CtrlButton::FormatToggle));
             drawFitCentered(rF.cx, rF.cy, rF.hw * 1.88f, pillSc,
-                            hudFormatEnabled_ ? themeTextCol : pillDisabledCol,
-                            "PROJ: " + hudFormat_);
+                            hudFormatEnabled_ ? themeTextCol : pillDisabledCol, hudFormat_);
 
             const CtrlButtonRect rA = get_ctrl_button_rect(static_cast<int>(CtrlButton::AudioToggle));
             drawFitCentered(rA.cx, rA.cy, rA.hw * 1.88f, pillSc,
-                            hudAudioEnabled_ ? themeTextCol : pillDisabledCol,
-                            "AUDIO: " + hudAudio_);
+                            hudAudioEnabled_ ? themeTextCol : pillDisabledCol, hudAudio_);
 
             const CtrlButtonRect rS = get_ctrl_button_rect(static_cast<int>(CtrlButton::ScreenToggle));
             drawFitCentered(rS.cx, rS.cy, rS.hw * 1.88f, pillSc, themeTextCol, hudScreen_);
 
             if (screenControlsVisible_) {
                 char lbl[32];
-                std::snprintf(lbl, sizeof(lbl), "SCREEN %d", screenControlsNumber_);
+                std::snprintf(lbl, sizeof(lbl), "Screen %d", screenControlsNumber_);
                 withHeadingFont([&] {
                     drawFitCentered(-0.24f, kBarY - 0.250f, 0.23f, pillSc * 1.05f, themeTextCol, lbl);
                 });
@@ -6089,9 +6104,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             const float dimText[4] = {themeTextCol[0] * 0.55f, themeTextCol[1] * 0.60f,
                                       themeTextCol[2] * 0.70f, 0.75f};
             const float errCol[4] = {1.0f, 0.45f, 0.45f, 1.0f};
-            static const char* const kLabels[7] = {"SERVER / HOST", "SHARE", "SIGN IN",
-                                                   "USERNAME", "PASSWORD", "WORKGROUP / DOMAIN",
-                                                   "NICKNAME"};
+            static const char* const kLabels[7] = {"Server / host", "Share", "Sign in",
+                                                   "Username", "Password", "Workgroup / domain",
+                                                   "Nickname"};
             static const char* const kPlaceholders[7] = {"IP address or hostname", "All shares",
                                                          "", "Username", "Password", "WORKGROUP",
                                                          "Optional display name"};
