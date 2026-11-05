@@ -238,35 +238,40 @@ target_compile_options(pixelvr_core PRIVATE
 add_executable(pixelvr src/main.cpp src/app/bundled_ffmpeg.cpp)
 target_link_libraries(pixelvr PRIVATE pixelvr_core)
 
-# Release builds embed the patched FFmpeg libraries (third_party/ffmpeg:
-# zero-copy dma-buf decode, AV1 via dav1d); the player unpacks them at start
-# (src/app/bundled_ffmpeg.cpp). Point this at that FFmpeg build directory.
-set(PIXELVR_EMBED_FFMPEG_DIR "" CACHE PATH "Patched FFmpeg build dir to embed (release builds)")
-set(PIXELVR_FFMPEG_SYSTEM_MATCH "libavcodec.so.61.3." CACHE STRING
-    "System libavcodec file name prefix the embedded libraries are built for (FFmpeg 7.0)")
+# Release builds embed the player's own FFmpeg 8.0 (third_party/ffmpeg:
+# zero-copy dma-buf decode, AV1 via dav1d); the player unpacks the libraries at
+# start and re-executes itself with them (src/app/bundled_ffmpeg.cpp), so it
+# does not depend on the FFmpeg release SteamOS ships. Point this at the
+# install prefix written by third_party/ffmpeg/build.sh (contains lib/).
+set(PIXELVR_EMBED_FFMPEG_DIR "" CACHE PATH "FFmpeg install prefix to embed (release builds)")
+# name;soname pairs: the file names the loader writes out must match the
+# DT_NEEDED entries of the player binary, i.e. the FFmpeg release it was built
+# against (8.0: avcodec/avformat 62, avutil 60, swscale 9, swresample 6).
+set(PIXELVR_FFMPEG_LIBS
+    avcodec:libavcodec.so.62 avformat:libavformat.so.62 avutil:libavutil.so.60
+    swscale:libswscale.so.9 swresample:libswresample.so.6)
 if(PIXELVR_EMBED_FFMPEG_DIR)
-    set(_ff_files
-        "${PIXELVR_EMBED_FFMPEG_DIR}/libavcodec/libavcodec.so.61"
-        "${PIXELVR_EMBED_FFMPEG_DIR}/libavutil/libavutil.so.59"
-        "${PIXELVR_EMBED_FFMPEG_DIR}/libswresample/libswresample.so.5")
-    foreach(_f IN LISTS _ff_files)
+    set(_ff_files "")
+    set(_ff_asm "${CMAKE_BINARY_DIR}/bundled_ffmpeg_data.S")
+    set(_ff_text "  .section .rodata\n")
+    set(_ff_names "")
+    foreach(_pair IN LISTS PIXELVR_FFMPEG_LIBS)
+        string(REPLACE ":" ";" _pair "${_pair}")
+        list(GET _pair 0 _name)
+        list(GET _pair 1 _so)
+        set(_f "${PIXELVR_EMBED_FFMPEG_DIR}/lib/${_so}")
         if(NOT EXISTS "${_f}")
             message(FATAL_ERROR "PIXELVR_EMBED_FFMPEG_DIR: missing ${_f}")
         endif()
-    endforeach()
-    file(SHA256 "${PIXELVR_EMBED_FFMPEG_DIR}/libavcodec/libavcodec.so.61" _ff_hash)
-    string(SUBSTRING "${_ff_hash}" 0 16 _ff_id)
-    set(_ff_asm "${CMAKE_BINARY_DIR}/bundled_ffmpeg_data.S")
-    set(_ff_text "  .section .rodata\n")
-    foreach(_pair "avcodec;libavcodec/libavcodec.so.61" "avutil;libavutil/libavutil.so.59"
-                  "swresample;libswresample/libswresample.so.5")
-        list(GET _pair 0 _name)
-        list(GET _pair 1 _rel)
+        list(APPEND _ff_files "${_f}")
+        string(APPEND _ff_names "${_so},")
         string(APPEND _ff_text
             "  .balign 16\n  .global pvr_ffmpeg_${_name}_start\npvr_ffmpeg_${_name}_start:\n"
-            "  .incbin \"${PIXELVR_EMBED_FFMPEG_DIR}/${_rel}\"\n"
+            "  .incbin \"${_f}\"\n"
             "  .global pvr_ffmpeg_${_name}_end\npvr_ffmpeg_${_name}_end:\n")
     endforeach()
+    file(SHA256 "${PIXELVR_EMBED_FFMPEG_DIR}/lib/libavcodec.so.62" _ff_hash)
+    string(SUBSTRING "${_ff_hash}" 0 16 _ff_id)
     string(APPEND _ff_text "  .section .note.GNU-stack,\"\",%progbits\n")
     file(WRITE "${_ff_asm}" "${_ff_text}")
     enable_language(ASM)
@@ -274,8 +279,8 @@ if(PIXELVR_EMBED_FFMPEG_DIR)
     set_source_files_properties("${_ff_asm}" PROPERTIES OBJECT_DEPENDS "${_ff_files}")
     target_compile_definitions(pixelvr PRIVATE PIXELVR_EMBED_FFMPEG=1
         PIXELVR_FFMPEG_BUNDLE_ID="${_ff_id}"
-        PIXELVR_FFMPEG_SYSTEM_MATCH="${PIXELVR_FFMPEG_SYSTEM_MATCH}")
-    message(STATUS "Embedding patched FFmpeg ${_ff_id} from ${PIXELVR_EMBED_FFMPEG_DIR}")
+        PIXELVR_FFMPEG_SONAMES="${_ff_names}")
+    message(STATUS "Embedding FFmpeg ${_ff_id} from ${PIXELVR_EMBED_FFMPEG_DIR}")
 endif()
 
 install(TARGETS pixelvr RUNTIME DESTINATION bin)

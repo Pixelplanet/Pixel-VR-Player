@@ -1,25 +1,34 @@
 #!/usr/bin/env bash
-# Builds a DMA-BUF-capable libavcodec.so.61 for the Steam Frame, natively on the
-# device (GCC). We patch FFmpeg 7.0's V4L2-M2M decoder to export capture buffers
-# as AV_PIX_FMT_DRM_PRIME (dmabuf) so the decoder output can be imported straight
-# into Vulkan (zero-copy) and sampled through a VkSamplerYcbcrConversion. This
-# handles NV12 (8-bit) and P010 (10-bit HEVC, Qualcomm UBWC) up to 4K+.
+# Builds the player's own FFmpeg 8.0 (LGPL) for the Steam Frame, with the
+# V4L2-M2M decoder patched to export capture buffers as AV_PIX_FMT_DRM_PRIME
+# (dmabuf) so decoded frames are imported straight into Vulkan (zero-copy) and
+# sampled through a VkSamplerYcbcrConversion. Handles NV12 (8-bit) and P010
+# (10-bit HEVC, Qualcomm UBWC) up to 8K.
 #
-# Only libavcodec is overridden at runtime (via LD_LIBRARY_PATH); the system's
-# libavformat/libavutil/libswscale (all FFmpeg 7.0) are used as-is.
+# The whole set (libavcodec, libavformat, libavutil, libswscale, libswresample)
+# is built and installed into $work/prefix. Release builds embed it into the
+# player (src/app/bundled_ffmpeg.cpp), so the player no longer depends on the
+# FFmpeg release SteamOS happens to ship (an OS update that moved from FFmpeg 7
+# to 8 once broke every installed copy). On the device itself the dev wrapper
+# may just put $work/prefix/lib first on LD_LIBRARY_PATH.
 #
-# Run ON the Steam Frame:  bash build.sh   (writes to ~/ffbuild by default)
+# Runtime dependencies outside FFmpeg: libgnutls (https for streams), libdav1d
+# (AV1 in software: the Iris hardware decoder has no AV1), zlib. All ship with
+# SteamOS.
 #
-# LGPL: the two patches modify FFmpeg (LGPL v2.1+). The resulting library is
-# LGPL; keep this directory (patches) plus the FFmpeg 7.0 source available. See
+# Run:  bash build.sh [workdir]   (default ~/ffbuild8)
+#
+# LGPL: the patch modifies FFmpeg (LGPL v2.1+). The resulting libraries are
+# LGPL; keep this directory (patch) plus the FFmpeg 8.0 source available. See
 # README.txt.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
-work="${1:-$HOME/ffbuild}"
+work="${1:-$HOME/ffbuild8}"
 jobs="${JOBS:-8}"
-tarball="ffmpeg-7.0.tar.xz"
-sha="4426a94dd2c814945456600c8adfc402bee65ec14a70e8c531ec9a2cd651da7b"
+version="8.0"
+tarball="ffmpeg-${version}.tar.xz"
+sha="b2751fccb6cc4c77708113cd78b561059b6fa904b24162fa0be2d60273d27b8e"
 
 mkdir -p "$work"
 cd "$work"
@@ -30,25 +39,24 @@ if [[ ! -f "$tarball" ]]; then
 fi
 printf '%s  %s\n' "$sha" "$tarball" | sha256sum -c
 
-rm -rf ffmpeg-7.0
+rm -rf "ffmpeg-${version}"
 tar xf "$tarball"
-cd ffmpeg-7.0
-patch -p1 < "$here/compat.patch"   # compiler-compat fixes (needed for modern GCC)
-patch -p1 < "$here/dmabuf.patch"   # V4L2 dmabuf (AV_PIX_FMT_DRM_PRIME) export
+cd "ffmpeg-${version}"
+patch -p1 < "$here/dmabuf-8.0.patch"   # V4L2 dmabuf (AV_PIX_FMT_DRM_PRIME) export
 
 cd "$work"
-rm -rf build && mkdir build && cd build
-../ffmpeg-7.0/configure \
-    --disable-autodetect --disable-doc --disable-programs --disable-network \
-    --disable-debug --disable-avdevice --disable-avformat --disable-avfilter \
-    --disable-swscale --disable-postproc --disable-encoders --disable-muxers \
-    --enable-v4l2-m2m --enable-shared --disable-static --extra-cflags=-std=gnu17 \
-    --enable-libdav1d
-# libdav1d: AV1 in software (the Iris hardware decoder has no AV1 yet);
-# needs dav1d installed (SteamOS ships it).
+rm -rf build prefix && mkdir build && cd build
+"../ffmpeg-${version}/configure" \
+    --prefix="$work/prefix" \
+    --disable-autodetect --disable-doc --disable-programs --disable-debug \
+    --disable-avdevice --disable-avfilter --disable-encoders --disable-muxers \
+    --enable-v4l2-m2m --enable-shared --disable-static \
+    --enable-libdav1d --enable-zlib --enable-gnutls
 make -j"$jobs"
+make install
 
 echo
-echo "Built: $work/build/libavcodec/libavcodec.so.61"
-echo "Run with: LD_LIBRARY_PATH=$work/build/libavcodec:$work/build/libavutil:$work/build/libswresample \\"
-echo "          PIXELVR_DRM_PRIME=1 ./pixelvr <clip>"
+echo "Installed: $work/prefix/lib (libavcodec.so.62, libavformat.so.62, libavutil.so.60,"
+echo "           libswscale.so.9, libswresample.so.6)"
+echo "Dev run:   LD_LIBRARY_PATH=$work/prefix/lib PIXELVR_DRM_PRIME=1 ./pixelvr <clip>"
+echo "Release:   cmake -DPIXELVR_EMBED_FFMPEG_DIR=$work/prefix ..."

@@ -16,9 +16,9 @@ permissions:
 jobs:
   build:
     name: Build Steam Frame ARM64 release
-    # Native aarch64 runner: no cross-toolchain or device sysroot needed.
-    # Debian 13 (trixie) ships FFmpeg 7, matching the SONAMEs present on the
-    # Steam Frame (libavcodec.so.61, libavutil.so.59, ...).
+    # Native aarch64 runner: no cross-toolchain or device sysroot needed. The
+    # player is built against (and ships) its own FFmpeg 8.0 from
+    # third_party/ffmpeg, so the container's FFmpeg does not matter.
     runs-on: ubuntu-24.04-arm
     container: debian:trixie
     steps:
@@ -28,9 +28,8 @@ jobs:
           DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
             build-essential cmake ninja-build git ca-certificates pkg-config file \
             glslang-tools libvulkan-dev \
-            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev \
             libpulse-dev libfreetype-dev libsmbclient-dev libturbojpeg0-dev \
-            libdav1d-dev curl xz-utils patch \
+            libdav1d-dev libgnutls28-dev zlib1g-dev curl xz-utils patch \
             libx11-dev libxrandr-dev libxxf86vm-dev libgl-dev
 
       - uses: actions/checkout@v4
@@ -45,15 +44,22 @@ jobs:
           bash -n tools/package-release.sh
           bash -n tools/build.sh
 
-      # Patched FFmpeg 7.0 (zero-copy dma-buf decode, AV1 via dav1d), embedded
-      # into the player, which unpacks it at start (src/app/bundled_ffmpeg.cpp).
+      # The player's own FFmpeg 8.0 (zero-copy dma-buf decode, AV1 via dav1d),
+      # built against here and embedded into the player, which unpacks it at
+      # start (src/app/bundled_ffmpeg.cpp).
       - name: Build patched FFmpeg
         run: JOBS="$(nproc)" bash third_party/ffmpeg/build.sh "$PWD/ffbuild"
 
       - name: Build
         env:
           PIXELVR_VERSION: ${{ inputs.tag || github.ref_name }}
-        run: bash tools/build.sh -DPIXELVR_EMBED_FFMPEG_DIR="$PWD/ffbuild/build"
+          PKG_CONFIG_PATH: ${{ github.workspace }}/ffbuild/prefix/lib/pkgconfig
+        run: |
+          set -eux
+          bash tools/build.sh -DPIXELVR_EMBED_FFMPEG_DIR="$PWD/ffbuild/prefix"
+          # The binary must want exactly the SONAMEs it ships.
+          readelf -d build/bin/pixelvr | grep -E 'libav|libsw'
+          readelf -d build/bin/pixelvr | grep -q 'libavcodec.so.62'
 
       - name: Release notes
         run: |

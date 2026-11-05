@@ -352,8 +352,10 @@ aarch64 cross (for the Steam Frame):
 ```
 
 Release builds are automated: `.github/workflows/release.yml` builds natively on
-an ARM64 runner in a Debian 13 container (FFmpeg 7, matching the headset's
-SONAMEs) and attaches `pixelvr-linux-arm64.tar.gz` to each `v*` tag's release.
+an ARM64 runner in a Debian 13 container, compiles the player against its own
+FFmpeg 8.0 (`third_party/ffmpeg`, embedded into the binary so SteamOS's FFmpeg
+version no longer matters) and attaches `pixelvr-linux-arm64.tar.gz` to each
+`v*` tag's release.
 To package a local build by hand:
 
 ```bash
