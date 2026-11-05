@@ -357,25 +357,25 @@ void main() {
     }
     if (shape == 0 || glass) {
         // Frosted glass: a gentle top-lit luminance gradient
-        float topLight = mix(0.92, 1.10, clamp(0.5 * (vCoord.y + 1.0), 0.0, 1.0));
+        float topLight = mix(0.95, 1.07, clamp(0.5 * (vCoord.y + 1.0), 0.0, 1.0));
         fillLin.rgb *= topLight;
     }
     vec4 finalColor = fillLin;
     if (hasBorder) {
-        // Hairline floor of ~1.25 screen pixels keeps thin rims visible without
+        // Hairline floor of one screen pixel keeps thin rims visible without
         // turning every element into a heavy outline
-        float minBorder = gradLen * 1.25;
+        float minBorder = gradLen * 1.0;
         float borderWidth = max(pc.params.z, minBorder);
         float innerD = d + borderWidth;
         float borderAlpha = 1.0 - smoothstep(-aa, aa, innerD);
         // (The glass panel uses borderColor.a for its sheen, so its rim alpha is fixed.)
         vec4 bordLin = vec4(pow(max(pc.borderColor.rgb, vec3(0.0)), vec3(2.2)),
-                            glass ? 0.42 : pc.borderColor.a);
+                            glass ? 0.34 : pc.borderColor.a);
         if (shape == 0 || glass) {
             // Soft specular catchlight along the upper rim, fading toward the bottom
-            float rimLight = mix(0.55, 1.25, smoothstep(-0.6, 0.95, vCoord.y));
+            float rimLight = mix(0.70, 1.20, smoothstep(-0.6, 0.95, vCoord.y));
             bordLin.rgb *= rimLight;
-            bordLin.a *= mix(0.65, 1.0, smoothstep(-0.6, 0.95, vCoord.y));
+            bordLin.a *= mix(0.70, 1.0, smoothstep(-0.6, 0.95, vCoord.y));
         }
         finalColor = mix(bordLin, fillLin, borderAlpha);
     }

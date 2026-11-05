@@ -706,6 +706,10 @@ private:
     VkPipeline uiPipelineLayer_ = VK_NULL_HANDLE;
     VkPipeline textPipelineLayer_ = VK_NULL_HANDLE;
     VkPipeline thumbPipelineLayer_ = VK_NULL_HANDLE;
+    VkPipeline pipelineLayer_ = VK_NULL_HANDLE;   // NV12 video quad (screen picker preview)
+    // Frosted-glass backdrop: the blurred video behind a panel (layer pass only).
+    VkPipelineLayout glassPipelineLayout_ = VK_NULL_HANDLE;  // NV12 textures + GlassPush
+    VkPipeline glassPipelineLayer_ = VK_NULL_HANDLE;
     ViewTargets uiLayerTargets_;
 
     VkInstance instance_ = VK_NULL_HANDLE;
@@ -988,6 +992,9 @@ private:
         VkDescriptorSet ycbcrSet = VK_NULL_HANDLE;
         VkPipelineLayout ycbcrQuadLayout = VK_NULL_HANDLE;
         VkPipeline ycbcrQuadPipeline = VK_NULL_HANDLE;
+        VkPipeline ycbcrQuadPipelineLayer = VK_NULL_HANDLE;  // UI layer pass variant
+        VkPipelineLayout glassLayout = VK_NULL_HANDLE;        // resolve set + GlassPush
+        VkPipeline glassPipelineLayer = VK_NULL_HANDLE;       // frosted-glass backdrop
         VkPipeline ycbcrAmbilightPipeline = VK_NULL_HANDLE;
         VkPipelineLayout ycbcrSphereLayout = VK_NULL_HANDLE;
         VkPipeline ycbcrSpherePipeline = VK_NULL_HANDLE;
