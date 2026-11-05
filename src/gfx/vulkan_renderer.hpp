@@ -655,7 +655,9 @@ private:
                        VkRenderPass pass = VK_NULL_HANDLE,
                        VkSampleCountFlagBits samples =
                            VK_SAMPLE_COUNT_FLAG_BITS_MAX_ENUM,
-                       const VkPipelineVertexInputStateCreateInfo* vertexInput = nullptr);
+                       const VkPipelineVertexInputStateCreateInfo* vertexInput = nullptr,
+                       VkColorComponentFlags writeMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
+                                                         VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT);
     struct VideoSlot;
     bool createVideoResources(VideoSlot& v, int width, int height);
     void destroyVideoResources(VideoSlot& v);
@@ -724,6 +726,11 @@ private:
     ViewTargets cursorTargets_;
     void recordScreenCopy(int slot, const ScreenLayer& L, uint32_t imageIndex);
     VkPipeline uiPipelineLayer_ = VK_NULL_HANDLE;
+    // Writes alpha only (no blend): stamps alpha = coverage over a glass panel
+    // so the layer is opaque there. SteamVR shows the layers underneath only
+    // where a layer's alpha is exactly zero, so partial alpha has to stay
+    // confined to anti-aliased edges.
+    VkPipeline uiPipelineLayerAlpha_ = VK_NULL_HANDLE;
     VkPipeline textPipelineLayer_ = VK_NULL_HANDLE;
     VkPipeline thumbPipelineLayer_ = VK_NULL_HANDLE;
     VkPipeline pipelineLayer_ = VK_NULL_HANDLE;   // NV12 video quad (screen picker preview)

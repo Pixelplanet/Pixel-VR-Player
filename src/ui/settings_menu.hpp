@@ -16,7 +16,6 @@ public:
         ListenRecenter,
         CycleDownloadDir,
         ToggleSwapEyes,
-        ToggleUiLayer,
         ToggleModels,
         ToggleStats,
         CycleDistance,
@@ -45,7 +44,6 @@ public:
         ToggleHoverHaptics,
         CycleHoverHapticsStrength,
         CycleAmbilight,
-        CycleResScale,
         CyclePanelCurve,
         CycleUiOpacity,
         ToggleMultiScreen,
@@ -102,7 +100,6 @@ public:
     int stereoMode() const { return stereoMode_; }         // 0=Mono, 1=SBS, 2=TB
     void setStereoMode(int s) { stereoMode_ = s; refresh(); }
     bool swapEyes() const { return swapEyes_; }
-    bool uiLayer() const { return uiLayer_; }
     void setSwapEyes(bool s) { swapEyes_ = s; refresh(); }
     bool drawModels() const { return drawModels_; }
     bool showStats() const { return showStats_; }
@@ -193,10 +190,6 @@ public:
     float ambilightIntensity() const;  // 0 = off
 
     // OpenXR swapchain supersampling / render resolution scale.
-    int resScaleIdx() const { return resScaleIdx_; }
-    float resScale() const;
-    const char* resScaleStr() const;
-    void setResScaleIdx(int idx);
 
     void onKeyboardSubmit(const std::string& text) { (void)text; }
     void onKeyboardCancel() {}
@@ -211,7 +204,6 @@ private:
     int projectionMode_ = 0;
     int stereoMode_ = 0;
     bool swapEyes_ = false;
-    bool uiLayer_ = true;      // UI drawn as a compositor layer (sharp) vs. into the eye buffers
     bool drawModels_ = false;  // off: SteamVR draws the real controllers; laser stays
     bool showStats_ = false;
     float screenDistance_ = 3.0f;
@@ -248,7 +240,6 @@ private:
     bool hoverHapticsEnabled_ = true;
     int hoverHapticsStrengthIdx_ = 1;
     int ambilightIdx_ = 2;     // 0=Off, 1=Subtle, 2=Medium (default), 3=Strong
-    int resScaleIdx_ = 4;      // 0=1.00x Panel 2160p, 1=1.15x Enhanced, 2=1.25x Balanced, 3=1.40x Ultra 3024p, 4=1.50x Extreme 3240p (default)
 
     int section_ = 0;   // 0=Display, 1=UI, 2=Audio, 3=Controls, 4=Vault; 10..12=sub-lists
     std::vector<std::pair<int, std::string>> videoStreams_;  // (index, label)

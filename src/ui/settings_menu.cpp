@@ -66,16 +66,6 @@ const char* kAmbilightNames[] = {"Off", "Subtle", "Medium", "Strong"};
 const float kAmbilightValues[] = {0.0f, 0.30f, 0.55f, 0.85f};
 constexpr int kAmbilightCount = 4;
 
-const char* kResScaleNames[] = {
-    "1.00x (Panel 2160p)",
-    "1.15x (Enhanced 2484p)",
-    "1.25x (Balanced 2700p)",
-    "1.40x (Ultra 3024p)",
-    "1.50x (Extreme 3240p)"
-};
-const float kResScaleValues[] = {1.00f, 1.15f, 1.25f, 1.40f, 1.50f};
-constexpr int kResScaleCount = 5;
-
 const char* kUiOpacityNames[] = {"Solid", "Frosted", "Glass", "Clear"};
 const float kUiOpacityValues[] = {1.0f, 0.82f, 0.64f, 0.46f};
 constexpr int kUiOpacityCount = 4;
@@ -190,8 +180,6 @@ void SettingsMenu::refresh() {
         choice("Ambient Screen Glow", kAmbilightNames[ambilightIdx_ % kAmbilightCount],
                kAmbilightCount, ambilightIdx_ % kAmbilightCount, Action::CycleAmbilight,
                projectionMode_ == 0);
-        choice("Render Resolution", kResScaleNames[resScaleIdx_ % kResScaleCount],
-               kResScaleCount, resScaleIdx_ % kResScaleCount, Action::CycleResScale);
         std::ostringstream distStream;
         distStream << std::fixed;
         distStream.precision(1);
@@ -225,8 +213,6 @@ void SettingsMenu::refresh() {
                   uiOpacityIdx_ % kUiOpacityCount, Action::CycleUiOpacity);
         segmented("UI in 360/180 Videos", {"Fixed", "Follow Gaze"}, uiFollowMode_ % 2,
                   Action::CycleUiFollowMode);
-        segmented("Sharp Layers (UI + Screens)", {"On", "Off"}, uiLayer_ ? 0 : 1,
-                  Action::ToggleUiLayer);
         segmented("Download Folder", {kDownloadDirs[0], kDownloadDirs[1], kDownloadDirs[2]},
                   downloadDirIdx_ % kDownloadDirCount, Action::CycleDownloadDir);
         rows_.push_back({"List View Columns", "Customize", Action::EnterListColsConfig});
@@ -361,11 +347,6 @@ SettingsMenu::Action SettingsMenu::activate() {
             saveConfig();
             refresh();
             break;
-        case Action::ToggleUiLayer:
-            uiLayer_ = !uiLayer_;
-            saveConfig();
-            refresh();
-            break;
         case Action::ToggleModels:
             drawModels_ = !drawModels_;
             saveConfig();
@@ -427,11 +408,6 @@ SettingsMenu::Action SettingsMenu::activate() {
             break;
         case Action::CycleAmbilight:
             ambilightIdx_ = (ambilightIdx_ + 1) % kAmbilightCount;
-            saveConfig();
-            refresh();
-            break;
-        case Action::CycleResScale:
-            resScaleIdx_ = (resScaleIdx_ + 1) % kResScaleCount;
             saveConfig();
             refresh();
             break;
@@ -673,19 +649,6 @@ float SettingsMenu::ambilightIntensity() const {
     return kAmbilightValues[ambilightIdx_ % kAmbilightCount];
 }
 
-float SettingsMenu::resScale() const {
-    return kResScaleValues[resScaleIdx_ % kResScaleCount];
-}
-
-const char* SettingsMenu::resScaleStr() const {
-    return kResScaleNames[resScaleIdx_ % kResScaleCount];
-}
-
-void SettingsMenu::setResScaleIdx(int idx) {
-    resScaleIdx_ = ((idx % kResScaleCount) + kResScaleCount) % kResScaleCount;
-    saveConfig();
-    refresh();
-}
 
 void SettingsMenu::loadConfig() {
     const std::string path = getConfigPath();
@@ -705,7 +668,6 @@ void SettingsMenu::loadConfig() {
             if (key == "projection") projectionMode_ = std::clamp(std::stoi(val), 0, 2);
             else if (key == "stereo") stereoMode_ = std::clamp(std::stoi(val), 0, 2);
             else if (key == "swap_eyes") swapEyes_ = (val == "1");
-            else if (key == "ui_layer") uiLayer_ = (val == "1");
             else if (key == "draw_models") drawModels_ = (val == "1");
             else if (key == "show_stats") showStats_ = (val == "1");
             else if (key == "distance") screenDistance_ = std::clamp(std::stof(val), 1.0f, 10.0f);
@@ -735,7 +697,6 @@ void SettingsMenu::loadConfig() {
             else if (key == "hover_haptics") hoverHapticsEnabled_ = (val == "1" || val == "true");
             else if (key == "hover_haptics_strength") hoverHapticsStrengthIdx_ = std::clamp(std::stoi(val), 0, kHoverHapticsStrengthCount - 1);
             else if (key == "ambilight") ambilightIdx_ = std::clamp(std::stoi(val), 0, kAmbilightCount - 1);
-            else if (key == "res_scale") resScaleIdx_ = std::clamp(std::stoi(val), 0, kResScaleCount - 1);
             else if (key == "multi_screen") multiScreen_ = (val == "1" || val == "true");
             else if (key == "pause_on_removal") pauseOnRemoval_ = (val == "1" || val == "true");
             else if (key == "keyboard_layout") keyboardLayout_ = std::clamp(std::stoi(val), 0, 1);
@@ -765,7 +726,6 @@ void SettingsMenu::saveConfig() const {
             file << "projection=" << projectionMode_ << "\n";
             file << "stereo=" << stereoMode_ << "\n";
             file << "swap_eyes=" << (swapEyes_ ? 1 : 0) << "\n";
-            file << "ui_layer=" << (uiLayer_ ? 1 : 0) << "\n";
             file << "draw_models=" << (drawModels_ ? 1 : 0) << "\n";
             file << "show_stats=" << (showStats_ ? 1 : 0) << "\n";
             file << "distance=" << screenDistance_ << "\n";
@@ -789,7 +749,6 @@ void SettingsMenu::saveConfig() const {
             file << "hover_haptics=" << (hoverHapticsEnabled_ ? 1 : 0) << "\n";
             file << "hover_haptics_strength=" << hoverHapticsStrengthIdx_ << "\n";
             file << "ambilight=" << ambilightIdx_ << "\n";
-            file << "res_scale=" << resScaleIdx_ << "\n";
             file << "panel_curve=" << panelCurveIdx_ << "\n";
             file << "ui_opacity=" << uiOpacityIdx_ << "\n";
             file << "multi_screen=" << (multiScreen_ ? 1 : 0) << "\n";

@@ -712,8 +712,8 @@ VulkanRenderer::~VulkanRenderer() {
         destroyLayerTargets(uiLayerTargets_);
         destroyLayerTargets(cursorTargets_);
         for (ScreenLayer& L : screenLayers_) destroyLayerTargets(L.targets);
-        for (VkPipeline p : {uiPipelineLayer_, textPipelineLayer_, thumbPipelineLayer_, pipelineLayer_,
-                             glassPipelineLayer_}) {
+        for (VkPipeline p : {uiPipelineLayer_, uiPipelineLayerAlpha_, textPipelineLayer_, thumbPipelineLayer_,
+                             pipelineLayer_, glassPipelineLayer_}) {
             if (p != VK_NULL_HANDLE) vkDestroyPipeline(device_, p, nullptr);
         }
         if (glassPipelineLayout_ != VK_NULL_HANDLE)
@@ -1158,7 +1158,8 @@ bool VulkanRenderer::buildPipeline(const std::string& vertName,
                                    VkPipelineLayout layout, VkPipeline& out,
                                    bool blend, VkRenderPass pass,
                                    VkSampleCountFlagBits samples,
-                                   const VkPipelineVertexInputStateCreateInfo* vertexInputOverride) {
+                                   const VkPipelineVertexInputStateCreateInfo* vertexInputOverride,
+                                   VkColorComponentFlags writeMask) {
     const VkRenderPass rp = (pass != VK_NULL_HANDLE) ? pass : renderPass_;
     const VkSampleCountFlagBits sc =
         (samples != VK_SAMPLE_COUNT_FLAG_BITS_MAX_ENUM) ? samples : sampleCount_;
@@ -1202,9 +1203,7 @@ bool VulkanRenderer::buildPipeline(const std::string& vertName,
     multisample.rasterizationSamples = sc;
 
     VkPipelineColorBlendAttachmentState blendAttachment{};
-    blendAttachment.colorWriteMask =
-        VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-        VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+    blendAttachment.colorWriteMask = writeMask;
     blendAttachment.blendEnable = blend ? VK_TRUE : VK_FALSE;
     if (blend) {
         // Straight-alpha "over". Alpha accumulates as coverage, so drawing onto
@@ -1545,7 +1544,9 @@ bool VulkanRenderer::createLayerResources(XrContext& xr, int64_t colorFormat) {
             !buildPipeline("thumb.vert.spv", "thumb.frag.spv", textPipelineLayout_, thumbPipelineLayer_,
                            true, uiLayerPass_, VK_SAMPLE_COUNT_1_BIT) ||
             !buildPipeline("quad.vert.spv", "quad.frag.spv", pipelineLayout_, pipelineLayer_,
-                           false, uiLayerPass_, VK_SAMPLE_COUNT_1_BIT)) {
+                           false, uiLayerPass_, VK_SAMPLE_COUNT_1_BIT) ||
+            !buildPipeline("ui.vert.spv", "ui.frag.spv", uiPipelineLayout_, uiPipelineLayerAlpha_, false,
+                           uiLayerPass_, VK_SAMPLE_COUNT_1_BIT, nullptr, VK_COLOR_COMPONENT_A_BIT)) {
             PIXELVR_LOG_WARN("UI layer pipelines failed; the UI stays in the eye buffers");
             return false;
         }
@@ -2981,7 +2982,7 @@ void VulkanRenderer::renderLayersBefore(XrContext& xr, const XrView* views, uint
     const float bendR = panelBendRadius(placement.dist);
 
     // Panel-space window (metres) with room for glows and shadows.
-    constexpr float kMargin = 0.10f;
+    constexpr float kMargin = 0.03f;   // rims and anti-aliasing only (no shadows in the layer)
     UiLayerPass pass;
     if (hubOpen || modalOpen || overlayOpen) {
         pass.cx = 0.0f;
@@ -3248,9 +3249,11 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
                                VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(UiPush), &push);
             vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
         };
-        const float glow[4] = {ac[0], ac[1], ac[2], 0.45f};
-        const float white[4] = {1.0f, 1.0f, 1.0f, 0.95f};
-        draw(1.0f, UiShape::SoftGlow, glow, 0.75f);
+        // No soft glow here: its partial alpha would cut a dark disc out of
+        // the screen behind (SteamVR layers), so just the dot with an accent ring.
+        const float ring[4] = {ac[0], ac[1], ac[2], 1.0f};
+        const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        draw(0.62f, UiShape::Cursor, ring, 0.0f);
         draw(0.5f, UiShape::Cursor, white, 0.0f);
         vkCmdEndRenderPass(commandBuffer_);
     }
@@ -3528,7 +3531,10 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         const float qhw = hw + spread;
         const float qhh = hh + spread;
         // Hollow halos (negative radius) stay outside the element: used for
-        // shadows behind translucent panels.
+        // shadows behind translucent panels. Not in the layer pass: SteamVR
+        // hides whatever is behind a layer wherever its alpha is non-zero, so
+        // a soft shadow would punch a dark band into the screens behind.
+        if (hollow && layerPass) return;
         drawUiElement(vp, cx, cy, qhw, qhh, UiShape::SoftGlow, col, hollow ? -radius : radius,
                       spread / std::min(qhw, qhh));
     };
@@ -3725,6 +3731,16 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         }
         const float rim[4] = {rimCol[0], rimCol[1], rimCol[2], glassPhase};
         drawUiElement(vpPanel, cx, cy, hw, hh, UiShape::GlassPanel, col, radius, borderWidth, rim);
+        if (layerPass && uiPipelineLayerAlpha_ != VK_NULL_HANDLE) {
+            // The panel's colour is already the right blend of glass over the
+            // frosted backdrop; make the layer opaque there (alpha = coverage,
+            // anti-aliased at the rim), see uiPipelineLayerAlpha_.
+            flushText();
+            vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipelineLayerAlpha_);
+            const float solid[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+            drawUiElement(vpPanel, cx, cy, hw, hh, UiShape::RoundedBox, solid, radius);
+            bindPipe(uiPipeline_);
+        }
     };
     // Small text (line height under ~2.8 cm on the panel) is set in the
     // SemiBold face: at that angular size the Medium strokes thin out and lose

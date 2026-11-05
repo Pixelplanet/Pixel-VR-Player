@@ -364,7 +364,10 @@ bool App::init(const std::string& mediaPath) {
         return false;
     }
     colorFormat_ = renderer_.chooseColorFormat(formats);
-    if (!xr_.createSwapchains(colorFormat_, settings_.resScale())) {
+    // Native panel resolution: the UI and flat screens are composition layers
+    // (sharp regardless of this), so supersampling the eye buffers only ever
+    // helped 180/360 video, and not enough to justify the GPU cost.
+    if (!xr_.createSwapchains(colorFormat_, 1.0f)) {
         return false;
     }
     if (!renderer_.createRenderResources(xr_.swapchains())) {
@@ -398,23 +401,6 @@ bool App::init(const std::string& mediaPath) {
 
     PIXELVR_LOG_INFO("Initialization complete");
     return true;
-}
-
-void App::applyResolutionScale(float scale) {
-    if (colorFormat_ == 0) return;
-    PIXELVR_LOG_INFO("Applying resolution scale %.2fx...", scale);
-    renderer_.waitIdle();
-    if (!xr_.createSwapchains(colorFormat_, scale)) {
-        PIXELVR_LOG_ERROR("Failed to recreate OpenXR swapchains with scale %.2fx", scale);
-        return;
-    }
-    if (!renderer_.recreateSwapchainTargets(xr_.swapchains())) {
-        PIXELVR_LOG_ERROR("Failed to recreate Vulkan render targets for swapchain");
-        return;
-    }
-    PIXELVR_LOG_INFO("Resolution scale applied successfully: %dx%d per eye",
-                     xr_.swapchains().empty() ? 0 : xr_.swapchains()[0].width,
-                     xr_.swapchains().empty() ? 0 : xr_.swapchains()[0].height);
 }
 
 #ifdef PIXELVR_HAVE_MEDIA
@@ -735,9 +721,8 @@ void App::updateStats() {
                   fps > 0.0 ? 1000.0 / fps : 0.0);
     statsLines_.emplace_back(buf);
     if (!xr_.swapchains().empty()) {
-        std::snprintf(buf, sizeof(buf), "Render %dx%d (%.2fx)",
-                      xr_.swapchains()[0].width, xr_.swapchains()[0].height,
-                      settings_.resScale());
+        std::snprintf(buf, sizeof(buf), "Render %dx%d",
+                      xr_.swapchains()[0].width, xr_.swapchains()[0].height);
         statsLines_.emplace_back(buf);
     }
     if (cur().web) {
@@ -2990,7 +2975,6 @@ int App::run() {
 
             // Live settings + place the screen in front on first head tracking.
             renderer_.setSwapEyes(settings_.swapEyes());
-            renderer_.setUiLayerEnabled(settings_.uiLayer());
             renderer_.setDrawModels(settings_.drawModels());
             renderer_.setUiAppearance(settings_.uiTextScale(),
                                       settings_.uiTextColorIdx(),
@@ -4400,11 +4384,6 @@ int App::run() {
                             const int pH = renderer_.pointerHand();
                             const int activeH = (pH >= 0 && pH <= 1) ? pH : 1;
                             xr_.triggerHaptic(activeH, 0.025f, 0.0f, settings_.hoverHapticsStrength());
-                        } else if (act == SettingsMenu::Action::CycleResScale) {
-                            applyResolutionScale(settings_.resScale());
-                            const int pH = renderer_.pointerHand();
-                            const int activeH = (pH >= 0 && pH <= 1) ? pH : 1;
-                            xr_.triggerHaptic(activeH, 0.030f, 0.0f, settings_.hoverHapticsStrength());
                         }
                 }
                 if (in.recenter && in.headValid) {
