@@ -80,6 +80,10 @@ Scope: flat 2D and every 3D format (SBS / half-SBS / TB) on flat or curved scree
   audio modes; vault lock; recenter (should recenter the whole arrangement around the user).
 
 ### Y. YouTube (Step 2)
+> **Concept (2026-11-02, for decision):** [docs/concepts/YOUTUBE_CONCEPT.md](docs/concepts/YOUTUBE_CONCEPT.md) —
+> recommends a native VR YouTube hub + sign-in-only web view instead of full m.youtube.com,
+> covers live/DVR, dock controls, PO tokens/SABR, EAC/mesh VR formats and a new Y1–Y7 phase plan.
+
 Approach: embedded browser shows m.youtube.com (browse, search, login); watch URLs are
 intercepted and played natively — **yt-dlp** resolves the streams, FFmpeg plays them with
 hardware VP9/H.264 in our player (works with multi-screen).
