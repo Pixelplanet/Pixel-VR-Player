@@ -373,11 +373,7 @@ bool App::init(const std::string& mediaPath) {
     // UI composition layer: the panel UI is drawn once into this image and the
     // compositor places it in the world, sharp at any eye-buffer resolution.
     // Best effort: without it the UI is drawn into the eye buffers as before.
-    if (xr_.createUiSwapchain(colorFormat_, kUiLayerWidth, kUiLayerHeight)) {
-        renderer_.createUiLayerTargets(xr_.uiSwapchain(), xr_.cylinderLayerSupported());
-    } else {
-        PIXELVR_LOG_WARN("UI layer swapchain unavailable; drawing the UI in the eye buffers");
-    }
+    renderer_.createLayerResources(xr_, colorFormat_);
 
 #ifdef PIXELVR_HAVE_MEDIA
     if (!mediaPath.empty()) {
@@ -2423,11 +2419,17 @@ int App::run() {
                     renderer_.renderView(viewIndex, imageIndex, view, swapchain);
                     perfViewCpuMs_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - viewT0).count();
                 },
-                [this](uint32_t imageIndex, const ViewSwapchain& swapchain, const XrView* views,
-                       uint32_t viewCount, UiLayerInfo& out) {
+                [this](XrContext& xr, const XrView* views, uint32_t viewCount,
+                       std::vector<CompositionLayer>& out) {
                     const auto uiT0 = std::chrono::steady_clock::now();
-                    renderer_.renderUiLayer(imageIndex, swapchain, views, viewCount, out);
+                    renderer_.renderLayersBefore(xr, views, viewCount, out);
                     perfViewCpuMs_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - uiT0).count();
+                },
+                [this](XrContext& xr, const XrView* views, uint32_t viewCount,
+                       std::vector<CompositionLayer>& out) {
+                    const auto scT0 = std::chrono::steady_clock::now();
+                    renderer_.renderLayersAfter(xr, views, viewCount, out);
+                    perfViewCpuMs_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - scT0).count();
                 });
             perfFrameMs_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - frameT0).count();
 

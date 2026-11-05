@@ -709,12 +709,9 @@ VulkanRenderer::~VulkanRenderer() {
             if (glyphMemory_[v] != VK_NULL_HANDLE) vkFreeMemory(device_, glyphMemory_[v], nullptr);
         }
         // UI composition layer resources.
-        for (auto fb : uiLayerTargets_.framebuffers) {
-            if (fb != VK_NULL_HANDLE) vkDestroyFramebuffer(device_, fb, nullptr);
-        }
-        for (auto iv : uiLayerTargets_.imageViews) {
-            if (iv != VK_NULL_HANDLE) vkDestroyImageView(device_, iv, nullptr);
-        }
+        destroyLayerTargets(uiLayerTargets_);
+        destroyLayerTargets(cursorTargets_);
+        for (ScreenLayer& L : screenLayers_) destroyLayerTargets(L.targets);
         for (VkPipeline p : {uiPipelineLayer_, textPipelineLayer_, thumbPipelineLayer_, pipelineLayer_,
                              glassPipelineLayer_}) {
             if (p != VK_NULL_HANDLE) vkDestroyPipeline(device_, p, nullptr);
@@ -1442,20 +1439,51 @@ bool VulkanRenderer::recreateSwapchainTargets(
     return true;
 }
 
-bool VulkanRenderer::createUiLayerTargets(const ViewSwapchain& swapchain, bool cylinderSupported) {
+void VulkanRenderer::destroyLayerTargets(ViewTargets& t) {
+    for (auto fb : t.framebuffers) {
+        if (fb != VK_NULL_HANDLE) vkDestroyFramebuffer(device_, fb, nullptr);
+    }
+    for (auto iv : t.imageViews) {
+        if (iv != VK_NULL_HANDLE) vkDestroyImageView(device_, iv, nullptr);
+    }
+    t = ViewTargets{};
+}
+
+// Image views + framebuffers (uiLayerPass_) for every image of a layer swapchain.
+bool VulkanRenderer::createLayerTargets(const ViewSwapchain& sc, ViewTargets& out) {
+    destroyLayerTargets(out);
+    out.width = sc.width;
+    out.height = sc.height;
+    out.imageViews.resize(sc.images.size());
+    out.framebuffers.resize(sc.images.size());
+    for (std::size_t i = 0; i < sc.images.size(); ++i) {
+        VkImageViewCreateInfo ivInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        ivInfo.image = sc.images[i].image;
+        ivInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        ivInfo.format = colorFormat_;
+        ivInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        ivInfo.subresourceRange.levelCount = 1;
+        ivInfo.subresourceRange.layerCount = 1;
+        PIXELVR_VK_CHECK(vkCreateImageView(device_, &ivInfo, nullptr, &out.imageViews[i]));
+        VkFramebufferCreateInfo fbInfo{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+        fbInfo.renderPass = uiLayerPass_;
+        fbInfo.attachmentCount = 1;
+        fbInfo.pAttachments = &out.imageViews[i];
+        fbInfo.width = static_cast<uint32_t>(sc.width);
+        fbInfo.height = static_cast<uint32_t>(sc.height);
+        fbInfo.layers = 1;
+        PIXELVR_VK_CHECK(vkCreateFramebuffer(device_, &fbInfo, nullptr, &out.framebuffers[i]));
+    }
+    return true;
+}
+
+bool VulkanRenderer::createLayerResources(XrContext& xr, int64_t colorFormat) {
     uiLayerReady_ = false;
-    uiLayerCylinder_ = cylinderSupported;
-    if (device_ == VK_NULL_HANDLE || swapchain.handle == XR_NULL_HANDLE || !textReady_) {
+    uiLayerCylinder_ = xr.cylinderLayerSupported();
+    if (device_ == VK_NULL_HANDLE || !textReady_) {
         return false;
     }
     vkDeviceWaitIdle(device_);
-    for (auto fb : uiLayerTargets_.framebuffers) {
-        if (fb != VK_NULL_HANDLE) vkDestroyFramebuffer(device_, fb, nullptr);
-    }
-    for (auto iv : uiLayerTargets_.imageViews) {
-        if (iv != VK_NULL_HANDLE) vkDestroyImageView(device_, iv, nullptr);
-    }
-    uiLayerTargets_ = ViewTargets{};
 
     if (uiLayerPass_ == VK_NULL_HANDLE) {
         // Single-sampled colour only: every UI element is an SDF with its own
@@ -1538,31 +1566,22 @@ bool VulkanRenderer::createUiLayerTargets(const ViewSwapchain& swapchain, bool c
         }
     }
 
-    uiLayerTargets_.width = swapchain.width;
-    uiLayerTargets_.height = swapchain.height;
-    uiLayerTargets_.imageViews.resize(swapchain.images.size());
-    uiLayerTargets_.framebuffers.resize(swapchain.images.size());
-    for (std::size_t i = 0; i < swapchain.images.size(); ++i) {
-        VkImageViewCreateInfo ivInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-        ivInfo.image = swapchain.images[i].image;
-        ivInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
-        ivInfo.format = colorFormat_;
-        ivInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        ivInfo.subresourceRange.levelCount = 1;
-        ivInfo.subresourceRange.layerCount = 1;
-        PIXELVR_VK_CHECK(vkCreateImageView(device_, &ivInfo, nullptr, &uiLayerTargets_.imageViews[i]));
-        VkFramebufferCreateInfo fbInfo{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
-        fbInfo.renderPass = uiLayerPass_;
-        fbInfo.attachmentCount = 1;
-        fbInfo.pAttachments = &uiLayerTargets_.imageViews[i];
-        fbInfo.width = static_cast<uint32_t>(swapchain.width);
-        fbInfo.height = static_cast<uint32_t>(swapchain.height);
-        fbInfo.layers = 1;
-        PIXELVR_VK_CHECK(vkCreateFramebuffer(device_, &fbInfo, nullptr, &uiLayerTargets_.framebuffers[i]));
+    // The UI panel image: the hub window (1.8 x 1.12 m plus margins) fits at
+    // up to ~1000 px/m; the drawn sub-rect is sized per frame. Plus a small
+    // image for the pointer cursor shown over layer screens.
+    if (!xr.createLayerSwapchain(colorFormat, 2048, 1536, uiSwapchain_) ||
+        !createLayerTargets(uiSwapchain_, uiLayerTargets_)) {
+        PIXELVR_LOG_WARN("UI layer swapchain unavailable; drawing the UI in the eye buffers");
+        return false;
+    }
+    if (!xr.createLayerSwapchain(colorFormat, 128, 128, cursorSwapchain_) ||
+        !createLayerTargets(cursorSwapchain_, cursorTargets_)) {
+        xr.destroyLayerSwapchain(cursorSwapchain_);
+        destroyLayerTargets(cursorTargets_);
     }
     uiLayerReady_ = true;
-    PIXELVR_LOG_INFO("UI composition layer ready (%dx%d, %s)", swapchain.width, swapchain.height,
-                     cylinderSupported ? "cylinder" : "flat quad only");
+    PIXELVR_LOG_INFO("Composition layers ready (UI %dx%d, %s)", uiSwapchain_.width, uiSwapchain_.height,
+                     uiLayerCylinder_ ? "cylinder" : "flat quad only");
     return true;
 }
 
@@ -2050,6 +2069,7 @@ void VulkanRenderer::updateWebFrame(int slot, const uint8_t* rgba, int width, in
     vkWaitForFences(device_, 1, &uploadFence_, VK_TRUE, UINT64_MAX);
     vkResetFences(device_, 1, &uploadFence_);
     t.initialized = true;
+    ++frameSerial_[slot];
 }
 
 void VulkanRenderer::screenOrderLeftToRight(int out[kMaxVideoSlots]) const {
@@ -2938,10 +2958,9 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
     recordView(viewIndex, imageIndex, view, nullptr);
 }
 
-void VulkanRenderer::renderUiLayer(uint32_t imageIndex, const ViewSwapchain& swapchain,
-                                   const XrView* views, uint32_t viewCount, UiLayerInfo& out) {
-    out.visible = false;
-    if (!uiLayerLive() || imageIndex >= uiLayerTargets_.framebuffers.size() || viewCount == 0) {
+void VulkanRenderer::renderLayersBefore(XrContext& xr, const XrView* views, uint32_t viewCount,
+                                        std::vector<CompositionLayer>& out) {
+    if (!uiLayerLive() || viewCount == 0) {
         return;
     }
     // What is on the panel plane this frame: the hub (and anything over it)
@@ -2964,7 +2983,6 @@ void VulkanRenderer::renderUiLayer(uint32_t imageIndex, const ViewSwapchain& swa
     // Panel-space window (metres) with room for glows and shadows.
     constexpr float kMargin = 0.10f;
     UiLayerPass pass;
-    pass.imageIndex = imageIndex;
     if (hubOpen || modalOpen || overlayOpen) {
         pass.cx = 0.0f;
         pass.cy = 0.0f;
@@ -3000,32 +3018,346 @@ void VulkanRenderer::renderUiLayer(uint32_t imageIndex, const ViewSwapchain& swa
     pass.headPos[1] = 0.5f * (v0.pose.position.y + v1.pose.position.y);
     pass.headPos[2] = 0.5f * (v0.pose.position.z + v1.pose.position.z);
 
+    uint32_t imageIndex = 0;
+    if (!xr.acquireLayerImage(uiSwapchain_, imageIndex) ||
+        imageIndex >= uiLayerTargets_.framebuffers.size()) {
+        return;
+    }
+    pass.imageIndex = imageIndex;
     recordView(2, imageIndex, v0, &pass);
+    xr.releaseLayerImage(uiSwapchain_);
 
     // Where the compositor puts the window: panel-space (cx, cy) on the plane
     // or, when curved, on the cylinder whose axis sits bendR in front of the
     // panel (local +Z), matching ui.vert / updatePointer.
     const Mat4& base = placement.base;
+    CompositionLayer cl;
+    cl.swapchain = uiSwapchain_.handle;
+    cl.blend = true;
     Mat4 poseMat;
     if (bendR > 0.0f) {
         poseMat = multiply(base, multiply(translation(Vec3{0.0f, pass.cy, bendR}),
                                           rotationY(-pass.cx / bendR)));
-        out.cylinder = true;
-        out.radius = bendR;
-        out.centralAngle = 2.0f * pass.hw / bendR;
-        out.aspectRatio = pass.hw / pass.hh;
+        cl.cylinder = true;
+        cl.radius = bendR;
+        cl.centralAngle = 2.0f * pass.hw / bendR;
+        cl.aspectRatio = pass.hw / pass.hh;
     } else {
         poseMat = multiply(base, translation(Vec3{pass.cx, pass.cy, 0.0f}));
-        out.cylinder = false;
     }
-    out.width = 2.0f * pass.hw;
-    out.height = 2.0f * pass.hh;
+    cl.width = 2.0f * pass.hw;
+    cl.height = 2.0f * pass.hh;
     const Quat q = quatFromMat(poseMat);
-    out.pose.orientation = {q.x, q.y, q.z, q.w};
-    out.pose.position = {poseMat.m[12], poseMat.m[13], poseMat.m[14]};
-    out.imageRect.offset = {pass.px, pass.py};
-    out.imageRect.extent = {pass.pw, pass.ph};
-    out.visible = true;
+    cl.pose.orientation = {q.x, q.y, q.z, q.w};
+    cl.pose.position = {poseMat.m[12], poseMat.m[13], poseMat.m[14]};
+    cl.imageRect.offset = {pass.px, pass.py};
+    cl.imageRect.extent = {pass.pw, pass.ph};
+    out.push_back(cl);
+}
+
+// Flat video / browser screens as composition layers, back to front, then the
+// pointer cursor over them. Each screen's swapchain is sized to the screen's
+// angular size (about 1.4x the headset's pixel density, never above the
+// source), so the copy pass does the downsampling from the mipmapped source
+// and the compositor only ever samples near 1:1.
+void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint32_t viewCount,
+                                       std::vector<CompositionLayer>& out) {
+    if (!uiLayerLive() || viewCount == 0 || device_ == VK_NULL_HANDLE) {
+        return;
+    }
+    using namespace math;
+    const XrView& v0 = views[0];
+    const XrView& v1 = views[viewCount > 1 ? 1 : 0];
+    const Vec3 head{0.5f * (v0.pose.position.x + v1.pose.position.x),
+                    0.5f * (v0.pose.position.y + v1.pose.position.y),
+                    0.5f * (v0.pose.position.z + v1.pose.position.z)};
+
+    // Which screens are drawn as layers this frame was decided by the first
+    // eye pass (screenLayerLive_); it also refreshed screenHit_.
+    struct Pending {
+        int slot;
+        uint32_t imageIndex;
+    };
+    std::vector<Pending> copies;
+    bool cursorPending = false;
+    uint32_t cursorImage = 0;
+
+    constexpr float kTexelsPerDegree = 28.0f;
+    for (int oi = 0; oi < kMaxVideoSlots; ++oi) {
+        const int slot = screenDrawOrder_[oi];
+        if (slot < 0 || slot >= kMaxVideoSlots || !screenLayerLive_[slot]) continue;
+        const ScreenHitInfo& sh = screenHit_[slot];
+        if (!sh.valid || sh.halfW <= 0.0f || sh.halfH <= 0.0f) continue;
+        ScreenLayer& L = screenLayers_[slot];
+        const bool web = webSlots_[slot] && webTex_[slot].initialized;
+        const VideoSlot& v = videoSlots_[slot];
+        const bool ycbcr = !web && v.usingDmabuf && v.resolveImage != VK_NULL_HANDLE;
+        // Source frame size (the whole frame: both views of 3D content).
+        int srcW = web ? webTex_[slot].width : (ycbcr ? v.resolveW : v.videoWidth);
+        int srcH = web ? webTex_[slot].height : (ycbcr ? v.resolveH : v.videoHeight);
+        if (ycbcr) {  // without the decoder's padding
+            srcW = static_cast<int>(std::lround(srcW * v.drmUvScaleX));
+            srcH = static_cast<int>(std::lround(srcH * v.drmUvScaleY));
+        }
+        if (srcW <= 0 || srcH <= 0) continue;
+        const StereoMode st = web ? StereoMode::Mono
+                                  : ((slot == 0) ? stereoMode_ : screenPlacements_[slot].stereo);
+        // Texels wanted across the frame, from the screen's angular size.
+        const Vec3 c{sh.center[0], sh.center[1], sh.center[2]};
+        const float dist = std::max(length(c - head), 0.3f);
+        const float angW = 2.0f * std::atan(sh.halfW / dist) * 57.2958f;
+        const float viewsAcross = (st == StereoMode::SideBySide) ? 2.0f : 1.0f;
+        const int wantW = static_cast<int>(angW * kTexelsPerDegree * viewsAcross);
+        // Snap to a few sizes so the swapchain is not rebuilt as the viewer sways.
+        static const int kSteps[] = {1024, 1536, 2048, 3072, 4096, 6144, 8192};
+        int tw = srcW;
+        for (int stp : kSteps) {
+            if (stp >= wantW) {
+                tw = std::min(stp, srcW);
+                break;
+            }
+        }
+        tw &= ~1;
+        const int th = std::max(2, static_cast<int>(std::lround(static_cast<double>(tw) * srcH / srcW)) & ~1);
+        if (L.sc.handle == XR_NULL_HANDLE || L.sc.width != tw || L.sc.height != th) {
+            vkDeviceWaitIdle(device_);
+            destroyLayerTargets(L.targets);
+            if (!xr.createLayerSwapchain(static_cast<int64_t>(colorFormat_), static_cast<uint32_t>(tw),
+                                         static_cast<uint32_t>(th), L.sc) ||
+                !createLayerTargets(L.sc, L.targets)) {
+                xr.destroyLayerSwapchain(L.sc);
+                destroyLayerTargets(L.targets);
+                screenLayerLive_[slot] = false;
+                continue;
+            }
+            L.drawnSerial = 0;
+        }
+        L.web = web;
+        if (L.drawnSerial != frameSerial_[slot]) {
+            uint32_t idx = 0;
+            if (xr.acquireLayerImage(L.sc, idx) && idx < L.targets.framebuffers.size()) {
+                copies.push_back({slot, idx});
+                L.drawnSerial = frameSerial_[slot];
+            }
+        }
+
+        // Placement: the screen's flat frame, or its cylinder (like quad.vert:
+        // axis bendR in front of the screen's centre).
+        const Mat4 frame = multiply(translation(c), orientFromYawPitchRoll(sh.yaw, sh.pitch, sh.roll));
+        CompositionLayer cl;
+        cl.swapchain = L.sc.handle;
+        cl.blend = false;
+        Mat4 poseMat = frame;
+        if (sh.bendR > 0.0f && uiLayerCylinder_) {
+            poseMat = multiply(frame, translation(Vec3{0.0f, 0.0f, sh.bendR}));
+            cl.cylinder = true;
+            cl.radius = sh.bendR;
+            cl.centralAngle = 2.0f * sh.halfW / sh.bendR;
+            cl.aspectRatio = sh.halfW / sh.halfH;
+        }
+        cl.width = 2.0f * sh.halfW;
+        cl.height = 2.0f * sh.halfH;
+        const Quat q = quatFromMat(poseMat);
+        cl.pose.orientation = {q.x, q.y, q.z, q.w};
+        cl.pose.position = {poseMat.m[12], poseMat.m[13], poseMat.m[14]};
+        // One layer per eye for 3D content: each eye sees its half of the frame.
+        const int32_t fullW = L.sc.width, fullH = L.sc.height;
+        if (st == StereoMode::Mono) {
+            cl.imageRect = {{0, 0}, {fullW, fullH}};
+            out.push_back(cl);
+        } else {
+            for (int eye = 0; eye < 2; ++eye) {
+                const int half = ((eye == 0) != swapEyes_) ? 0 : 1;
+                CompositionLayer e = cl;
+                e.eye = (eye == 0) ? XR_EYE_VISIBILITY_LEFT : XR_EYE_VISIBILITY_RIGHT;
+                if (st == StereoMode::SideBySide) {
+                    e.imageRect = {{half * (fullW / 2), 0}, {fullW / 2, fullH}};
+                } else {
+                    e.imageRect = {{0, half * (fullH / 2)}, {fullW, fullH / 2}};
+                }
+                out.push_back(e);
+            }
+        }
+    }
+
+    // Pointer cursor over a layer screen: the dot in the eye buffers would be
+    // composited behind the layer, so it becomes a small billboard layer.
+    const bool cursorOnLayer = pointerActive_ && !pointerOnPanel_ && pointerScreen_ >= 0 &&
+                               pointerScreen_ < kMaxVideoSlots && screenLayerLive_[pointerScreen_] &&
+                               cursorSwapchain_.handle != XR_NULL_HANDLE;
+    if (cursorOnLayer && xr.acquireLayerImage(cursorSwapchain_, cursorImage) &&
+        cursorImage < cursorTargets_.framebuffers.size()) {
+        cursorPending = true;
+    }
+
+    if (copies.empty() && !cursorPending) {
+        return;
+    }
+
+    // One command buffer for all the copies (pass slot 3).
+    const uint32_t slotCb = 3;
+    if (viewFenceInFlight_[slotCb]) {
+        vkWaitForFences(device_, 1, &viewFences_[slotCb], VK_TRUE, UINT64_MAX);
+        vkResetFences(device_, 1, &viewFences_[slotCb]);
+        viewFenceInFlight_[slotCb] = false;
+    }
+    commandBuffer_ = viewCommandBuffers_[slotCb];
+    vkResetCommandBuffer(commandBuffer_, 0);
+    VkCommandBufferBeginInfo beginInfo{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
+    beginInfo.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (vkBeginCommandBuffer(commandBuffer_, &beginInfo) != VK_SUCCESS) {
+        for (const Pending& p : copies) xr.releaseLayerImage(screenLayers_[p.slot].sc);
+        if (cursorPending) xr.releaseLayerImage(cursorSwapchain_);
+        return;
+    }
+    for (const Pending& p : copies) {
+        recordScreenCopy(p.slot, screenLayers_[p.slot], p.imageIndex);
+    }
+    if (cursorPending) {
+        // Glow + dot, like the in-scene cursor.
+        VkClearValue clear{};
+        clear.color = {{0.0f, 0.0f, 0.0f, 0.0f}};
+        VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+        rp.renderPass = uiLayerPass_;
+        rp.framebuffer = cursorTargets_.framebuffers[cursorImage];
+        rp.renderArea = {{0, 0}, {static_cast<uint32_t>(cursorTargets_.width),
+                                  static_cast<uint32_t>(cursorTargets_.height)}};
+        rp.clearValueCount = 1;
+        rp.pClearValues = &clear;
+        vkCmdBeginRenderPass(commandBuffer_, &rp, VK_SUBPASS_CONTENTS_INLINE);
+        VkViewport vp{0.0f, 0.0f, static_cast<float>(cursorTargets_.width),
+                      static_cast<float>(cursorTargets_.height), 0.0f, 1.0f};
+        vkCmdSetViewport(commandBuffer_, 0, 1, &vp);
+        VkRect2D sc = rp.renderArea;
+        vkCmdSetScissor(commandBuffer_, 0, 1, &sc);
+        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipelineLayer_);
+        static const float kAccents[5][3] = {{0.25f, 0.78f, 1.00f}, {0.18f, 0.85f, 0.52f}, {1.00f, 0.68f, 0.20f},
+                                             {0.68f, 0.42f, 1.00f}, {0.96f, 0.28f, 0.36f}};
+        const float* ac = kAccents[std::clamp(uiAccentColorIdx_, 0, 4)];
+        const Mat4 ortho = orthographicVulkan(-1.0f, 1.0f, -1.0f, 1.0f);
+        auto draw = [&](float half, UiShape shape, const float col[4], float spread) {
+            UiPush push{};
+            std::memcpy(push.mvp, ortho.m, sizeof(push.mvp));
+            std::memcpy(push.color, col, sizeof(push.color));
+            push.params[0] = static_cast<float>(shape);
+            push.params[1] = 1.0f;
+            push.params[2] = spread;
+            push.rect[2] = half;
+            push.rect[3] = half;
+            vkCmdPushConstants(commandBuffer_, uiPipelineLayout_,
+                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(UiPush), &push);
+            vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
+        };
+        const float glow[4] = {ac[0], ac[1], ac[2], 0.45f};
+        const float white[4] = {1.0f, 1.0f, 1.0f, 0.95f};
+        draw(1.0f, UiShape::SoftGlow, glow, 0.75f);
+        draw(0.5f, UiShape::Cursor, white, 0.0f);
+        vkCmdEndRenderPass(commandBuffer_);
+    }
+    vkEndCommandBuffer(commandBuffer_);
+    VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+    submit.commandBufferCount = 1;
+    submit.pCommandBuffers = &commandBuffer_;
+    if (vkQueueSubmit(queue_, 1, &submit, viewFences_[slotCb]) == VK_SUCCESS) {
+        viewFenceInFlight_[slotCb] = true;
+    }
+    for (const Pending& p : copies) xr.releaseLayerImage(screenLayers_[p.slot].sc);
+    if (cursorPending) {
+        xr.releaseLayerImage(cursorSwapchain_);
+        // 8 cm billboard at the hit, a hair toward the viewer, facing the head.
+        const Vec3 hit{pointerHit_[0], pointerHit_[1], pointerHit_[2]};
+        const Vec3 toEye = normalize(head - hit);
+        Vec3 right = cross(Vec3{0.0f, 1.0f, 0.0f}, toEye);
+        if (length(right) < 1e-4f) right = Vec3{1.0f, 0.0f, 0.0f};
+        right = normalize(right);
+        const Vec3 up = normalize(cross(toEye, right));
+        Mat4 m;
+        m.m[0] = right.x; m.m[1] = right.y; m.m[2] = right.z;
+        m.m[4] = up.x;    m.m[5] = up.y;    m.m[6] = up.z;
+        m.m[8] = toEye.x; m.m[9] = toEye.y; m.m[10] = toEye.z;
+        const Vec3 pos = hit + toEye * 0.01f;
+        CompositionLayer cl;
+        cl.swapchain = cursorSwapchain_.handle;
+        cl.blend = true;
+        cl.width = 0.08f;
+        cl.height = 0.08f;
+        const Quat q = quatFromMat(m);
+        cl.pose.orientation = {q.x, q.y, q.z, q.w};
+        cl.pose.position = {pos.x, pos.y, pos.z};
+        cl.imageRect = {{0, 0}, {cursorTargets_.width, cursorTargets_.height}};
+        out.push_back(cl);
+    }
+    // The app updates video / page textures right after this frame: the
+    // copies must be done reading them.
+    if (viewFenceInFlight_[slotCb]) {
+        vkWaitForFences(device_, 1, &viewFences_[slotCb], VK_TRUE, UINT64_MAX);
+        vkResetFences(device_, 1, &viewFences_[slotCb]);
+        viewFenceInFlight_[slotCb] = false;
+    }
+}
+
+// Copies the current frame of a layer screen into its swapchain image: the
+// whole frame (both views of 3D content), flat, filling the image.
+void VulkanRenderer::recordScreenCopy(int slot, const ScreenLayer& L, uint32_t imageIndex) {
+    using namespace math;
+    VkClearValue clear{};
+    clear.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+    VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+    rp.renderPass = uiLayerPass_;
+    rp.framebuffer = L.targets.framebuffers[imageIndex];
+    rp.renderArea = {{0, 0}, {static_cast<uint32_t>(L.targets.width), static_cast<uint32_t>(L.targets.height)}};
+    rp.clearValueCount = 1;
+    rp.pClearValues = &clear;
+    vkCmdBeginRenderPass(commandBuffer_, &rp, VK_SUBPASS_CONTENTS_INLINE);
+    VkViewport vp{0.0f, 0.0f, static_cast<float>(L.targets.width), static_cast<float>(L.targets.height), 0.0f, 1.0f};
+    vkCmdSetViewport(commandBuffer_, 0, 1, &vp);
+    VkRect2D sc = rp.renderArea;
+    vkCmdSetScissor(commandBuffer_, 0, 1, &sc);
+    // quad.vert / thumb.vert draw the 3.2 x 1.8 screen model: map it onto the image.
+    const Mat4 ortho = orthographicVulkan(-1.6f, 1.6f, -0.9f, 0.9f);
+    if (L.web) {
+        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, thumbPipelineLayer_);
+        vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipelineLayout_, 0, 1,
+                                &webTex_[slot].set, 0, nullptr);
+        TextPush tp{};
+        std::memcpy(tp.mvp, ortho.m, sizeof(tp.mvp));
+        const float white4[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        std::memcpy(tp.color, white4, sizeof(tp.color));
+        tp.rect[0] = -1.6f;
+        tp.rect[1] = -0.9f;
+        tp.rect[2] = 3.2f;
+        tp.rect[3] = 1.8f;
+        tp.uv[2] = 1.0f;
+        tp.uv[3] = 1.0f;
+        vkCmdPushConstants(commandBuffer_, textPipelineLayout_,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(TextPush), &tp);
+        vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
+    } else {
+        const VideoSlot& v = videoSlots_[slot];
+        const bool ycbcr = v.usingDmabuf && v.resolveImage != VK_NULL_HANDLE &&
+                           v.ycbcrQuadPipelineLayer != VK_NULL_HANDLE;
+        const VkPipeline pipe = ycbcr ? v.ycbcrQuadPipelineLayer : pipelineLayer_;
+        const VkPipelineLayout layout = ycbcr ? v.ycbcrQuadLayout : pipelineLayout_;
+        const VkDescriptorSet set = ycbcr ? v.resolveSet : v.descriptorSet;
+        if (pipe != VK_NULL_HANDLE && set != VK_NULL_HANDLE) {
+            vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+            vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &set, 0, nullptr);
+            PushConstants push{};
+            std::memcpy(push.mvp, ortho.m, sizeof(push.mvp));
+            std::memcpy(push.conversion, v.conversion, sizeof(push.conversion));
+            std::memcpy(push.range, v.range, sizeof(push.range));
+            if (ycbcr) {
+                push.conversion[0] = v.drmUvScaleX;
+                push.conversion[1] = v.drmUvScaleY;
+            }
+            push.stereo[0] = 0.0f;  // whole frame; the layers pick each eye's half
+            push.stereo[3] = 0.0f;  // flat: the compositor bends the layer
+            vkCmdPushConstants(commandBuffer_, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                               sizeof(PushConstants), &push);
+            vkCmdDraw(commandBuffer_, 64 * 6, 1, 0, 0);
+        }
+    }
+    vkCmdEndRenderPass(commandBuffer_);
 }
 
 void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
@@ -3668,6 +4000,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
     // screen's model matrix and half-size are kept for the selection outline.
     if (viewIndex == 0 && drawWorld) {
         for (ScreenHitInfo& h : screenHit_) h.valid = false;  // refreshed below
+        for (bool& l : screenLayerLive_) l = false;
     }
     math::Mat4 screenModels[kMaxVideoSlots];
     float screenBend[kMaxVideoSlots] = {};
@@ -3827,7 +4160,16 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const Mat4 model = multiply(multiply(translation(center), rot),
                                             scaling(Vec3{widthScale * scale, scale, widthScale * scale}));
                 const Mat4 mvp = multiply(vpV, model);
-                if (webHere) {
+                // A plain flat video or browser screen is shown by the
+                // compositor as a layer (renderLayersAfter) while layers are
+                // live; the eye passes then draw only its glow and frame.
+                // Screens with on-surface UI (music view) stay in-scene.
+                if (viewIndex == 0) {
+                    screenLayerLive_[slot] = uiLayerLive() && !musicViews_[slot].active;
+                }
+                if (screenLayerLive_[slot]) {
+                    // (fall through to the outline / hit bookkeeping below)
+                } else if (webHere) {
                     // Page texture over the same 3.2 x 1.8 model quad, bent like
                     // quad.vert (arc of radius 3.2 / (curvature * 1.75)).
                     vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, thumbPipeline_);
@@ -6590,7 +6932,10 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
     // Pointer cursor on the UI panel: part of the layer while it is live (the
     // layer composites over the eye buffers, so a cursor drawn there would be
     // hidden behind the panel).
-    const bool cursorInLayer = uiLayerLive() && pointerOnPanel_;
+    const bool cursorOnLayerScreen = uiLayerLive() && pointerActive_ && !pointerOnPanel_ &&
+                                     pointerScreen_ >= 0 && pointerScreen_ < kMaxVideoSlots &&
+                                     screenLayerLive_[pointerScreen_];
+    const bool cursorInLayer = (uiLayerLive() && pointerOnPanel_) || cursorOnLayerScreen;
     if (layerPass && pointerActive_ && cursorInLayer && uiPipeline_ != VK_NULL_HANDLE) {
         bindPipe(uiPipeline_);
         const float cursorGlow[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.45f};
@@ -6694,6 +7039,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             if (pointerActive_ && pointerHand_ == h) {
                 rayLen = length(
                     Vec3{pointerHit_[0], pointerHit_[1], pointerHit_[2]} - o);
+                // A layer surface is composited over the eye buffers, so stop
+                // the beam a little short of it instead of vanishing into it.
+                if (cursorInLayer) rayLen = std::max(rayLen - 0.03f, 0.05f);
             }
             // Tapered beam: thin at the controller, widening toward the hit, so
             // it reads as a 3D cone rather than a flat stick.
@@ -8497,6 +8845,7 @@ void VulkanRenderer::updateVideoDmabuf(DrmVideoFrame& frame, int slot) {
     v.range[2] = 1.0f;  // re-encode to sRGB in the shader (matches the CPU path)
     v.usingDmabuf = true;
     v.hasVideo = true;
+    ++frameSerial_[slot];  // the screen's layer copies the new frame
 }
 
 void VulkanRenderer::releaseVideoFrame(int slot, bool keepPicture) {
@@ -8721,6 +9070,7 @@ void VulkanRenderer::updateVideoTexture(int width, int height, const uint8_t* y,
 
     v.videoLayoutInitialized = true;
     v.hasVideo = true;
+    ++frameSerial_[slot];
 }
 
 } // namespace pixelvr

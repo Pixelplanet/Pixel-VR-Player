@@ -225,7 +225,7 @@ void SettingsMenu::refresh() {
                   uiOpacityIdx_ % kUiOpacityCount, Action::CycleUiOpacity);
         segmented("UI in 360/180 Videos", {"Fixed", "Follow Gaze"}, uiFollowMode_ % 2,
                   Action::CycleUiFollowMode);
-        segmented("UI Rendering", {"Sharp Layer", "In Scene"}, uiLayer_ ? 0 : 1,
+        segmented("Sharp Layers (UI + Screens)", {"On", "Off"}, uiLayer_ ? 0 : 1,
                   Action::ToggleUiLayer);
         segmented("Download Folder", {kDownloadDirs[0], kDownloadDirs[1], kDownloadDirs[2]},
                   downloadDirIdx_ % kDownloadDirCount, Action::CycleDownloadDir);

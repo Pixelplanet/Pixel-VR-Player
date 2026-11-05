@@ -3,6 +3,7 @@
 #include "gfx/text_atlas.hpp"
 #include "util/chapter.hpp"
 #include "xr/openxr_headers.hpp"
+#include "xr/xr_context.hpp"
 
 #include <cstdint>
 #include <cstring>
@@ -14,9 +15,6 @@
 
 namespace pixelvr {
 
-class XrContext;
-struct ViewSwapchain;
-struct UiLayerInfo;
 struct DrmVideoFrame;
 struct GltfMesh;
 
@@ -55,18 +53,22 @@ public:
     void renderView(uint32_t viewIndex, uint32_t imageIndex, const XrView& view,
                     const ViewSwapchain& swapchain);
 
-    // UI composition layer: the panel UI (hub, dock, modals, keyboard) is drawn
-    // once into this off-screen swapchain and the compositor places it in the
-    // world as a quad / cylinder, so its text stays sharp at any eye-buffer
-    // resolution. Call after createRenderResources; the eye passes then skip
-    // the panel UI.
-    bool createUiLayerTargets(const ViewSwapchain& swapchain, bool cylinderSupported);
+    // Composition layers: the panel UI (hub, dock, modals, keyboard) and the
+    // flat video / browser screens are drawn once into their own swapchains
+    // and the compositor places them in the world as quads / cylinders, so
+    // they stay sharp at any eye-buffer resolution (and video is downsampled
+    // with a proper filter). Call after createRenderResources; the eye passes
+    // then skip what the layers show.
+    bool createLayerResources(XrContext& xr, int64_t colorFormat);
     void setUiLayerEnabled(bool on) { uiLayerEnabled_ = on; }
     bool uiLayerLive() const { return uiLayerEnabled_ && uiLayerReady_; }
-    // Records the UI into the layer image and reports where the layer sits;
-    // out.visible stays false when there is no panel UI to show this frame.
-    void renderUiLayer(uint32_t imageIndex, const ViewSwapchain& swapchain,
-                       const XrView* views, uint32_t viewCount, UiLayerInfo& out);
+    // XrContext::renderFrame callbacks: the UI layer before the eye passes
+    // (its GPU work overlaps them), the screen and cursor layers after (they
+    // need this frame's screen poses).
+    void renderLayersBefore(XrContext& xr, const XrView* views, uint32_t viewCount,
+                            std::vector<CompositionLayer>& out);
+    void renderLayersAfter(XrContext& xr, const XrView* views, uint32_t viewCount,
+                           std::vector<CompositionLayer>& out);
 
     // Uploads a decoded NV12 frame (luma + interleaved chroma) into the video
     // textures, creating or resizing them as needed. Safe to call once per frame.
@@ -703,6 +705,24 @@ private:
     bool uiLayerReady_ = false;
     bool uiLayerCylinder_ = false;   // runtime can bend the layer (else it stays flat)
     VkRenderPass uiLayerPass_ = VK_NULL_HANDLE;
+    ViewSwapchain uiSwapchain_;
+    bool createLayerTargets(const ViewSwapchain& sc, ViewTargets& out);
+    void destroyLayerTargets(ViewTargets& t);
+    // A flat screen shown as a composition layer: the video / page is copied
+    // into a swapchain sized to its angular size (so the compositor never
+    // minifies it much), re-done whenever a new frame arrives.
+    struct ScreenLayer {
+        ViewSwapchain sc;
+        ViewTargets targets;
+        uint64_t drawnSerial = 0;   // frameSerial_ last copied
+        bool web = false;
+    };
+    ScreenLayer screenLayers_[kMaxVideoSlots];
+    bool screenLayerLive_[kMaxVideoSlots] = {};   // eye passes skip these screens
+    uint64_t frameSerial_[kMaxVideoSlots] = {};   // bumps with every new video / page frame
+    ViewSwapchain cursorSwapchain_;                // pointer cursor over layer screens
+    ViewTargets cursorTargets_;
+    void recordScreenCopy(int slot, const ScreenLayer& L, uint32_t imageIndex);
     VkPipeline uiPipelineLayer_ = VK_NULL_HANDLE;
     VkPipeline textPipelineLayer_ = VK_NULL_HANDLE;
     VkPipeline thumbPipelineLayer_ = VK_NULL_HANDLE;
@@ -880,10 +900,10 @@ private:
     // Per-pass glyph instance buffers (host-visible, persistently mapped): text
     // is appended during renderView and drawn in a few instanced batches.
     // [0], [1] = eyes, [2] = UI layer pass.
-    static constexpr int kRenderPasses = 3;
-    VkBuffer glyphBuffer_[kRenderPasses] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
-    VkDeviceMemory glyphMemory_[kRenderPasses] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
-    void* glyphMapped_[kRenderPasses] = {nullptr, nullptr, nullptr};
+    static constexpr int kRenderPasses = 4;   // + [3] = screen / cursor layer copies
+    VkBuffer glyphBuffer_[kRenderPasses] = {};
+    VkDeviceMemory glyphMemory_[kRenderPasses] = {};
+    void* glyphMapped_[kRenderPasses] = {};
 
     bool browserVisible_ = false;
     std::string browserTitle_;
@@ -938,9 +958,9 @@ private:
     // can record the next pass while the GPU renders the previous one;
     // commandBuffer_ is the one being recorded.
     VkCommandBuffer commandBuffer_ = VK_NULL_HANDLE;
-    VkCommandBuffer viewCommandBuffers_[kRenderPasses] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
-    VkFence viewFences_[kRenderPasses] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
-    bool viewFenceInFlight_[kRenderPasses] = {false, false, false};
+    VkCommandBuffer viewCommandBuffers_[kRenderPasses] = {};
+    VkFence viewFences_[kRenderPasses] = {};
+    bool viewFenceInFlight_[kRenderPasses] = {};
 
     // Video texture sampling: descriptor set + sampler shared by both eyes.
     VkDescriptorSetLayout descriptorSetLayout_ = VK_NULL_HANDLE;

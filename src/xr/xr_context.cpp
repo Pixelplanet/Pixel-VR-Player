@@ -33,8 +33,8 @@ XrContext::~XrContext() {
             xrDestroySwapchain(sc.handle);
         }
     }
-    if (uiSwapchain_.handle != XR_NULL_HANDLE) {
-        xrDestroySwapchain(uiSwapchain_.handle);
+    for (XrSwapchain sc : layerSwapchains_) {
+        if (sc != XR_NULL_HANDLE) xrDestroySwapchain(sc);
     }
     if (appSpace_ != XR_NULL_HANDLE) {
         xrDestroySpace(appSpace_);
@@ -330,11 +330,9 @@ bool XrContext::createSwapchains(int64_t colorFormat, float scaleFactor) {
     return true;
 }
 
-bool XrContext::createUiSwapchain(int64_t colorFormat, uint32_t width, uint32_t height) {
-    if (uiSwapchain_.handle != XR_NULL_HANDLE) {
-        xrDestroySwapchain(uiSwapchain_.handle);
-        uiSwapchain_ = ViewSwapchain{};
-    }
+bool XrContext::createLayerSwapchain(int64_t colorFormat, uint32_t width, uint32_t height,
+                                     ViewSwapchain& out) {
+    destroyLayerSwapchain(out);
     XrSwapchainCreateInfo createInfo{XR_TYPE_SWAPCHAIN_CREATE_INFO};
     createInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
                             XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
@@ -345,23 +343,44 @@ bool XrContext::createUiSwapchain(int64_t colorFormat, uint32_t width, uint32_t 
     createInfo.faceCount = 1;
     createInfo.arraySize = 1;
     createInfo.mipCount = 1;
-    PIXELVR_XR_CHECK(instance_, xrCreateSwapchain(session_, &createInfo, &uiSwapchain_.handle));
+    PIXELVR_XR_CHECK(instance_, xrCreateSwapchain(session_, &createInfo, &out.handle));
+    layerSwapchains_.push_back(out.handle);
 
-    uiSwapchain_.width = static_cast<int32_t>(width);
-    uiSwapchain_.height = static_cast<int32_t>(height);
-    uiSwapchain_.format = colorFormat;
+    out.width = static_cast<int32_t>(width);
+    out.height = static_cast<int32_t>(height);
+    out.format = colorFormat;
     uint32_t imageCount = 0;
-    PIXELVR_XR_CHECK(instance_,
-                     xrEnumerateSwapchainImages(uiSwapchain_.handle, 0, &imageCount, nullptr));
-    uiSwapchain_.images.assign(imageCount,
-                               XrSwapchainImageVulkan2KHR{XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR});
+    PIXELVR_XR_CHECK(instance_, xrEnumerateSwapchainImages(out.handle, 0, &imageCount, nullptr));
+    out.images.assign(imageCount, XrSwapchainImageVulkan2KHR{XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR});
     PIXELVR_XR_CHECK(
         instance_,
-        xrEnumerateSwapchainImages(
-            uiSwapchain_.handle, imageCount, &imageCount,
-            reinterpret_cast<XrSwapchainImageBaseHeader*>(uiSwapchain_.images.data())));
-    PIXELVR_LOG_INFO("Created UI layer swapchain (%ux%u, %u images)", width, height, imageCount);
+        xrEnumerateSwapchainImages(out.handle, imageCount, &imageCount,
+                                   reinterpret_cast<XrSwapchainImageBaseHeader*>(out.images.data())));
+    PIXELVR_LOG_INFO("Created layer swapchain (%ux%u, %u images)", width, height, imageCount);
     return true;
+}
+
+void XrContext::destroyLayerSwapchain(ViewSwapchain& sc) {
+    if (sc.handle != XR_NULL_HANDLE) {
+        xrDestroySwapchain(sc.handle);
+        layerSwapchains_.erase(std::remove(layerSwapchains_.begin(), layerSwapchains_.end(), sc.handle),
+                               layerSwapchains_.end());
+    }
+    sc = ViewSwapchain{};
+}
+
+bool XrContext::acquireLayerImage(const ViewSwapchain& sc, uint32_t& imageIndex) {
+    XrSwapchainImageAcquireInfo acquireInfo{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+    PIXELVR_XR_CHECK(instance_, xrAcquireSwapchainImage(sc.handle, &acquireInfo, &imageIndex));
+    XrSwapchainImageWaitInfo waitImageInfo{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+    waitImageInfo.timeout = XR_INFINITE_DURATION;
+    PIXELVR_XR_CHECK(instance_, xrWaitSwapchainImage(sc.handle, &waitImageInfo));
+    return true;
+}
+
+void XrContext::releaseLayerImage(const ViewSwapchain& sc) {
+    XrSwapchainImageReleaseInfo releaseInfo{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+    xrReleaseSwapchainImage(sc.handle, &releaseInfo);
 }
 
 bool XrContext::createActions() {
@@ -1024,7 +1043,8 @@ bool XrContext::locateViews(XrTime displayTime, std::vector<XrView>& views,
     return true;
 }
 
-bool XrContext::renderFrame(const RenderViewFn& renderView, const RenderUiLayerFn& renderUi) {
+bool XrContext::renderFrame(const RenderViewFn& renderView, const RenderLayersFn& beforeViews,
+                            const RenderLayersFn& afterViews) {
     XrFrameWaitInfo waitInfo{XR_TYPE_FRAME_WAIT_INFO};
     XrFrameState frameState{XR_TYPE_FRAME_STATE};
     PIXELVR_XR_CHECK(instance_, xrWaitFrame(session_, &waitInfo, &frameState));
@@ -1139,52 +1159,12 @@ bool XrContext::renderFrame(const RenderViewFn& renderView, const RenderUiLayerF
         }
     }
 
-    // UI layer first: its GPU work then overlaps the eye recording, and the
-    // last eye waits for all of it.
-    UiLayerInfo uiInfo;
-    XrCompositionLayerQuad uiQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
-    XrCompositionLayerCylinderKHR uiCyl{XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR};
-    if (viewsValid && renderUi && uiSwapchain_.handle != XR_NULL_HANDLE) {
-        uint32_t imageIndex = 0;
-        XrSwapchainImageAcquireInfo acquireInfo{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
-        PIXELVR_XR_CHECK(instance_,
-                         xrAcquireSwapchainImage(uiSwapchain_.handle, &acquireInfo, &imageIndex));
-        XrSwapchainImageWaitInfo waitImageInfo{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
-        waitImageInfo.timeout = XR_INFINITE_DURATION;
-        PIXELVR_XR_CHECK(instance_, xrWaitSwapchainImage(uiSwapchain_.handle, &waitImageInfo));
-
-        renderUi(imageIndex, uiSwapchain_, views_.data(), static_cast<uint32_t>(views_.size()), uiInfo);
-
-        XrSwapchainImageReleaseInfo releaseInfo{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-        PIXELVR_XR_CHECK(instance_, xrReleaseSwapchainImage(uiSwapchain_.handle, &releaseInfo));
-
-        if (uiInfo.visible) {
-            // The UI is rendered with premultiplied alpha (straight-alpha
-            // blending onto a cleared transparent target).
-            const XrCompositionLayerFlags flags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
-            XrSwapchainSubImage sub{};
-            sub.swapchain = uiSwapchain_.handle;
-            sub.imageRect = uiInfo.imageRect;
-            sub.imageArrayIndex = 0;
-            if (uiInfo.cylinder && cylinderLayerEnabled_) {
-                uiCyl.layerFlags = flags;
-                uiCyl.space = appSpace_;
-                uiCyl.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-                uiCyl.subImage = sub;
-                uiCyl.pose = uiInfo.pose;
-                uiCyl.radius = uiInfo.radius;
-                uiCyl.centralAngle = uiInfo.centralAngle;
-                uiCyl.aspectRatio = uiInfo.aspectRatio;
-            } else {
-                uiQuad.layerFlags = flags;
-                uiQuad.space = appSpace_;
-                uiQuad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-                uiQuad.subImage = sub;
-                uiQuad.pose = uiInfo.pose;
-                uiQuad.size = {uiInfo.width, uiInfo.height};
-                uiInfo.cylinder = false;
-            }
-        }
+    // Composition layers (UI panel, screens, cursor) collected from the
+    // renderer: `beforeViews` first so its GPU work overlaps the eye
+    // recording, `afterViews` once the eye passes have refreshed screen poses.
+    std::vector<CompositionLayer> extra;
+    if (viewsValid && beforeViews) {
+        beforeViews(*this, views_.data(), static_cast<uint32_t>(views_.size()), extra);
     }
 
     if (viewsValid) {
@@ -1223,15 +1203,56 @@ bool XrContext::renderFrame(const RenderViewFn& renderView, const RenderUiLayerF
         layer.views = projectionViews.data();
     }
 
-    std::array<XrCompositionLayerBaseHeader*, 2> layers{
-        reinterpret_cast<XrCompositionLayerBaseHeader*>(&layer),
-        uiInfo.cylinder ? reinterpret_cast<XrCompositionLayerBaseHeader*>(&uiCyl)
-                        : reinterpret_cast<XrCompositionLayerBaseHeader*>(&uiQuad)};
+    if (viewsValid && afterViews) {
+        afterViews(*this, views_.data(), static_cast<uint32_t>(views_.size()), extra);
+    }
+    // Build the OpenXR structs (stable addresses: reserved up front).
+    std::vector<XrCompositionLayerQuad> quads;
+    std::vector<XrCompositionLayerCylinderKHR> cylinders;
+    quads.reserve(extra.size());
+    cylinders.reserve(extra.size());
+    std::vector<XrCompositionLayerBaseHeader*> layers;
+    layers.reserve(extra.size() + 1);
+    layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader*>(&layer));
+    for (const CompositionLayer& cl : extra) {
+        if (cl.swapchain == XR_NULL_HANDLE) continue;
+        // Blended layers are rendered with premultiplied alpha (straight-alpha
+        // blending onto a cleared transparent target).
+        const XrCompositionLayerFlags flags =
+            cl.blend ? XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT : 0;
+        XrSwapchainSubImage sub{};
+        sub.swapchain = cl.swapchain;
+        sub.imageRect = cl.imageRect;
+        sub.imageArrayIndex = 0;
+        if (cl.cylinder && cylinderLayerEnabled_) {
+            XrCompositionLayerCylinderKHR& c = cylinders.emplace_back();
+            c = XrCompositionLayerCylinderKHR{XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR};
+            c.layerFlags = flags;
+            c.space = appSpace_;
+            c.eyeVisibility = cl.eye;
+            c.subImage = sub;
+            c.pose = cl.pose;
+            c.radius = cl.radius;
+            c.centralAngle = cl.centralAngle;
+            c.aspectRatio = cl.aspectRatio;
+            layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader*>(&c));
+        } else {
+            XrCompositionLayerQuad& q = quads.emplace_back();
+            q = XrCompositionLayerQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+            q.layerFlags = flags;
+            q.space = appSpace_;
+            q.eyeVisibility = cl.eye;
+            q.subImage = sub;
+            q.pose = cl.pose;
+            q.size = {cl.width, cl.height};
+            layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader*>(&q));
+        }
+    }
 
     XrFrameEndInfo endInfo{XR_TYPE_FRAME_END_INFO};
     endInfo.displayTime = frameState.predictedDisplayTime;
     endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-    endInfo.layerCount = viewsValid ? (uiInfo.visible ? 2u : 1u) : 0u;
+    endInfo.layerCount = viewsValid ? static_cast<uint32_t>(layers.size()) : 0u;
     endInfo.layers = viewsValid ? layers.data() : nullptr;
 
     if (!viewsValid && frameState.shouldRender == XR_TRUE) {

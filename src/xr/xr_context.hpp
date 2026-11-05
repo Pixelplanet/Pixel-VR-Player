@@ -17,12 +17,15 @@ struct ViewSwapchain {
     std::vector<XrSwapchainImageVulkan2KHR> images;
 };
 
-// Where the UI composition layer sits this frame (filled in by the renderer).
-// The pose is in the app reference space; a cylinder is used when `cylinder`
-// is set and the runtime supports it, otherwise a flat quad.
-struct UiLayerInfo {
-    bool visible = false;
+// One composition layer (UI panel, video / browser screen, pointer cursor) the
+// renderer wants composited over the projection layer this frame. The pose is
+// in the app reference space; a cylinder is used when `cylinder` is set and
+// the runtime supports it, otherwise a flat quad.
+struct CompositionLayer {
+    XrSwapchain swapchain = XR_NULL_HANDLE;
     bool cylinder = false;
+    bool blend = false;         // composite with the texture's alpha (else opaque)
+    XrEyeVisibility eye = XR_EYE_VISIBILITY_BOTH;
     XrPosef pose{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
     float width = 1.0f;         // quad size (metres)
     float height = 1.0f;
@@ -115,11 +118,17 @@ public:
     bool createReferenceSpace();
     std::vector<int64_t> enumerateSwapchainFormats();
     bool createSwapchains(int64_t colorFormat, float scaleFactor = 1.25f);
-    // Off-screen swapchain for the UI composition layer (quad / cylinder), so
-    // the compositor samples the panel once at display resolution instead of
-    // the UI being rasterised into the eye buffers and resampled again.
-    bool createUiSwapchain(int64_t colorFormat, uint32_t width, uint32_t height);
-    const ViewSwapchain& uiSwapchain() const { return uiSwapchain_; }
+    // Off-screen swapchains for composition layers (UI panel, video / browser
+    // screens), so the compositor samples them once at display resolution
+    // instead of their being rasterised into the eye buffers and resampled
+    // again. Created swapchains are destroyed with the context (or explicitly).
+    bool createLayerSwapchain(int64_t colorFormat, uint32_t width, uint32_t height,
+                              ViewSwapchain& out);
+    void destroyLayerSwapchain(ViewSwapchain& sc);
+    // Acquire (and wait for) the next image of a layer swapchain; the renderer
+    // draws into it and calls releaseLayerImage once the work is submitted.
+    bool acquireLayerImage(const ViewSwapchain& sc, uint32_t& imageIndex);
+    void releaseLayerImage(const ViewSwapchain& sc);
     bool cylinderLayerSupported() const { return cylinderLayerEnabled_; }
 
     // Controller input (OpenXR actions). Call createActions after createSession.
@@ -139,17 +148,18 @@ public:
                                             const XrView& view,
                                             const ViewSwapchain& swapchain)>;
 
-    // Callback that records the UI into the UI swapchain image (called before
-    // the eye views) and reports the layer placement.
-    using RenderUiLayerFn = std::function<void(uint32_t imageIndex, const ViewSwapchain& swapchain,
-                                               const XrView* views, uint32_t viewCount,
-                                               UiLayerInfo& out)>;
+    // Callback that records composition-layer content (acquiring / releasing
+    // layer swapchain images itself) and appends the layers to submit, in
+    // back-to-front order.
+    using RenderLayersFn = std::function<void(XrContext& xr, const XrView* views, uint32_t viewCount,
+                                              std::vector<CompositionLayer>& out)>;
 
     // Runs xrWaitFrame / xrBeginFrame, locates the eye views, invokes
     // renderView per eye, and submits the stereo projection layer via xrEndFrame.
-    // With renderUi set (and a UI swapchain created), the UI is rendered into
-    // its own swapchain and submitted as a quad / cylinder layer on top.
-    bool renderFrame(const RenderViewFn& renderView, const RenderUiLayerFn& renderUi = nullptr);
+    // `beforeViews` / `afterViews` add composition layers (UI panel, screens)
+    // composited over the projection layer, in the order given.
+    bool renderFrame(const RenderViewFn& renderView, const RenderLayersFn& beforeViews = nullptr,
+                     const RenderLayersFn& afterViews = nullptr);
 
     // --- Accessors -------------------------------------------------------
     XrInstance instance() const { return instance_; }
@@ -203,7 +213,7 @@ private:
 
     std::vector<XrViewConfigurationView> configViews_;
     std::vector<ViewSwapchain> swapchains_;
-    ViewSwapchain uiSwapchain_;
+    std::vector<XrSwapchain> layerSwapchains_;   // created via createLayerSwapchain
     std::vector<XrView> views_;
     std::vector<XrView> lastValidViews_;
     XrTime lastValidViewsTime_ = 0;
