@@ -2621,7 +2621,7 @@ void VulkanRenderer::updatePointer() {
 
         // Draggable timeline track (top band of dock)
         {
-            const float trackY = kBarY + 0.125f;
+            const float trackY = kBarY + 0.150f;
             if (hyy >= trackY - 0.045f && hyy <= trackY + 0.045f &&
                 hx >= -0.58f && hx <= 0.58f) {
                 hitHere(world.x, world.y, world.z);
@@ -2633,7 +2633,7 @@ void VulkanRenderer::updatePointer() {
 
         // Clickable total/remaining time readout (right of scrubber)
         if (transportDuration_ > 0.0 && hx >= 0.58f && hx <= 0.82f &&
-            hyy >= kBarY + 0.080f && hyy <= kBarY + 0.170f) {
+            hyy >= kBarY + 0.105f && hyy <= kBarY + 0.195f) {
             hitHere(world.x, world.y, world.z);
             pointerOnTimeToggle_ = true;
             break;
@@ -3183,7 +3183,7 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
         const Mat4 frame = multiply(translation(cNear), orientFromYawPitchRoll(sh.yaw, sh.pitch, sh.roll));
         CompositionLayer cl;
         cl.swapchain = L.sc.handle;
-        cl.blend = false;
+        cl.blend = true;   // edge alpha from recordScreenCopy: anti-aliased outline
         Mat4 poseMat = frame;
         if (sh.bendR > 0.0f && uiLayerCylinder_) {
             poseMat = multiply(frame, translation(Vec3{0.0f, 0.0f, sh.bendR}));
@@ -3339,8 +3339,11 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
 // whole frame (both views of 3D content), flat, filling the image.
 void VulkanRenderer::recordScreenCopy(int slot, const ScreenLayer& L, uint32_t imageIndex) {
     using namespace math;
+    // The compositor draws layer outlines without anti-aliasing, so the frame
+    // is drawn one texel inside a transparent border: its bilinear sampling
+    // then ramps the edge over that texel instead of cutting it hard.
     VkClearValue clear{};
-    clear.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
+    clear.color = {{0.0f, 0.0f, 0.0f, 0.0f}};
     VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     rp.renderPass = uiLayerPass_;
     rp.framebuffer = L.targets.framebuffers[imageIndex];
@@ -3348,7 +3351,8 @@ void VulkanRenderer::recordScreenCopy(int slot, const ScreenLayer& L, uint32_t i
     rp.clearValueCount = 1;
     rp.pClearValues = &clear;
     vkCmdBeginRenderPass(commandBuffer_, &rp, VK_SUBPASS_CONTENTS_INLINE);
-    VkViewport vp{0.0f, 0.0f, static_cast<float>(L.targets.width), static_cast<float>(L.targets.height), 0.0f, 1.0f};
+    VkViewport vp{1.0f, 1.0f, static_cast<float>(L.targets.width - 2), static_cast<float>(L.targets.height - 2),
+                  0.0f, 1.0f};
     vkCmdSetViewport(commandBuffer_, 0, 1, &vp);
     VkRect2D sc = rp.renderArea;
     vkCmdSetScissor(commandBuffer_, 0, 1, &sc);
@@ -4533,7 +4537,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         }
 
         // Top scrubber groove
-        drawUiElement(vpPanel, 0.0f, kBarY + 0.125f, kDockHalfW - 0.045f, 0.052f,
+        drawUiElement(vpPanel, 0.0f, kBarY + 0.150f, kDockHalfW - 0.045f, 0.048f,
                       UiShape::RoundedBox, glassWellT.data(), 0.55f, 0.012f, kGlassRimFaint);
 
         // Center transport recessed island: centered at 0.0f, symmetrically
@@ -4658,7 +4662,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         // Scrubber bar track + tick marks + hover time tooltip
         const float trackHalfW = 0.56f;
         const float trackHalfH = 0.009f;
-        const float trackY = kBarY + 0.130f;
+        const float trackY = kBarY + 0.152f;
         // Brighter with chapters, so the dark gaps between them stand out.
         const bool chapterTrack = !transportChapters_.empty() && transportLive_ == 0;
         const float trackBg[4] = {chapterTrack ? 0.38f : 0.16f, chapterTrack ? 0.42f : 0.19f,
@@ -5412,12 +5416,12 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                                     textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
 
             drawRailText();
-            drawFit(-0.855f, 0.02f, 0.34f, scBadge, dimCol, "QUICK FILTERS");
+            drawFit(-0.855f, hub::railDividerY() - 0.015f, 0.34f, scBadge, dimCol, "QUICK FILTERS");
             const char* qLabels[6] = {"Local Storage", "Videos", "SMB Shares", "Downloads", "Bookmarks", "Vault (Private)"};
             const int qCount = vaultUnlocked_ ? 6 : 5;
             for (int sub = 0; sub < qCount; ++sub) {
                 const float* col = (browserQuickFilter_ == sub) ? themeTextCol : slateCol;
-                drawFit(-0.790f, fileSubY[sub], 0.28f, scSub, col, qLabels[sub]);
+                drawFit(-0.790f, hub::subY(fileSubY[sub]), 0.28f, scSub, col, qLabels[sub]);
             }
 
             // Content header: Breadcrumb + Page switcher
@@ -5887,7 +5891,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             const int effSec = (settingsSection_ >= 10 && settingsSection_ <= 12) ? 2 : ((settingsSection_ == 21 || settingsSection_ == 22) ? 1 : settingsSection_);
             const int sCount = vaultUnlocked_ ? 5 : 4;
             for (int sub = 0; sub < sCount; ++sub) {
-                drawFit(-0.84f, setSubY[sub], 0.30f, scSub * 0.92f,
+                drawFit(-0.84f, hub::subY(setSubY[sub]), 0.30f, scSub * 0.92f,
                         (effSec == sub) ? themeTextCol : slateCol, setSubLabels[sub]);
             }
 
