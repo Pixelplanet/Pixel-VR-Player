@@ -16,6 +16,7 @@ namespace pixelvr {
 
 class XrContext;
 struct ViewSwapchain;
+struct UiLayerInfo;
 struct DrmVideoFrame;
 struct GltfMesh;
 
@@ -53,6 +54,19 @@ public:
     // Records and submits the draw for one eye. Invoked by XrContext::renderFrame.
     void renderView(uint32_t viewIndex, uint32_t imageIndex, const XrView& view,
                     const ViewSwapchain& swapchain);
+
+    // UI composition layer: the panel UI (hub, dock, modals, keyboard) is drawn
+    // once into this off-screen swapchain and the compositor places it in the
+    // world as a quad / cylinder, so its text stays sharp at any eye-buffer
+    // resolution. Call after createRenderResources; the eye passes then skip
+    // the panel UI.
+    bool createUiLayerTargets(const ViewSwapchain& swapchain, bool cylinderSupported);
+    void setUiLayerEnabled(bool on) { uiLayerEnabled_ = on; }
+    bool uiLayerLive() const { return uiLayerEnabled_ && uiLayerReady_; }
+    // Records the UI into the layer image and reports where the layer sits;
+    // out.visible stays false when there is no panel UI to show this frame.
+    void renderUiLayer(uint32_t imageIndex, const ViewSwapchain& swapchain,
+                       const XrView* views, uint32_t viewCount, UiLayerInfo& out);
 
     // Uploads a decoded NV12 frame (luma + interleaved chroma) into the video
     // textures, creating or resizing them as needed. Safe to call once per frame.
@@ -670,6 +684,30 @@ private:
         std::vector<VkFramebuffer> framebuffers;
     };
 
+    // One UI-layer pass: which image, the pixel sub-rect drawn, and the
+    // panel-space window (metres) that maps onto it.
+    struct UiLayerPass {
+        uint32_t imageIndex = 0;
+        int32_t px = 0, py = 0, pw = 0, ph = 0;
+        float cx = 0.0f, cy = 0.0f, hw = 1.0f, hh = 1.0f;
+        float headPos[3] = {0.0f, 0.0f, 0.0f};
+    };
+    // Shared body of renderView (eye pass, layer == nullptr) and renderUiLayer.
+    void recordView(uint32_t viewIndex, uint32_t imageIndex, const XrView& view,
+                    const UiLayerPass* layer);
+    float panelBendRadius(float panelDist) const {
+        const bool curved = panelCurve_ > 0.01f && !(uiLayerLive() && !uiLayerCylinder_);
+        return curved ? panelDist / panelCurve_ : 0.0f;
+    }
+    bool uiLayerEnabled_ = true;
+    bool uiLayerReady_ = false;
+    bool uiLayerCylinder_ = false;   // runtime can bend the layer (else it stays flat)
+    VkRenderPass uiLayerPass_ = VK_NULL_HANDLE;
+    VkPipeline uiPipelineLayer_ = VK_NULL_HANDLE;
+    VkPipeline textPipelineLayer_ = VK_NULL_HANDLE;
+    VkPipeline thumbPipelineLayer_ = VK_NULL_HANDLE;
+    ViewTargets uiLayerTargets_;
+
     VkInstance instance_ = VK_NULL_HANDLE;
     VkPhysicalDevice physicalDevice_ = VK_NULL_HANDLE;
     VkDevice device_ = VK_NULL_HANDLE;
@@ -834,11 +872,13 @@ private:
     VkPipelineLayout textPipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline textPipeline_ = VK_NULL_HANDLE;
     bool textReady_ = false;
-    // Per-eye glyph instance buffers (host-visible, persistently mapped): text
+    // Per-pass glyph instance buffers (host-visible, persistently mapped): text
     // is appended during renderView and drawn in a few instanced batches.
-    VkBuffer glyphBuffer_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
-    VkDeviceMemory glyphMemory_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
-    void* glyphMapped_[2] = {nullptr, nullptr};
+    // [0], [1] = eyes, [2] = UI layer pass.
+    static constexpr int kRenderPasses = 3;
+    VkBuffer glyphBuffer_[kRenderPasses] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkDeviceMemory glyphMemory_[kRenderPasses] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
+    void* glyphMapped_[kRenderPasses] = {nullptr, nullptr, nullptr};
 
     bool browserVisible_ = false;
     std::string browserTitle_;
@@ -877,6 +917,10 @@ private:
     // laser pointer at any time. Defaults to right controller active, left off.
     bool laserOn_[2] = {false, true};
     float pointerHit_[3] = {0.0f, 0.0f, 0.0f};
+    // Hit in panel-local metres when the pointer is on the UI panel (the
+    // cursor is then drawn into the UI layer rather than into the eye buffers).
+    bool pointerOnPanel_ = false;
+    float pointerPanel_[2] = {0.0f, 0.0f};
     bool controlBarVisible_ = false;
     bool vaultUnlocked_ = false;
     bool pointerSuppressed_ = false;
@@ -885,12 +929,13 @@ private:
     float pointerScrub_ = 0.0f;
 
     VkCommandPool commandPool_ = VK_NULL_HANDLE;
-    // One command buffer + fence per eye so the CPU can record the second eye
-    // while the GPU renders the first; commandBuffer_ is the one being recorded.
+    // One command buffer + fence per pass (two eyes + the UI layer) so the CPU
+    // can record the next pass while the GPU renders the previous one;
+    // commandBuffer_ is the one being recorded.
     VkCommandBuffer commandBuffer_ = VK_NULL_HANDLE;
-    VkCommandBuffer viewCommandBuffers_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
-    VkFence viewFences_[2] = {VK_NULL_HANDLE, VK_NULL_HANDLE};
-    bool viewFenceInFlight_[2] = {false, false};
+    VkCommandBuffer viewCommandBuffers_[kRenderPasses] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
+    VkFence viewFences_[kRenderPasses] = {VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE};
+    bool viewFenceInFlight_[kRenderPasses] = {false, false, false};
 
     // Video texture sampling: descriptor set + sampler shared by both eyes.
     VkDescriptorSetLayout descriptorSetLayout_ = VK_NULL_HANDLE;

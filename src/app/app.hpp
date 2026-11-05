@@ -107,6 +107,10 @@ private:
     std::vector<std::string> statsLines_;
     void updateStats();
     int64_t colorFormat_ = 0;
+    // UI composition layer image. The hub window (1.96 x 1.28 m with margins)
+    // fits at up to ~1045 px/m; the drawn sub-rect is sized per frame.
+    static constexpr uint32_t kUiLayerWidth = 2048;
+    static constexpr uint32_t kUiLayerHeight = 1536;
     void applyResolutionScale(float scale);
     // Menu nav stick auto-repeat: -1/+1 to step (initial press + hold), else 0.
     int navStep(float axisY, std::chrono::steady_clock::time_point now);

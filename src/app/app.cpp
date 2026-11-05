@@ -370,6 +370,14 @@ bool App::init(const std::string& mediaPath) {
     if (!renderer_.createRenderResources(xr_.swapchains())) {
         return false;
     }
+    // UI composition layer: the panel UI is drawn once into this image and the
+    // compositor places it in the world, sharp at any eye-buffer resolution.
+    // Best effort: without it the UI is drawn into the eye buffers as before.
+    if (xr_.createUiSwapchain(colorFormat_, kUiLayerWidth, kUiLayerHeight)) {
+        renderer_.createUiLayerTargets(xr_.uiSwapchain(), xr_.cylinderLayerSupported());
+    } else {
+        PIXELVR_LOG_WARN("UI layer swapchain unavailable; drawing the UI in the eye buffers");
+    }
 
 #ifdef PIXELVR_HAVE_MEDIA
     if (!mediaPath.empty()) {
@@ -2389,12 +2397,19 @@ int App::run() {
             perfFeedMs_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - feedT0).count();
 #endif
             const auto frameT0 = std::chrono::steady_clock::now();
-            xr_.renderFrame([this](uint32_t viewIndex, uint32_t imageIndex,
-                                   const XrView& view, const ViewSwapchain& swapchain) {
-                const auto viewT0 = std::chrono::steady_clock::now();
-                renderer_.renderView(viewIndex, imageIndex, view, swapchain);
-                perfViewCpuMs_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - viewT0).count();
-            });
+            xr_.renderFrame(
+                [this](uint32_t viewIndex, uint32_t imageIndex,
+                       const XrView& view, const ViewSwapchain& swapchain) {
+                    const auto viewT0 = std::chrono::steady_clock::now();
+                    renderer_.renderView(viewIndex, imageIndex, view, swapchain);
+                    perfViewCpuMs_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - viewT0).count();
+                },
+                [this](uint32_t imageIndex, const ViewSwapchain& swapchain, const XrView* views,
+                       uint32_t viewCount, UiLayerInfo& out) {
+                    const auto uiT0 = std::chrono::steady_clock::now();
+                    renderer_.renderUiLayer(imageIndex, swapchain, views, viewCount, out);
+                    perfViewCpuMs_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - uiT0).count();
+                });
             perfFrameMs_ += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - frameT0).count();
 
             // Apply controller input that renderFrame synced this frame.
@@ -2954,6 +2969,7 @@ int App::run() {
 
             // Live settings + place the screen in front on first head tracking.
             renderer_.setSwapEyes(settings_.swapEyes());
+            renderer_.setUiLayerEnabled(settings_.uiLayer());
             renderer_.setDrawModels(settings_.drawModels());
             renderer_.setUiAppearance(settings_.uiTextScale(),
                                       settings_.uiTextColorIdx(),

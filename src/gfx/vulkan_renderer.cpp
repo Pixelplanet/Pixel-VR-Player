@@ -691,10 +691,22 @@ VulkanRenderer::~VulkanRenderer() {
             vkDestroyPipeline(device_, thumbPipeline_, nullptr);
         if (textPipeline_ != VK_NULL_HANDLE)
             vkDestroyPipeline(device_, textPipeline_, nullptr);
-        for (int v = 0; v < 2; ++v) {
+        for (int v = 0; v < kRenderPasses; ++v) {
             if (glyphBuffer_[v] != VK_NULL_HANDLE) vkDestroyBuffer(device_, glyphBuffer_[v], nullptr);
             if (glyphMemory_[v] != VK_NULL_HANDLE) vkFreeMemory(device_, glyphMemory_[v], nullptr);
         }
+        // UI composition layer resources.
+        for (auto fb : uiLayerTargets_.framebuffers) {
+            if (fb != VK_NULL_HANDLE) vkDestroyFramebuffer(device_, fb, nullptr);
+        }
+        for (auto iv : uiLayerTargets_.imageViews) {
+            if (iv != VK_NULL_HANDLE) vkDestroyImageView(device_, iv, nullptr);
+        }
+        for (VkPipeline p : {uiPipelineLayer_, textPipelineLayer_, thumbPipelineLayer_}) {
+            if (p != VK_NULL_HANDLE) vkDestroyPipeline(device_, p, nullptr);
+        }
+        if (uiLayerPass_ != VK_NULL_HANDLE)
+            vkDestroyRenderPass(device_, uiLayerPass_, nullptr);
         if (textPipelineLayout_ != VK_NULL_HANDLE)
             vkDestroyPipelineLayout(device_, textPipelineLayout_, nullptr);
         if (textPool_ != VK_NULL_HANDLE)
@@ -1182,11 +1194,14 @@ bool VulkanRenderer::buildPipeline(const std::string& vertName,
         VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
     blendAttachment.blendEnable = blend ? VK_TRUE : VK_FALSE;
     if (blend) {
+        // Straight-alpha "over". Alpha accumulates as coverage, so drawing onto
+        // a cleared transparent target (the UI layer) yields premultiplied
+        // colour + correct alpha; on the opaque eye buffers alpha stays 1.
         blendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
         blendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
         blendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
         blendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
-        blendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+        blendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
         blendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
     }
 
@@ -1411,6 +1426,113 @@ bool VulkanRenderer::recreateSwapchainTargets(
     return true;
 }
 
+bool VulkanRenderer::createUiLayerTargets(const ViewSwapchain& swapchain, bool cylinderSupported) {
+    uiLayerReady_ = false;
+    uiLayerCylinder_ = cylinderSupported;
+    if (device_ == VK_NULL_HANDLE || swapchain.handle == XR_NULL_HANDLE || !textReady_) {
+        return false;
+    }
+    vkDeviceWaitIdle(device_);
+    for (auto fb : uiLayerTargets_.framebuffers) {
+        if (fb != VK_NULL_HANDLE) vkDestroyFramebuffer(device_, fb, nullptr);
+    }
+    for (auto iv : uiLayerTargets_.imageViews) {
+        if (iv != VK_NULL_HANDLE) vkDestroyImageView(device_, iv, nullptr);
+    }
+    uiLayerTargets_ = ViewTargets{};
+
+    if (uiLayerPass_ == VK_NULL_HANDLE) {
+        // Single-sampled colour only: every UI element is an SDF with its own
+        // edge anti-aliasing, so MSAA and depth buy nothing here. The image is
+        // cleared to transparent and left in COLOR_ATTACHMENT_OPTIMAL for the
+        // runtime, like the eye images.
+        VkAttachmentDescription color{};
+        color.format = colorFormat_;
+        color.samples = VK_SAMPLE_COUNT_1_BIT;
+        color.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+        color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+        color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+        color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        color.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+        color.finalLayout = VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL;
+        VkAttachmentReference colorRef{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+        VkSubpassDescription subpass{};
+        subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+        subpass.colorAttachmentCount = 1;
+        subpass.pColorAttachments = &colorRef;
+        VkSubpassDependency dep{};
+        dep.srcSubpass = VK_SUBPASS_EXTERNAL;
+        dep.dstSubpass = 0;
+        dep.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dep.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dep.srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        dep.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+        VkRenderPassCreateInfo info{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
+        info.attachmentCount = 1;
+        info.pAttachments = &color;
+        info.subpassCount = 1;
+        info.pSubpasses = &subpass;
+        info.dependencyCount = 1;
+        info.pDependencies = &dep;
+        PIXELVR_VK_CHECK(vkCreateRenderPass(device_, &info, nullptr, &uiLayerPass_));
+
+        // The UI pipelines again, compatible with this pass (no MSAA).
+        VkVertexInputBindingDescription glyphBinding{};
+        glyphBinding.binding = 0;
+        glyphBinding.stride = sizeof(GlyphInstance);
+        glyphBinding.inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+        VkVertexInputAttributeDescription glyphAttrs[3]{};
+        for (uint32_t a = 0; a < 3; ++a) {
+            glyphAttrs[a].location = a;
+            glyphAttrs[a].binding = 0;
+            glyphAttrs[a].format = VK_FORMAT_R32G32B32A32_SFLOAT;
+            glyphAttrs[a].offset = a * 4u * sizeof(float);
+        }
+        VkPipelineVertexInputStateCreateInfo glyphInput{
+            VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+        glyphInput.vertexBindingDescriptionCount = 1;
+        glyphInput.pVertexBindingDescriptions = &glyphBinding;
+        glyphInput.vertexAttributeDescriptionCount = 3;
+        glyphInput.pVertexAttributeDescriptions = glyphAttrs;
+        if (!buildPipeline("ui.vert.spv", "ui.frag.spv", uiPipelineLayout_, uiPipelineLayer_, true,
+                           uiLayerPass_, VK_SAMPLE_COUNT_1_BIT) ||
+            !buildPipeline("text.vert.spv", "text.frag.spv", textPipelineLayout_, textPipelineLayer_,
+                           true, uiLayerPass_, VK_SAMPLE_COUNT_1_BIT, &glyphInput) ||
+            !buildPipeline("thumb.vert.spv", "thumb.frag.spv", textPipelineLayout_, thumbPipelineLayer_,
+                           true, uiLayerPass_, VK_SAMPLE_COUNT_1_BIT)) {
+            PIXELVR_LOG_WARN("UI layer pipelines failed; the UI stays in the eye buffers");
+            return false;
+        }
+    }
+
+    uiLayerTargets_.width = swapchain.width;
+    uiLayerTargets_.height = swapchain.height;
+    uiLayerTargets_.imageViews.resize(swapchain.images.size());
+    uiLayerTargets_.framebuffers.resize(swapchain.images.size());
+    for (std::size_t i = 0; i < swapchain.images.size(); ++i) {
+        VkImageViewCreateInfo ivInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        ivInfo.image = swapchain.images[i].image;
+        ivInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        ivInfo.format = colorFormat_;
+        ivInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        ivInfo.subresourceRange.levelCount = 1;
+        ivInfo.subresourceRange.layerCount = 1;
+        PIXELVR_VK_CHECK(vkCreateImageView(device_, &ivInfo, nullptr, &uiLayerTargets_.imageViews[i]));
+        VkFramebufferCreateInfo fbInfo{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+        fbInfo.renderPass = uiLayerPass_;
+        fbInfo.attachmentCount = 1;
+        fbInfo.pAttachments = &uiLayerTargets_.imageViews[i];
+        fbInfo.width = static_cast<uint32_t>(swapchain.width);
+        fbInfo.height = static_cast<uint32_t>(swapchain.height);
+        fbInfo.layers = 1;
+        PIXELVR_VK_CHECK(vkCreateFramebuffer(device_, &fbInfo, nullptr, &uiLayerTargets_.framebuffers[i]));
+    }
+    uiLayerReady_ = true;
+    PIXELVR_LOG_INFO("UI composition layer ready (%dx%d, %s)", swapchain.width, swapchain.height,
+                     cylinderSupported ? "cylinder" : "flat quad only");
+    return true;
+}
+
 bool VulkanRenderer::createRenderResources(
     const std::vector<ViewSwapchain>& swapchains) {
     if (swapchains.empty()) {
@@ -1433,7 +1555,7 @@ bool VulkanRenderer::createRenderResources(
         VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO};
     allocInfo.commandPool = commandPool_;
     allocInfo.level = VK_COMMAND_BUFFER_LEVEL_PRIMARY;
-    allocInfo.commandBufferCount = 2;
+    allocInfo.commandBufferCount = kRenderPasses;
     PIXELVR_VK_CHECK(
         vkAllocateCommandBuffers(device_, &allocInfo, viewCommandBuffers_));
     commandBuffer_ = viewCommandBuffers_[0];
@@ -1444,6 +1566,7 @@ bool VulkanRenderer::createRenderResources(
     }
 
     // A second command buffer + fence dedicated to video texture uploads.
+    allocInfo.commandBufferCount = 1;
     PIXELVR_VK_CHECK(vkAllocateCommandBuffers(device_, &allocInfo, &uploadCmd_));
     PIXELVR_VK_CHECK(vkCreateFence(device_, &fenceInfo, nullptr, &uploadFence_));
 
@@ -1929,6 +2052,7 @@ void VulkanRenderer::updatePointer() {
     pointerButton_ = -1;
     pointerOnTimeline_ = false;
     pointerOnTimeToggle_ = false;
+    pointerOnPanel_ = false;
     pointerHand_ = -1;
     browserHovered_ = -1;
     browserSidebarHovered_ = -1;
@@ -1974,7 +2098,7 @@ void VulkanRenderer::updatePointer() {
         screenForward_, screenYaw_, recenterPitch_,
         sphereFollowInit_ ? sphereFollowYaw_ : screenYaw_);
     const Mat4 inv = rigidInverse(placement.base);
-    const float bendR = (panelCurve_ > 0.01f) ? placement.dist / panelCurve_ : 0.0f;
+    const float bendR = panelBendRadius(placement.dist);
 
     // Prefer the right hand; fall back to the left. A hand whose laser is off
     // takes no part in the raycast.
@@ -2030,12 +2154,16 @@ void VulkanRenderer::updatePointer() {
                 panelHit = true;
             }
         }
+        // Every hit below is on the panel plane except takeScreenHit's.
         auto hitHere = [&](float px, float py, float pz) {
             pointerActive_ = true;
             pointerHand_ = h;
             pointerHit_[0] = px;
             pointerHit_[1] = py;
             pointerHit_[2] = pz;
+            pointerOnPanel_ = true;
+            pointerPanel_[0] = hx;
+            pointerPanel_[1] = hyy;
         };
         const bool inPanel = panelHit && std::fabs(hx) <= kPanelW && std::fabs(hyy) <= kPanelTop;
 
@@ -2334,6 +2462,7 @@ void VulkanRenderer::updatePointer() {
         auto takeScreenHit = [&]() {
             if (screenHitSlot < 0) return false;
             hitHere(screenHitWorld.x, screenHitWorld.y, screenHitWorld.z);
+            pointerOnPanel_ = false;
             pointerScreen_ = screenHitSlot;
             if (webSlots_[screenHitSlot]) {
                 webPointerSlot_ = screenHitSlot;
@@ -2707,8 +2836,8 @@ bool VulkanRenderer::initText() {
         PIXELVR_LOG_WARN("Failed to build thumb pipeline");
     }
 
-    // Per-eye glyph instance buffers, persistently mapped.
-    for (int v = 0; v < 2; ++v) {
+    // Per-pass glyph instance buffers (eyes + UI layer), persistently mapped.
+    for (int v = 0; v < kRenderPasses; ++v) {
         VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
         bi.size = sizeof(GlyphInstance) * kMaxGlyphsPerView;
         bi.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT;
@@ -2732,11 +2861,112 @@ bool VulkanRenderer::initText() {
 
 void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                                 const XrView& view, const ViewSwapchain& swapchain) {
-    const ViewTargets& vt = viewTargets_[viewIndex];
+    (void)swapchain;
+    recordView(viewIndex, imageIndex, view, nullptr);
+}
 
-    // Per-eye command buffer; its previous submission was waited for at the end
+void VulkanRenderer::renderUiLayer(uint32_t imageIndex, const ViewSwapchain& swapchain,
+                                   const XrView* views, uint32_t viewCount, UiLayerInfo& out) {
+    out.visible = false;
+    if (!uiLayerLive() || imageIndex >= uiLayerTargets_.framebuffers.size() || viewCount == 0) {
+        return;
+    }
+    // What is on the panel plane this frame: the hub (and anything over it)
+    // or, during playback, the transport dock. Nothing -> no layer.
+    const bool hubOpen = browserVisible_ || settingsVisible_ ||
+                         (downloadsVisible_ && !downloadsModal_);
+    const bool modalOpen = downloadsVisible_ && downloadsModal_;
+    const bool overlayOpen = actionMenu_.visible || keyboardModal_.visible;
+    const bool dock = controlBarVisible_ && !hubOpen && !modalOpen;
+    if (!hubOpen && !modalOpen && !overlayOpen && !dock) {
+        return;
+    }
+
+    using namespace math;
+    const PanelPlacement placement = computePanelPlacement(
+        uiDistance_, projectionMode_ == ProjectionMode::Flat, uiFollowMode_, screenPivot_,
+        screenForward_, screenYaw_, recenterPitch_, sphereFollowYaw_);
+    const float bendR = panelBendRadius(placement.dist);
+
+    // Panel-space window (metres) with room for glows and shadows.
+    constexpr float kMargin = 0.10f;
+    UiLayerPass pass;
+    pass.imageIndex = imageIndex;
+    if (hubOpen || modalOpen || overlayOpen) {
+        pass.cx = 0.0f;
+        pass.cy = 0.0f;
+        pass.hw = kPanelW + kMargin;
+        pass.hh = kPanelTop + kMargin;
+    } else {
+        // Dock plus the scrub bubble / keyframe preview that pops up above it.
+        const float rowExtra = screenControlsVisible_ ? kDockScreenRowExtra : 0.0f;
+        const float bottom = kBarY - kDockHalfH - rowExtra - kMargin;
+        const float top = kBarY + 0.40f + kMargin;
+        pass.cx = 0.0f;
+        pass.cy = 0.5f * (bottom + top);
+        pass.hw = kDockHalfW + kMargin;
+        pass.hh = 0.5f * (top - bottom);
+    }
+
+    // Texel density: ~28 texels per degree seen from the viewer (about 1.3x the
+    // headset's pixel density), clamped to what fits in the swapchain image.
+    constexpr float kTexelsPerDegree = 28.0f;
+    float pxPerMetre = kTexelsPerDegree * 57.2958f / std::max(placement.dist, 0.5f);
+    pxPerMetre = std::min(pxPerMetre, static_cast<float>(uiLayerTargets_.width) / (2.0f * pass.hw));
+    pxPerMetre = std::min(pxPerMetre, static_cast<float>(uiLayerTargets_.height) / (2.0f * pass.hh));
+    pass.pw = std::clamp(static_cast<int32_t>(std::lround(2.0f * pass.hw * pxPerMetre)) & ~1,
+                         2, uiLayerTargets_.width);
+    pass.ph = std::clamp(static_cast<int32_t>(std::lround(2.0f * pass.hh * pxPerMetre)) & ~1,
+                         2, uiLayerTargets_.height);
+    pass.px = 0;
+    pass.py = 0;
+
+    const XrView& v0 = views[0];
+    const XrView& v1 = views[viewCount > 1 ? 1 : 0];
+    pass.headPos[0] = 0.5f * (v0.pose.position.x + v1.pose.position.x);
+    pass.headPos[1] = 0.5f * (v0.pose.position.y + v1.pose.position.y);
+    pass.headPos[2] = 0.5f * (v0.pose.position.z + v1.pose.position.z);
+
+    recordView(2, imageIndex, v0, &pass);
+
+    // Where the compositor puts the window: panel-space (cx, cy) on the plane
+    // or, when curved, on the cylinder whose axis sits bendR in front of the
+    // panel (local +Z), matching ui.vert / updatePointer.
+    const Mat4& base = placement.base;
+    Mat4 poseMat;
+    if (bendR > 0.0f) {
+        poseMat = multiply(base, multiply(translation(Vec3{0.0f, pass.cy, bendR}),
+                                          rotationY(-pass.cx / bendR)));
+        out.cylinder = true;
+        out.radius = bendR;
+        out.centralAngle = 2.0f * pass.hw / bendR;
+        out.aspectRatio = pass.hw / pass.hh;
+    } else {
+        poseMat = multiply(base, translation(Vec3{pass.cx, pass.cy, 0.0f}));
+        out.cylinder = false;
+    }
+    out.width = 2.0f * pass.hw;
+    out.height = 2.0f * pass.hh;
+    const Quat q = quatFromMat(poseMat);
+    out.pose.orientation = {q.x, q.y, q.z, q.w};
+    out.pose.position = {poseMat.m[12], poseMat.m[13], poseMat.m[14]};
+    out.imageRect.offset = {pass.px, pass.py};
+    out.imageRect.extent = {pass.pw, pass.ph};
+    out.visible = true;
+}
+
+void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
+                                const XrView& view, const UiLayerPass* layer) {
+    const bool layerPass = (layer != nullptr);
+    // Eye passes leave the panel UI to the layer while it is live; the layer
+    // pass draws only the panel UI.
+    const bool drawPanelUi = layerPass || !uiLayerLive();
+    const bool drawWorld = !layerPass;
+    const ViewTargets& vt = layerPass ? uiLayerTargets_ : viewTargets_[viewIndex];
+
+    // Per-pass command buffer; its previous submission was waited for at the end
     // of the last frame, but guard anyway in case a frame was cut short.
-    const uint32_t slot = viewIndex % 2;
+    const uint32_t slot = layerPass ? 2u : viewIndex % 2;
     if (viewFenceInFlight_[slot]) {
         const auto fenceT0 = std::chrono::steady_clock::now();
         vkWaitForFences(device_, 1, &viewFences_[slot], VK_TRUE, UINT64_MAX);
@@ -2754,9 +2984,13 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         return;
     }
 
-    const bool msaa = sampleCount_ != VK_SAMPLE_COUNT_1_BIT;
+    const bool msaa = !layerPass && sampleCount_ != VK_SAMPLE_COUNT_1_BIT;
     VkClearValue clears[3]{};
-    clears[0].color = {{clearColor_[0], clearColor_[1], clearColor_[2], clearColor_[3]}};
+    if (layerPass) {
+        clears[0].color = {{0.0f, 0.0f, 0.0f, 0.0f}};  // transparent: only the UI shows
+    } else {
+        clears[0].color = {{clearColor_[0], clearColor_[1], clearColor_[2], clearColor_[3]}};
+    }
     if (msaa) {
         clears[1].color = clears[0].color;
         clears[2].depthStencil = {1.0f, 0};
@@ -2764,28 +2998,30 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         clears[1].depthStencil = {1.0f, 0};
     }
 
+    // The layer pass draws only the window sub-rect the layer will show.
+    VkRect2D area{};
+    area.offset = {layerPass ? layer->px : 0, layerPass ? layer->py : 0};
+    area.extent = {static_cast<uint32_t>(layerPass ? layer->pw : vt.width),
+                   static_cast<uint32_t>(layerPass ? layer->ph : vt.height)};
+
     VkRenderPassBeginInfo rpBegin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-    rpBegin.renderPass = renderPass_;
+    rpBegin.renderPass = layerPass ? uiLayerPass_ : renderPass_;
     rpBegin.framebuffer = vt.framebuffers[imageIndex];
-    rpBegin.renderArea.offset = {0, 0};
-    rpBegin.renderArea.extent = {static_cast<uint32_t>(vt.width),
-                                 static_cast<uint32_t>(vt.height)};
-    rpBegin.clearValueCount = msaa ? 3u : 2u;
+    rpBegin.renderArea = area;
+    rpBegin.clearValueCount = layerPass ? 1u : (msaa ? 3u : 2u);
     rpBegin.pClearValues = clears;
     vkCmdBeginRenderPass(commandBuffer_, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
 
     VkViewport vp{};
-    vp.x = 0.0f;
-    vp.y = 0.0f;
-    vp.width = static_cast<float>(vt.width);
-    vp.height = static_cast<float>(vt.height);
+    vp.x = static_cast<float>(area.offset.x);
+    vp.y = static_cast<float>(area.offset.y);
+    vp.width = static_cast<float>(area.extent.width);
+    vp.height = static_cast<float>(area.extent.height);
     vp.minDepth = 0.0f;
     vp.maxDepth = 1.0f;
     vkCmdSetViewport(commandBuffer_, 0, 1, &vp);
 
-    VkRect2D scissor{};
-    scissor.extent = {static_cast<uint32_t>(vt.width),
-                      static_cast<uint32_t>(vt.height)};
+    VkRect2D scissor = area;
     vkCmdSetScissor(commandBuffer_, 0, 1, &scissor);
 
     // Transport HUD. For flat content it is world-locked just beneath the video
@@ -2832,16 +3068,22 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         screenForward_, screenYaw_, recenterPitch_, sphereFollowYaw_);
     const Mat4& panelBase = placement.base;
     // Curved main panel: a cylinder whose radius is the panel distance divided by
-    // the curve amount (1.0 = wraps around the viewer, 0 = flat).
-    const float bendR = (panelCurve_ > 0.01f) ? placement.dist / panelCurve_ : 0.0f;
-    const Mat4 vpPanel = multiply(multiply(proj, viewMat), panelBase);
+    // the curve amount (1.0 = wraps around the viewer, 0 = flat). In the layer
+    // pass the panel is drawn flat (orthographic, panel metres -> the layer
+    // window) and the compositor bends the layer instead.
+    const float bendR = layerPass ? 0.0f : panelBendRadius(placement.dist);
+    const Mat4 vpPanel = layerPass
+        ? orthographicVulkan(layer->cx - layer->hw, layer->cx + layer->hw,
+                             layer->cy - layer->hh, layer->cy + layer->hh)
+        : multiply(multiply(proj, viewMat), panelBase);
     // Glass sheen phase for this eye: the reflection band follows the eye's
     // horizontal position in panel space (encoded into borderColor.a, 4 m range).
     float glassPhase = 0.5f;
     {
-        const Vec3 eyeLocal = transformPoint(
-            rigidInverse(panelBase),
-            Vec3{view.pose.position.x, view.pose.position.y, view.pose.position.z});
+        const Vec3 eyePos = layerPass
+            ? Vec3{layer->headPos[0], layer->headPos[1], layer->headPos[2]}
+            : Vec3{view.pose.position.x, view.pose.position.y, view.pose.position.z};
+        const Vec3 eyeLocal = transformPoint(rigidInverse(panelBase), eyePos);
         glassPhase = std::clamp((eyeLocal.x - 0.35f) / 4.0f + 0.5f, 0.0f, 1.0f);
     }
 
@@ -2958,8 +3200,17 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
     // Batched text: drawString appends glyph instances to this eye's buffer and
     // a run is drawn with one instanced call when the pipeline changes (see
     // bindPipe) or when the transform / bend / font of the text changes.
-    GlyphInstance* const glyphOut = static_cast<GlyphInstance*>(glyphMapped_[viewIndex % 2]);
-    const VkBuffer glyphBuf = glyphBuffer_[viewIndex % 2];
+    GlyphInstance* const glyphOut = static_cast<GlyphInstance*>(glyphMapped_[slot]);
+    const VkBuffer glyphBuf = glyphBuffer_[slot];
+    // The layer pass draws with the pipelines built for its own render pass.
+    const VkPipeline textPipe = layerPass ? textPipelineLayer_ : textPipeline_;
+    auto passPipeline = [&](VkPipeline pipe) -> VkPipeline {
+        if (!layerPass) return pipe;
+        if (pipe == uiPipeline_) return uiPipelineLayer_;
+        if (pipe == textPipeline_) return textPipelineLayer_;
+        if (pipe == thumbPipeline_) return thumbPipelineLayer_;
+        return pipe;
+    };
     uint32_t glyphCount = 0;
     uint32_t glyphBatchStart = 0;
     Mat4 glyphBatchMvp{};          // copied: curTextVp may point at a loop-local
@@ -2972,7 +3223,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
     VkDescriptorSet curTextSet = textSet_;
     auto flushText = [&]() {
         if (glyphCount > glyphBatchStart && glyphBatchValid) {
-            vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline_);
+            vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipe);
             vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                     textPipelineLayout_, 0, 1, &glyphBatchSet, 0, nullptr);
             const VkDeviceSize off = 0;
@@ -2989,7 +3240,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
     };
     auto bindPipe = [&](VkPipeline pipe) {
         flushText();
-        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, passPipeline(pipe));
     };
     auto drawString = [&](float x, float baseline, float scale, const float col[4],
                           const std::string& s) {
@@ -3246,13 +3497,13 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
     // clears the eye image. Slot 0 is the main screen (recenter-anchored, also
     // 360/180); slots 1..2 are extra flat screens placed by the user. Each flat
     // screen's model matrix and half-size are kept for the selection outline.
-    if (viewIndex == 0) {
+    if (viewIndex == 0 && drawWorld) {
         for (ScreenHitInfo& h : screenHit_) h.valid = false;  // refreshed below
     }
     math::Mat4 screenModels[kMaxVideoSlots];
     float screenBend[kMaxVideoSlots] = {};
     float screenScaleX[kMaxVideoSlots] = {};
-    {
+    if (drawWorld) {
         using namespace math;
         const Mat4 viewMatV = rigidInverse(rigidTransform(
             Quat{view.pose.orientation.x, view.pose.orientation.y,
@@ -3654,7 +3905,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
     // 1. In-Playback Floating Cinema Transport Dock (Mockup #4)
     // Shown only during playback / when Unified Spatial Hub is closed.
     // =========================================================================
-    if (controlBarVisible_ && !hubOpen && !modalOpen && uiPipeline_ != VK_NULL_HANDLE) {
+    if (drawPanelUi && controlBarVisible_ && !hubOpen && !modalOpen && uiPipeline_ != VK_NULL_HANDLE) {
         bindPipe(uiPipeline_);
         const float dockShadow[4] = {0.0f, 0.0f, 0.0f, 0.55f};
         const float rowExtra = screenControlsVisible_ ? kDockScreenRowExtra : 0.0f;
@@ -4029,7 +4280,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
     // 2. Unified Spatial Hub Window (1.80m x 1.12m)
     // Shared shell for Files (Mockup #1), Downloads (Mockup #2), Settings (Mockup #3)
     // =========================================================================
-    if (hubOpen && textReady_ && uiPipeline_ != VK_NULL_HANDLE) {
+    if (drawPanelUi && hubOpen && textReady_ && uiPipeline_ != VK_NULL_HANDLE) {
         bindPipe(uiPipeline_);
 
         // Depth shadow + faint accent edge light behind the glass panel
@@ -5071,7 +5322,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
     // =========================================================================
     // 3. Folder Download Confirmation Modal (centered overlay)
     // =========================================================================
-    if (modalOpen && textReady_ && uiPipeline_ != VK_NULL_HANDLE) {
+    if (drawPanelUi && modalOpen && textReady_ && uiPipeline_ != VK_NULL_HANDLE) {
         bindPipe(uiPipeline_);
         const float mHalfW = 0.44f;
         const float mHalfH = 0.26f;
@@ -5124,7 +5375,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
     // =========================================================================
     // 4. File Action Submenu Modal (overlay)
     // =========================================================================
-    if (actionMenu_.visible && textReady_ && uiPipeline_ != VK_NULL_HANDLE) {
+    if (drawPanelUi && actionMenu_.visible && textReady_ && uiPipeline_ != VK_NULL_HANDLE) {
         bindPipe(uiPipeline_);
         const float backdrop[4] = {0.0f, 0.0f, 0.0f, 0.82f};
         drawUiElement(vpPanel, 0.0f, 0.0f, kPanelW, kPanelTop,
@@ -5905,7 +6156,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
     // =========================================================================
     // In-app keyboard: input field + glass key sheet over the panel
     // =========================================================================
-    if (keyboardModal_.visible && textReady_ && uiPipeline_ != VK_NULL_HANDLE) {
+    if (drawPanelUi && keyboardModal_.visible && textReady_ && uiPipeline_ != VK_NULL_HANDLE) {
         bindPipe(uiPipeline_);
         const float dimBg[4] = {0.0f, 0.0f, 0.0f, 0.62f};
         drawUiElement(vpPanel, 0.0f, 0.0f, kPanelW, kPanelTop, UiShape::RoundedBox, dimBg, 0.09f);
@@ -5975,7 +6226,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         const TextFieldLayout kbLay = layoutTextField(
             fieldLeft, fieldRight, fieldSc, keyboardModal_.text, keyboardModal_.cursorPos,
             keyboardModal_.isPassword, false);
-        if (viewIndex == 0) {
+        if (viewIndex == 0 || layerPass) {
             // Caret stops at every character boundary of the visible text, so a
             // laser click maps to exactly what is on screen (scrolling, masking).
             kbCaretStops_.clear();
@@ -6058,7 +6309,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
     }
 
     // Tracked controller 3D models (lit capsule), drawn before the laser/cursor.
-    if (drawModels_ &&
+    if (drawWorld && drawModels_ &&
         (controllers_[0].active || controllers_[1].active) &&
         modelPipeline_ != VK_NULL_HANDLE) {
         bindPipe(modelPipeline_);
@@ -6169,9 +6420,23 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         }
     }
 
+    // Pointer cursor on the UI panel: part of the layer while it is live (the
+    // layer composites over the eye buffers, so a cursor drawn there would be
+    // hidden behind the panel).
+    const bool cursorInLayer = uiLayerLive() && pointerOnPanel_;
+    if (layerPass && pointerActive_ && cursorInLayer && uiPipeline_ != VK_NULL_HANDLE) {
+        bindPipe(uiPipeline_);
+        const float cursorGlow[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.45f};
+        const float cursorCol[4] = {1.0f, 1.0f, 1.0f, 0.95f};
+        drawUiElement(vpPanel, pointerPanel_[0], pointerPanel_[1], 0.040f, 0.040f,
+                      UiShape::SoftGlow, cursorGlow, 1.0f, 0.75f);
+        drawUiElement(vpPanel, pointerPanel_[0], pointerPanel_[1], 0.020f, 0.020f,
+                      UiShape::Cursor, cursorCol, 1.0f);
+    }
+
     // Tracked controllers: a short body stub, a pointer ray and the UI cursor,
     // drawn last (in world space) so they sit on top of the scene.
-    if ((controllers_[0].active || controllers_[1].active) &&
+    if (drawWorld && (controllers_[0].active || controllers_[1].active) &&
         uiPipeline_ != VK_NULL_HANDLE) {
         const Vec3 eyePos{view.pose.position.x, view.pose.position.y,
                           view.pose.position.z};
@@ -6275,7 +6540,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                         rayCol);
             }
         }
-        if (pointerActive_) {
+        if (pointerActive_ && !cursorInLayer) {
             const Vec3 hit{pointerHit_[0], pointerHit_[1], pointerHit_[2]};
             const float cursorGlow[4] = {
                 themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.45f};
@@ -6285,7 +6550,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
     }
 
     // Debug statistics overlay: head-locked text pinned to the upper-left FOV.
-    if (statsVisible_ && textReady_ && !statsLines_.empty()) {
+    if (drawWorld && statsVisible_ && textReady_ && !statsLines_.empty()) {
         bindPipe(textPipeline_);
         vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
@@ -6310,7 +6575,7 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
 
     // Background download status: one head-locked line near the bottom edge, so
     // an in-progress download stays visible after the browser panel is closed.
-    if (downloadStatusVisible_ && textReady_ && !downloadStatusText_.empty()) {
+    if (drawWorld && downloadStatusVisible_ && textReady_ && !downloadStatusText_.empty()) {
         bindPipe(textPipeline_);
         vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
@@ -6340,11 +6605,12 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
         return;
     }
     viewFenceInFlight_[slot] = true;
-    // Only the last eye waits: until then the first eye's GPU work overlaps the
-    // second eye's recording. Everything the app mutates between frames (video
-    // textures, dma-buf frames, thumbnails, glyph buffers) is idle afterwards.
-    if (viewIndex + 1 >= viewTargets_.size()) {
-        for (uint32_t i = 0; i < 2; ++i) {
+    // Only the last eye waits: until then the UI layer's and first eye's GPU
+    // work overlaps the later recording. Everything the app mutates between
+    // frames (video textures, dma-buf frames, thumbnails, glyph buffers) is
+    // idle afterwards.
+    if (!layerPass && viewIndex + 1 >= viewTargets_.size()) {
+        for (uint32_t i = 0; i < kRenderPasses; ++i) {
             if (!viewFenceInFlight_[i]) continue;
             vkWaitForFences(device_, 1, &viewFences_[i], VK_TRUE, UINT64_MAX);
             vkResetFences(device_, 1, &viewFences_[i]);

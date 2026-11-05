@@ -17,6 +17,21 @@ struct ViewSwapchain {
     std::vector<XrSwapchainImageVulkan2KHR> images;
 };
 
+// Where the UI composition layer sits this frame (filled in by the renderer).
+// The pose is in the app reference space; a cylinder is used when `cylinder`
+// is set and the runtime supports it, otherwise a flat quad.
+struct UiLayerInfo {
+    bool visible = false;
+    bool cylinder = false;
+    XrPosef pose{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
+    float width = 1.0f;         // quad size (metres)
+    float height = 1.0f;
+    float radius = 1.0f;        // cylinder parameters
+    float centralAngle = 1.0f;
+    float aspectRatio = 1.0f;
+    XrRect2Di imageRect{{0, 0}, {0, 0}};
+};
+
 // Per-frame controller input. Boolean fields are rising-edge (true only on the
 // frame the button was pressed). Head pose is in the app reference space.
 struct XrInputState {
@@ -100,6 +115,12 @@ public:
     bool createReferenceSpace();
     std::vector<int64_t> enumerateSwapchainFormats();
     bool createSwapchains(int64_t colorFormat, float scaleFactor = 1.25f);
+    // Off-screen swapchain for the UI composition layer (quad / cylinder), so
+    // the compositor samples the panel once at display resolution instead of
+    // the UI being rasterised into the eye buffers and resampled again.
+    bool createUiSwapchain(int64_t colorFormat, uint32_t width, uint32_t height);
+    const ViewSwapchain& uiSwapchain() const { return uiSwapchain_; }
+    bool cylinderLayerSupported() const { return cylinderLayerEnabled_; }
 
     // Controller input (OpenXR actions). Call createActions after createSession.
     bool createActions();
@@ -118,9 +139,17 @@ public:
                                             const XrView& view,
                                             const ViewSwapchain& swapchain)>;
 
+    // Callback that records the UI into the UI swapchain image (called before
+    // the eye views) and reports the layer placement.
+    using RenderUiLayerFn = std::function<void(uint32_t imageIndex, const ViewSwapchain& swapchain,
+                                               const XrView* views, uint32_t viewCount,
+                                               UiLayerInfo& out)>;
+
     // Runs xrWaitFrame / xrBeginFrame, locates the eye views, invokes
     // renderView per eye, and submits the stereo projection layer via xrEndFrame.
-    bool renderFrame(const RenderViewFn& renderView);
+    // With renderUi set (and a UI swapchain created), the UI is rendered into
+    // its own swapchain and submitted as a quad / cylinder layer on top.
+    bool renderFrame(const RenderViewFn& renderView, const RenderUiLayerFn& renderUi = nullptr);
 
     // --- Accessors -------------------------------------------------------
     XrInstance instance() const { return instance_; }
@@ -170,8 +199,11 @@ private:
     bool profileLogged_ = false;
     bool profileLoggedHand_[2] = {false, false};  // each hand logged once
 
+    bool cylinderLayerEnabled_ = false;   // XR_KHR_composition_layer_cylinder
+
     std::vector<XrViewConfigurationView> configViews_;
     std::vector<ViewSwapchain> swapchains_;
+    ViewSwapchain uiSwapchain_;
     std::vector<XrView> views_;
     std::vector<XrView> lastValidViews_;
     XrTime lastValidViewsTime_ = 0;

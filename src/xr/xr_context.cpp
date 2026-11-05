@@ -33,6 +33,9 @@ XrContext::~XrContext() {
             xrDestroySwapchain(sc.handle);
         }
     }
+    if (uiSwapchain_.handle != XR_NULL_HANDLE) {
+        xrDestroySwapchain(uiSwapchain_.handle);
+    }
     if (appSpace_ != XR_NULL_HANDLE) {
         xrDestroySpace(appSpace_);
     }
@@ -78,6 +81,16 @@ bool XrContext::createInstanceAndSystem(const char* appName) {
     }
 
     std::vector<const char*> enabledExts{XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME};
+
+    // Optional: curved UI composition layer (the flat quad layer is core).
+    if (has_ext(XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME)) {
+        enabledExts.push_back(XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME);
+        cylinderLayerEnabled_ = true;
+        PIXELVR_LOG_INFO("Cylinder composition layers available");
+    } else {
+        PIXELVR_LOG_WARN("%s unavailable; the UI layer falls back to a flat quad",
+                         XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME);
+    }
 
     // Optional: real controller models via XR_EXT_render_model (depends on uuid +
     // interaction_render_model). Enabled only if all three are present.
@@ -314,6 +327,40 @@ bool XrContext::createSwapchains(int64_t colorFormat, float scaleFactor) {
                      swapchains_.empty() ? 0 : swapchains_[0].width,
                      swapchains_.empty() ? 0 : swapchains_[0].height,
                      scaleFactor);
+    return true;
+}
+
+bool XrContext::createUiSwapchain(int64_t colorFormat, uint32_t width, uint32_t height) {
+    if (uiSwapchain_.handle != XR_NULL_HANDLE) {
+        xrDestroySwapchain(uiSwapchain_.handle);
+        uiSwapchain_ = ViewSwapchain{};
+    }
+    XrSwapchainCreateInfo createInfo{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    createInfo.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT |
+                            XR_SWAPCHAIN_USAGE_SAMPLED_BIT;
+    createInfo.format = colorFormat;
+    createInfo.sampleCount = 1;
+    createInfo.width = width;
+    createInfo.height = height;
+    createInfo.faceCount = 1;
+    createInfo.arraySize = 1;
+    createInfo.mipCount = 1;
+    PIXELVR_XR_CHECK(instance_, xrCreateSwapchain(session_, &createInfo, &uiSwapchain_.handle));
+
+    uiSwapchain_.width = static_cast<int32_t>(width);
+    uiSwapchain_.height = static_cast<int32_t>(height);
+    uiSwapchain_.format = colorFormat;
+    uint32_t imageCount = 0;
+    PIXELVR_XR_CHECK(instance_,
+                     xrEnumerateSwapchainImages(uiSwapchain_.handle, 0, &imageCount, nullptr));
+    uiSwapchain_.images.assign(imageCount,
+                               XrSwapchainImageVulkan2KHR{XR_TYPE_SWAPCHAIN_IMAGE_VULKAN2_KHR});
+    PIXELVR_XR_CHECK(
+        instance_,
+        xrEnumerateSwapchainImages(
+            uiSwapchain_.handle, imageCount, &imageCount,
+            reinterpret_cast<XrSwapchainImageBaseHeader*>(uiSwapchain_.images.data())));
+    PIXELVR_LOG_INFO("Created UI layer swapchain (%ux%u, %u images)", width, height, imageCount);
     return true;
 }
 
@@ -977,7 +1024,7 @@ bool XrContext::locateViews(XrTime displayTime, std::vector<XrView>& views,
     return true;
 }
 
-bool XrContext::renderFrame(const RenderViewFn& renderView) {
+bool XrContext::renderFrame(const RenderViewFn& renderView, const RenderUiLayerFn& renderUi) {
     XrFrameWaitInfo waitInfo{XR_TYPE_FRAME_WAIT_INFO};
     XrFrameState frameState{XR_TYPE_FRAME_STATE};
     PIXELVR_XR_CHECK(instance_, xrWaitFrame(session_, &waitInfo, &frameState));
@@ -1092,6 +1139,54 @@ bool XrContext::renderFrame(const RenderViewFn& renderView) {
         }
     }
 
+    // UI layer first: its GPU work then overlaps the eye recording, and the
+    // last eye waits for all of it.
+    UiLayerInfo uiInfo;
+    XrCompositionLayerQuad uiQuad{XR_TYPE_COMPOSITION_LAYER_QUAD};
+    XrCompositionLayerCylinderKHR uiCyl{XR_TYPE_COMPOSITION_LAYER_CYLINDER_KHR};
+    if (viewsValid && renderUi && uiSwapchain_.handle != XR_NULL_HANDLE) {
+        uint32_t imageIndex = 0;
+        XrSwapchainImageAcquireInfo acquireInfo{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
+        PIXELVR_XR_CHECK(instance_,
+                         xrAcquireSwapchainImage(uiSwapchain_.handle, &acquireInfo, &imageIndex));
+        XrSwapchainImageWaitInfo waitImageInfo{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
+        waitImageInfo.timeout = XR_INFINITE_DURATION;
+        PIXELVR_XR_CHECK(instance_, xrWaitSwapchainImage(uiSwapchain_.handle, &waitImageInfo));
+
+        renderUi(imageIndex, uiSwapchain_, views_.data(), static_cast<uint32_t>(views_.size()), uiInfo);
+
+        XrSwapchainImageReleaseInfo releaseInfo{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
+        PIXELVR_XR_CHECK(instance_, xrReleaseSwapchainImage(uiSwapchain_.handle, &releaseInfo));
+
+        if (uiInfo.visible) {
+            // The UI is rendered with premultiplied alpha (straight-alpha
+            // blending onto a cleared transparent target).
+            const XrCompositionLayerFlags flags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+            XrSwapchainSubImage sub{};
+            sub.swapchain = uiSwapchain_.handle;
+            sub.imageRect = uiInfo.imageRect;
+            sub.imageArrayIndex = 0;
+            if (uiInfo.cylinder && cylinderLayerEnabled_) {
+                uiCyl.layerFlags = flags;
+                uiCyl.space = appSpace_;
+                uiCyl.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                uiCyl.subImage = sub;
+                uiCyl.pose = uiInfo.pose;
+                uiCyl.radius = uiInfo.radius;
+                uiCyl.centralAngle = uiInfo.centralAngle;
+                uiCyl.aspectRatio = uiInfo.aspectRatio;
+            } else {
+                uiQuad.layerFlags = flags;
+                uiQuad.space = appSpace_;
+                uiQuad.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+                uiQuad.subImage = sub;
+                uiQuad.pose = uiInfo.pose;
+                uiQuad.size = {uiInfo.width, uiInfo.height};
+                uiInfo.cylinder = false;
+            }
+        }
+    }
+
     if (viewsValid) {
         projectionViews.resize(views_.size(),
                                {XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW});
@@ -1128,13 +1223,15 @@ bool XrContext::renderFrame(const RenderViewFn& renderView) {
         layer.views = projectionViews.data();
     }
 
-    std::array<XrCompositionLayerBaseHeader*, 1> layers{
-        reinterpret_cast<XrCompositionLayerBaseHeader*>(&layer)};
+    std::array<XrCompositionLayerBaseHeader*, 2> layers{
+        reinterpret_cast<XrCompositionLayerBaseHeader*>(&layer),
+        uiInfo.cylinder ? reinterpret_cast<XrCompositionLayerBaseHeader*>(&uiCyl)
+                        : reinterpret_cast<XrCompositionLayerBaseHeader*>(&uiQuad)};
 
     XrFrameEndInfo endInfo{XR_TYPE_FRAME_END_INFO};
     endInfo.displayTime = frameState.predictedDisplayTime;
     endInfo.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
-    endInfo.layerCount = viewsValid ? 1u : 0u;
+    endInfo.layerCount = viewsValid ? (uiInfo.visible ? 2u : 1u) : 0u;
     endInfo.layers = viewsValid ? layers.data() : nullptr;
 
     if (!viewsValid && frameState.shouldRender == XR_TRUE) {

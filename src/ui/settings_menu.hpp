@@ -16,6 +16,7 @@ public:
         ListenRecenter,
         CycleDownloadDir,
         ToggleSwapEyes,
+        ToggleUiLayer,
         ToggleModels,
         ToggleStats,
         CycleDistance,
@@ -101,6 +102,7 @@ public:
     int stereoMode() const { return stereoMode_; }         // 0=Mono, 1=SBS, 2=TB
     void setStereoMode(int s) { stereoMode_ = s; refresh(); }
     bool swapEyes() const { return swapEyes_; }
+    bool uiLayer() const { return uiLayer_; }
     void setSwapEyes(bool s) { swapEyes_ = s; refresh(); }
     bool drawModels() const { return drawModels_; }
     bool showStats() const { return showStats_; }
@@ -209,6 +211,7 @@ private:
     int projectionMode_ = 0;
     int stereoMode_ = 0;
     bool swapEyes_ = false;
+    bool uiLayer_ = true;      // UI drawn as a compositor layer (sharp) vs. into the eye buffers
     bool drawModels_ = false;  // off: SteamVR draws the real controllers; laser stays
     bool showStats_ = false;
     float screenDistance_ = 3.0f;

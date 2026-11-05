@@ -225,6 +225,8 @@ void SettingsMenu::refresh() {
                   uiOpacityIdx_ % kUiOpacityCount, Action::CycleUiOpacity);
         segmented("UI in 360/180 Videos", {"Fixed", "Follow Gaze"}, uiFollowMode_ % 2,
                   Action::CycleUiFollowMode);
+        segmented("UI Rendering", {"Sharp Layer", "In Scene"}, uiLayer_ ? 0 : 1,
+                  Action::ToggleUiLayer);
         segmented("Download Folder", {kDownloadDirs[0], kDownloadDirs[1], kDownloadDirs[2]},
                   downloadDirIdx_ % kDownloadDirCount, Action::CycleDownloadDir);
         rows_.push_back({"List View Columns", "Customize", Action::EnterListColsConfig});
@@ -356,6 +358,11 @@ SettingsMenu::Action SettingsMenu::activate() {
             break;
         case Action::ToggleSwapEyes:
             swapEyes_ = !swapEyes_;
+            saveConfig();
+            refresh();
+            break;
+        case Action::ToggleUiLayer:
+            uiLayer_ = !uiLayer_;
             saveConfig();
             refresh();
             break;
@@ -698,6 +705,7 @@ void SettingsMenu::loadConfig() {
             if (key == "projection") projectionMode_ = std::clamp(std::stoi(val), 0, 2);
             else if (key == "stereo") stereoMode_ = std::clamp(std::stoi(val), 0, 2);
             else if (key == "swap_eyes") swapEyes_ = (val == "1");
+            else if (key == "ui_layer") uiLayer_ = (val == "1");
             else if (key == "draw_models") drawModels_ = (val == "1");
             else if (key == "show_stats") showStats_ = (val == "1");
             else if (key == "distance") screenDistance_ = std::clamp(std::stof(val), 1.0f, 10.0f);
@@ -757,6 +765,7 @@ void SettingsMenu::saveConfig() const {
             file << "projection=" << projectionMode_ << "\n";
             file << "stereo=" << stereoMode_ << "\n";
             file << "swap_eyes=" << (swapEyes_ ? 1 : 0) << "\n";
+            file << "ui_layer=" << (uiLayer_ ? 1 : 0) << "\n";
             file << "draw_models=" << (drawModels_ ? 1 : 0) << "\n";
             file << "show_stats=" << (showStats_ ? 1 : 0) << "\n";
             file << "distance=" << screenDistance_ << "\n";

@@ -194,4 +194,67 @@ inline Mat4 rotationX(float angle) {
     return r;
 }
 
+inline Mat4 rotationY(float angle) {
+    Mat4 r;
+    const float c = std::cos(angle);
+    const float s = std::sin(angle);
+    r.m[0] = c;
+    r.m[2] = -s;
+    r.m[8] = s;
+    r.m[10] = c;
+    return r;
+}
+
+// Orthographic projection of the rectangle [left, right] x [bottom, top] onto
+// Vulkan clip space (Y down: `top` maps to -1), depth fixed at 0.5.
+inline Mat4 orthographicVulkan(float left, float right, float bottom, float top) {
+    Mat4 r;
+    for (float& v : r.m) {
+        v = 0.0f;
+    }
+    r.m[0] = 2.0f / (right - left);
+    r.m[12] = -(right + left) / (right - left);
+    r.m[5] = -2.0f / (top - bottom);
+    r.m[13] = (top + bottom) / (top - bottom);
+    r.m[10] = 0.0f;
+    r.m[14] = 0.5f;
+    r.m[15] = 1.0f;
+    return r;
+}
+
+// Rotation quaternion of a rigid transform (the 3x3 part must be orthonormal).
+inline Quat quatFromMat(const Mat4& m) {
+    const float m00 = m.m[0], m10 = m.m[1], m20 = m.m[2];
+    const float m01 = m.m[4], m11 = m.m[5], m21 = m.m[6];
+    const float m02 = m.m[8], m12 = m.m[9], m22 = m.m[10];
+    const float trace = m00 + m11 + m22;
+    Quat q;
+    if (trace > 0.0f) {
+        const float s = std::sqrt(trace + 1.0f) * 2.0f;
+        q.w = 0.25f * s;
+        q.x = (m21 - m12) / s;
+        q.y = (m02 - m20) / s;
+        q.z = (m10 - m01) / s;
+    } else if (m00 > m11 && m00 > m22) {
+        const float s = std::sqrt(1.0f + m00 - m11 - m22) * 2.0f;
+        q.w = (m21 - m12) / s;
+        q.x = 0.25f * s;
+        q.y = (m01 + m10) / s;
+        q.z = (m02 + m20) / s;
+    } else if (m11 > m22) {
+        const float s = std::sqrt(1.0f + m11 - m00 - m22) * 2.0f;
+        q.w = (m02 - m20) / s;
+        q.x = (m01 + m10) / s;
+        q.y = 0.25f * s;
+        q.z = (m12 + m21) / s;
+    } else {
+        const float s = std::sqrt(1.0f + m22 - m00 - m11) * 2.0f;
+        q.w = (m10 - m01) / s;
+        q.x = (m02 + m20) / s;
+        q.y = (m12 + m21) / s;
+        q.z = 0.25f * s;
+    }
+    return q;
+}
+
 } // namespace pixelvr::math
