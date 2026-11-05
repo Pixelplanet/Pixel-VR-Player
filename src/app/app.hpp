@@ -283,8 +283,6 @@ private:
     // close); each has its own Chromium window. "web://" is the pseudo path the
     // screen picker uses for "open a browser here".
     static constexpr const char* kWebPath = "web://";
-    static constexpr const char* kYouTubeUrl = "https://www.youtube.com";
-    static constexpr const char* kBrowserHomeUrl = "https://www.google.com";
     BrowserHost webHosts_[VulkanRenderer::kMaxVideoSlots];
     int webMouseSlot_ = -1;      // browser screen the press / hover belongs to
     bool webMouseDown_ = false;

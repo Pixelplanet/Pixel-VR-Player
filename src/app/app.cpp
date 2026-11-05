@@ -2981,6 +2981,8 @@ int App::run() {
                                       settings_.uiAccentColorIdx(),
                                       settings_.uiDistance());
             renderer_.setAmbilightIntensity(settings_.ambilightIntensity());
+            renderer_.setRailShortcuts(settings_.railShortcut(0).name, settings_.railShortcut(0).kiosk,
+                                       settings_.railShortcut(1).name, settings_.railShortcut(1).kiosk);
             renderer_.setUiFollowMode(settings_.uiFollowMode());
             renderer_.setPanelCurve(settings_.panelCurve());
             renderer_.setUiOpacity(settings_.uiOpacity());
@@ -3718,12 +3720,11 @@ int App::run() {
                                    pendingDl_.empty() && !actionMenu_.visible;
             const int sbHover = renderer_.browserSidebarHovered();
             if (hubActive && (in.togglePlay || in.select) && sbHover >= 0) {
-                if (sbHover == 10) {
-                    // Main Tab: YouTube (just the page, on youtube.com)
-                    openWebScreen(kYouTubeUrl, true);
-                } else if (sbHover == 11) {
-                    // Main Tab: Browser (full browser: tabs, address bar, bookmarks)
-                    openWebScreen(kBrowserHomeUrl, false);
+                if (sbHover == 10 || sbHover == 11) {
+                    // The two configurable web tabs (Settings > UI & Appearance):
+                    // a streaming service as a kiosk page, or the full browser.
+                    const SettingsMenu::RailShortcut& sc = settings_.railShortcut(sbHover - 10);
+                    openWebScreen(sc.url, sc.kiosk);
                 } else if (sbHover == 0) {
                     // Main Tab: Files
                     downloadsWindow_ = false;

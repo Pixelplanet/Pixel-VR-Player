@@ -4832,8 +4832,10 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         // Active primary section: 0=Files, 1=Downloads, 2=Settings
         const int activeMainTab = settingsVisible_ ? 2 : (downloadsVisible_ ? 1 : 0);
         const float* mainTabY = hub::kMainTabY;
-        const UiShape mainIcons[hub::kMainTabCount] = {UiShape::Files, UiShape::Download, UiShape::Settings,
-                                                       UiShape::Play, UiShape::Globe};
+        const UiShape mainIcons[hub::kMainTabCount] = {
+            UiShape::Files, UiShape::Download, UiShape::Settings,
+            railShortcutKiosk_[0] ? UiShape::Play : UiShape::Globe,
+            railShortcutKiosk_[1] ? UiShape::Play : UiShape::Globe};
 
         const float tabActiveBg[4] = {
             themeAccentCol[0] * 0.30f, themeAccentCol[1] * 0.30f,
@@ -4955,7 +4957,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const UiRect lockR = hub::lockVaultButton(activeMainTab);
                 drawFitCentered(lockR.cx, lockR.cy, 0.28f, scSub, lockTextCol, "Lock Vault");
             }
-            const char* mainLabels[hub::kMainTabCount] = {"Files", "Downloads", "Settings", "YouTube", "Browser"};
+            const char* mainLabels[hub::kMainTabCount] = {"Files", "Downloads", "Settings",
+                                                          railShortcutName_[0].c_str(), railShortcutName_[1].c_str()};
             for (int s = 0; s < hub::kMainTabCount; ++s) {
                 drawFit(-0.790f, mainTabY[s], 0.23f, scStd,
                         (s == activeMainTab) ? themeTextCol : slateCol, mainLabels[s]);

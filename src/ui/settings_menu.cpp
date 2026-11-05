@@ -26,6 +26,18 @@ constexpr int kButtonCount = 13;
 const char* kDownloadDirs[] = {"~/media", "~/Downloads", "~/Videos"};
 constexpr int kDownloadDirCount = 3;
 
+// Web destinations the two lower rail tabs can open. Streaming services open
+// as a kiosk screen (just the page); "Browser" is the full browser.
+const SettingsMenu::RailShortcut kRailShortcuts[] = {
+    {"YouTube", "https://www.youtube.com", true},
+    {"Netflix", "https://www.netflix.com", true},
+    {"Disney+", "https://www.disneyplus.com", true},
+    {"Prime Video", "https://www.primevideo.com", true},
+    {"Twitch", "https://www.twitch.tv", true},
+    {"Browser", "https://www.google.com", false},
+};
+constexpr int kRailShortcutCount = 6;
+
 const char* kLangNames[] = {"Auto",    "English",  "German",  "French",
                            "Spanish", "Japanese", "Italian", "Russian",
                            "Chinese"};
@@ -215,6 +227,10 @@ void SettingsMenu::refresh() {
                   Action::CycleUiFollowMode);
         segmented("Download Folder", {kDownloadDirs[0], kDownloadDirs[1], kDownloadDirs[2]},
                   downloadDirIdx_ % kDownloadDirCount, Action::CycleDownloadDir);
+        choice("Rail Shortcut 1", kRailShortcuts[railShortcut_[0] % kRailShortcutCount].name,
+               kRailShortcutCount, railShortcut_[0] % kRailShortcutCount, Action::CycleRailShortcut1);
+        choice("Rail Shortcut 2", kRailShortcuts[railShortcut_[1] % kRailShortcutCount].name,
+               kRailShortcutCount, railShortcut_[1] % kRailShortcutCount, Action::CycleRailShortcut2);
         rows_.push_back({"List View Columns", "Customize", Action::EnterListColsConfig});
     } else if (section_ == 2) {
         title_ = "Settings > Audio & Video Tracks";
@@ -337,6 +353,14 @@ SettingsMenu::Action SettingsMenu::activate() {
             status_ = "Press any controller button for Recenter";
             refresh();
             break;
+        case Action::CycleRailShortcut1:
+        case Action::CycleRailShortcut2: {
+            int& idx = railShortcut_[act == Action::CycleRailShortcut1 ? 0 : 1];
+            idx = (idx + 1) % kRailShortcutCount;
+            saveConfig();
+            refresh();
+            break;
+        }
         case Action::CycleDownloadDir:
             downloadDirIdx_ = (downloadDirIdx_ + 1) % kDownloadDirCount;
             saveConfig();
@@ -612,6 +636,10 @@ void SettingsMenu::assignListening(int button) {
     refresh();
 }
 
+const SettingsMenu::RailShortcut& SettingsMenu::railShortcut(int tab) const {
+    return kRailShortcuts[railShortcut_[tab == 0 ? 0 : 1] % kRailShortcutCount];
+}
+
 std::string SettingsMenu::downloadDir() const {
     const char* home = std::getenv("HOME");
     const std::string base = home ? home : ".";
@@ -681,6 +709,8 @@ void SettingsMenu::loadConfig() {
             }
             else if (key == "bind_quick_path_btn") bindQuickPathBtn_ = std::clamp(std::stoi(val), 0, kButtonCount - 1);
             else if (key == "download_dir") downloadDirIdx_ = std::clamp(std::stoi(val), 0, kDownloadDirCount - 1);
+            else if (key == "rail_shortcut1") railShortcut_[0] = std::clamp(std::stoi(val), 0, kRailShortcutCount - 1);
+            else if (key == "rail_shortcut2") railShortcut_[1] = std::clamp(std::stoi(val), 0, kRailShortcutCount - 1);
             else if (key == "audio_lang") audioLangIdx_ = std::clamp(std::stoi(val), 0, kLangCount - 1);
             else if (key == "curvature") curvatureIdx_ = std::clamp(std::stoi(val), 0, kCurvatureCount - 1);
             else if (key == "ui_text_scale") uiTextScaleIdx_ = std::clamp(std::stoi(val), 0, kUiTextScaleCount - 1);
@@ -734,6 +764,8 @@ void SettingsMenu::saveConfig() const {
             file << "bind_recenter_btn=" << bindRecenterBtn_ << "\n";
             file << "bind_quick_path_btn=" << bindQuickPathBtn_ << "\n";
             file << "download_dir=" << downloadDirIdx_ << "\n";
+            file << "rail_shortcut1=" << railShortcut_[0] << "\n";
+            file << "rail_shortcut2=" << railShortcut_[1] << "\n";
             file << "audio_lang=" << audioLangIdx_ << "\n";
             file << "curvature=" << curvatureIdx_ << "\n";
             file << "ui_text_scale=" << uiTextScaleIdx_ << "\n";
