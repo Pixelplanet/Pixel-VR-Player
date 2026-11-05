@@ -1871,10 +1871,15 @@ void App::computeArrangement(const Arrangement& a,
     const float gap = a.snap ? 0.0f : kArrangeGap;
     std::vector<ScreenExtent> ext(static_cast<std::size_t>(n));
     std::vector<float> curv(static_cast<std::size_t>(n));
+    // Browser screens are taller than video screens of the same width (the
+    // page plus its toolbar); rows must make room for that.
+    std::vector<float> hFactor(static_cast<std::size_t>(n), 1.0f);
     for (int i = 0; i < n; ++i) {
         const int slot = a.order[static_cast<std::size_t>(i)];
         curv[i] = a.curvature;
+        hFactor[i] = renderer_.webScreenHeightFactor(slot);
         ext[i] = screenExtent(screenEyeAspect(slot), scale[i] * a.scale, curv[i]);
+        ext[i].hy *= hFactor[i];
     }
     // Curved screens on a curved wall form one big curve: each screen bends
     // with the wall's radius (a.dist, centred on the viewer) instead of its own.
@@ -1886,6 +1891,7 @@ void App::computeArrangement(const Arrangement& a,
             arcHalf[i] = screenExtent(aspect, scale[i] * a.scale, 0.0f).hx;  // half the arc length
             curv[i] = std::min(1.0f, 2.0f * arcHalf[i] / (1.75f * a.dist));
             ext[i] = screenExtent(aspect, scale[i] * a.scale, curv[i]);
+            ext[i].hy *= hFactor[i];
         }
     }
     std::vector<float> rowHalf(rows.size(), 0.0f);
@@ -2658,7 +2664,15 @@ int App::run() {
                     continue;
                 }
                 if (const uint8_t* rgba = host.takeFrame()) {
+                    const float before = renderer_.webScreenHeightFactor(slot);
                     renderer_.updateWebFrame(slot, rgba, host.frameWidth(), host.frameHeight());
+                    // The page's height (toolbar shown / hidden, first frame) is
+                    // only known now: re-lay the arrangement around it.
+                    if (arrangementActive_ && std::fabs(renderer_.webScreenHeightFactor(slot) - before) > 1e-3f &&
+                        std::find(arrangement_.order.begin(), arrangement_.order.end(), slot) !=
+                            arrangement_.order.end()) {
+                        applyArrangement(arrangement_);
+                    }
                 }
                 // Text fields: a click into one opens the keyboard, which then
                 // types straight into the page; it closes when the field does.

@@ -332,6 +332,16 @@ public:
         uiAccentColorIdx_ = accentColorIdx;
         uiDistance_ = uiDistance;
     }
+    // A browser screen keeps the 16:9 width and grows taller by its toolbar:
+    // the factor its height has over a video screen of the same scale (1 when
+    // the slot shows no page yet).
+    float webScreenHeightFactor(int slot) const {
+        if (slot < 0 || slot >= kMaxVideoSlots || !webSlots_[slot] || !webTex_[slot].initialized ||
+            webTex_[slot].width <= 0 || webTex_[slot].height <= 0) {
+            return 1.0f;
+        }
+        return (16.0f / 9.0f) * static_cast<float>(webTex_[slot].height) / static_cast<float>(webTex_[slot].width);
+    }
     // The web shortcuts shown as main tabs on the hub's rail (0..4).
     struct RailShortcut {
         std::string name;
