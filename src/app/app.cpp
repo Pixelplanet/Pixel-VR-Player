@@ -633,6 +633,15 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
     PIXELVR_LOG_INFO("Loaded %s on screen %d (%dx%d, %s/%s)", path.c_str(), slot + 1, w, h,
                      kProj[static_cast<int>(proj)],
                      kStereo[static_cast<int>(stereo)]);
+    // Software decoding forced by someone else's decoder session: say so,
+    // since at 4K+ that means stutter the viewer would otherwise blame on us.
+    const std::string blockedBy = sc.engine.hardwareBlockedBy();
+    if (!blockedBy.empty() && static_cast<long long>(w) * h >= 3840LL * 2000LL) {
+        notice_ = "Software decoding: the hardware decoder is held by " + blockedBy +
+                  " - close that video (Steam overlay / store) or restart Steam";
+        noticeUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(12);
+        PIXELVR_LOG_WARN("%s", notice_.c_str());
+    }
 }
 
 void App::switchTracks(bool byLanguage) {
@@ -3220,7 +3229,10 @@ int App::run() {
             // No head-locked download text (it followed the view); progress lives
             // in the Downloads window and the control-bar badge.
             const bool dlAnyActive = browser_.downloadActive() || browser_.hasQueuedDownloads();
-            renderer_.setDownloadStatus(false, "");
+            // The head-locked line carries short notices instead (software
+            // decoding because another process holds the hardware decoder).
+            const bool noticeOn = !notice_.empty() && std::chrono::steady_clock::now() < noticeUntil_;
+            renderer_.setDownloadStatus(noticeOn, noticeOn ? notice_ : std::string());
             renderer_.setDownloadsBadge(dlAnyActive,
                                         !dlAnyActive &&
                                             browser_.hasDownloads() && dlRecent,

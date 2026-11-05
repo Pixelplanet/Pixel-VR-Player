@@ -71,6 +71,9 @@ public:
     double duration() const;  // seconds; 0 if unknown
     double frameRate() const;  // source frames per second; 0 if unknown
     std::string codecName() const;   // decoder name + (hw)/(sw)
+    // Non-empty when the hardware decoder was refused while another process
+    // held it ("steamwebhelper (3079)"): playback is in software because of it.
+    std::string hardwareBlockedBy() const;
     uint64_t decodedFrames() const;  // total frames decoded since open
     uint64_t lateFrames() const;     // decoded but skipped: too late to show
     uint64_t clockWaits() const;     // times the clock waited for lagging video

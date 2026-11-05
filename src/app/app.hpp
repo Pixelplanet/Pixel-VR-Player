@@ -338,6 +338,10 @@ private:
     void clearSlotKeepLayout(int slot);
     void applyAudioFollow();  // audio-follow on: only the selected screen is heard
     bool lastLoadFailed_ = false;  // the hub stays open to show why
+    // Short head-locked notice (e.g. software decoding because another process
+    // holds the hardware decoder), shown until noticeUntil_.
+    std::string notice_;
+    std::chrono::steady_clock::time_point noticeUntil_{};
     std::string chapterKey_;       // whose chapters the timeline shows
     // Chromium missing: the install dialog (action menu page 9), and the
     // browser screen to open once it is installed.

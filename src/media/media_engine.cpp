@@ -14,6 +14,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <cctype>
+#include <filesystem>
+#include <fstream>
 #include <deque>
 #include <functional>
 #include <mutex>
@@ -53,6 +56,35 @@ namespace pixelvr {
 
 #ifdef PIXELVR_HAVE_SMB
 namespace {
+
+// Other processes with the hardware decoder node open, as "comm (pid), ...".
+// The iris driver budgets decoder sessions core-wide, so a foreign session
+// (Steam's web helper after a trailer, a browser tab) can make an 8K session
+// fail to open; this names the culprit for the log and the status line.
+std::string decoderHolders() {
+    std::string out;
+    std::error_code ec;
+    const std::filesystem::path node = std::filesystem::canonical("/dev/video-dec0", ec);
+    if (ec) return out;
+    const pid_t self = getpid();
+    for (const auto& proc : std::filesystem::directory_iterator("/proc", ec)) {
+        const std::string name = proc.path().filename().string();
+        if (name.empty() || !std::isdigit(static_cast<unsigned char>(name[0]))) continue;
+        const pid_t pid = static_cast<pid_t>(std::atoi(name.c_str()));
+        if (pid == self) continue;
+        std::error_code fdEc;
+        for (const auto& fd : std::filesystem::directory_iterator(proc.path() / "fd", fdEc)) {
+            std::error_code linkEc;
+            if (std::filesystem::read_symlink(fd.path(), linkEc) != node) continue;
+            std::string comm;
+            if (std::ifstream in(proc.path() / "comm"); in) std::getline(in, comm);
+            if (!out.empty()) out += ", ";
+            out += (comm.empty() ? std::string("pid") : comm) + " (" + name + ")";
+            break;
+        }
+    }
+    return out;
+}
 
 void smb_auth(SMBCCTX*, const char* srv, const char* shr, char* wg, int wglen, char* un, int unlen,
               char* pw, int pwlen) {
@@ -316,6 +348,7 @@ struct MediaEngine::Impl {
     AVRational timeBase{1, 1};
     int drmDiag = 0;
     std::string codecName;
+    std::string hwBlockedBy;  // who else held the hardware decoder when it was refused
     const AVCodec* videoDecoder = nullptr;  // retained for reopen-on-seek
     bool decoderDrm = false;                // apply drm_prime opts on reopen
     int captureBuffers = 0;                 // num_capture_buffers for reopen
@@ -1248,6 +1281,7 @@ bool MediaEngine::open(const std::string& path) {
             return avcodec_open2(impl_->codec, dec, nullptr) >= 0;
         };
 
+        impl_->hwBlockedBy.clear();
         bool opened = open_with(decoder);
         if (!opened && hardware) {
             // The previous session (ours or a just-closed browser page's) may
@@ -1261,7 +1295,14 @@ bool MediaEngine::open(const std::string& path) {
         }
         if (!opened) {
             if (hardware) {
-                PIXELVR_LOG_WARN("MediaEngine: hardware decoder failed, trying software");
+                // Name whoever else has the decoder open: the driver refuses a
+                // big session while another process (Steam's own web helper
+                // after a store trailer, say) holds one.
+                const std::string holders = decoderHolders();
+                impl_->hwBlockedBy = holders;
+                PIXELVR_LOG_WARN("MediaEngine: hardware decoder failed, trying software%s%s",
+                                 holders.empty() ? "" : " (decoder also open in: ",
+                                 holders.empty() ? "" : (holders + ")").c_str());
                 hardware = false;
                 decoder = avcodec_find_decoder(codecId);
                 if (decoder == nullptr || !open_with(decoder)) {
@@ -1416,6 +1457,7 @@ void MediaEngine::close() {
 int MediaEngine::width() const { return impl_->width; }
 int MediaEngine::height() const { return impl_->height; }
 std::string MediaEngine::codecName() const { return impl_->codecName; }
+std::string MediaEngine::hardwareBlockedBy() const { return impl_->hwBlockedBy; }
 uint64_t MediaEngine::decodedFrames() const {
     return impl_->decodedCount.load(std::memory_order_relaxed);
 }
