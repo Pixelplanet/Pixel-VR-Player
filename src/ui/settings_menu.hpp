@@ -116,7 +116,7 @@ public:
     bool isListening() const { return listeningFunc_ >= 0; }
     void assignListening(int button);
     std::string downloadDir() const;
-    // Web shortcuts shown as tabs on the hub's rail (in table order, up to 4).
+    // Web shortcuts shown as tabs on the hub's rail (in table order).
     struct RailShortcut {
         const char* name;
         const char* url;

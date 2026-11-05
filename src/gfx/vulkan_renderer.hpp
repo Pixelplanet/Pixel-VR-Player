@@ -883,7 +883,7 @@ private:
     float hubOpenAnim_ = 0.0f;                    // hub / modal scale-in
     float dockOpenAnim_ = 0.0f;                   // dock slide-in from below
     float dockHoverAnim_[32]{};                   // per transport button
-    float railHoverAnim_[8]{};                    // per rail main tab
+    float railHoverAnim_[16]{};                   // per rail main tab
     std::chrono::steady_clock::time_point animLastT_{};
     VkPipeline thumbPipeline_ = VK_NULL_HANDLE;
     VkDescriptorPool thumbPool_ = VK_NULL_HANDLE;

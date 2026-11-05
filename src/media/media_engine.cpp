@@ -1107,6 +1107,8 @@ bool MediaEngine::open(const std::string& path) {
         Chapter c;
         c.start = std::max(0.0, static_cast<double>(ch->start) * av_q2d(ch->time_base));
         if (const AVDictionaryEntry* t = av_dict_get(ch->metadata, "title", nullptr, 0)) c.title = t->value;
+        // Many rips carry chapter marks without names: number them.
+        if (c.title.empty()) c.title = "Chapter " + std::to_string(ci + 1);
         impl_->chapters.push_back(std::move(c));
     }
     std::sort(impl_->chapters.begin(), impl_->chapters.end(),

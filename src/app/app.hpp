@@ -317,6 +317,7 @@ private:
     int curLive();              // 0 = not live, 1 = live but behind, 2 = at the live edge
     void curTogglePause();
     void curSeek(double t);
+    bool webSeekBlocked() const;  // ad playing on a streaming page
     void curSeekRelative(double d);
     float movingDistance_ = 3.0f;
     std::string pendingPlayPath_;  // file waiting for the "play where?" choice

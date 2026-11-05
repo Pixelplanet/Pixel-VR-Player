@@ -180,19 +180,29 @@ constexpr float kRailItemHalfW = 0.172f;
 // compress the pitch (and the tab height) so the last tab stays above the
 // divider and the section tabs below keep their place.
 constexpr int kFixedTabCount = 3;
-constexpr int kMaxShortcuts = 4;
+constexpr int kMaxShortcuts = 6;
 constexpr int kMaxMainTabs = kFixedTabCount + kMaxShortcuts;
 inline int gShortcutCount = 2;
 inline int mainTabCount() { return kFixedTabCount + gShortcutCount; }
 constexpr float kMainTabTopY = 0.365f;
-constexpr float kMainTabBottomY = 0.085f;
-inline float mainTabPitch() {
-    const int n = mainTabCount();
-    return n <= 5 ? 0.070f : (kMainTabTopY - kMainTabBottomY) / static_cast<float>(n - 1);
-}
+// Five tabs keep the classic 7 cm pitch; more tabs first tighten the pitch a
+// little, then the main section grows downward and the section tabs below
+// slide down (and compress) to make room.
+inline float mainTabPitch() { return mainTabCount() <= 5 ? 0.070f : 0.060f; }
 inline float mainTabY(int s) { return kMainTabTopY - mainTabPitch() * static_cast<float>(s); }
-inline float mainTabHalfH() { return std::min(0.030f, mainTabPitch() * 0.43f); }
-constexpr float kRailDividerY = 0.035f;  // between the main tabs and the section tabs
+inline float mainTabHalfH() { return mainTabCount() <= 5 ? 0.030f : 0.026f; }
+inline float railDividerY() { return std::min(0.035f, mainTabY(mainTabCount() - 1) - 0.050f); }
+// Section tabs: their resting layout shifted by how far the divider moved,
+// then compressed so the lowest item (and the vault lock) stay on the panel.
+inline float railSubShift() { return railDividerY() - 0.035f; }
+inline float railSubSqueeze() {
+    const float lowest = -0.47f + railSubShift();         // lock button at rest + shift
+    constexpr float kFloor = -0.515f;
+    const float span = -0.47f - (-0.01f);                 // highest to lowest resting item
+    return lowest < kFloor ? (kFloor - (-0.01f + railSubShift())) / span : 1.0f;
+}
+inline float subY(float resting) { return (-0.01f + railSubShift()) + (resting - (-0.01f)) * railSubSqueeze(); }
+inline float subHalfH(float resting) { return resting * std::min(1.0f, railSubSqueeze() + 0.15f); }
 // Rail hover ids: 0..2 the fixed tabs, 3..8 section tabs, 9 lock, 10.. shortcuts.
 constexpr int kShortcutHoverBase = 10;
 inline int mainTabHoverId(int s) { return s < kFixedTabCount ? s : kShortcutHoverBase + (s - kFixedTabCount); }
@@ -204,12 +214,12 @@ constexpr float kHitPad = 0.004f;  // laser targets are slightly larger than dra
 inline UiRect mainTab(int s) { return {kRailCx, mainTabY(s), kRailItemHalfW, mainTabHalfH()}; }
 // page: 0 = Files, 1 = Downloads, 2 = Settings
 inline UiRect subTab(int page, int sub) {
-    if (page == 2) return {kRailCx, kSettingsSubY[sub], kRailItemHalfW, 0.030f};
-    if (page == 1) return {kRailCx, kDownloadsSubY[sub], kRailItemHalfW, 0.032f};
-    return {kRailCx, kFilesSubY[sub], kRailItemHalfW, 0.032f};
+    if (page == 2) return {kRailCx, subY(kSettingsSubY[sub]), kRailItemHalfW, subHalfH(0.030f)};
+    if (page == 1) return {kRailCx, subY(kDownloadsSubY[sub]), kRailItemHalfW, subHalfH(0.032f)};
+    return {kRailCx, subY(kFilesSubY[sub]), kRailItemHalfW, subHalfH(0.032f)};
 }
 inline UiRect lockVaultButton(int page) {
-    return {kRailCx, page == 2 ? -0.46f : -0.47f, kRailItemHalfW, 0.030f};
+    return {kRailCx, subY(page == 2 ? -0.46f : -0.47f), kRailItemHalfW, subHalfH(0.030f)};
 }
 
 // File browser header: 0 = prev page, 1 = next page, 2 = view mode,
@@ -3163,8 +3173,14 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
         }
 
         // Placement: the screen's flat frame, or its cylinder (like quad.vert:
-        // axis bendR in front of the screen's centre).
-        const Mat4 frame = multiply(translation(c), orientFromYawPitchRoll(sh.yaw, sh.pitch, sh.roll));
+        // axis bendR in front of the screen's centre). Overlapping screens
+        // (a tall browser above two others) would intersect in depth and the
+        // compositor's depth test between layers then flickers along the
+        // seam, so each layer sits 6 mm nearer the viewer than the one before
+        // it in the far-to-near order.
+        const Vec3 toHead = normalize(head - c);
+        const Vec3 cNear = c + toHead * (0.006f * static_cast<float>(oi));
+        const Mat4 frame = multiply(translation(cNear), orientFromYawPitchRoll(sh.yaw, sh.pitch, sh.roll));
         CompositionLayer cl;
         cl.swapchain = L.sc.handle;
         cl.blend = false;
@@ -4015,7 +4031,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         for (int b = 0; b < kBtnCount && b < 32; ++b) {
             ease(dockHoverAnim_[b], (dockShown && pointerButton_ == b) ? 1.0f : 0.0f, 16.0f);
         }
-        for (int s = 0; s < hub::mainTabCount() && s < 8; ++s) {
+        for (int s = 0; s < hub::mainTabCount() && s < 16; ++s) {
             ease(railHoverAnim_[s], (hubOpen && browserSidebarHovered_ == hub::mainTabHoverId(s)) ? 1.0f : 0.0f,
                  16.0f);
         }
@@ -4940,7 +4956,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                               UiShape::RoundedBox, tabActiveBg, 0.55f, 0.07f, tabActiveBord);
             } else {
                 // Eased hover: veil -> card colour, rim brightens
-                const float ha = (s < 8) ? railHoverAnim_[s] : (hov ? 1.0f : 0.0f);
+                const float ha = (s < 16) ? railHoverAnim_[s] : (hov ? 1.0f : 0.0f);
                 float bgMix[4], rimMix[4];
                 for (int k = 0; k < 4; ++k) {
                     bgMix[k] = kGlassVeil[k] + (tabHovBg[k] - kGlassVeil[k]) * ha;
@@ -4960,7 +4976,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
         }
         // Thin separator between the primary tabs and the contextual sub-navigation
-        drawUiElement(vpPanel, -0.695f, hub::kRailDividerY, 0.160f, 0.0012f,
+        drawUiElement(vpPanel, -0.695f, hub::railDividerY(), 0.160f, 0.0012f,
                       UiShape::RoundedBox, kGlassDivider, 1.0f);
 
         // Sub-navigation items in rail (contextual to Files / Downloads / Settings)
@@ -4981,8 +4997,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             themeTextCol[0] * 0.62f, themeTextCol[1] * 0.68f,
             themeTextCol[2] * 0.78f, 0.90f};
         for (int sub = 0; sub < subCount; ++sub) {
-            const float sy = isSet ? setSubY[sub] : (isDl ? dlSubY[sub] : fileSubY[sub]);
-            const float sH = isSet ? 0.030f : 0.032f;
+            const float sy = hub::subY(isSet ? setSubY[sub] : (isDl ? dlSubY[sub] : fileSubY[sub]));
+            const float sH = hub::subHalfH(isSet ? 0.030f : 0.032f);
             const bool hov = (browserSidebarHovered_ == (3 + sub));
             const bool subAct = (sub == activeSubTab);
             if (subAct || hov) {
@@ -5629,7 +5645,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             drawRailText();
             const char* dlSubLabels[3] = {"All Tasks", "Active Transfers", "Completed"};
             for (int sub = 0; sub < 3; ++sub) {
-                drawFit(-0.84f, hub::kDownloadsSubY[sub], 0.30f, scSub,
+                drawFit(-0.84f, hub::subY(hub::kDownloadsSubY[sub]), 0.30f, scSub,
                         (downloadsFilter_ == sub) ? themeTextCol : slateCol, dlSubLabels[sub]);
             }
 

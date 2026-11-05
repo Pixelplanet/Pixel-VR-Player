@@ -1418,9 +1418,19 @@ void App::curTogglePause() {
 #endif
 }
 
+// Streaming services run ads as a separate short video; seeking it from our
+// timeline breaks the ad player and the film never starts. A kiosk page whose
+// current video is under three minutes is left alone.
+bool App::webSeekBlocked() const {
+    const BrowserHost& host = webHosts_[selectedScreen_];
+    const BrowserHost::Media& m = host.media();
+    return host.kiosk() && m.present && !m.live && m.duration > 0.0 && m.duration < 180.0 &&
+           host.startUrl().find("youtube.com") == std::string::npos;
+}
+
 void App::curSeek(double t) {
     if (cur().web) {
-        webHosts_[selectedScreen_].mediaSeek(t);
+        if (!webSeekBlocked()) webHosts_[selectedScreen_].mediaSeek(t);
         return;
     }
 #ifdef PIXELVR_HAVE_MEDIA
@@ -1430,7 +1440,7 @@ void App::curSeek(double t) {
 
 void App::curSeekRelative(double d) {
     if (cur().web) {
-        webHosts_[selectedScreen_].mediaSeekRelative(d);
+        if (!webSeekBlocked()) webHosts_[selectedScreen_].mediaSeekRelative(d);
         return;
     }
 #ifdef PIXELVR_HAVE_MEDIA

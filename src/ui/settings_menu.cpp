@@ -232,7 +232,7 @@ void SettingsMenu::refresh() {
             for (int i = 0; i < kRailShortcutCount; ++i) {
                 if ((railShortcutMask_ >> i) & 1) on += (on.empty() ? "" : ", ") + std::string(kRailShortcuts[i].name);
             }
-            rows_.push_back({"Rail Shortcuts", on.empty() ? "None" : on, Action::EnterRailShortcuts});
+            rows_.push_back({"Shortcuts", on.empty() ? "None" : on, Action::EnterRailShortcuts});
         }
         rows_.push_back({"List View Columns", "Customize", Action::EnterListColsConfig});
     } else if (section_ == 2) {
@@ -298,8 +298,8 @@ void SettingsMenu::refresh() {
         }
         binding("Unlock Combo Sequence", comboLabel, Action::RecordVaultCombo);
     } else if (section_ == 22) {
-        title_ = "Settings > UI & Appearance > Rail Shortcuts";
-        status_ = "Up to four appear as tabs on the hub's rail, in this order.";
+        title_ = "Settings > UI & Appearance > Shortcuts";
+        status_ = "Shortcuts appear as tabs on the hub's rail, in this order.";
         for (int i = 0; i < kRailShortcutCount; ++i) {
             const bool on = (railShortcutMask_ >> i) & 1;
             toggle(kRailShortcuts[i].name, on,
@@ -372,11 +372,7 @@ SettingsMenu::Action SettingsMenu::activate() {
         case Action::ToggleRailShortcut4:
         case Action::ToggleRailShortcut5: {
             const int i = static_cast<int>(act) - static_cast<int>(Action::ToggleRailShortcut0);
-            const bool on = (railShortcutMask_ >> i) & 1;
-            // The rail fits four shortcuts; a fifth stays off.
-            if (on || __builtin_popcount(static_cast<unsigned>(railShortcutMask_)) < 4) {
-                railShortcutMask_ ^= (1 << i);
-            }
+            railShortcutMask_ ^= (1 << i);
             saveConfig();
             refresh();
             break;
@@ -663,7 +659,7 @@ void SettingsMenu::assignListening(int button) {
 
 std::vector<const SettingsMenu::RailShortcut*> SettingsMenu::railShortcuts() const {
     std::vector<const RailShortcut*> out;
-    for (int i = 0; i < kRailShortcutCount && out.size() < 4; ++i) {
+    for (int i = 0; i < kRailShortcutCount; ++i) {
         if ((railShortcutMask_ >> i) & 1) out.push_back(&kRailShortcuts[i]);
     }
     return out;
