@@ -3480,7 +3480,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
     // pass the panel is drawn flat (orthographic, panel metres -> the layer
     // window) and the compositor bends the layer instead.
     const float bendR = layerPass ? 0.0f : panelBendRadius(placement.dist);
-    const Mat4 vpPanel = layerPass
+    Mat4 vpPanel = layerPass
         ? orthographicVulkan(layer->cx - layer->hw, layer->cx + layer->hw,
                              layer->cy - layer->hh, layer->cy + layer->hh)
         : multiply(multiply(proj, viewMat), panelBase);
@@ -3973,6 +3973,52 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
     const bool hubOpen = browserVisible_ || settingsVisible_ ||
                          (downloadsVisible_ && !downloadsModal_);
     const bool modalOpen = downloadsVisible_ && downloadsModal_;
+
+    // Motion tick: eased states move toward their targets once per frame.
+    // Open states only ease in (closing is immediate, since the panels stop
+    // being drawn); the eased value drives a scale-in / slide-in below.
+    if (layerPass || (!uiLayerLive() && viewIndex == 0)) {
+        const auto nowT = std::chrono::steady_clock::now();
+        float dt = animLastT_.time_since_epoch().count() == 0
+                       ? 0.016f
+                       : std::chrono::duration<float>(nowT - animLastT_).count();
+        animLastT_ = nowT;
+        if (dt <= 0.0f || dt > 0.1f) dt = 0.016f;
+        auto ease = [&](float& v, float target, float rate) {
+            v += (target - v) * std::clamp(rate * dt, 0.0f, 1.0f);
+            if (std::fabs(target - v) < 0.002f) v = target;
+        };
+        const bool panelShown = hubOpen || modalOpen || actionMenu_.visible || keyboardModal_.visible;
+        if (!panelShown) hubOpenAnim_ = 0.0f; else ease(hubOpenAnim_, 1.0f, 12.0f);
+        const bool dockShown = controlBarVisible_ && !hubOpen && !modalOpen;
+        if (!dockShown) dockOpenAnim_ = 0.0f; else ease(dockOpenAnim_, 1.0f, 10.0f);
+        for (int b = 0; b < kBtnCount && b < 32; ++b) {
+            ease(dockHoverAnim_[b], (dockShown && pointerButton_ == b) ? 1.0f : 0.0f, 16.0f);
+        }
+        for (int s = 0; s < hub::kMainTabCount && s < 8; ++s) {
+            ease(railHoverAnim_[s], (hubOpen && browserSidebarHovered_ == hub::mainTabHoverId(s)) ? 1.0f : 0.0f,
+                 16.0f);
+        }
+    }
+    // Ease-out curves for the open animations.
+    auto easeOut = [](float t) { t = std::clamp(t, 0.0f, 1.0f); return 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t); };
+    const float hubIn = easeOut(hubOpenAnim_);
+    const float dockIn = easeOut(dockOpenAnim_);
+    // Panel-space transform of the animated content: the hub scales in from
+    // 94% around its centre; the dock rises 6 cm and scales in from 96%.
+    const Mat4 vpPanelHub = (hubIn < 0.999f)
+        ? multiply(vpPanel, scaling(Vec3{0.94f + 0.06f * hubIn, 0.94f + 0.06f * hubIn, 1.0f}))
+        : vpPanel;
+    const Mat4 vpPanelDock = (dockIn < 0.999f)
+        ? multiply(vpPanel, multiply(translation(Vec3{0.0f, kBarY - 0.06f * (1.0f - dockIn), 0.0f}),
+                                     multiply(scaling(Vec3{0.96f + 0.04f * dockIn, 0.96f + 0.04f * dockIn, 1.0f}),
+                                              translation(Vec3{0.0f, -kBarY, 0.0f}))))
+        : vpPanel;
+    // The dock and the hub are never shown together, so the animated transform
+    // can simply become the panel transform every draw below uses (hit-testing
+    // keeps the resting layout; the animation is ~150 ms).
+    if (hubOpen || modalOpen || actionMenu_.visible || keyboardModal_.visible) vpPanel = vpPanelHub;
+    else if (controlBarVisible_) vpPanel = vpPanelDock;
 
     // Dynamic UI Typography Scale & Color Themes (configured in Settings > UI & Appearance)
     const float tScale = std::clamp(uiTextScale_, 0.85f, 1.75f);
@@ -4471,10 +4517,19 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         for (int b = 0; b < kBtnCount; ++b) {
             const auto cb = static_cast<CtrlButton>(b);
             if (is_screen_row_button(b) && !screenControlsVisible_) continue;
-            const CtrlButtonRect r = get_ctrl_button_rect(b);
+            CtrlButtonRect r = get_ctrl_button_rect(b);
             const bool hovered = (pointerButton_ == b);
-            const float* bg = hovered ? btnBgHover : glassControlT.data();
-            const float* border = hovered ? btnBorderHover : kGlassRimFaint;
+            // Eased hover: the button grows 5% and its colours cross-fade.
+            const float ha = (b < 32) ? dockHoverAnim_[b] : (hovered ? 1.0f : 0.0f);
+            r.hw *= 1.0f + 0.05f * ha;
+            r.hh *= 1.0f + 0.05f * ha;
+            float bgMix[4], borderMix[4];
+            for (int k = 0; k < 4; ++k) {
+                bgMix[k] = glassControlT[k] + (btnBgHover[k] - glassControlT[k]) * ha;
+                borderMix[k] = kGlassRimFaint[k] + (btnBorderHover[k] - kGlassRimFaint[k]) * ha;
+            }
+            const float* bg = bgMix;
+            const float* border = borderMix;
 
             if (cb == CtrlButton::PlayPause) {
                 // Hero glowing circular Play/Pause button
@@ -4858,12 +4913,16 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                          tabActiveGlow, 0.55f);
                 drawUiElement(vpPanel, -0.695f, mainTabY[s], 0.172f, tabHh,
                               UiShape::RoundedBox, tabActiveBg, 0.55f, 0.07f, tabActiveBord);
-            } else if (hov) {
-                drawUiElement(vpPanel, -0.695f, mainTabY[s], 0.172f, tabHh,
-                              UiShape::RoundedBox, tabHovBg, 0.55f, 0.05f, tabHovBord);
             } else {
+                // Eased hover: veil -> card colour, rim brightens
+                const float ha = (s < 8) ? railHoverAnim_[s] : (hov ? 1.0f : 0.0f);
+                float bgMix[4], rimMix[4];
+                for (int k = 0; k < 4; ++k) {
+                    bgMix[k] = kGlassVeil[k] + (tabHovBg[k] - kGlassVeil[k]) * ha;
+                    rimMix[k] = kGlassRimFaint[k] + (tabHovBord[k] - kGlassRimFaint[k]) * ha;
+                }
                 drawUiElement(vpPanel, -0.695f, mainTabY[s], 0.172f, tabHh,
-                              UiShape::RoundedBox, kGlassVeil, 0.55f, 0.04f, kGlassRimFaint);
+                              UiShape::RoundedBox, bgMix, 0.55f, 0.04f + 0.01f * ha, rimMix);
             }
             drawUiElement(vpPanel, -0.825f, mainTabY[s], 0.017f, 0.017f, mainIcons[s],
                           act ? themeAccentCol : themeTextCol);

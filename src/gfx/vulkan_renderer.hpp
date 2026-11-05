@@ -5,6 +5,7 @@
 #include "xr/openxr_headers.hpp"
 #include "xr/xr_context.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <deque>
@@ -878,6 +879,13 @@ private:
     float webPointerU_ = 0.0f;
     float webPointerV_ = 0.0f;
     float cardHoverAnim_[12]{};
+    // Motion: eased 0..1 states advanced once per frame (the layer pass, or
+    // the first eye when the UI is drawn in-scene).
+    float hubOpenAnim_ = 0.0f;                    // hub / modal scale-in
+    float dockOpenAnim_ = 0.0f;                   // dock slide-in from below
+    float dockHoverAnim_[32]{};                   // per transport button
+    float railHoverAnim_[8]{};                    // per rail main tab
+    std::chrono::steady_clock::time_point animLastT_{};
     VkPipeline thumbPipeline_ = VK_NULL_HANDLE;
     VkDescriptorPool thumbPool_ = VK_NULL_HANDLE;
     BrowserViewMode browserViewMode_ = BrowserViewMode::BigCards;
