@@ -227,10 +227,12 @@ void SettingsMenu::refresh() {
                   Action::CycleUiFollowMode);
         segmented("Download Folder", {kDownloadDirs[0], kDownloadDirs[1], kDownloadDirs[2]},
                   downloadDirIdx_ % kDownloadDirCount, Action::CycleDownloadDir);
-        choice("Rail Shortcut 1", kRailShortcuts[railShortcut_[0] % kRailShortcutCount].name,
-               kRailShortcutCount, railShortcut_[0] % kRailShortcutCount, Action::CycleRailShortcut1);
-        choice("Rail Shortcut 2", kRailShortcuts[railShortcut_[1] % kRailShortcutCount].name,
-               kRailShortcutCount, railShortcut_[1] % kRailShortcutCount, Action::CycleRailShortcut2);
+        // Web shortcuts on the hub's rail (up to 4; shown in this order).
+        for (int i = 0; i < kRailShortcutCount; ++i) {
+            const bool on = (railShortcutMask_ >> i) & 1;
+            toggle(std::string("Rail: ") + kRailShortcuts[i].name, on,
+                   static_cast<Action>(static_cast<int>(Action::ToggleRailShortcut0) + i));
+        }
         rows_.push_back({"List View Columns", "Customize", Action::EnterListColsConfig});
     } else if (section_ == 2) {
         title_ = "Settings > Audio & Video Tracks";
@@ -353,10 +355,18 @@ SettingsMenu::Action SettingsMenu::activate() {
             status_ = "Press any controller button for Recenter";
             refresh();
             break;
-        case Action::CycleRailShortcut1:
-        case Action::CycleRailShortcut2: {
-            int& idx = railShortcut_[act == Action::CycleRailShortcut1 ? 0 : 1];
-            idx = (idx + 1) % kRailShortcutCount;
+        case Action::ToggleRailShortcut0:
+        case Action::ToggleRailShortcut1:
+        case Action::ToggleRailShortcut2:
+        case Action::ToggleRailShortcut3:
+        case Action::ToggleRailShortcut4:
+        case Action::ToggleRailShortcut5: {
+            const int i = static_cast<int>(act) - static_cast<int>(Action::ToggleRailShortcut0);
+            const bool on = (railShortcutMask_ >> i) & 1;
+            // The rail fits four shortcuts; a fifth stays off.
+            if (on || __builtin_popcount(static_cast<unsigned>(railShortcutMask_)) < 4) {
+                railShortcutMask_ ^= (1 << i);
+            }
             saveConfig();
             refresh();
             break;
@@ -636,8 +646,12 @@ void SettingsMenu::assignListening(int button) {
     refresh();
 }
 
-const SettingsMenu::RailShortcut& SettingsMenu::railShortcut(int tab) const {
-    return kRailShortcuts[railShortcut_[tab == 0 ? 0 : 1] % kRailShortcutCount];
+std::vector<const SettingsMenu::RailShortcut*> SettingsMenu::railShortcuts() const {
+    std::vector<const RailShortcut*> out;
+    for (int i = 0; i < kRailShortcutCount && out.size() < 4; ++i) {
+        if ((railShortcutMask_ >> i) & 1) out.push_back(&kRailShortcuts[i]);
+    }
+    return out;
 }
 
 std::string SettingsMenu::downloadDir() const {
@@ -709,8 +723,7 @@ void SettingsMenu::loadConfig() {
             }
             else if (key == "bind_quick_path_btn") bindQuickPathBtn_ = std::clamp(std::stoi(val), 0, kButtonCount - 1);
             else if (key == "download_dir") downloadDirIdx_ = std::clamp(std::stoi(val), 0, kDownloadDirCount - 1);
-            else if (key == "rail_shortcut1") railShortcut_[0] = std::clamp(std::stoi(val), 0, kRailShortcutCount - 1);
-            else if (key == "rail_shortcut2") railShortcut_[1] = std::clamp(std::stoi(val), 0, kRailShortcutCount - 1);
+            else if (key == "rail_shortcuts") railShortcutMask_ = std::stoi(val) & ((1 << kRailShortcutCount) - 1);
             else if (key == "audio_lang") audioLangIdx_ = std::clamp(std::stoi(val), 0, kLangCount - 1);
             else if (key == "curvature") curvatureIdx_ = std::clamp(std::stoi(val), 0, kCurvatureCount - 1);
             else if (key == "ui_text_scale") uiTextScaleIdx_ = std::clamp(std::stoi(val), 0, kUiTextScaleCount - 1);
@@ -764,8 +777,7 @@ void SettingsMenu::saveConfig() const {
             file << "bind_recenter_btn=" << bindRecenterBtn_ << "\n";
             file << "bind_quick_path_btn=" << bindQuickPathBtn_ << "\n";
             file << "download_dir=" << downloadDirIdx_ << "\n";
-            file << "rail_shortcut1=" << railShortcut_[0] << "\n";
-            file << "rail_shortcut2=" << railShortcut_[1] << "\n";
+            file << "rail_shortcuts=" << railShortcutMask_ << "\n";
             file << "audio_lang=" << audioLangIdx_ << "\n";
             file << "curvature=" << curvatureIdx_ << "\n";
             file << "ui_text_scale=" << uiTextScaleIdx_ << "\n";

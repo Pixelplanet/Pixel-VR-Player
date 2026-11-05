@@ -15,8 +15,12 @@ public:
         ListenMenu,
         ListenRecenter,
         CycleDownloadDir,
-        CycleRailShortcut1,
-        CycleRailShortcut2,
+        ToggleRailShortcut0,
+        ToggleRailShortcut1,
+        ToggleRailShortcut2,
+        ToggleRailShortcut3,
+        ToggleRailShortcut4,
+        ToggleRailShortcut5,
         ToggleSwapEyes,
         ToggleModels,
         ToggleStats,
@@ -111,13 +115,13 @@ public:
     bool isListening() const { return listeningFunc_ >= 0; }
     void assignListening(int button);
     std::string downloadDir() const;
-    // The two configurable web tabs at the bottom of the hub's rail.
+    // Web shortcuts shown as tabs on the hub's rail (in table order, up to 4).
     struct RailShortcut {
         const char* name;
         const char* url;
         bool kiosk;   // just the page (streaming service) vs. the full browser
     };
-    const RailShortcut& railShortcut(int tab) const;   // tab 0 / 1
+    std::vector<const RailShortcut*> railShortcuts() const;
     float screenDistance() const { return screenDistance_; }
     void setScreenDistance(float d) { screenDistance_ = d; refresh(); }
     float screenCurvature() const;
@@ -224,7 +228,7 @@ private:
     int bindQuickPathBtn_ = 7; // default Right Stick Click (BtnThumbR)
     int listeningFunc_ = -1;   // 0=play 1=menu 2=recenter 3=move 4=quick path
     int downloadDirIdx_ = 0;   // index into the download-destination presets
-    int railShortcut_[2] = {0, 5};  // kRailShortcuts: YouTube, Browser
+    int railShortcutMask_ = (1 << 0) | (1 << 5);  // kRailShortcuts bits: YouTube + Browser
     int curvatureIdx_ = 0;     // 0=Flat (0%), 1=Gentle (25%), 2=Cinema (50%), 3=Deep (75%), 4=IMAX (100%)
     int uiTextScaleIdx_ = 2;   // 0=90%, 1=105%, 2=120% (default), 3=140%, 4=160%
     int uiTextColorIdx_ = 0;   // 0=Pure White, 1=Ice Cyan, 2=Warm Cream, 3=Soft Gold, 4=Mint Green

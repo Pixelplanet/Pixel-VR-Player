@@ -2981,8 +2981,13 @@ int App::run() {
                                       settings_.uiAccentColorIdx(),
                                       settings_.uiDistance());
             renderer_.setAmbilightIntensity(settings_.ambilightIntensity());
-            renderer_.setRailShortcuts(settings_.railShortcut(0).name, settings_.railShortcut(0).kiosk,
-                                       settings_.railShortcut(1).name, settings_.railShortcut(1).kiosk);
+            {
+                std::vector<VulkanRenderer::RailShortcut> rail;
+                for (const SettingsMenu::RailShortcut* sc : settings_.railShortcuts()) {
+                    rail.push_back({sc->name, sc->kiosk});
+                }
+                renderer_.setRailShortcuts(rail);
+            }
             renderer_.setUiFollowMode(settings_.uiFollowMode());
             renderer_.setPanelCurve(settings_.panelCurve());
             renderer_.setUiOpacity(settings_.uiOpacity());
@@ -3720,10 +3725,10 @@ int App::run() {
                                    pendingDl_.empty() && !actionMenu_.visible;
             const int sbHover = renderer_.browserSidebarHovered();
             if (hubActive && (in.togglePlay || in.select) && sbHover >= 0) {
-                if (sbHover == 10 || sbHover == 11) {
-                    // The two configurable web tabs (Settings > UI & Appearance):
-                    // a streaming service as a kiosk page, or the full browser.
-                    const SettingsMenu::RailShortcut& sc = settings_.railShortcut(sbHover - 10);
+                if (sbHover >= 10 && sbHover < 10 + static_cast<int>(settings_.railShortcuts().size())) {
+                    // A web shortcut tab (Settings > UI & Appearance): a streaming
+                    // service as a kiosk page, or the full browser.
+                    const SettingsMenu::RailShortcut& sc = *settings_.railShortcuts()[sbHover - 10];
                     openWebScreen(sc.url, sc.kiosk);
                 } else if (sbHover == 0) {
                     // Main Tab: Files

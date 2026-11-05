@@ -175,21 +175,33 @@ struct UiRect {
 namespace hub {
 constexpr float kRailCx = -0.695f;
 constexpr float kRailItemHalfW = 0.172f;
-constexpr int kMainTabCount = 5;
-// Files, Downloads, Settings, YouTube, Browser
-constexpr float kMainTabY[kMainTabCount] = {0.365f, 0.295f, 0.225f, 0.155f, 0.085f};
-constexpr float kMainTabHalfH = 0.030f;
+// Main tabs: Files, Downloads, Settings, then the user's web shortcuts (0..4,
+// Settings > UI & Appearance). Five tabs sit at the classic 7 cm pitch; more
+// compress the pitch (and the tab height) so the last tab stays above the
+// divider and the section tabs below keep their place.
+constexpr int kFixedTabCount = 3;
+constexpr int kMaxShortcuts = 4;
+constexpr int kMaxMainTabs = kFixedTabCount + kMaxShortcuts;
+inline int gShortcutCount = 2;
+inline int mainTabCount() { return kFixedTabCount + gShortcutCount; }
+constexpr float kMainTabTopY = 0.365f;
+constexpr float kMainTabBottomY = 0.085f;
+inline float mainTabPitch() {
+    const int n = mainTabCount();
+    return n <= 5 ? 0.070f : (kMainTabTopY - kMainTabBottomY) / static_cast<float>(n - 1);
+}
+inline float mainTabY(int s) { return kMainTabTopY - mainTabPitch() * static_cast<float>(s); }
+inline float mainTabHalfH() { return std::min(0.030f, mainTabPitch() * 0.43f); }
 constexpr float kRailDividerY = 0.035f;  // between the main tabs and the section tabs
-// Rail hover ids of the YouTube and Browser tabs (0..2 are the first tabs).
-constexpr int kYouTubeTabHoverId = 10;
-constexpr int kBrowserTabHoverId = 11;
-inline int mainTabHoverId(int s) { return s == 3 ? kYouTubeTabHoverId : (s == 4 ? kBrowserTabHoverId : s); }
+// Rail hover ids: 0..2 the fixed tabs, 3..8 section tabs, 9 lock, 10.. shortcuts.
+constexpr int kShortcutHoverBase = 10;
+inline int mainTabHoverId(int s) { return s < kFixedTabCount ? s : kShortcutHoverBase + (s - kFixedTabCount); }
 constexpr float kSettingsSubY[5] = {-0.01f, -0.10f, -0.19f, -0.28f, -0.37f};
 constexpr float kDownloadsSubY[3] = {-0.05f, -0.14f, -0.23f};
 constexpr float kFilesSubY[6] = {-0.04f, -0.11f, -0.18f, -0.25f, -0.32f, -0.39f};
 constexpr float kHitPad = 0.004f;  // laser targets are slightly larger than drawn
 
-inline UiRect mainTab(int s) { return {kRailCx, kMainTabY[s], kRailItemHalfW, kMainTabHalfH}; }
+inline UiRect mainTab(int s) { return {kRailCx, mainTabY(s), kRailItemHalfW, mainTabHalfH()}; }
 // page: 0 = Files, 1 = Downloads, 2 = Settings
 inline UiRect subTab(int page, int sub) {
     if (page == 2) return {kRailCx, kSettingsSubY[sub], kRailItemHalfW, 0.030f};
@@ -2112,6 +2124,14 @@ int VulkanRenderer::keyboardCursorAtPointer() const {
 
 void VulkanRenderer::setKeyboardLayout(int layout) { hub::gKeyboardLayout = layout; }
 
+void VulkanRenderer::setRailShortcuts(const std::vector<RailShortcut>& shortcuts) {
+    railShortcuts_ = shortcuts;
+    if (railShortcuts_.size() > static_cast<std::size_t>(hub::kMaxShortcuts)) {
+        railShortcuts_.resize(hub::kMaxShortcuts);
+    }
+    hub::gShortcutCount = static_cast<int>(railShortcuts_.size());
+}
+
 std::string VulkanRenderer::keyboardKeyText(int index, bool shift, bool symbols) {
     const auto& keys = hub::keyboardKeys();
     if (index < 0 || index >= static_cast<int>(keys.size())) return {};
@@ -2385,7 +2405,7 @@ void VulkanRenderer::updatePointer() {
 
             // Left navigation rail
             if (hx <= kRailRight) {
-                for (int s = 0; s < hub::kMainTabCount; ++s) {
+                for (int s = 0; s < hub::mainTabCount(); ++s) {
                     if (hub::mainTab(s).contains(hx, hyy, hub::kHitPad)) {
                         browserSidebarHovered_ = hub::mainTabHoverId(s);
                         break;
@@ -3995,7 +4015,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         for (int b = 0; b < kBtnCount && b < 32; ++b) {
             ease(dockHoverAnim_[b], (dockShown && pointerButton_ == b) ? 1.0f : 0.0f, 16.0f);
         }
-        for (int s = 0; s < hub::kMainTabCount && s < 8; ++s) {
+        for (int s = 0; s < hub::mainTabCount() && s < 8; ++s) {
             ease(railHoverAnim_[s], (hubOpen && browserSidebarHovered_ == hub::mainTabHoverId(s)) ? 1.0f : 0.0f,
                  16.0f);
         }
@@ -4886,11 +4906,16 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
 
         // Active primary section: 0=Files, 1=Downloads, 2=Settings
         const int activeMainTab = settingsVisible_ ? 2 : (downloadsVisible_ ? 1 : 0);
-        const float* mainTabY = hub::kMainTabY;
-        const UiShape mainIcons[hub::kMainTabCount] = {
-            UiShape::Files, UiShape::Download, UiShape::Settings,
-            railShortcutKiosk_[0] ? UiShape::Play : UiShape::Globe,
-            railShortcutKiosk_[1] ? UiShape::Play : UiShape::Globe};
+        const int mainTabCount = hub::mainTabCount();
+        float mainTabY[hub::kMaxMainTabs];
+        UiShape mainIcons[hub::kMaxMainTabs] = {UiShape::Files, UiShape::Download, UiShape::Settings};
+        for (int s = 0; s < hub::kMaxMainTabs; ++s) {
+            mainTabY[s] = hub::mainTabY(s);
+            if (s >= hub::kFixedTabCount) {
+                const int sc = s - hub::kFixedTabCount;
+                mainIcons[s] = railShortcuts_[sc].kiosk ? UiShape::Play : UiShape::Globe;
+            }
+        }
 
         const float tabActiveBg[4] = {
             themeAccentCol[0] * 0.30f, themeAccentCol[1] * 0.30f,
@@ -4904,10 +4929,10 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         const float* tabNormBg = glassControlT.data();
         const float* tabNormBord = kGlassRimFaint;
 
-        for (int s = 0; s < hub::kMainTabCount; ++s) {
+        for (int s = 0; s < mainTabCount; ++s) {
             const bool act = (s == activeMainTab);
             const bool hov = (browserSidebarHovered_ == hub::mainTabHoverId(s));
-            const float tabHh = hub::kMainTabHalfH;
+            const float tabHh = hub::mainTabHalfH();
             if (act) {
                 drawGlow(vpPanel, -0.695f, mainTabY[s], 0.172f, tabHh, 0.014f,
                          tabActiveGlow, 0.55f);
@@ -5016,11 +5041,13 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const UiRect lockR = hub::lockVaultButton(activeMainTab);
                 drawFitCentered(lockR.cx, lockR.cy, 0.28f, scSub, lockTextCol, "Lock Vault");
             }
-            const char* mainLabels[hub::kMainTabCount] = {"Files", "Downloads", "Settings",
-                                                          railShortcutName_[0].c_str(), railShortcutName_[1].c_str()};
-            for (int s = 0; s < hub::kMainTabCount; ++s) {
-                drawFit(-0.790f, mainTabY[s], 0.23f, scStd,
-                        (s == activeMainTab) ? themeTextCol : slateCol, mainLabels[s]);
+            // Compressed pitch (more than 5 tabs): slightly smaller labels.
+            const float tabSc = (mainTabCount > 5) ? scSub : scStd;
+            for (int s = 0; s < mainTabCount; ++s) {
+                const char* label = s == 0 ? "Files" : s == 1 ? "Downloads" : s == 2 ? "Settings"
+                                    : railShortcuts_[s - hub::kFixedTabCount].name.c_str();
+                drawFit(-0.790f, mainTabY[s], 0.23f, tabSc,
+                        (s == activeMainTab) ? themeTextCol : slateCol, label);
                 if (s == 1 && activeDownloadCount_ > 0) {
                     drawFitCentered(-0.555f, mainTabY[s], 0.035f, scBadge, themeTextCol,
                                     std::to_string(activeDownloadCount_));

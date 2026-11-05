@@ -332,13 +332,12 @@ public:
         uiAccentColorIdx_ = accentColorIdx;
         uiDistance_ = uiDistance;
     }
-    // Labels / icons of the two configurable web tabs on the hub's rail.
-    void setRailShortcuts(const char* name1, bool kiosk1, const char* name2, bool kiosk2) {
-        railShortcutName_[0] = name1;
-        railShortcutName_[1] = name2;
-        railShortcutKiosk_[0] = kiosk1;
-        railShortcutKiosk_[1] = kiosk2;
-    }
+    // The web shortcuts shown as main tabs on the hub's rail (0..4).
+    struct RailShortcut {
+        std::string name;
+        bool kiosk = true;   // Play icon (streaming page) vs. Globe (full browser)
+    };
+    void setRailShortcuts(const std::vector<RailShortcut>& shortcuts);
     void setAmbilightIntensity(float intensity) {
         ambilightIntensity_ = intensity < 0.0f ? 0.0f : (intensity > 1.0f ? 1.0f : intensity);
     }
@@ -944,8 +943,7 @@ private:
     int uiTextColorIdx_ = 0;
     int uiAccentColorIdx_ = 0;
     float uiDistance_ = 1.9f;
-    std::string railShortcutName_[2] = {"YouTube", "Browser"};
-    bool railShortcutKiosk_[2] = {true, false};
+    std::vector<RailShortcut> railShortcuts_ = {{"YouTube", true}, {"Browser", false}};
 
     // Settings panel overlay
     bool settingsVisible_ = false;
