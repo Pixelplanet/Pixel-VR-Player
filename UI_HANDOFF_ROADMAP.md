@@ -147,19 +147,27 @@ In `shaders/thumb.frag`, thumbnails are drawn without scrims, causing white dura
 ### 4.5. Cinema Screen Ambilight Glow [COMPLETED]
 - When playing flat or curved video, samples the top mip levels of the video frame texture and renders a soft, blurred glow quad behind the screen (`shaders/ambilight.frag` and `shaders/ambilight_nv12.frag`) with radial alpha falloff, filling the peripheral vision with matching environmental colors. Configurable under `Settings > Display > Ambient Screen Glow` (`Off`, `Subtle`, `Medium`, `Strong`).
 
-### 4.6. OpenXR Swapchain Supersampling & Panel-Native Resolution Anchoring [COMPLETED]
-- Anchored baseline resolution directly to the headset's physical panel dimensions (**2160×2160 per eye**), preventing SteamVR's conservative runtime default (1728×1728) from downsampling and degrading text and video clarity.
-- 5 tuned presets in `Settings > Display > Render Resolution`:
-  - `1.00x (Panel 2160p)`: Exactly 2160×2160 physical panel 1:1 pixel grid.
-  - `1.15x (Enhanced 2484p)`: 2484×2484 per eye.
-  - `1.25x (Balanced 2700p)`: 2700×2700 per eye.
-  - `1.40x (Ultra 3024p, Default)`: 3024×3024 per eye (optical fovea 1:1 match after lens barrel distortion warp).
-  - `1.50x (Extreme 3240p)`: 3240×3240 per eye for extreme edge clarity.
-- Tightened FreeType SDF font shader kernel in `shaders/text.frag` (`smoothstep(-0.45, 0.45, ...)` + `0.18px` stem darkening bias) for crisp, printed-type clarity.
+### 4.6. Eye-buffer render scale [SUPERSEDED by 4.7]
+- Eye buffers are created at the panel's native 2160×2160 (`createSwapchains(..., 1.0f)`). The
+  1.15x–1.50x supersampling presets were removed in 2026-11: with the UI and flat screens on
+  composition layers they only helped 180/360 video, not enough for the GPU cost.
+- `shaders/text.frag`: FreeType SDF, `smoothstep(-0.45, 0.45, ...)` + 0.18 px stem darkening + dark halo.
 
-### 4.7. OpenXR Composition Layer Quad Migration [IN PROGRESS]
-- Architectural migration to separate the 2D planar elements (Flat Cinema Screen and Spatial UI) from the 3D projection eye swapchain into dedicated OpenXR Composition Layer Quads (`XrCompositionLayerQuad`).
-- By submitting quads directly to the OpenXR compositor in `xrEndFrame()`, the SteamVR runtime distortion scanout pass samples the video and UI textures with single-pass high-order anisotropic/bicubic filtering, completely bypassing projection layer downsampling and geometric perspective blur.
+### 4.7. OpenXR Composition Layers [COMPLETED 2026-11-05]
+Everything 2D is composited by the runtime, not rasterised into the eye buffers:
+
+| Layer | Source | Where |
+|---|---|---|
+| Panel UI (hub, dock, modals, action menu, keyboard) | drawn once per frame into a 2048×1536 swapchain, sub-rect sized to ~28 texels/° | `VulkanRenderer::renderLayersBefore` → `recordView(layerPass)` |
+| Flat video / browser screens (not 180/360, not music-view screens) | copied per new frame into a per-screen swapchain sized to the screen's angular size (snapped steps, ≤ source), one layer per eye for SBS/TB | `renderLayersAfter` → `recordScreenCopy`; `screenLayerLive_[slot]` decided in eye pass 0 |
+| Pointer cursor over a layer screen | 128×128 billboard quad | `renderLayersAfter` |
+
+- `XrContext::renderFrame(renderView, beforeViews, afterViews)` collects `CompositionLayer`s and submits them after the projection layer; `XR_KHR_composition_layer_cylinder` when available (curved panel / curved screens use the same bend maths as `ui.vert` / `quad.vert`), quad otherwise. `XrContext` owns the layer swapchains (`createLayerSwapchain` / `acquireLayerImage` / `releaseLayerImage`).
+- Pipelines have layer-pass variants (`*PipelineLayer_`, no MSAA, `uiLayerPass_`); `passPipeline()` in `recordView` maps them. Per-slot `ycbcrQuadPipelineLayer` for dma-buf video.
+- **SteamVR alpha gotcha:** the compositor shows the layers *beneath* a layer only where that layer's alpha is exactly 0 (cutout), blending only against the projection layer. Therefore: no soft shadows outside panels in the layer pass, panels are stamped opaque (`uiPipelineLayerAlpha_`, alpha = coverage), the cursor has no glow, and see-through comes from the frosted backdrop (`glass_*.frag`: blurred video behind the panel, drawn inside the layer).
+- Laser beam stops 3 cm short of layer surfaces (it would otherwise be composited behind them). Known limitation: anything in the projection layer physically in front of a screen layer is hidden by it.
+- Motion: eased open (hub scale-in, dock slide-in) and hover states advance once per frame in the layer pass (`hubOpenAnim_`, `dockOpenAnim_`, `dockHoverAnim_`, `railHoverAnim_`).
+- Not done: 180/360 as `XR_KHR_composition_layer_equirect2`; MSDF icon atlas replacing the procedural `ui.frag` icons.
 
 ---
 
