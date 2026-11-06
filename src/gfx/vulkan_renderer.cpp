@@ -361,23 +361,26 @@ inline UiRect deleteConfirmButton(int i) { return {i == 0 ? -0.15f : 0.15f, -0.1
 // Network share editor form (action menu page 4). Option ids: 0 host, 1 share
 // (folder for SFTP / WebDAV), 2 authentication, 3 username, 4 password,
 // 5 workgroup (SMB) or port, 6 nickname, 7 save, 8 cancel, 9 delete (existing
-// shares only; the option is empty for a new one), 10 type (protocol).
+// shares only; the option is empty for a new one), 10 type (protocol): a full
+// width row of four pills between the header and the host field.
 constexpr float kSmbHalfW = 0.60f;
-constexpr float kSmbHalfH = 0.43f;
+constexpr float kSmbHalfH = 0.47f;
+constexpr float kSmbHeaderDivY = 0.322f;
+constexpr float kSmbFooterDivY = -0.354f;
 constexpr float kSmbColCx = 0.2775f;    // half-width columns at -/+ this
 constexpr float kSmbColHalfW = 0.2625f;
 constexpr float kSmbWellHalfH = 0.028f;
 constexpr float kSmbLabelLift = 0.047f; // label baseline above the well centre
 inline UiRect smbFieldWell(int i) {
     switch (i) {
-        case 0: return {0.0f, 0.188f, 0.54f, kSmbWellHalfH};
-        case 1: return {-kSmbColCx, 0.073f, kSmbColHalfW, kSmbWellHalfH};
-        case 6: return {kSmbColCx, 0.073f, kSmbColHalfW, kSmbWellHalfH};
-        case 2: return {0.0f, -0.042f, 0.54f, kSmbWellHalfH};
-        case 10: return {kSmbColCx, -0.272f, kSmbColHalfW, kSmbWellHalfH};
-        case 3: return {-kSmbColCx, -0.157f, kSmbColHalfW, kSmbWellHalfH};
-        case 4: return {kSmbColCx, -0.157f, kSmbColHalfW, kSmbWellHalfH};
-        default: return {-kSmbColCx, -0.272f, kSmbColHalfW, kSmbWellHalfH};  // 5 workgroup
+        case 10: return {0.0f, 0.262f, 0.54f, kSmbWellHalfH};
+        case 0: return {0.0f, 0.146f, 0.54f, kSmbWellHalfH};
+        case 1: return {-kSmbColCx, 0.031f, kSmbColHalfW, kSmbWellHalfH};
+        case 6: return {kSmbColCx, 0.031f, kSmbColHalfW, kSmbWellHalfH};
+        case 2: return {0.0f, -0.084f, 0.54f, kSmbWellHalfH};
+        case 3: return {-kSmbColCx, -0.199f, kSmbColHalfW, kSmbWellHalfH};
+        case 4: return {kSmbColCx, -0.199f, kSmbColHalfW, kSmbWellHalfH};
+        default: return {-kSmbColCx, -0.314f, kSmbColHalfW, kSmbWellHalfH};  // 5 workgroup
     }
 }
 // Laser target for a field: the well plus its label above it.
@@ -391,14 +394,20 @@ inline UiRect smbAuthSegment(int seg) {
     const float segHalfW = w.hw * 0.5f - 0.004f;
     return {w.cx + (seg == 0 ? -1.0f : 1.0f) * (segHalfW + 0.002f), w.cy, segHalfW, w.hh - 0.004f};
 }
+// Protocol pills inside field 10: 0 SMB, 1 SFTP, 2 WebDAV, 3 WebDAV https.
+inline UiRect smbTypeSegment(int seg) {
+    const UiRect w = smbFieldWell(10);
+    const float segHalfW = w.hw * 0.25f - 0.004f;
+    return {w.cx + (static_cast<float>(seg) - 1.5f) * w.hw * 0.5f, w.cy, segHalfW, w.hh - 0.004f};
+}
 // Footer / header buttons by option id (7 save, 8 cancel, 9 delete); id 10 is
 // the header close button, which also cancels.
 inline UiRect smbButton(int id) {
     switch (id) {
-        case 7: return {0.445f, -0.362f, 0.105f, 0.034f};
-        case 8: return {0.235f, -0.362f, 0.085f, 0.034f};
-        case 9: return {-0.455f, -0.362f, 0.090f, 0.034f};
-        default: return {0.545f, 0.362f, 0.026f, 0.026f};
+        case 7: return {0.445f, -0.404f, 0.105f, 0.034f};
+        case 8: return {0.235f, -0.404f, 0.085f, 0.034f};
+        case 9: return {-0.455f, -0.404f, 0.090f, 0.034f};
+        default: return {0.545f, 0.399f, 0.026f, 0.026f};
     }
 }
 // In-app keyboard (text entry for SMB fields, rename): a glass sheet over the
@@ -2393,6 +2402,11 @@ void VulkanRenderer::updatePointer() {
                             if (hub::smbAuthSegment(seg).contains(hx, hyy, 0.004f)) actionMenuKeyHovered_ = seg;
                         }
                     }
+                    if (actionMenuBtnHovered_ == 10) {
+                        for (int seg = 0; seg < 4; ++seg) {
+                            if (hub::smbTypeSegment(seg).contains(hx, hyy, 0.004f)) actionMenuKeyHovered_ = seg;
+                        }
+                    }
                     if (actionMenuBtnHovered_ < 0) {
                         for (int id : {7, 8, 9, 10}) {
                             if (id == 9 && (optCount < 10 || actionMenu_.options[9].empty())) continue;  // no Delete for a new share
@@ -2536,8 +2550,8 @@ void VulkanRenderer::updatePointer() {
         Vec3 screenHitWorld{0.0f, 0.0f, 0.0f};
         float screenHitU = 0.0f;  // 0..1 across the screen (left to right)
         float screenHitV = 0.0f;  // 0..1 down the screen
+        float bestT = 1e9f;
         if (screensPointable) {
-            float bestT = 1e9f;
             for (int slot = 0; slot < kMaxVideoSlots; ++slot) {
                 const ScreenHitInfo& sh = screenHit_[slot];
                 if (!sh.valid) continue;
@@ -2627,6 +2641,12 @@ void VulkanRenderer::updatePointer() {
         if (!controlBar || !panelHit) {
             if (takeScreenHit()) break;
             continue;
+        }
+        // A screen the ray reaches before the dock plane is what the beam sees
+        // first (the dock keeps a small lead, so grazing hits still go to it).
+        if (screenHitSlot >= 0 && bestT < length(world - origin) - 0.02f) {
+            takeScreenHit();
+            break;
         }
 
         // Draggable timeline track (top band of dock)
@@ -3018,7 +3038,8 @@ void VulkanRenderer::renderLayersBefore(XrContext& xr, const XrView* views, uint
     using namespace math;
     const PanelPlacement placement = computePanelPlacement(
         uiDistance_, projectionMode_ == ProjectionMode::Flat, uiFollowMode_, screenPivot_,
-        screenForward_, screenYaw_, recenterPitch_, sphereFollowYaw_);
+        screenForward_, screenYaw_, recenterPitch_,
+        sphereFollowInit_ ? sphereFollowYaw_ : screenYaw_);
     const float bendR = panelBendRadius(placement.dist);
 
     // Panel-space window (metres) with room for glows and shadows.
@@ -3627,7 +3648,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
     }
     const PanelPlacement placement = computePanelPlacement(
         uiDistance_, projectionMode_ == ProjectionMode::Flat, uiFollowMode_, screenPivot_,
-        screenForward_, screenYaw_, recenterPitch_, sphereFollowYaw_);
+        screenForward_, screenYaw_, recenterPitch_,
+        sphereFollowInit_ ? sphereFollowYaw_ : screenYaw_);
     const Mat4& panelBase = placement.base;
     // Curved main panel: a cylinder whose radius is the panel distance divided by
     // the curve amount (1.0 = wraps around the viewer, 0 = flat). In the layer
@@ -4089,6 +4111,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
 
     auto formatBreadcrumbs = [](const std::string& path) -> std::string {
         if (path.empty()) return "Local Storage";
+        if (path == "smb://") return "Network";
         if (isRemotePath(path)) {
             std::string s = path.substr(path.find("://") + 3);
             std::string res = remoteProtocolLabel(path);
@@ -5531,7 +5554,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
 
             drawRailText();
             drawFit(-0.855f, hub::railDividerY() - 0.015f, 0.34f, scBadge, dimCol, "QUICK FILTERS");
-            const char* qLabels[6] = {"Local Storage", "Videos", "SMB Shares", "Downloads", "Bookmarks", "Vault (Private)"};
+            const char* qLabels[6] = {"Local Storage", "Videos", "Network", "Downloads", "Bookmarks", "Vault (Private)"};
             const int qCount = vaultUnlocked_ ? 6 : 5;
             for (int sub = 0; sub < qCount; ++sub) {
                 const float* col = (browserQuickFilter_ == sub) ? themeTextCol : slateCol;
@@ -6627,9 +6650,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                               hov ? kGlassRim : kGlassRimFaint);
                 drawUiElement(vpPanel, cr.cx, cr.cy, cr.hw * 0.42f, cr.hh * 0.42f, UiShape::Close,
                               themeTextCol);
-                drawUiElement(vpPanel, 0.0f, 0.285f, hub::kSmbHalfW - 0.04f, 0.0012f,
+                drawUiElement(vpPanel, 0.0f, hub::kSmbHeaderDivY, hub::kSmbHalfW - 0.04f, 0.0012f,
                               UiShape::RoundedBox, kGlassDivider, 1.0f);
-                drawUiElement(vpPanel, 0.0f, -0.312f, hub::kSmbHalfW - 0.04f, 0.0012f,
+                drawUiElement(vpPanel, 0.0f, hub::kSmbFooterDivY, hub::kSmbHalfW - 0.04f, 0.0012f,
                               UiShape::RoundedBox, kGlassDivider, 1.0f);
             }
             for (int i : {0, 1, 2, 3, 4, 5, 6, 10}) {
@@ -6649,6 +6672,23 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         const UiRect r = hub::smbAuthSegment(seg);
                         const bool active = (seg == 0) == anon;
                         if (active) {
+                            drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox,
+                                          activeSegBg, 1.0f, 0.10f, tabActiveBord);
+                        } else if (hov && actionMenuKeyHovered_ == seg) {
+                            drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox,
+                                          kGlassVeil, 1.0f, 0.08f, kGlassRim);
+                        }
+                    }
+                }
+                if (i == 10) {
+                    const int sel = optCount > 10 ? (actionMenu_.options[10] == "SFTP"             ? 1
+                                                     : actionMenu_.options[10] == "WebDAV"          ? 2
+                                                     : actionMenu_.options[10] == "WebDAV (https)" ? 3
+                                                                                                    : 0)
+                                                  : 0;
+                    for (int seg = 0; seg < 4; ++seg) {
+                        const UiRect r = hub::smbTypeSegment(seg);
+                        if (seg == sel) {
                             drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox,
                                           activeSegBg, 1.0f, 0.10f, tabActiveBord);
                         } else if (hov && actionMenuKeyHovered_ == seg) {
@@ -6843,7 +6883,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             const std::string defPort = kind == "SFTP" ? "22" : (kind == "WebDAV" ? "80" : "443");
             const std::string labels[11] = {"Server / host", smbKind ? "Share" : "Folder", "Sign in",
                                             "Username", "Password", smbKind ? "Workgroup / domain" : "Port",
-                                            "Nickname", "", "", "", "Type"};
+                                            "Nickname", "", "", "", ""};
             const std::string placeholders[11] = {"IP address or hostname",
                                                   smbKind ? "All shares" : (kind == "SFTP" ? "Home, or /absolute/path" : "Start folder (optional)"),
                                                   "", "Username", "Password",
@@ -6851,11 +6891,11 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                                                   "Optional display name", "", "", "", ""};
             // Header: title (heading weight) + hint / error line
             withHeadingFont([&] {
-                drawFit(-hub::kSmbHalfW + 0.055f, 0.362f, 0.95f, sc * 1.10f, themeTextCol,
+                drawFit(-hub::kSmbHalfW + 0.055f, 0.399f, 0.95f, sc * 1.10f, themeTextCol,
                         actionMenu_.title);
             });
             const bool isError = actionMenu_.subtitle.rfind("Error", 0) == 0;
-            drawFit(-hub::kSmbHalfW + 0.055f, 0.318f, 1.0f, labelSc * 1.05f,
+            drawFit(-hub::kSmbHalfW + 0.055f, 0.355f, 1.0f, labelSc * 1.05f,
                     isError ? errCol : slateCol, actionMenu_.subtitle);
 
             for (int i : {0, 1, 2, 3, 4, 5, 6, 10}) {
@@ -6873,6 +6913,16 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         drawFitCentered(r.cx, r.cy, r.hw * 2.0f - 0.02f, valSc,
                                         active ? themeTextCol : slateCol,
                                         seg == 0 ? "Guest" : "Username & Password");
+                    }
+                    continue;
+                }
+                if (i == 10) {
+                    static const char* const kTypes[4] = {"SMB", "SFTP", "WebDAV", "WebDAV https"};
+                    const int sel = kind == "SFTP" ? 1 : (kind == "WebDAV" ? 2 : (kind == "WebDAV (https)" ? 3 : 0));
+                    for (int seg = 0; seg < 4; ++seg) {
+                        const UiRect r = hub::smbTypeSegment(seg);
+                        drawFitCentered(r.cx, r.cy, r.hw * 2.0f - 0.02f, valSc,
+                                        seg == sel ? themeTextCol : slateCol, kTypes[seg]);
                     }
                     continue;
                 }
@@ -7181,7 +7231,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
     const bool cursorOnLayerScreen = uiLayerLive() && pointerActive_ && !pointerOnPanel_ &&
                                      pointerScreen_ >= 0 && pointerScreen_ < kMaxVideoSlots &&
                                      screenLayerLive_[pointerScreen_];
-    const bool cursorInLayer = (uiLayerLive() && pointerOnPanel_) || cursorOnLayerScreen;
+    const bool cursorInLayer = uiLayerLive() && pointerOnPanel_;
     if (layerPass && pointerActive_ && cursorInLayer && uiPipeline_ != VK_NULL_HANDLE) {
         bindPipe(uiPipeline_);
         const float cursorGlow[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.45f};
@@ -7287,7 +7337,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     Vec3{pointerHit_[0], pointerHit_[1], pointerHit_[2]} - o);
                 // A layer surface is composited over the eye buffers, so stop
                 // the beam a little short of it instead of vanishing into it.
-                if (cursorInLayer) rayLen = std::max(rayLen - 0.03f, 0.05f);
+                if (cursorInLayer || cursorOnLayerScreen) rayLen = std::max(rayLen - 0.03f, 0.05f);
             }
             if (uiLayerLive() && beamSwapchain_.handle != XR_NULL_HANDLE) continue;  // beam is a layer
             // Tapered beam: thin at the controller, widening toward the hit, so
@@ -7302,7 +7352,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         rayCol);
             }
         }
-        if (pointerActive_ && !cursorInLayer) {
+        if (pointerActive_ && !cursorInLayer && !cursorOnLayerScreen) {
             const Vec3 hit{pointerHit_[0], pointerHit_[1], pointerHit_[2]};
             const float cursorGlow[4] = {
                 themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.45f};

@@ -1070,7 +1070,8 @@ void App::startPlexPlay(int slot, const BrowserHost::PlexPlay& play) {
     }
     const auto now = std::chrono::steady_clock::now();
     notice_ = play.title;
-    noticeUntil_ = now + std::chrono::seconds(5);
+    noticeUntil_ = now + std::chrono::seconds(8);
+    plexHintAt_ = now + std::chrono::seconds(4);
     sc.plexReportAt = now + std::chrono::seconds(10);
     webHosts_[slot].plexTimeline("playing", static_cast<int64_t>(play.offset * 1000.0));
     PIXELVR_LOG_INFO("Plex: playing \"%s\" on screen %d", play.title.c_str(), slot + 1);
@@ -3402,6 +3403,10 @@ int App::run() {
             const bool dlAnyActive = browser_.downloadActive() || browser_.hasQueuedDownloads();
             // The head-locked line carries short notices instead (software
             // decoding because another process holds the hardware decoder).
+            if (plexHintAt_ != std::chrono::steady_clock::time_point{} && std::chrono::steady_clock::now() >= plexHintAt_) {
+                plexHintAt_ = {};
+                if (std::chrono::steady_clock::now() < noticeUntil_) notice_ = "Stop or close returns to Plex";
+            }
             const bool noticeOn = !notice_.empty() && std::chrono::steady_clock::now() < noticeUntil_;
             renderer_.setDownloadStatus(noticeOn, noticeOn ? notice_ : std::string());
             renderer_.setDownloadsBadge(dlAnyActive,
@@ -3634,7 +3639,7 @@ int App::run() {
                     if (e.isBack) {
                         item.tag = "UP";
                     } else if (e.isNetwork) {
-                        item.tag = "SMB";
+                        item.tag = "NETWORK";
                     } else if (e.isDir) {
                         // Folders always show FOLDER in the badge; format of contained
                         // video is added to the detail line below.
@@ -4429,11 +4434,17 @@ int App::run() {
                                 } else if (chosen == 9 && !smbModal_.isNew) {
                                     deleteSmbModal();
                                 } else if (chosen == 10) {
-                                    smbModal_.protocol = smbModal_.protocol == "smb"    ? "sftp"
-                                                         : smbModal_.protocol == "sftp" ? "dav"
-                                                         : smbModal_.protocol == "dav"  ? "davs"
-                                                                                        : "smb";
-                                    smbModal_.port.clear();
+                                    static const char* const kProtocols[4] = {"smb", "sftp", "dav", "davs"};
+                                    const int seg = renderer_.actionMenuKeyHovered();
+                                    int cur = 0;
+                                    for (int k = 0; k < 4; ++k) {
+                                        if (smbModal_.protocol == kProtocols[k]) cur = k;
+                                    }
+                                    const std::string next = kProtocols[seg >= 0 ? seg : (cur + 1) % 4];
+                                    if (next != smbModal_.protocol) {
+                                        smbModal_.protocol = next;
+                                        smbModal_.port.clear();
+                                    }
                                     updateSmbModalMenu();
                                 }
                             }

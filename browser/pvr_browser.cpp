@@ -1071,6 +1071,8 @@ int runScreen(const ScreenOptions& opt) {
         bool intercepted = false;
         std::string session, base, token, ratingKey, key, url;
         long long durationMs = 0;
+        bool restoring = false;          // a request nobody asked for: keep the page paused, do not hand off
+        Clock::time_point lastInputAt{};
         Clock::time_point pauseUntil{};  // the player starts a moment after its request: keep it paused
         Clock::time_point nextPauseAt{};
         Clock::time_point closeAt{};
@@ -1540,6 +1542,16 @@ int runScreen(const ScreenOptions& opt) {
                 if (const pvrjson::Value* h = req->get("headers")) token = h->getString("X-Plex-Token");
             }
             if (path.rfind("/library/metadata/", 0) != 0 || hostEnd == std::string::npos || token.empty()) return;
+            const auto nowT = Clock::now();
+            if (plex.lastInputAt == Clock::time_point{} || nowT - plex.lastInputAt > std::chrono::seconds(4)) {
+                // Plex Web restores its last play queue on load; that is not the user pressing play.
+                plex.restoring = true;
+                plex.session = session;
+                plex.pauseUntil = nowT + std::chrono::seconds(5);
+                plex.nextPauseAt = {};
+                return;
+            }
+            plex.restoring = false;
             plex.intercepted = true;
             plex.session = session;
             plex.base = url.substr(0, hostEnd);
@@ -1770,6 +1782,7 @@ int runScreen(const ScreenOptions& opt) {
         double x = 0, y = 0;
         int d = 0;
         Tab* tab = activeTab();
+        if (cmd == "down" || cmd == "up" || cmd == "wheel" || cmd == "key" || cmd == "text") plex.lastInputAt = Clock::now();
         if (cmd == "move" && std::sscanf(rest.c_str(), "%lf %lf", &x, &y) == 2) {
             updateReveal(y);
             double off = 0.0;
@@ -2039,9 +2052,12 @@ int runScreen(const ScreenOptions& opt) {
             pollState();
             nextPoll = now + std::chrono::milliseconds(400);
         }
-        if (plex.intercepted && plex.pauseUntil != Clock::time_point{} && now >= plex.nextPauseAt) {
+        if ((plex.intercepted || plex.restoring) && plex.pauseUntil != Clock::time_point{} && now >= plex.nextPauseAt) {
             plex.nextPauseAt = now + std::chrono::milliseconds(250);
-            if (now >= plex.pauseUntil) plex.pauseUntil = {};
+            if (now >= plex.pauseUntil) {
+                plex.pauseUntil = {};
+                plex.restoring = false;
+            }
             else evalIn(plex.session, "(()=>{" + kPauseAllJs + "})()");
         }
         if (plex.closeAt != Clock::time_point{} && now >= plex.closeAt) {

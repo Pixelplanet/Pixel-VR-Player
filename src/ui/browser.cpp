@@ -227,7 +227,7 @@ void Browser::scanLocalInto(const std::string& dir, ScanResult& out) {
     out.entries.clear();
 
     if (dir == homeDir_) {
-        out.entries.push_back({"[ Network (SMB) ]", "", false, false, false, true});
+        out.entries.push_back({"[ Network ]", "", false, false, false, true});
     }
     if (dir != "/") {
         out.entries.push_back({".. (up)", "", false, false, true, false});
