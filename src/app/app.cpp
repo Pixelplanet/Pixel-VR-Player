@@ -2281,7 +2281,9 @@ void App::openWebScreen(const std::string& url, bool kiosk) {
     downloadsWindow_ = false;
     pendingWebUrl_ = url;
     pendingWebKiosk_ = kiosk;
-    if (multiScreenEnabled() && openScreenCount() > 0) {
+    // A 180/360 video plays alone: the page replaces it, like a new file does.
+    const bool immersiveMain = screens_[0].open && screens_[0].projection != 0;
+    if (!immersiveMain && multiScreenEnabled() && openScreenCount() > 0) {
         // The picker lives in the Files hub (it is dismissed without it), like
         // picking a screen for a file; choosing a screen closes the hub.
 #ifdef PIXELVR_HAVE_FREETYPE
@@ -3313,10 +3315,11 @@ int App::run() {
             // In 360/180 the right stick tilts / zooms the scene: used blindly, and a
             // flat dock popping up over the whole view is distracting, so it doesn't wake the UI.
             const bool sphereView = settings_.projectionMode() != 0;
-            const bool stickMoved = (std::fabs(in.thumbstickX) > 0.25f ||
-                                     std::fabs(in.thumbstickY) > 0.25f ||
-                                     (!sphereView && (std::fabs(in.thumbstickRX) > 0.25f ||
-                                                      std::fabs(in.thumbstickRY) > 0.25f)));
+            // (thumbstickX/Y combine both hands, so in 360/180 only the left stick counts.)
+            const bool stickMoved =
+                sphereView ? (std::fabs(in.thumbstickLX) > 0.25f || std::fabs(in.thumbstickLY) > 0.25f)
+                           : (std::fabs(in.thumbstickX) > 0.25f || std::fabs(in.thumbstickY) > 0.25f ||
+                              std::fabs(in.thumbstickRX) > 0.25f || std::fabs(in.thumbstickRY) > 0.25f);
             // Only digital full grip press (gripFullPressDown) or physical buttons wake the HUD.
             // Soft analog squeeze (gripDown / BtnGrip) is ignored to prevent accidental wake-up from resting hands.
             bool anyButtonPressed = (in.togglePlay || in.browserToggle || in.recenter ||
