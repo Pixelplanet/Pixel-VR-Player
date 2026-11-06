@@ -122,6 +122,7 @@ public:
     };
     void setPlexNative(bool on);
     bool takePlexPlay(PlexPlay& out);
+    void plexRelease() { send("plexrelease"); }  // close the page's player, no timeline report
     void plexReturn(int64_t ms) { send("plexreturn " + std::to_string(ms)); }  // close Plex's player, report "stopped" at ms
     void plexTimeline(const char* state, int64_t ms);  // playing | paused | stopped
 

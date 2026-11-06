@@ -582,6 +582,13 @@ public:
         screenFramesOn_ = frames;
     }
     void setControlBar(bool visible) { controlBarVisible_ = visible; }
+    // A one-line glass pill just above the dock (e.g. how to leave a hand-off).
+    // `seconds` count down only while the dock is visible; it hides while the
+    // scrub bubble shows.
+    void setDockHint(const std::string& text, float seconds) {
+        dockHintText_ = text;
+        dockHintLeft_ = seconds;
+    }
     void setAudioFollow(bool on) { audioFollow_ = on; }
     // Perf log: milliseconds spent waiting for the GPU (a view's previous use)
     // and in renderView overall since the last call; then reset.
@@ -898,6 +905,9 @@ private:
     // the first eye when the UI is drawn in-scene).
     float hubOpenAnim_ = 0.0f;                    // hub / modal scale-in
     float dockOpenAnim_ = 0.0f;                   // dock slide-in from below
+    std::string dockHintText_;
+    float dockHintLeft_ = 0.0f;                   // seconds of dock time still to show it
+    float dockHintAlpha_ = 0.0f;                  // fade 0..1
     float dockHoverAnim_[32]{};                   // per transport button
     float railHoverAnim_[16]{};                   // per rail main tab
     std::chrono::steady_clock::time_point animLastT_{};

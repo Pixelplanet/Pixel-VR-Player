@@ -3057,7 +3057,9 @@ void VulkanRenderer::renderLayersBefore(XrContext& xr, const XrView* views, uint
         // band out of the screen above the dock.
         const float rowExtra = screenControlsVisible_ ? kDockScreenRowExtra : 0.0f;
         const float bottom = kBarY - kDockHalfH - rowExtra - kMargin;
-        const float top = kBarY + (pointerOnTimeline_ ? 0.40f : kDockHalfH) + kMargin;
+        // The return-hint pill (top edge kBarY + kDockHalfH + 0.066) widens the window only while it shows.
+        const bool hintOn = !dockHintText_.empty() && (dockHintLeft_ > 0.0f || dockHintAlpha_ > 0.0f);
+        const float top = kBarY + (pointerOnTimeline_ ? 0.40f : (hintOn ? kDockHalfH + 0.070f : kDockHalfH)) + kMargin;
         pass.cx = 0.0f;
         pass.cy = 0.5f * (bottom + top);
         pass.hw = kDockHalfW + kMargin;
@@ -4169,6 +4171,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         if (!panelShown) hubOpenAnim_ = 0.0f; else ease(hubOpenAnim_, 1.0f, 12.0f);
         const bool dockShown = controlBarVisible_ && !hubOpen && !modalOpen;
         if (!dockShown) dockOpenAnim_ = 0.0f; else ease(dockOpenAnim_, 1.0f, 10.0f);
+        if (dockShown && dockHintLeft_ > 0.0f) dockHintLeft_ = std::max(0.0f, dockHintLeft_ - dt);
+        ease(dockHintAlpha_, (dockShown && dockHintLeft_ > 0.0f && !pointerOnTimeline_ && !dockHintText_.empty()) ? 1.0f : 0.0f,
+             20.0f);
         for (int b = 0; b < kBtnCount && b < 32; ++b) {
             ease(dockHoverAnim_[b], (dockShown && pointerButton_ == b) ? 1.0f : 0.0f, 16.0f);
         }
@@ -4929,6 +4934,19 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                           UiShape::RoundedBox, glassControlT.data(), 1.0f, 0.06f, kGlassRim);
         }
 
+        // Return hint: a glass pill 1.4 cm above the dock's top edge (centre
+        // kBarY + kDockHalfH + 0.040, half-height 0.026), same style as the scrub bubble.
+        const float hintHh = 0.026f;
+        const float hintY = kBarY + kDockHalfH + 0.014f + hintHh;
+        const float hintHw = dockHintText_.empty()
+                                 ? 0.0f
+                                 : std::clamp(0.5f * measureString(tipSc, dockHintText_) + 0.034f, 0.14f, 0.62f);
+        if (dockHintAlpha_ > 0.005f && hintHw > 0.0f) {
+            const auto hintBg = tinted(glassControlT.data(), dockHintAlpha_);
+            const float hintRim[4] = {kGlassRim[0], kGlassRim[1], kGlassRim[2], kGlassRim[3] * dockHintAlpha_};
+            drawUiElement(vpPanel, 0.0f, hintY, hintHw, hintHh, UiShape::RoundedBox, hintBg.data(), 1.0f, 0.06f, hintRim);
+        }
+
         if (textReady_) {
             bindPipe(textPipeline_);
             vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -4978,6 +4996,11 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         drawFitCentered(0.0f, trackY + 0.042f, 2.0f * trackHalfW, pillSc, chapCol, c->title);
                     }
                 }
+            }
+
+            if (dockHintAlpha_ > 0.005f && hintHw > 0.0f) {
+                const float hintCol[4] = {themeTextCol[0], themeTextCol[1], themeTextCol[2], dockHintAlpha_};
+                drawFitCentered(0.0f, hintY, 2.0f * hintHw - 0.03f, tipSc, hintCol, dockHintText_);
             }
 
             // Left flank pills: HUB and RECENTER

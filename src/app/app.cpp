@@ -993,6 +993,7 @@ void App::closeMedia(int slot) {
         webHosts_[slot].plexTimeline("stopped", static_cast<int64_t>(sc.engine.position() * 1000.0));
 #endif
         webHosts_[slot].stop();
+        renderer_.setDockHint(std::string(), 0.0f);
     }
     if (sc.web) {
         if (kbWebSlot_ == slot) cancelKeyboard();
@@ -1070,8 +1071,10 @@ void App::startPlexPlay(int slot, const BrowserHost::PlexPlay& play) {
     }
     const auto now = std::chrono::steady_clock::now();
     notice_ = play.title;
-    noticeUntil_ = now + std::chrono::seconds(8);
-    plexHintAt_ = now + std::chrono::seconds(4);
+    noticeUntil_ = now + std::chrono::seconds(4);
+    hudDismissed_ = false;  // the dock shows, with the hint above it
+    lastControllerActivity_ = now;
+    renderer_.setDockHint("Press Stop or Close to return to Plex", 8.0f);
     sc.plexReportAt = now + std::chrono::seconds(10);
     webHosts_[slot].plexTimeline("playing", static_cast<int64_t>(play.offset * 1000.0));
     PIXELVR_LOG_INFO("Plex: playing \"%s\" on screen %d", play.title.c_str(), slot + 1);
@@ -1087,6 +1090,7 @@ bool App::returnFromPlex(int slot) {
     ScreenState& sc = screens_[slot];
     if (!sc.webSuspended) return false;
     webHosts_[slot].plexReturn(static_cast<int64_t>(sc.engine.position() * 1000.0));
+    renderer_.setDockHint(std::string(), 0.0f);
     sc.engine.close();
     renderer_.releaseVideoFrame(slot);
     renderer_.clearVideo(slot);
@@ -2826,7 +2830,16 @@ int App::run() {
                 }
                 BrowserHost::PlexPlay plexPlay;
                 while (host.takePlexPlay(plexPlay)) {
-                    if (screens_[slot].web) startPlexPlay(slot, plexPlay);
+                    if (!screens_[slot].web) continue;
+                    // Plex Web restores the play queue another window is already playing natively.
+                    const std::string item = plexPlay.url.substr(0, plexPlay.url.find('?'));
+                    bool playing = false;
+                    for (int o = 0; o < VulkanRenderer::kMaxVideoSlots; ++o) {
+                        const std::string& op = screens_[o].path;
+                        playing = playing || (o != slot && screens_[o].webSuspended && op.substr(0, op.find('?')) == item);
+                    }
+                    if (playing) host.plexRelease();
+                    else startPlexPlay(slot, plexPlay);
                 }
                 // Text fields: a click into one opens the keyboard, which then
                 // types straight into the page; it closes when the field does.
@@ -3403,10 +3416,6 @@ int App::run() {
             const bool dlAnyActive = browser_.downloadActive() || browser_.hasQueuedDownloads();
             // The head-locked line carries short notices instead (software
             // decoding because another process holds the hardware decoder).
-            if (plexHintAt_ != std::chrono::steady_clock::time_point{} && std::chrono::steady_clock::now() >= plexHintAt_) {
-                plexHintAt_ = {};
-                if (std::chrono::steady_clock::now() < noticeUntil_) notice_ = "Stop or close returns to Plex";
-            }
             const bool noticeOn = !notice_.empty() && std::chrono::steady_clock::now() < noticeUntil_;
             renderer_.setDownloadStatus(noticeOn, noticeOn ? notice_ : std::string());
             renderer_.setDownloadsBadge(dlAnyActive,

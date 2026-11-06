@@ -353,6 +353,8 @@ struct MediaEngine::Impl {
     int height = 0;
     double duration = 0.0;
     double frameRate = 0.0;
+    bool httpSource = false;  // http(s): FFmpeg reconnects; read errors are retried here too
+    int readRetries = 0;
     AVRational timeBase{1, 1};
     int drmDiag = 0;
     std::string codecName;
@@ -872,6 +874,7 @@ void MediaEngine::Impl::decodeLoop() {
             masterClock.store(seekTo);
             playClock.reset();  // the next presented frame re-anchors the clock
             eofFlushed = false;
+            readRetries = 0;
             eof.store(false);
         }
         if (paused.load()) {
@@ -898,6 +901,19 @@ void MediaEngine::Impl::decodeLoop() {
         }
         playClock.resume();  // no-op unless resuming from pause
         const int readResult = av_read_frame(format, packet);
+        if (readResult >= 0) {
+            readRetries = 0;
+        } else if (httpSource && !eofFlushed && readRetries < 6 &&
+                   (readResult != AVERROR_EOF || duration <= 0.0 || masterClock.load() < duration - 15.0)) {
+            // A dropped connection far from the end is not the end of the file:
+            // re-seek the I/O layer to where it stopped (this clears its sticky
+            // EOF/error flag and makes the HTTP layer open a fresh request).
+            ++readRetries;
+            PIXELVR_LOG_WARN("MediaEngine: network read error (%d), retry %d", readResult, readRetries);
+            std::this_thread::sleep_for(std::chrono::milliseconds(300 * readRetries));
+            if (format->pb != nullptr) avio_seek(format->pb, avio_tell(format->pb), SEEK_SET | AVSEEK_FORCE);
+            continue;
+        }
         if (readResult < 0) {
             if (!eofFlushed) {
                 if (codec != nullptr) {
@@ -1038,6 +1054,8 @@ const std::string& MediaEngine::lastError() const { return impl_->lastError; }
 bool MediaEngine::open(const std::string& path) {
     close();
     impl_->lastError = "the file could not be opened";
+    impl_->httpSource = false;
+    impl_->readRetries = 0;
 
     if (isRemotePath(path)) {
         std::unique_ptr<RemoteFile> remote;
@@ -1110,10 +1128,26 @@ bool MediaEngine::open(const std::string& path) {
             close();
             return false;
         }
-    } else
-    if (avformat_open_input(&impl_->format, path.c_str(), nullptr, nullptr) < 0) {
+    } else {
+    AVDictionary* httpOpts = nullptr;
+    impl_->httpSource = path.rfind("http://", 0) == 0 || path.rfind("https://", 0) == 0;
+    if (impl_->httpSource) {
+        // Servers and NATs drop long transfers (Plex: every 10-60 s); resume
+        // from the current offset instead of ending the stream.
+        av_dict_set(&httpOpts, "reconnect", "1", 0);
+        av_dict_set(&httpOpts, "reconnect_streamed", "1", 0);
+        av_dict_set(&httpOpts, "reconnect_at_eof", "1", 0);
+        av_dict_set(&httpOpts, "reconnect_on_network_error", "1", 0);
+        av_dict_set(&httpOpts, "reconnect_on_http_error", "4xx,5xx", 0);
+        av_dict_set(&httpOpts, "reconnect_delay_max", "5", 0);
+        av_dict_set(&httpOpts, "multiple_requests", "1", 0);
+    }
+    const int openRc = avformat_open_input(&impl_->format, path.c_str(), nullptr, &httpOpts);
+    av_dict_free(&httpOpts);
+    if (openRc < 0) {
         PIXELVR_LOG_ERROR("MediaEngine: cannot open %s", path.c_str());
         return false;
+    }
     }
     if (avformat_find_stream_info(impl_->format, nullptr) < 0) {
         impl_->lastError = "unknown or damaged file format";

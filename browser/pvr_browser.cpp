@@ -1085,7 +1085,8 @@ int runScreen(const ScreenOptions& opt) {
                                          urlEncode(plex.key) + "&state=" + state + "&time=" + std::to_string(ms) +
                                          "&duration=" + std::to_string(plex.durationMs) +
                                          "&X-Plex-Token=" + plex.token) +
-                   ",{headers:{'X-Plex-Client-Identifier':'pixelvr-player','X-Plex-Product':'Pixel VR Player'}}).catch(()=>0)&&0");
+                   ",{headers:{'X-Plex-Client-Identifier':'pixelvr-player-" + std::to_string(getpid()) +
+                   "','X-Plex-Product':'Pixel VR Player'}}).catch(()=>0)&&0");
     };
     const std::string kPauseAllJs = "for(const m of document.querySelectorAll('video,audio'))m.pause()";
 
@@ -1882,9 +1883,11 @@ int runScreen(const ScreenOptions& opt) {
             for (const Tab& t : tabs) evalIn(t.session, js);
         } else if (cmd == "plexnative") {
             plex.enabled = rest == "1";
-        } else if (cmd == "plexreturn") {
+        } else if (cmd == "plexreturn" || cmd == "plexrelease") {
+            // plexrelease closes the page's player without a timeline report
+            // (another window plays the same item and owns the resume position).
             if (!plex.intercepted || plex.closeAt != Clock::time_point{}) return;
-            plex.stoppedMs = std::atoll(rest.c_str());
+            plex.stoppedMs = cmd == "plexrelease" ? -1 : std::atoll(rest.c_str());
             evalIn(plex.session, "(()=>{" + kPauseAllJs + "})()");
             if (const KeyInfo* esc = keyInfo("Escape")) keyEvent(esc, plex.session);
             plex.closeAt = Clock::now() + std::chrono::milliseconds(400);
@@ -2084,7 +2087,7 @@ int runScreen(const ScreenOptions& opt) {
             plex.intercepted = false;
             const int i = tabBySession(plex.session);
             if (i >= 0 && tabs[i].url != plex.url) evalIn(plex.session, "history.back()");
-            plexTimeline("stopped", plex.stoppedMs);
+            if (plex.stoppedMs >= 0) plexTimeline("stopped", plex.stoppedMs);
         }
         if (probeAt != Clock::time_point{} && now >= probeAt) {
             probeAt = {};
