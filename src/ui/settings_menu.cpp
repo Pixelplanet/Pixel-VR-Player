@@ -310,7 +310,6 @@ void SettingsMenu::refresh() {
             toggle(kRailShortcuts[i].name, on,
                    static_cast<Action>(static_cast<int>(Action::ToggleRailShortcut0) + i));
         }
-        toggle("Plex: original quality in player", plexNative_, Action::TogglePlexNative);
         rows_.push_back({"Back to UI & Appearance", "", Action::BackToUI});
     } else if (section_ == 21) {
         title_ = "Settings > UI & Appearance > List Columns";
@@ -391,11 +390,6 @@ SettingsMenu::Action SettingsMenu::activate() {
             break;
         case Action::ToggleSwapEyes:
             swapEyes_ = !swapEyes_;
-            saveConfig();
-            refresh();
-            break;
-        case Action::TogglePlexNative:
-            plexNative_ = !plexNative_;
             saveConfig();
             refresh();
             break;
@@ -733,7 +727,6 @@ void SettingsMenu::loadConfig() {
             if (key == "projection") projectionMode_ = std::clamp(std::stoi(val), 0, 2);
             else if (key == "stereo") stereoMode_ = std::clamp(std::stoi(val), 0, 2);
             else if (key == "swap_eyes") swapEyes_ = (val == "1");
-            else if (key == "plex_native") plexNative_ = (val != "0");
             else if (key == "draw_models") drawModels_ = (val == "1");
             else if (key == "show_stats") showStats_ = (val == "1");
             else if (key == "distance") screenDistance_ = std::clamp(std::stof(val), 1.0f, 10.0f);
@@ -802,7 +795,6 @@ void SettingsMenu::saveConfig() const {
             file << "bind_quick_path_btn=" << bindQuickPathBtn_ << "\n";
             file << "download_dir=" << downloadDirIdx_ << "\n";
             file << "rail_shortcuts=" << railShortcutMask_ << "\n";
-            file << "plex_native=" << (plexNative_ ? 1 : 0) << "\n";
             file << "audio_lang=" << audioLangIdx_ << "\n";
             file << "curvature=" << curvatureIdx_ << "\n";
             file << "ui_text_scale=" << uiTextScaleIdx_ << "\n";

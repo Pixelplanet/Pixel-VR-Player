@@ -2791,7 +2791,7 @@ int App::run() {
             for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
                 if (!screens_[slot].web && !screens_[slot].webSuspended) continue;
                 BrowserHost& host = webHosts_[slot];
-                host.setPlexNative(settings_.plexNative());
+                host.setPlexNative(true);  // Plex videos always play in our player
                 host.poll();
                 // The page behind a Plex video went away: keep the video playing;
                 // returning to the dead page then closes the screen below.
@@ -3310,10 +3310,13 @@ int App::run() {
                     for (int k = 0; k < 4; ++k) activityAnchorOrient_[h][k] = c.orientation[k];
                 }
             }
+            // In 360/180 the right stick tilts / zooms the scene: used blindly, and a
+            // flat dock popping up over the whole view is distracting, so it doesn't wake the UI.
+            const bool sphereView = settings_.projectionMode() != 0;
             const bool stickMoved = (std::fabs(in.thumbstickX) > 0.25f ||
                                      std::fabs(in.thumbstickY) > 0.25f ||
-                                     std::fabs(in.thumbstickRX) > 0.25f ||
-                                     std::fabs(in.thumbstickRY) > 0.25f);
+                                     (!sphereView && (std::fabs(in.thumbstickRX) > 0.25f ||
+                                                      std::fabs(in.thumbstickRY) > 0.25f)));
             // Only digital full grip press (gripFullPressDown) or physical buttons wake the HUD.
             // Soft analog squeeze (gripDown / BtnGrip) is ignored to prevent accidental wake-up from resting hands.
             bool anyButtonPressed = (in.togglePlay || in.browserToggle || in.recenter ||
@@ -4835,14 +4838,9 @@ int App::run() {
                         interacted = true;
                     }
                 } else if (dt > 0.0f) {
-                    if (std::fabs(in.thumbstickRY) > 0.15f) {
-                        renderer_.adjustSpherePitch(in.thumbstickRY * dt * 0.6f);
-                        interacted = true;
-                    }
-                    if (std::fabs(in.thumbstickRX) > 0.15f) {
-                        renderer_.adjustSphereZoom(in.thumbstickRX * dt * 0.6f);
-                        interacted = true;
-                    }
+                    // Not "interacted": these adjustments keep the UI hidden (see stickMoved).
+                    if (std::fabs(in.thumbstickRY) > 0.15f) renderer_.adjustSpherePitch(in.thumbstickRY * dt * 0.6f);
+                    if (std::fabs(in.thumbstickRX) > 0.15f) renderer_.adjustSphereZoom(in.thumbstickRX * dt * 0.6f);
                 }
 #ifdef PIXELVR_HAVE_MEDIA
                 if (in.togglePlay && cur().open) {
