@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=Update Pixel VR Player
 Comment=Update Pixel VR Player to the latest version on Valve Steam Frame
-Exec=bash -c 'if [ -f "$HOME/PixelVRPlayer/update.sh" ]; then bash "$HOME/PixelVRPlayer/update.sh"; else curl -fsSL https://raw.githubusercontent.com/Pixelplanet/Pixel-VR-Player/main/tools/install.sh | bash -s -- --update; fi; rc=$?; L="$HOME/pixelvr-install.log"; if [ $rc -eq 0 ]; then m=$(tail -n 30 "$L" 2>/dev/null | grep "^RESULT: " | tail -n 1 | cut -c9-); command -v kdialog >/dev/null && kdialog --title "Pixel VR Player" --msgbox "${m:-Update complete.}"; else command -v kdialog >/dev/null && kdialog --title "Pixel VR Player" --detailederror "Update failed. Details:" "$(tail -n 15 "$L" 2>/dev/null)"; fi'
+Exec=bash -c 'export PIXELVR_GUI=1; if [ -f "$HOME/PixelVRPlayer/update.sh" ]; then bash "$HOME/PixelVRPlayer/update.sh"; else curl -fsSL https://raw.githubusercontent.com/Pixelplanet/Pixel-VR-Player/main/tools/install.sh | bash -s -- --update; fi; rc=$?; if [ $rc -ne 0 ]; then command -v kdialog >/dev/null && kdialog --title "Pixel VR Player" --detailederror "Update failed. Details:" "$(tail -n 15 "$HOME/pixelvr-install.log" 2>/dev/null)"; fi'
 Icon=steam
 Terminal=true
 Type=Application

@@ -63,6 +63,10 @@ for asset in icon.png hero.png capsule.png header.png logo.png; do
         cp "assets/${asset}" "${stage}/PixelVRPlayer/${asset}"
     fi
 done
+# Steam wants a small shortcut icon: ship the 256x256 version as icon.png.
+if [[ -f "assets/icon-256.png" ]]; then
+    cp "assets/icon-256.png" "${stage}/PixelVRPlayer/icon.png"
+fi
 if [[ -n "${VERSION}" ]]; then
     printf '%s\n' "${VERSION}" > "${stage}/PixelVRPlayer/VERSION"
 fi

@@ -427,6 +427,16 @@ steam_session_env() {
     done
 }
 
+# Steam loads custom artwork for non-Steam shortcuts only when it starts: true when any
+# file for <appid> in the grid folder is newer than the running Steam process.
+art_needs_restart() {  # <shortcuts.vdf> <appid>
+    steam_pid=$(pgrep -x steam 2>/dev/null | head -n 1)
+    [ -n "$steam_pid" ] || return 1
+    started=$(stat -c %Y "/proc/$steam_pid" 2>/dev/null) || return 1
+    newer=$(find "$(dirname "$1")/grid" -name "$2*" -newermt "@$started" 2>/dev/null | head -n 1)
+    [ -n "$newer" ]
+}
+
 # Steam only reads shortcuts.vdf at startup and rewrites it from memory, so
 # while it runs the entry must be added through Steam itself (steam://).
 # Returns 0 when the entry is in the library, 1 when Steam did not confirm it.
@@ -439,6 +449,7 @@ register_via_steam() {  # <shortcuts.vdf>
         if [ "$found_exe" = "$INSTALL_DIR/run.sh" ]; then
             ok "'$APP_NAME' is already in the Steam library"
             run_vdf_helper art "$vdf" "$found_appid" "$INSTALL_DIR" >/dev/null 2>&1 || true
+            ! art_needs_restart "$vdf" "$found_appid" || ART_NEEDS_RESTART=1
             return 0
         fi
         # An entry that points into the folder this install was unpacked from (e.g. a
@@ -467,6 +478,7 @@ register_via_steam() {  # <shortcuts.vdf>
         found=$(run_vdf_helper find "$vdf" "$APP_NAME" "$INSTALL_DIR/run.sh" 2>/dev/null) || found=""
         if [ -n "$found" ] && [ "${found#*|}" = "$INSTALL_DIR/run.sh" ]; then
             run_vdf_helper art "$vdf" "${found%%|*}" "$INSTALL_DIR" >/dev/null 2>&1 || warn "could not install the library artwork"
+            ! art_needs_restart "$vdf" "${found%%|*}" || ART_NEEDS_RESTART=1
             ok "Steam added '$APP_NAME' to the library (appid ${found%%|*})"
             return 0
         fi
@@ -716,7 +728,7 @@ write_update_icon() {
 [Desktop Entry]
 Name=Update Pixel VR Player
 Comment=Update Pixel VR Player to the latest version on Valve Steam Frame
-Exec=bash -c 'if [ -f "$HOME/PixelVRPlayer/update.sh" ]; then bash "$HOME/PixelVRPlayer/update.sh"; else curl -fsSL https://raw.githubusercontent.com/Pixelplanet/Pixel-VR-Player/main/tools/install.sh | bash -s -- --update; fi; rc=$?; L="$HOME/pixelvr-install.log"; if [ $rc -eq 0 ]; then m=$(tail -n 30 "$L" 2>/dev/null | grep "^RESULT: " | tail -n 1 | cut -c9-); command -v kdialog >/dev/null && kdialog --title "Pixel VR Player" --msgbox "${m:-Update complete.}"; else command -v kdialog >/dev/null && kdialog --title "Pixel VR Player" --detailederror "Update failed. Details:" "$(tail -n 15 "$L" 2>/dev/null)"; fi'
+Exec=bash -c 'export PIXELVR_GUI=1; if [ -f "$HOME/PixelVRPlayer/update.sh" ]; then bash "$HOME/PixelVRPlayer/update.sh"; else curl -fsSL https://raw.githubusercontent.com/Pixelplanet/Pixel-VR-Player/main/tools/install.sh | bash -s -- --update; fi; rc=$?; if [ $rc -ne 0 ]; then command -v kdialog >/dev/null && kdialog --title "Pixel VR Player" --detailederror "Update failed. Details:" "$(tail -n 15 "$HOME/pixelvr-install.log" 2>/dev/null)"; fi'
 Icon=steam
 Terminal=true
 Type=Application
@@ -748,6 +760,7 @@ fi
 STEAM_REGISTERED=0
 STEAM_PENDING=0
 STEAM_OTHER=0
+ART_NEEDS_RESTART=0
 if [ "$DO_STEAM" -eq 1 ]; then
     info "Adding '$APP_NAME' to the Steam library"
     if register_steam_shortcut; then
@@ -789,3 +802,37 @@ else
     result="Pixel VR Player $version_label is installed, but it could not be added to Steam automatically.<br><br>Add $INSTALL_DIR/run.sh as a Non-Steam Game."
 fi
 printf 'RESULT: %s\n' "$result"
+if [ "$ART_NEEDS_RESTART" -eq 1 ]; then
+    printf 'RESTART_STEAM: 1\n'
+    info "Steam shows the new icon and artwork after it restarts"
+fi
+
+restart_steam_now() {
+    info "Restarting Steam..."
+    steam -shutdown >/dev/null 2>&1 || true
+    waited=0
+    while steam_running && [ "$waited" -lt 30 ]; do
+        sleep 1
+        waited=$((waited + 1))
+    done
+    # In a Gaming Mode session the session brings Steam back by itself.
+    waited=0
+    while ! steam_running && [ "$waited" -lt 5 ]; do
+        sleep 1
+        waited=$((waited + 1))
+    done
+    if ! steam_running && command -v steam >/dev/null 2>&1; then
+        nohup steam >/dev/null 2>&1 &
+    fi
+}
+
+# Started from the desktop icons (they set PIXELVR_GUI=1): the final message box.
+if [ "${PIXELVR_GUI:-}" = 1 ] && command -v kdialog >/dev/null 2>&1; then
+    if [ "$ART_NEEDS_RESTART" -eq 1 ]; then
+        if kdialog --title "Pixel VR Player" --yesno "$result<br><br>Restart Steam now so its icon and artwork appear? (Takes a few seconds; you can also just reboot later.)"; then
+            restart_steam_now
+        fi
+    else
+        kdialog --title "Pixel VR Player" --msgbox "$result" || true
+    fi
+fi

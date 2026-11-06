@@ -1,7 +1,7 @@
 [Desktop Entry]
 Name=Install Pixel VR Player
 Comment=Install Pixel VR Player for Valve Steam Frame
-Exec=bash -c 'D="$(dirname "%k")"; if [ -f "$D/install.sh" ]; then bash "$D/install.sh"; else curl -fsSL https://raw.githubusercontent.com/Pixelplanet/Pixel-VR-Player/main/tools/install.sh | bash; fi; rc=$?; L="$HOME/pixelvr-install.log"; if [ $rc -eq 0 ]; then m=$(tail -n 30 "$L" 2>/dev/null | grep "^RESULT: " | tail -n 1 | cut -c9-); command -v kdialog >/dev/null && kdialog --title "Pixel VR Player" --msgbox "${m:-Installation complete.}"; else command -v kdialog >/dev/null && kdialog --title "Pixel VR Player" --detailederror "Installation failed. Details:" "$(tail -n 15 "$L" 2>/dev/null)"; fi'
+Exec=bash -c 'D="$(dirname "%k")"; export PIXELVR_GUI=1; if [ -f "$D/install.sh" ]; then bash "$D/install.sh"; else curl -fsSL https://raw.githubusercontent.com/Pixelplanet/Pixel-VR-Player/main/tools/install.sh | bash; fi; rc=$?; if [ $rc -ne 0 ]; then command -v kdialog >/dev/null && kdialog --title "Pixel VR Player" --detailederror "Installation failed. Details:" "$(tail -n 15 "$HOME/pixelvr-install.log" 2>/dev/null)"; fi'
 Icon=steam
 Terminal=true
 Type=Application
