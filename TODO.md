@@ -129,6 +129,10 @@ hardware VP9/H.264 in our player (works with multi-screen).
   player. Needs HTTP(S) in the media path: either `--enable-network` for our FFmpeg
   (gnutls is already on) or a libcurl read-ahead reader shared with WebDAV. Setting
   "Plex: play with the player" (default on). Jellyfin: same pattern afterwards.
+  **Seamless return:** the browser page is kept (paused, hidden behind the video) while the
+  file plays on that screen; closing the video (stop / ✕ / end of file) brings the same
+  Plex page back exactly where it was, like the YouTube flow. Report the watched position
+  back to Plex (`/:/timeline`) so Continue Watching stays right.
 - [ ] **S3. Browser bugs found with Plex (2026-11-06):**
   - typing a URL: the keyboard stayed open after Enter although the address bar had taken
     it; Enter on the address bar should navigate and close the keyboard.

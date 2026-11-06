@@ -1630,6 +1630,14 @@ int runScreen(const ScreenOptions& opt) {
             } else if (const KeyInfo* k = keyInfo(rest)) {
                 keyEvent(k);
                 valueAt = Clock::now() + std::chrono::milliseconds(80);
+                // Enter in the toolbar's address bar navigates: the field keeps
+                // its focus, so nothing else would tell the app the keyboard is
+                // done. Blur it and say so.
+                if (rest == "Enter" && keySession == toolbar && !toolbar.empty()) {
+                    evalIn(toolbar, "document.activeElement && document.activeElement.blur(); 0", nullptr);
+                    keySession.clear();
+                    emitLine("focus p 0");
+                }
             }
         } else if (cmd == "text" && !rest.empty()) {
             if (!keySession.empty()) send("Input.insertText", "{\"text\":" + pvrjson::quote(rest) + "}", keySession);
