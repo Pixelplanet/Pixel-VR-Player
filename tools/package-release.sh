@@ -52,9 +52,6 @@ fi
 if [[ -f "tools/Install Pixel VR Player.desktop" ]]; then
     cp "tools/Install Pixel VR Player.desktop" "${stage}/PixelVRPlayer/Install Pixel VR Player.desktop"
 fi
-if [[ -f "tools/Update Pixel VR Player.desktop" ]]; then
-    cp "tools/Update Pixel VR Player.desktop" "${stage}/PixelVRPlayer/Update Pixel VR Player.desktop"
-fi
 if [[ -f "LICENSE" ]]; then
     cp "LICENSE" "${stage}/PixelVRPlayer/LICENSE"
 fi
@@ -77,9 +74,6 @@ if [[ -f "${stage}/PixelVRPlayer/update.sh" ]]; then
 fi
 if [[ -f "${stage}/PixelVRPlayer/Install Pixel VR Player.desktop" ]]; then
     chmod +x "${stage}/PixelVRPlayer/Install Pixel VR Player.desktop"
-fi
-if [[ -f "${stage}/PixelVRPlayer/Update Pixel VR Player.desktop" ]]; then
-    chmod +x "${stage}/PixelVRPlayer/Update Pixel VR Player.desktop"
 fi
 
 rm -f "${OUT_TAR}"

@@ -48,16 +48,21 @@ Choose whichever method fits your setup:
 
 1. On the Steam Frame switch to **Desktop Mode** and open the web browser.
 2. Go to the [latest release](https://github.com/Pixelplanet/Pixel-VR-Player/releases/latest) and download **`pixelvr-linux-arm64.tar.gz`**.
-3. Open your **Downloads** folder in Dolphin, right-click the file → **Extract → Extract archive here**.
-4. Open the new `PixelVRPlayer` folder and double-click **`Install Pixel VR Player.desktop`** (confirm *Execute* if asked).
-5. A confirmation appears when it's done. Return to Gaming Mode and launch **Pixel VR Player** from your Steam Library.
+3. Open your **Downloads** folder in Dolphin and double-click the `.tar.gz` — it opens like a folder (there is no "Extract" step).
+4. Drag the **`PixelVRPlayer`** folder onto the **Desktop** (or right-click it → **Copy**, then right-click the Desktop → **Paste**).
+5. Open the `PixelVRPlayer` folder on the Desktop and double-click **`Install Pixel VR Player`** (choose *Execute* if asked).
+6. Wait for the message box and click **OK**. Switch back to **Gaming Mode**: **Pixel VR Player** is in your library under *Non-Steam*.
+
+> **Right-click in Desktop Mode = press the thumbstick down (click it).**
+>
+> The `PixelVRPlayer` folder on the Desktop is only the installer: the app lives in `~/PixelVRPlayer`, so you can delete the Desktop folder afterwards.
+> The install log is `~/pixelvr-install.log`.
 
 ### Option B: USB Drive / MicroSD Card (No typing & No Dev Mode needed)
 
 1. Download `pixelvr-linux-arm64.tar.gz` from the [Releases](https://github.com/Pixelplanet/Pixel-VR-Player/releases) page onto a USB flash drive or MicroSD card.
 2. Plug it into your Steam Frame and switch to **Desktop Mode**.
-3. Open the drive in Dolphin, right-click the file → **Extract → Extract archive here**, open the `PixelVRPlayer` folder and double-click **`Install Pixel VR Player.desktop`**.
-4. A confirmation dialog will appear when finished. Return to Gaming Mode and launch it directly from your Steam Library!
+3. Open the drive in Dolphin and double-click the `.tar.gz` (it opens like a folder), then follow steps 4–6 of Option A: drag **`PixelVRPlayer`** onto the Desktop, double-click **`Install Pixel VR Player`** there, click **OK**, and go back to Gaming Mode.
 
 ### Option C: One command in headset terminal
 
@@ -161,7 +166,7 @@ curl -fsSL https://raw.githubusercontent.com/Pixelplanet/Pixel-VR-Player/main/to
 
 1. Download `pixelvr-linux-arm64.tar.gz` from the [Releases](https://github.com/Pixelplanet/Pixel-VR-Player/releases) page to a USB flash drive or MicroSD card.
 2. Plug it into your Steam Frame and open it in Desktop Mode.
-3. Double-click **`Install Pixel VR Player.desktop`** (or run `./install.sh --update` from the unpacked folder).
+3. Open the archive, copy the `PixelVRPlayer` folder to the Desktop and double-click **`Install Pixel VR Player`** (or run `./install.sh --update` from it). It always updates `~/PixelVRPlayer`.
 
 
 ## Uninstallation

@@ -20,6 +20,24 @@
 # outside the install directory, so reinstalling or upgrading never loses them.
 set -eu
 
+# Everything this script prints is also appended to ~/pixelvr-install.log (the
+# desktop icons point users there). Run from a file we re-run ourselves through
+# tee; when piped from curl the message helpers below write the log instead.
+LOG_FILE="$HOME/pixelvr-install.log"
+if [ -z "${PIXELVR_INSTALL_LOGGING:-}" ] && [ -f "$0" ] && command -v tee >/dev/null 2>&1; then
+    status_file=$(mktemp 2>/dev/null) || status_file=""
+    if [ -n "$status_file" ]; then
+        PIXELVR_INSTALL_LOGGING=1
+        export PIXELVR_INSTALL_LOGGING
+        printf '\n=== %s  install.sh %s ===\n' "$(date '+%F %T')" "$*" >> "$LOG_FILE" 2>/dev/null || true
+        { sh "$0" "$@"; echo $? > "$status_file"; } 2>&1 | tee -a "$LOG_FILE"
+        rc=$(cat "$status_file" 2>/dev/null || echo 1)
+        rm -f "$status_file"
+        exit "$rc"
+    fi
+fi
+logline() { [ -n "${PIXELVR_INSTALL_LOGGING:-}" ] || printf '%s\n' "$*" >> "$LOG_FILE" 2>/dev/null || true; }
+
 REPO="Pixelplanet/Pixel-VR-Player"
 ASSET="pixelvr-linux-arm64.tar.gz"
 APP_NAME="Pixel VR Player"
@@ -42,10 +60,10 @@ else
     C_INFO=""; C_OK=""; C_WARN=""; C_ERR=""; C_OFF=""
 fi
 
-info() { printf '%s==>%s %s\n' "$C_INFO" "$C_OFF" "$*"; }
-ok()   { printf '%s  ok%s %s\n' "$C_OK" "$C_OFF" "$*"; }
-warn() { printf '%swarn%s %s\n' "$C_WARN" "$C_OFF" "$*" >&2; }
-die()  { printf '%serror%s %s\n' "$C_ERR" "$C_OFF" "$*" >&2; exit 1; }
+info() { printf '%s==>%s %s\n' "$C_INFO" "$C_OFF" "$*"; logline "==> $*"; }
+ok()   { printf '%s  ok%s %s\n' "$C_OK" "$C_OFF" "$*"; logline "  ok $*"; }
+warn() { printf '%swarn%s %s\n' "$C_WARN" "$C_OFF" "$*" >&2; logline "warn $*"; }
+die()  { printf '%serror%s %s\n' "$C_ERR" "$C_OFF" "$*" >&2; logline "error $*"; exit 1; }
 
 usage() {
     cat <<'USAGE'
@@ -239,6 +257,21 @@ def find(shortcuts, name, exe):
     return None, None
 
 
+def install_art(path, raw_appid, src_dir):
+    import shutil
+    grid_dir = os.path.join(os.path.dirname(path), "grid")  # userdata/<id>/config/grid
+    os.makedirs(grid_dir, exist_ok=True)
+    icon = os.path.join(src_dir, "icon.png")
+    names = (("icon.png", "%d_icon.png"), ("capsule.png", "%dp.png"), ("header.png", "%d.png"),
+             ("hero.png", "%d_hero.png"), ("logo.png", "%d_logo.png"))
+    for asset, target in names:
+        source = os.path.join(src_dir, asset)
+        if not os.path.isfile(source) and asset in ("capsule.png", "header.png"):
+            source = icon  # no dedicated art: fall back to the icon
+        if os.path.isfile(source):
+            shutil.copyfile(source, os.path.join(grid_dir, target % raw_appid))
+
+
 def main():
     mode, path, name = sys.argv[1], sys.argv[2], sys.argv[3]
     exe = sys.argv[4] if len(sys.argv) > 4 else ""
@@ -254,6 +287,26 @@ def main():
         root_key = "shortcuts"
         root[root_key] = [OBJ, {}]
     shortcuts = root[root_key][1]
+
+    if mode == "find":
+        # Prints "appid|exe" of the shortcut called <name> (the one whose Exe is <exe> if several).
+        best = None
+        for k in shortcuts:
+            kind, e = shortcuts[k]
+            if kind != OBJ or e.get("AppName", [STR, ""])[1] != name:
+                continue
+            cand = (e.get("appid", [INT, 0])[1] & 0xFFFFFFFF, e.get("Exe", [STR, ""])[1].strip('"'))
+            if exe and cand[1] == exe:
+                best = cand
+                break
+            best = best or cand
+        if best is None:
+            return 1
+        print("%d|%s" % best)
+        return 0
+    if mode == "art":
+        install_art(path, int(name), exe)  # name carries the appid, exe the folder with the images
+        return 0
 
     key, entry = find(shortcuts, name, exe)
 
@@ -312,29 +365,9 @@ def main():
         ):
             entry[field] = value
         entry.setdefault("tags", [OBJ, {}])
-        if icon_path and os.path.isfile(icon_path):
+        if icon_path:
             try:
-                import shutil
-                steam_user_dir = os.path.dirname(os.path.dirname(path))
-                grid_dir = os.path.join(steam_user_dir, "config", "grid")
-                if icon_path and os.path.isfile(icon_path):
-                    shutil.copyfile(icon_path, os.path.join(grid_dir, "%d_icon.png" % raw_appid))
-                capsule_path = os.path.join(os.path.dirname(icon_path), "capsule.png") if icon_path else ""
-                if capsule_path and os.path.isfile(capsule_path):
-                    shutil.copyfile(capsule_path, os.path.join(grid_dir, "%dp.png" % raw_appid))
-                elif icon_path and os.path.isfile(icon_path):
-                    shutil.copyfile(icon_path, os.path.join(grid_dir, "%dp.png" % raw_appid))
-                header_path = os.path.join(os.path.dirname(icon_path), "header.png") if icon_path else ""
-                if header_path and os.path.isfile(header_path):
-                    shutil.copyfile(header_path, os.path.join(grid_dir, "%d.png" % raw_appid))
-                elif icon_path and os.path.isfile(icon_path):
-                    shutil.copyfile(icon_path, os.path.join(grid_dir, "%d.png" % raw_appid))
-                hero_path = os.path.join(os.path.dirname(icon_path), "hero.png") if icon_path else ""
-                if hero_path and os.path.isfile(hero_path):
-                    shutil.copyfile(hero_path, os.path.join(grid_dir, "%d_hero.png" % raw_appid))
-                logo_path = os.path.join(os.path.dirname(icon_path), "logo.png") if icon_path else ""
-                if logo_path and os.path.isfile(logo_path):
-                    shutil.copyfile(logo_path, os.path.join(grid_dir, "%d_logo.png" % raw_appid))
+                install_art(path, entry["appid"][1] & 0xFFFFFFFF, start_dir)
             except Exception:
                 pass
         print("%s '%s' (%d shortcut(s) in the library)" % (
@@ -362,6 +395,87 @@ if __name__ == "__main__":
 PYEOF
 }
 
+write_desktop_entry() {
+    exec_path="$INSTALL_DIR/run.sh"
+    case "$exec_path" in *" "*) exec_path="\"$exec_path\"" ;; esac
+    cat > "$INSTALL_DIR/$APP_NAME.desktop" <<DESKTOP
+[Desktop Entry]
+Name=$APP_NAME
+Comment=VR video player for the Valve Steam Frame
+Exec=$exec_path
+Icon=$INSTALL_DIR/icon.png
+Type=Application
+Terminal=false
+Categories=AudioVideo;Player;
+DESKTOP
+    chmod 0755 "$INSTALL_DIR/$APP_NAME.desktop"
+}
+
+# Fill in the display/session variables a running Steam has, so steam:// calls
+# also work from a plain ssh shell.
+steam_session_env() {
+    steam_pid=$(pgrep -x steam 2>/dev/null | head -n 1)
+    [ -n "$steam_pid" ] && [ -r "/proc/$steam_pid/environ" ] || return 0
+    for var in DISPLAY XAUTHORITY XDG_RUNTIME_DIR WAYLAND_DISPLAY DBUS_SESSION_BUS_ADDRESS XDG_SESSION_TYPE; do
+        eval "cur=\${$var:-}"
+        [ -z "$cur" ] || continue
+        val=$(tr '\0' '\n' < "/proc/$steam_pid/environ" 2>/dev/null | sed -n "s/^$var=//p" | head -n 1)
+        if [ -n "$val" ]; then
+            eval "$var=\$val"
+            export "$var"
+        fi
+    done
+}
+
+# Steam only reads shortcuts.vdf at startup and rewrites it from memory, so
+# while it runs the entry must be added through Steam itself (steam://).
+# Returns 0 when the entry is in the library, 1 when Steam did not confirm it.
+register_via_steam() {  # <shortcuts.vdf>
+    vdf="$1"
+    found=$(run_vdf_helper find "$vdf" "$APP_NAME" "$INSTALL_DIR/run.sh" 2>/dev/null) || found=""
+    if [ -n "$found" ]; then
+        found_appid="${found%%|*}"
+        found_exe="${found#*|}"
+        if [ "$found_exe" = "$INSTALL_DIR/run.sh" ]; then
+            ok "'$APP_NAME' is already in the Steam library"
+            run_vdf_helper art "$vdf" "$found_appid" "$INSTALL_DIR" >/dev/null 2>&1 || true
+            return 0
+        fi
+        # An entry that points into the folder this install was unpacked from (e.g. a
+        # copy on the Desktop) or at a path that no longer exists is stale; one that
+        # points at some other existing install is left alone.
+        if [ -e "$found_exe" ] && [ "${found_exe#"$srcdir"/}" = "$found_exe" ]; then
+            warn "Steam already lists '$APP_NAME' from $found_exe (another install) - not adding a second entry"
+            STEAM_OTHER=1
+            return 0
+        fi
+        warn "Steam has a '$APP_NAME' entry pointing at $found_exe, which is not this install; adding a new one - delete the old one in Steam"
+    fi
+
+    write_desktop_entry
+    steam_session_env
+    if command -v steamos-add-to-steam >/dev/null 2>&1; then
+        steamos-add-to-steam "$INSTALL_DIR/$APP_NAME.desktop" >/dev/null 2>&1 || warn "steamos-add-to-steam failed"
+    else
+        encoded=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote(sys.argv[1], safe=""))' "$INSTALL_DIR/$APP_NAME.desktop")
+        touch /tmp/addnonsteamgamefile
+        steam "steam://addnonsteamgame/$encoded" >/dev/null 2>&1 || warn "could not reach Steam"
+    fi
+
+    waited=0
+    while [ "$waited" -lt 15 ]; do
+        found=$(run_vdf_helper find "$vdf" "$APP_NAME" "$INSTALL_DIR/run.sh" 2>/dev/null) || found=""
+        if [ -n "$found" ] && [ "${found#*|}" = "$INSTALL_DIR/run.sh" ]; then
+            run_vdf_helper art "$vdf" "${found%%|*}" "$INSTALL_DIR" >/dev/null 2>&1 || warn "could not install the library artwork"
+            ok "Steam added '$APP_NAME' to the library (appid ${found%%|*})"
+            return 0
+        fi
+        sleep 1
+        waited=$((waited + 1))
+    done
+    return 1
+}
+
 register_steam_shortcut() {
     vdf=$(find_steam_userdata) || {
         warn "Steam userdata not found - is Steam installed and logged in at least once?"
@@ -373,6 +487,15 @@ register_steam_shortcut() {
     fi
 
     steam_was_running=0
+    if steam_running && [ "$RESTART_STEAM" -eq 0 ]; then
+        if register_via_steam "$vdf"; then
+            STEAM_REGISTERED=1
+            return 0
+        fi
+        STEAM_PENDING=1
+        warn "Steam did not confirm the new library entry - restart Steam to finish adding '$APP_NAME'"
+        return 1
+    fi
     if steam_running; then
         steam_was_running=1
         if [ "$RESTART_STEAM" -eq 1 ]; then
@@ -386,8 +509,6 @@ register_steam_shortcut() {
             if steam_running; then
                 warn "Steam did not close in time"
             fi
-        else
-            warn "Steam is running - restart Steam afterwards to see '$APP_NAME' in the library"
         fi
     fi
 
@@ -398,6 +519,7 @@ register_steam_shortcut() {
         backup=""
     fi
 
+    write_desktop_entry
     if ! run_vdf_helper add "$vdf" "$APP_NAME" "$INSTALL_DIR/run.sh" "$INSTALL_DIR"; then
         [ -n "$backup" ] && [ -f "$backup" ] && cp "$backup" "$vdf"
         return 1
@@ -529,6 +651,16 @@ fi
 # Install
 # ---------------------------------------------------------------------------
 info "Installing to $INSTALL_DIR"
+mkdir -p "$INSTALL_DIR"
+SAME_DIR=0
+if [ "$(cd "$srcdir" && pwd -P)" = "$(cd "$INSTALL_DIR" && pwd -P)" ]; then
+    SAME_DIR=1
+fi
+INSTALLED_SCRIPT=0
+if [ "$SAME_DIR" -eq 1 ]; then
+    info "the files are already in $INSTALL_DIR"
+    [ -f "$INSTALL_DIR/install.sh" ] && INSTALLED_SCRIPT=1
+else
 mkdir -p "$INSTALL_DIR/shaders"
 rm -f "$INSTALL_DIR/pixelvr"
 cp "$srcdir/pixelvr" "$INSTALL_DIR/pixelvr"
@@ -542,7 +674,6 @@ if [ -d "$srcdir/fonts" ]; then
 fi
 cp "$srcdir/run.sh" "$INSTALL_DIR/run.sh"
 chmod 0755 "$INSTALL_DIR/run.sh"
-INSTALLED_SCRIPT=0
 if [ -f "$srcdir/install.sh" ]; then
     cp "$srcdir/install.sh" "$INSTALL_DIR/install.sh"
     chmod 0755 "$INSTALL_DIR/install.sh"
@@ -564,26 +695,6 @@ elif [ -f "tools/update.sh" ]; then
     chmod 0755 "$INSTALL_DIR/update.sh"
 fi
 
-# Copy Desktop 1-click update entry
-DESKTOP_ENTRY="Update Pixel VR Player.desktop"
-if [ -f "$srcdir/$DESKTOP_ENTRY" ]; then
-    cp "$srcdir/$DESKTOP_ENTRY" "$INSTALL_DIR/$DESKTOP_ENTRY"
-    chmod 0755 "$INSTALL_DIR/$DESKTOP_ENTRY"
-elif [ -n "$script_dir" ] && [ -f "$script_dir/$DESKTOP_ENTRY" ]; then
-    cp "$script_dir/$DESKTOP_ENTRY" "$INSTALL_DIR/$DESKTOP_ENTRY"
-    chmod 0755 "$INSTALL_DIR/$DESKTOP_ENTRY"
-elif [ -f "tools/$DESKTOP_ENTRY" ]; then
-    cp "tools/$DESKTOP_ENTRY" "$INSTALL_DIR/$DESKTOP_ENTRY"
-    chmod 0755 "$INSTALL_DIR/$DESKTOP_ENTRY"
-fi
-
-# Install 1-click update shortcut to Desktop if Desktop folder exists
-if [ -d "$HOME/Desktop" ] && [ -f "$INSTALL_DIR/$DESKTOP_ENTRY" ]; then
-    cp "$INSTALL_DIR/$DESKTOP_ENTRY" "$HOME/Desktop/$DESKTOP_ENTRY"
-    chmod 0755 "$HOME/Desktop/$DESKTOP_ENTRY"
-    ok "Installed 1-click update shortcut to ~/Desktop/$DESKTOP_ENTRY"
-fi
-
 if [ -f "$srcdir/VERSION" ]; then
     cp "$srcdir/VERSION" "$INSTALL_DIR/VERSION"
 elif [ -n "$VERSION" ]; then
@@ -598,6 +709,23 @@ for asset in icon.png hero.png capsule.png header.png logo.png; do
         cp "assets/$asset" "$INSTALL_DIR/$asset"
     fi
 done
+fi
+write_update_icon() {
+    [ -d "$HOME/Desktop" ] || return 0
+    cat > "$HOME/Desktop/Update Pixel VR Player.desktop" <<'UPDATEICON'
+[Desktop Entry]
+Name=Update Pixel VR Player
+Comment=Update Pixel VR Player to the latest version on Valve Steam Frame
+Exec=bash -c 'if [ -f "$HOME/PixelVRPlayer/update.sh" ]; then bash "$HOME/PixelVRPlayer/update.sh"; else curl -fsSL https://raw.githubusercontent.com/Pixelplanet/Pixel-VR-Player/main/tools/install.sh | bash -s -- --update; fi; rc=$?; L="$HOME/pixelvr-install.log"; if [ $rc -eq 0 ]; then m=$(tail -n 30 "$L" 2>/dev/null | grep "^RESULT: " | tail -n 1 | cut -c9-); command -v kdialog >/dev/null && kdialog --title "Pixel VR Player" --msgbox "${m:-Update complete.}"; else command -v kdialog >/dev/null && kdialog --title "Pixel VR Player" --detailederror "Update failed. Details:" "$(tail -n 15 "$L" 2>/dev/null)"; fi'
+Icon=steam
+Terminal=true
+Type=Application
+Categories=AudioVideo;Player;
+UPDATEICON
+    chmod 0755 "$HOME/Desktop/Update Pixel VR Player.desktop"
+    ok "Installed the update icon on the Desktop"
+}
+write_update_icon
 ok "$(ls -1 "$INSTALL_DIR/shaders" | wc -l | tr -d ' ') shaders, $(du -h "$INSTALL_DIR/pixelvr" 2>/dev/null | cut -f1) binary"
 
 missing_libs=""
@@ -618,11 +746,13 @@ fi
 # Steam library entry
 # ---------------------------------------------------------------------------
 STEAM_REGISTERED=0
+STEAM_PENDING=0
+STEAM_OTHER=0
 if [ "$DO_STEAM" -eq 1 ]; then
     info "Adding '$APP_NAME' to the Steam library"
     if register_steam_shortcut; then
         ok "Steam library entry ready"
-    else
+    elif [ "$STEAM_PENDING" -eq 0 ]; then
         warn "add $INSTALL_DIR/run.sh as a Non-Steam Game manually"
     fi
 fi
@@ -646,3 +776,16 @@ if [ "$INSTALLED_SCRIPT" -eq 1 ]; then
 else
     printf '  Remove      : rerun this script with --uninstall\n\n'
 fi
+# One line for the desktop icons' message box (they show the text after "RESULT: ").
+if [ "$DO_STEAM" -eq 0 ]; then
+    result="Pixel VR Player $version_label is installed in $INSTALL_DIR."
+elif [ "$STEAM_OTHER" -eq 1 ]; then
+    result="Pixel VR Player $version_label is installed in $INSTALL_DIR.<br><br>Steam already lists Pixel VR Player from another folder, so no second entry was added. Delete that entry in Steam and run the installer again to use this copy."
+elif [ "$STEAM_REGISTERED" -eq 1 ]; then
+    result="Pixel VR Player $version_label is installed and in your Steam library (Non-Steam games).<br><br>Switch to Gaming Mode to start it."
+elif [ "$STEAM_PENDING" -eq 1 ]; then
+    result="Pixel VR Player $version_label is installed, but Steam has not confirmed the library entry yet.<br><br>Restart Steam (or the headset) to finish, then look under Non-Steam games."
+else
+    result="Pixel VR Player $version_label is installed, but it could not be added to Steam automatically.<br><br>Add $INSTALL_DIR/run.sh as a Non-Steam Game."
+fi
+printf 'RESULT: %s\n' "$result"

@@ -4,12 +4,9 @@
 set -eu
 
 REPO="Pixelplanet/Pixel-VR-Player"
-SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" 2>/dev/null && pwd)
+# Always the real install, never the folder this script happens to sit in: an
+# unpacked release copied to the Desktop has an update.sh next to it too.
 INSTALL_DIR="${PIXELVR_INSTALL_DIR:-$HOME/PixelVRPlayer}"
-
-if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/pixelvr" ]; then
-    INSTALL_DIR="$SCRIPT_DIR"
-fi
 
 if [ -t 1 ]; then
     C_INFO=$(printf '\0033[36m')
