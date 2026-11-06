@@ -154,6 +154,10 @@ hardware VP9/H.264 in our player (works with multi-screen).
   then WebDAV over libcurl (PROPFIND listing, ranged GET read-ahead; shares the HTTP reader
   with S2). NFS (libnfs, host-based auth) and DLNA only if asked. Check on the headset which
   of libssh / libssh2 / libnfs / libcurl SteamOS ships.
+- [ ] **L1. Laser smoothing (later):** SteamOS's own laser is steady even with a shaky
+  hand; ours uses the raw aim pose. Filter the aim ray (One Euro filter on direction +
+  origin: strong smoothing when slow, little lag on fast moves), applied to the ray used
+  for hit testing and drawing alike; button presses keep the hit of the press frame.
 - [ ] **R1. Room / environment colour (after S2-S4):** user-selectable room backdrop —
   presets (current navy, pure black "cinema" with no distractions, a few tinted / themed
   rooms), later optional environment scenes. Applies to the projection-layer clear colour
