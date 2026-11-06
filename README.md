@@ -44,16 +44,22 @@ Captured in the headset on a Steam Frame.
 
 Choose whichever method fits your setup:
 
-### Option A: USB Drive / MicroSD Card (No typing & No Dev Mode needed)
+### Option A: Straight from the headset's browser (easiest — no typing, no PC)
 
-The simplest method for standard users without touching the terminal:
+1. On the Steam Frame switch to **Desktop Mode** and open the web browser.
+2. Go to the [latest release](https://github.com/Pixelplanet/Pixel-VR-Player/releases/latest) and download **`pixelvr-linux-arm64.tar.gz`**.
+3. Open your **Downloads** folder in Dolphin, right-click the file → **Extract → Extract archive here**.
+4. Open the new `PixelVRPlayer` folder and double-click **`Install Pixel VR Player.desktop`** (confirm *Execute* if asked).
+5. A confirmation appears when it's done. Return to Gaming Mode and launch **Pixel VR Player** from your Steam Library.
+
+### Option B: USB Drive / MicroSD Card (No typing & No Dev Mode needed)
 
 1. Download `pixelvr-linux-arm64.tar.gz` from the [Releases](https://github.com/Pixelplanet/Pixel-VR-Player/releases) page onto a USB flash drive or MicroSD card.
 2. Plug it into your Steam Frame and switch to **Desktop Mode**.
-3. Open the USB drive in Dolphin and double-click **`Install Pixel VR Player.desktop`**.
+3. Open the drive in Dolphin, right-click the file → **Extract → Extract archive here**, open the `PixelVRPlayer` folder and double-click **`Install Pixel VR Player.desktop`**.
 4. A confirmation dialog will appear when finished. Return to Gaming Mode and launch it directly from your Steam Library!
 
-### Option B: One command in headset terminal
+### Option C: One command in headset terminal
 
 If you are already in Desktop Mode on the Steam Frame, open **Konsole** and paste:
 
@@ -63,7 +69,7 @@ curl -fsSL https://raw.githubusercontent.com/Pixelplanet/Pixel-VR-Player/main/to
 
 *(No root access or disabled read-only filesystem needed; it installs entirely into user space).*
 
-### Option C: From your PC over Wi-Fi (Requires SSH or Dev Mode)
+### Option D: From your PC over Wi-Fi (Requires SSH or Dev Mode)
 
 If you have SSH enabled or Developer Mode turned on with your headset paired:
 
