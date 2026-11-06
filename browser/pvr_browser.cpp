@@ -356,16 +356,21 @@ pid_t launchChromium(ChromiumKind kind, const std::string& profile, int width, i
         "--no-first-run",
         "--no-default-browser-check",
         "--autoplay-policy=no-user-gesture-required",
-        // Headless renders in software by default; draw pages on the GPU
-        // (ANGLE on Vulkan / Mesa Turnip). Video decoding stays on the CPU:
-        // Chromium has no hardware decoder for this platform.
-        "--enable-gpu",
-        "--ignore-gpu-blocklist",
-        "--use-angle=vulkan",
-        "--enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE",
         "about:blank",
     };
     args.insert(args.end(), flags.begin(), flags.end() - 1);
+    // Pages are rasterised in software. GPU compositing (ANGLE on Vulkan /
+    // Mesa Turnip) breaks translucent layers: Plex Web rendered white panels
+    // with unreadable text. PVR_BROWSER_GPU=1 brings the GPU path back.
+    // Video decoding is on the CPU either way (no Chromium hardware decoder here).
+    if (const char* gpu = std::getenv("PVR_BROWSER_GPU"); gpu && gpu[0] == '1') {
+        for (const char* f : {"--enable-gpu", "--ignore-gpu-blocklist", "--use-angle=vulkan",
+                              "--enable-features=Vulkan,DefaultANGLEVulkan,VulkanFromANGLE"}) {
+            args.push_back(f);
+        }
+    } else {
+        args.push_back("--disable-gpu");
+    }
     // Extra flags for experiments: PVR_CHROMIUM_FLAGS="--flag1 --flag2".
     if (const char* extra = std::getenv("PVR_CHROMIUM_FLAGS")) {
         std::string word;

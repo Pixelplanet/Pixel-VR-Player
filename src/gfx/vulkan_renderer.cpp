@@ -180,7 +180,7 @@ constexpr float kRailItemHalfW = 0.172f;
 // compress the pitch (and the tab height) so the last tab stays above the
 // divider and the section tabs below keep their place.
 constexpr int kFixedTabCount = 3;
-constexpr int kMaxShortcuts = 6;
+constexpr int kMaxShortcuts = 7;
 constexpr int kMaxMainTabs = kFixedTabCount + kMaxShortcuts;
 inline int gShortcutCount = 2;
 inline int mainTabCount() { return kFixedTabCount + gShortcutCount; }
@@ -3406,8 +3406,13 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
     }
     if (cursorPending) {
         xr.releaseLayerImage(cursorSwapchain_);
-        // 8 cm billboard at the hit, a hair toward the viewer, facing the head.
+        // 8 cm billboard at the hit, facing the head. It sits 4 cm toward the
+        // eye (shrunk to keep its apparent size), so a curved or obliquely
+        // seen screen never cuts through it.
         const Vec3 hit{pointerHit_[0], pointerHit_[1], pointerHit_[2]};
+        const float eyeDist = std::max(length(head - hit), 0.1f);
+        const float lift = std::min(0.04f, eyeDist * 0.5f);
+        const float shrink = (eyeDist - lift) / eyeDist;
         const Vec3 toEye = normalize(head - hit);
         Vec3 right = cross(Vec3{0.0f, 1.0f, 0.0f}, toEye);
         if (length(right) < 1e-4f) right = Vec3{1.0f, 0.0f, 0.0f};
@@ -3417,12 +3422,12 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
         m.m[0] = right.x; m.m[1] = right.y; m.m[2] = right.z;
         m.m[4] = up.x;    m.m[5] = up.y;    m.m[6] = up.z;
         m.m[8] = toEye.x; m.m[9] = toEye.y; m.m[10] = toEye.z;
-        const Vec3 pos = hit + toEye * 0.01f;
+        const Vec3 pos = hit + toEye * lift;
         CompositionLayer cl;
         cl.swapchain = cursorSwapchain_.handle;
         cl.blend = true;
-        cl.width = 0.08f;
-        cl.height = 0.08f;
+        cl.width = 0.08f * shrink;
+        cl.height = 0.08f * shrink;
         const Quat q = quatFromMat(m);
         cl.pose.orientation = {q.x, q.y, q.z, q.w};
         cl.pose.position = {pos.x, pos.y, pos.z};

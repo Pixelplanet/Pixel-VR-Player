@@ -35,8 +35,10 @@ const SettingsMenu::RailShortcut kRailShortcuts[] = {
     {"Prime Video", "https://www.primevideo.com", true},
     {"Twitch", "https://www.twitch.tv", true},
     {"Browser", "https://www.google.com", false},
+    // Appended (not sorted) so saved rail_shortcuts bitmasks keep their meaning.
+    {"Plex", "https://app.plex.tv", true},
 };
-constexpr int kRailShortcutCount = 6;
+constexpr int kRailShortcutCount = 7;
 
 const char* kLangNames[] = {"Auto",    "English",  "German",  "French",
                            "Spanish", "Japanese", "Italian", "Russian",
