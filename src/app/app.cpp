@@ -157,6 +157,11 @@ bool is_vr360_text(const std::string& lower) {
     return false;
 }
 
+// Format hints come from the file name only, never from an URL's query (token).
+std::string formatName(const std::string& path) {
+    return path.rfind("http", 0) == 0 ? path.substr(0, path.find('?')) : path;
+}
+
 bool is_vr180_media(const std::string& pathOrName, int w, int h) {
     const std::string lower = to_lower(pathOrName);
     if (is_vr180_text(lower)) return true;
@@ -412,7 +417,7 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
         VulkanRenderer::ProjectionMode p = VulkanRenderer::ProjectionMode::Flat;
         VulkanRenderer::StereoMode st = VulkanRenderer::StereoMode::Mono;
         bool fromName = false;
-        detect_format(path, p, st, fromName);
+        detect_format(formatName(path), p, st, fromName);
         if (slot > 0 && p != VulkanRenderer::ProjectionMode::Flat) slot = 0;
         // Immersive plays alone, and its decoder must open with the hardware
         // to itself: every other screen (a 1080p clip, a browser page with a
@@ -433,14 +438,18 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
         playbackMemory_.save();
     }
     if (!sameFile) renderer_.clearScrubPreview();  // stale frame from the previous clip
+    if (sc.webSuspended && !plexLoading_ && !sameFile) {  // another file replaces the Plex hand-off
+        webHosts_[slot].stop();
+        sc.webSuspended = false;
+    }
     sc.path = path;
-    const bool privatePath = VaultManager::instance().isVaultPath(path);
+    const bool privatePath = VaultManager::instance().isVaultPath(path) || sc.webSuspended;
     if (!sameFile) sc.fingerprint = privatePath ? std::string() : PlaybackMemory::fingerprintOf(path);
     const PlaybackMemory::Entry* remembered = privatePath ? nullptr : playbackMemory_.find(path, sc.fingerprint);
     VulkanRenderer::ProjectionMode proj = VulkanRenderer::ProjectionMode::Flat;
     VulkanRenderer::StereoMode stereo = VulkanRenderer::StereoMode::Mono;
     bool stereoFromName = false;
-    detect_format(path, proj, stereo, stereoFromName);
+    detect_format(formatName(path), proj, stereo, stereoFromName);
 
     renderer_.releaseVideoFrame(slot);  // free the previous clip's dma-buf before reopening
     if (slot == 0) {
@@ -459,6 +468,10 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
         const std::string why = sc.engine.lastError();
         lastLoadFailed_ = true;
         if (fromQueue) {  // the queue moves on to the next track (playQueueTrack)
+            PIXELVR_LOG_WARN("Failed to open %s: %s", path.c_str(), why.c_str());
+            return;
+        }
+        if (returnFromPlex(slot)) {
             PIXELVR_LOG_WARN("Failed to open %s: %s", path.c_str(), why.c_str());
             return;
         }
@@ -492,7 +505,7 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
 
     // If filename did not indicate VR, check if probed dimensions reveal VR180
     if (proj == VulkanRenderer::ProjectionMode::Flat && h > 0) {
-        if (is_vr180_media(path, w, h)) {
+        if (is_vr180_media(formatName(path), w, h)) {
             proj = VulkanRenderer::ProjectionMode::Equirect180;
             if (!stereoFromName) {
                 stereo = VulkanRenderer::StereoMode::SideBySide;
@@ -531,7 +544,7 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
             ThumbnailCache::MediaMeta tm;
             if (thumbnailCache_.getMeta(path, tm) && tm.stereoHint >= 0) {
                 hintStereo = tm.stereoHint;
-            } else {
+            } else if (!sc.webSuspended) {
                 sc.formatPending = true;
                 thumbnailCache_.request(path, true);
             }
@@ -945,7 +958,7 @@ void App::rememberPlaybackPosition(int slot) {
 #ifdef PIXELVR_HAVE_MEDIA
     if (slot < 0) slot = selectedScreen_;
     ScreenState& sc = screens_[slot];
-    if (!sc.open || sc.web || sc.path.empty() || VaultManager::instance().isVaultPath(sc.path)) {
+    if (!sc.open || sc.web || sc.webSuspended || sc.path.empty() || VaultManager::instance().isVaultPath(sc.path)) {
         return;
     }
     // Songs start from the top; long audio (audiobooks, mixes) resumes.
@@ -974,6 +987,12 @@ void App::clearSlotKeepLayout(int slot) {
 void App::closeMedia(int slot) {
     if (slot < 0) slot = selectedScreen_;
     ScreenState& sc = screens_[slot];
+    if (sc.webSuspended) {
+#ifdef PIXELVR_HAVE_MEDIA
+        webHosts_[slot].plexTimeline("stopped", static_cast<int64_t>(sc.engine.position() * 1000.0));
+#endif
+        webHosts_[slot].stop();
+    }
     if (sc.web) {
         if (kbWebSlot_ == slot) cancelKeyboard();
         webHosts_[slot].stop();
@@ -994,6 +1013,7 @@ void App::closeMedia(int slot) {
         renderer_.releaseVideoFrame(slot);
 #endif
     }
+    sc.webSuspended = false;
 #ifdef PIXELVR_HAVE_MEDIA
     sc.queue.clear();
 #endif
@@ -1026,6 +1046,92 @@ void App::closeMedia(int slot) {
         selectScreen(next);
     }
     leaveArrangement(slot);
+}
+
+void App::startPlexPlay(int slot, const BrowserHost::PlexPlay& play) {
+#ifdef PIXELVR_HAVE_MEDIA
+    ScreenState& sc = screens_[slot];
+    if (kbWebSlot_ == slot) cancelKeyboard();
+    if (webMouseSlot_ == slot) {
+        webMouseSlot_ = -1;
+        webMouseDown_ = false;
+    }
+    renderer_.setWebSlot(slot, false);
+    sc.web = false;
+    sc.webSuspended = true;
+    sc.path.clear();
+    plexLoading_ = true;
+    loadMedia(play.url, slot);
+    plexLoading_ = false;
+    if (!sc.open || !sc.webSuspended) return;
+    if (play.offset > 0.5 && (sc.engine.duration() <= 0.0 || play.offset < sc.engine.duration() - 5.0)) {
+        sc.engine.seek(play.offset);
+    }
+    const auto now = std::chrono::steady_clock::now();
+    notice_ = play.title;
+    noticeUntil_ = now + std::chrono::seconds(5);
+    sc.plexReportAt = now + std::chrono::seconds(10);
+    webHosts_[slot].plexTimeline("playing", static_cast<int64_t>(play.offset * 1000.0));
+    PIXELVR_LOG_INFO("Plex: playing \"%s\" on screen %d", play.title.c_str(), slot + 1);
+#else
+    (void)slot;
+    (void)play;
+#endif
+}
+
+bool App::returnFromPlex(int slot) {
+#ifdef PIXELVR_HAVE_MEDIA
+    if (slot < 0) slot = selectedScreen_;
+    ScreenState& sc = screens_[slot];
+    if (!sc.webSuspended) return false;
+    webHosts_[slot].plexReturn(static_cast<int64_t>(sc.engine.position() * 1000.0));
+    sc.engine.close();
+    renderer_.releaseVideoFrame(slot);
+    renderer_.clearVideo(slot);
+    sc.webSuspended = false;
+    sc.open = true;
+    sc.web = true;
+    sc.path = kWebPath;
+    sc.projection = 0;
+    sc.stereo = 0;
+    if (slot == 0) {
+        renderer_.setProjectionMode(VulkanRenderer::ProjectionMode::Flat);
+        renderer_.setStereoMode(VulkanRenderer::StereoMode::Mono);
+    } else {
+        VulkanRenderer::ScreenPlacement pl = renderer_.screenPlacement(slot);
+        pl.stereo = VulkanRenderer::StereoMode::Mono;
+        renderer_.setScreenPlacement(slot, pl);
+    }
+    renderer_.setWebSlot(slot, true);
+    if (arrangementActive_ && inArrangement(slot)) applyArrangement(arrangement_);
+    selectScreen(slot);
+    webMouseDown_ = false;
+    webHoverValid_ = false;
+    return true;
+#else
+    (void)slot;
+    return false;
+#endif
+}
+
+bool App::updatePlexPlayback(int slot) {
+#ifdef PIXELVR_HAVE_MEDIA
+    ScreenState& sc = screens_[slot];
+    const double duration = sc.engine.duration();
+    if (sc.engine.eof() && (duration <= 0.0 || sc.engine.position() >= duration - 5.0)) {
+        returnFromPlex(slot);
+        return true;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= sc.plexReportAt) {
+        sc.plexReportAt = now + std::chrono::seconds(10);
+        webHosts_[slot].plexTimeline(sc.engine.paused() ? "paused" : "playing",
+                                     static_cast<int64_t>(sc.engine.position() * 1000.0));
+    }
+#else
+    (void)slot;
+#endif
+    return false;
 }
 
 void App::performVaultLock() {
@@ -2641,9 +2747,13 @@ int App::run() {
                 }
             }
             for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
-                if (!screens_[slot].web) continue;
+                if (!screens_[slot].web && !screens_[slot].webSuspended) continue;
                 BrowserHost& host = webHosts_[slot];
+                host.setPlexNative(settings_.plexNative());
                 host.poll();
+                // The page behind a Plex video went away: keep the video playing;
+                // returning to the dead page then closes the screen below.
+                if (!host.running() && screens_[slot].webSuspended) continue;
                 if (!host.running()) {  // helper or Chromium died
                     const std::string why = host.lastError();
                     const bool missing = why.rfind("Chromium is not installed", 0) == 0;
@@ -2673,6 +2783,10 @@ int App::run() {
                             arrangement_.order.end()) {
                         applyArrangement(arrangement_);
                     }
+                }
+                BrowserHost::PlexPlay plexPlay;
+                while (host.takePlexPlay(plexPlay)) {
+                    if (screens_[slot].web) startPlexPlay(slot, plexPlay);
                 }
                 // Text fields: a click into one opens the keyboard, which then
                 // types straight into the page; it closes when the field does.
@@ -3045,6 +3159,7 @@ int App::run() {
                     webHosts_[slot].setVolume(sc.volume);
                     continue;
                 }
+                if (sc.webSuspended && updatePlexPlayback(slot)) continue;
                 sc.engine.setMuted(mute);
                 sc.engine.setVolume(sc.volume);
                 // Music: the next track when one ends.
@@ -4448,7 +4563,7 @@ int App::run() {
                     const auto cb = static_cast<VulkanRenderer::CtrlButton>(btn);
                     if (cb == VulkanRenderer::CtrlButton::Stop) {
 #ifdef PIXELVR_HAVE_MEDIA
-                        closeMedia();
+                        if (!returnFromPlex(selectedScreen_)) closeMedia();
 #endif
 #ifdef PIXELVR_HAVE_FREETYPE
                         if (openScreenCount() == 0) browser_.open();  // large file selection
@@ -4557,7 +4672,7 @@ int App::run() {
                     } else if (cb == VulkanRenderer::CtrlButton::ScreenLayout) {
                         openArrangeMenu();
                     } else if (cb == VulkanRenderer::CtrlButton::ScreenClose) {
-                        closeMedia(selectedScreen_);
+                        if (!returnFromPlex(selectedScreen_)) closeMedia(selectedScreen_);
 #ifdef PIXELVR_HAVE_FREETYPE
                         if (openScreenCount() == 0) browser_.open();
 #endif
@@ -4791,7 +4906,7 @@ int App::run() {
             }
             // Timeline hover preview: follow the current clip/stereo layout, ask
             // for the hovered time and upload whatever the worker has finished.
-            scrubPreview_.setSource(cur().open && !cur().web ? cur().path : std::string(),
+            scrubPreview_.setSource(cur().open && !cur().web && !cur().webSuspended ? cur().path : std::string(),
                                     settings_.stereoMode());
             if (cur().open && renderer_.pointerOnTimeline() && cur().engine.duration() > 0.0) {
                 scrubPreview_.request(renderer_.pointerScrub() * cur().engine.duration());

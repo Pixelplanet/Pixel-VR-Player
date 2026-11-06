@@ -72,8 +72,20 @@ namespace {
 
 using Clock = std::chrono::steady_clock;
 
+std::string redactToken(std::string s) {
+    static const std::string kTok = "X-Plex-Token=";
+    for (size_t p = 0; (p = s.find(kTok, p)) != std::string::npos;) {
+        p += kTok.size();
+        size_t e = p;
+        while (e < s.size() && s[e] != '&' && s[e] != '"' && s[e] != ' ' && s[e] != '\n') ++e;
+        s.replace(p, e - p, "***");
+        p += 3;
+    }
+    return s;
+}
+
 void emitLine(const std::string& line) {
-    const std::string l = line + "\n";
+    const std::string l = (line.rfind("plex ", 0) == 0 ? line : redactToken(line)) + "\n";
     std::fwrite(l.data(), 1, l.size(), stdout);
     std::fflush(stdout);
 }
@@ -577,6 +589,48 @@ struct Tab {
     bool canFwd = false;
 };
 
+std::string urlDecode(std::string_view in) {
+    std::string out;
+    for (size_t i = 0; i < in.size(); ++i) {
+        if (in[i] == '%' && i + 2 < in.size() && std::isxdigit(static_cast<unsigned char>(in[i + 1])) &&
+            std::isxdigit(static_cast<unsigned char>(in[i + 2]))) {
+            out += static_cast<char>(std::stoi(std::string(in.substr(i + 1, 2)), nullptr, 16));
+            i += 2;
+        } else {
+            out += in[i] == '+' ? ' ' : in[i];
+        }
+    }
+    return out;
+}
+
+std::string urlEncode(const std::string& in) {
+    std::string out;
+    for (const unsigned char c : in) {
+        if (std::isalnum(c) || c == '-' || c == '_' || c == '.' || c == '~') {
+            out += static_cast<char>(c);
+        } else {
+            char b[4];
+            std::snprintf(b, sizeof(b), "%%%02X", c);
+            out += b;
+        }
+    }
+    return out;
+}
+
+std::string queryParam(const std::string& url, const std::string& name) {
+    const size_t q = url.find('?');
+    if (q == std::string::npos) return {};
+    for (size_t p = q + 1; p < url.size();) {
+        size_t e = url.find('&', p);
+        if (e == std::string::npos) e = url.size();
+        if (url.compare(p, name.size() + 1, name + "=") == 0) {
+            return urlDecode(std::string_view(url).substr(p + name.size() + 1, e - p - name.size() - 1));
+        }
+        p = e + 1;
+    }
+    return {};
+}
+
 struct Pixels {
     std::vector<uint8_t> px;
     int w = 0;
@@ -912,9 +966,10 @@ int runScreen(const ScreenOptions& opt) {
         return false;
     };
     auto evalIn = [&](const std::string& session, const std::string& expr,
-                      std::function<void(const pvrjson::Value*)> onValue = nullptr) {
+                      std::function<void(const pvrjson::Value*)> onValue = nullptr, bool await = false) {
         const std::string params = "{\"expression\":" + pvrjson::quote(expr) +
-                                   ",\"returnByValue\":true,\"userGesture\":true,\"awaitPromise\":false}";
+                                   ",\"returnByValue\":true,\"userGesture\":true,\"awaitPromise\":" +
+                                   (await ? "true" : "false") + "}";
         if (!onValue) {
             send("Runtime.evaluate", params, session);
             return;
@@ -1010,6 +1065,27 @@ int runScreen(const ScreenOptions& opt) {
     int lastLoading = -1;
     auto nextPoll = Clock::now();
     auto nextBookmarkCheck = Clock::now() + std::chrono::seconds(3);
+    // Plex Web hand-off: a play request is intercepted and the app plays the original file.
+    struct PlexState {
+        bool enabled = false;
+        bool intercepted = false;
+        std::string session, base, token, ratingKey, key, url;
+        long long durationMs = 0;
+        Clock::time_point pauseUntil{};  // the player starts a moment after its request: keep it paused
+        Clock::time_point nextPauseAt{};
+        Clock::time_point closeAt{};
+        Clock::time_point returnCheckAt{};
+        long long stoppedMs = 0;
+    } plex;
+    auto plexTimeline = [&](const std::string& state, long long ms) {
+        evalIn(plex.session,
+               "fetch(" + pvrjson::quote(plex.base + "/:/timeline?ratingKey=" + plex.ratingKey + "&key=" +
+                                         urlEncode(plex.key) + "&state=" + state + "&time=" + std::to_string(ms) +
+                                         "&duration=" + std::to_string(plex.durationMs) +
+                                         "&X-Plex-Token=" + plex.token) +
+                   ",{headers:{'X-Plex-Client-Identifier':'pixelvr-player','X-Plex-Product':'Pixel VR Player'}}).catch(()=>0)&&0");
+    };
+    const std::string kPauseAllJs = "for(const m of document.querySelectorAll('video,audio'))m.pause()";
 
     auto activeTab = [&]() -> Tab* { return (active >= 0 && active < static_cast<int>(tabs.size())) ? &tabs[active] : nullptr; };
     auto tabBySession = [&](const std::string& s) -> int {
@@ -1158,6 +1234,7 @@ int runScreen(const ScreenOptions& opt) {
         // others) render their light theme: white pages in a dark room. Ask for dark.
         send("Emulation.setEmulatedMedia",
              "{\"features\":[{\"name\":\"prefers-color-scheme\",\"value\":\"dark\"}]}", t.session);
+        send("Network.enable", "{}", t.session);
         send("Runtime.enable", "{}", t.session);  // binding calls arrive only with Runtime on
         send("Runtime.addBinding", "{\"name\":\"pvrSelect\"}", t.session);
         send("Page.addScriptToEvaluateOnNewDocument", "{\"source\":" + pvrjson::quote(kSelectJs) + "}", t.session);
@@ -1447,6 +1524,55 @@ int runScreen(const ScreenOptions& opt) {
                 ++statFrames;
                 statDecodeUs += std::chrono::duration_cast<std::chrono::microseconds>(Clock::now() - t0).count();
             }
+        } else if (method == "Network.requestWillBeSent" && plex.enabled && !plex.intercepted) {
+            const int ti = tabBySession(session);
+            const pvrjson::Value* req = params->get("request");
+            if (ti < 0 || !req) return;
+            const std::string url = req->getString("url");
+            if (url.find("/video/:/transcode/universal/decision") == std::string::npos &&
+                url.find("/video/:/transcode/universal/start") == std::string::npos) {
+                return;
+            }
+            const std::string path = queryParam(url, "path");
+            const size_t hostEnd = url.find('/', url.find("://") + 3);
+            std::string token = queryParam(url, "X-Plex-Token");
+            if (token.empty()) {
+                if (const pvrjson::Value* h = req->get("headers")) token = h->getString("X-Plex-Token");
+            }
+            if (path.rfind("/library/metadata/", 0) != 0 || hostEnd == std::string::npos || token.empty()) return;
+            plex.intercepted = true;
+            plex.session = session;
+            plex.base = url.substr(0, hostEnd);
+            plex.token = token;
+            plex.url = tabs[ti].url;
+            const std::string offsetParam = queryParam(url, "offset");
+            const int mediaIndex = std::max(0, std::atoi(queryParam(url, "mediaIndex").c_str()));
+            plex.pauseUntil = Clock::now() + std::chrono::seconds(15);
+            const std::string js =
+                "fetch(" + pvrjson::quote(plex.base + path + "?X-Plex-Token=" + token) +
+                ",{headers:{Accept:'application/json'}}).then(r=>r.json()).then(j=>{const m=j.MediaContainer.Metadata[0],"
+                "p=(m.Media[" + std::to_string(mediaIndex) + "]||m.Media[0]).Part[0];"
+                "return JSON.stringify({part:p.key,title:m.grandparentTitle?m.grandparentTitle+' - '+m.title:m.title,"
+                "dur:m.duration||0,off:m.viewOffset||0,rk:m.ratingKey,key:m.key})})";
+            evalIn(session, js, [&, session, offsetParam](const pvrjson::Value* v) {
+                pvrjson::Value info;
+                if (!v || v->type != pvrjson::Value::Type::String || !pvrjson::parse(v->str, info) ||
+                    info.getString("part").empty()) {
+                    std::fprintf(stderr, "plex: metadata request failed\n");
+                    plex.intercepted = false;
+                    evalIn(session, "(()=>{for(const m of document.querySelectorAll('video,audio'))m.play()})()");
+                    return;
+                }
+                plex.ratingKey = info.getString("rk");
+                plex.key = info.getString("key");
+                plex.durationMs = static_cast<long long>(info.getNumber("dur"));
+                const double offset = offsetParam.empty() ? info.getNumber("off") / 1000.0 : std::atof(offsetParam.c_str());
+                char nums[64];
+                std::snprintf(nums, sizeof(nums), "%.3f,\"duration\":%.3f}", offset, plex.durationMs / 1000.0);
+                emitLine("plex {\"url\":" + pvrjson::quote(plex.base + info.getString("part") + "?X-Plex-Token=" + plex.token +
+                                                          "&download=0") +
+                         ",\"title\":" + pvrjson::quote(info.getString("title")) + ",\"offset\":" + nums);
+            }, true);
         } else if (method == "Runtime.bindingCalled" && session == toolbar) {
             handleToolbar(params->getString("payload"));
         } else if (method == "Runtime.bindingCalled" && params->getString("name") == "pvrSelect") {
@@ -1625,16 +1751,16 @@ int runScreen(const ScreenOptions& opt) {
             else if (hideRevealAt == Clock::time_point{}) hideRevealAt = Clock::now() + std::chrono::milliseconds(700);
         }
     };
-    auto keyEvent = [&](const KeyInfo* k) {
-        if (keySession.empty()) return;
+    auto keyEvent = [&](const KeyInfo* k, const std::string& ks) {
+        if (ks.empty()) return;
         std::string down = std::string("{\"type\":\"keyDown\",\"key\":") + pvrjson::quote(k->key) +
                            ",\"code\":" + pvrjson::quote(k->code) + ",\"windowsVirtualKeyCode\":" + std::to_string(k->vk);
         if (k->text) down += ",\"text\":" + pvrjson::quote(k->text);
-        send("Input.dispatchKeyEvent", down + "}", inputSession(keySession));
+        send("Input.dispatchKeyEvent", down + "}", inputSession(ks));
         send("Input.dispatchKeyEvent", std::string("{\"type\":\"keyUp\",\"key\":") + pvrjson::quote(k->key) +
                                            ",\"code\":" + pvrjson::quote(k->code) +
                                            ",\"windowsVirtualKeyCode\":" + std::to_string(k->vk) + "}",
-             inputSession(keySession));
+             inputSession(ks));
     };
 
     auto handleCommand = [&](const std::string& line) {
@@ -1679,7 +1805,7 @@ int runScreen(const ScreenOptions& opt) {
             if (rest == "F11") {
                 toggleFullscreen();
             } else if (const KeyInfo* k = keyInfo(rest)) {
-                keyEvent(k);
+                keyEvent(k, keySession);
                 valueAt = Clock::now() + std::chrono::milliseconds(80);
                 // Enter in the toolbar's address bar navigates: the field keeps
                 // its focus, so nothing else would tell the app the keyboard is
@@ -1741,6 +1867,20 @@ int runScreen(const ScreenOptions& opt) {
                                    ";for(const m of document.querySelectorAll('video,audio')){"
                                    "if(!L&&live(m))continue;m.pause()}})()";
             for (const Tab& t : tabs) evalIn(t.session, js);
+        } else if (cmd == "plexnative") {
+            plex.enabled = rest == "1";
+        } else if (cmd == "plexreturn") {
+            if (!plex.intercepted || plex.closeAt != Clock::time_point{}) return;
+            plex.stoppedMs = std::atoll(rest.c_str());
+            evalIn(plex.session, "(()=>{" + kPauseAllJs + "})()");
+            if (const KeyInfo* esc = keyInfo("Escape")) keyEvent(esc, plex.session);
+            plex.closeAt = Clock::now() + std::chrono::milliseconds(400);
+            plex.returnCheckAt = Clock::now() + std::chrono::milliseconds(1200);
+        } else if (cmd == "plextimeline") {
+            char state[16] = {};
+            long long ms = 0;
+            if (!plex.intercepted || std::sscanf(rest.c_str(), "%15s %lld", state, &ms) != 2) return;
+            plexTimeline(state, ms);
         } else if (cmd == "keyboard") {
             // The app opened its keyboard by hand: report the field, if any.
             probeSession = keySession.empty() && tab ? tab->session : keySession;
@@ -1898,6 +2038,37 @@ int runScreen(const ScreenOptions& opt) {
         if (now >= nextPoll) {
             pollState();
             nextPoll = now + std::chrono::milliseconds(400);
+        }
+        if (plex.intercepted && plex.pauseUntil != Clock::time_point{} && now >= plex.nextPauseAt) {
+            plex.nextPauseAt = now + std::chrono::milliseconds(250);
+            if (now >= plex.pauseUntil) plex.pauseUntil = {};
+            else evalIn(plex.session, "(()=>{" + kPauseAllJs + "})()");
+        }
+        if (plex.closeAt != Clock::time_point{} && now >= plex.closeAt) {
+            plex.closeAt = {};
+            // Plex ignores synthetic clicks: press its "Close Player" button with real input.
+            evalIn(plex.session,
+                   "(()=>{const b=document.querySelector('[data-testid=closeButton]');if(!b)return null;"
+                   "const r=b.getBoundingClientRect();return [r.x+r.width/2,r.y+r.height/2]})()",
+                   [&, session = plex.session](const pvrjson::Value* v) {
+                       if (!v || v->type != pvrjson::Value::Type::Array || v->array.size() < 2) return;
+                       char buf[160];
+                       for (const char* type : {"mouseMoved", "mousePressed", "mouseReleased"}) {
+                           std::snprintf(buf, sizeof(buf),
+                                         "{\"type\":\"%s\",\"x\":%.1f,\"y\":%.1f,\"button\":\"left\",\"buttons\":%d,"
+                                         "\"clickCount\":1}",
+                                         type, v->array[0].number, v->array[1].number,
+                                         std::strcmp(type, "mousePressed") == 0 ? 1 : 0);
+                           send("Input.dispatchMouseEvent", buf, session);
+                       }
+                   });
+        }
+        if (plex.returnCheckAt != Clock::time_point{} && now >= plex.returnCheckAt) {
+            plex.returnCheckAt = {};
+            plex.intercepted = false;
+            const int i = tabBySession(plex.session);
+            if (i >= 0 && tabs[i].url != plex.url) evalIn(plex.session, "history.back()");
+            plexTimeline("stopped", plex.stoppedMs);
         }
         if (probeAt != Clock::time_point{} && now >= probeAt) {
             probeAt = {};

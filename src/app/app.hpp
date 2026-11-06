@@ -114,6 +114,12 @@ private:
     // Closes the current clip and returns the renderer to flat/mono so the hub
     // panel stops behaving as if 180/360 content were still playing.
     void closeMedia(int slot = -1);
+    // Plex Web hand-off: the page's play request plays the original file on
+    // the same slot; stopping, closing or finishing it brings the page back.
+    void startPlexPlay(int slot, const BrowserHost::PlexPlay& play);
+    bool returnFromPlex(int slot);  // false when the slot is not playing a Plex hand-off
+    bool updatePlexPlayback(int slot);  // true once it ended and the page is back
+    bool plexLoading_ = false;
     // Stores the current clip's position in playbackMemory_ (never for vault files).
     void rememberPlaybackPosition(int slot = -1);
     VulkanRenderer::ActionMenuData actionMenu_{};
@@ -197,6 +203,8 @@ private:
         int projection = 0;  // 0 flat, 1 360, 2 180 (extra screens: always 0)
         int stereo = 0;      // 0 mono, 1 SBS, 2 TB
         bool web = false;    // shows the web browser instead of a video
+        bool webSuspended = false;  // its BrowserHost is alive, paused behind a natively playing (Plex) video
+        std::chrono::steady_clock::time_point plexReportAt{};
         float volume = 1.0f; // this screen's own volume (on top of the system volume)
 #ifdef PIXELVR_HAVE_MEDIA
         MusicQueue queue;    // audio files: the folder they were opened from

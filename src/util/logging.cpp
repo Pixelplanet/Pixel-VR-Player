@@ -7,6 +7,7 @@
 #include <cstring>
 #include <ctime>
 #include <mutex>
+#include <string>
 
 namespace pixelvr::log {
 
@@ -50,6 +51,20 @@ Level resolve_initial_level() {
 
 std::once_flag g_env_once;
 
+// Plex media URLs carry the account token; never write it out.
+std::string redact_token(std::string_view in) {
+    static constexpr std::string_view kTok = "X-Plex-Token=";
+    std::string s(in);
+    for (std::size_t p = 0; (p = s.find(kTok, p)) != std::string::npos;) {
+        p += kTok.size();
+        std::size_t e = p;
+        while (e < s.size() && s[e] != '&' && s[e] != '"' && s[e] != ' ' && s[e] != '\n') ++e;
+        s.replace(p, e - p, "***");
+        p += 3;
+    }
+    return s;
+}
+
 } // namespace
 
 void set_level(Level level) {
@@ -78,9 +93,10 @@ void write(Level msg_level, std::string_view message) {
     std::snprintf(stamp, sizeof(stamp), "%02d:%02d:%02d.%03ld", tm.tm_hour,
                   tm.tm_min, tm.tm_sec, ts.tv_nsec / 1'000'000);
 
+    const std::string clean = redact_token(message);
     std::lock_guard<std::mutex> lock(g_mutex);
     std::fprintf(stderr, "[%s] %s  %.*s\n", stamp, level_tag(msg_level),
-                 static_cast<int>(message.size()), message.data());
+                 static_cast<int>(clean.size()), clean.data());
 }
 
 void writef(Level msg_level, const char* fmt, ...) {

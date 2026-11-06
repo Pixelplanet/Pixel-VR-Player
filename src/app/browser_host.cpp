@@ -234,6 +234,7 @@ bool BrowserHost::start(const std::string& url, int width, int height, const Opt
     mutedState_ = -1;
     volumeState_ = -1;
     focusEvents_.clear();
+    plexPlays_.clear();
     fieldValueNew_ = false;
 
     // Shared memory for frames (the app owns and unlinks it).
@@ -293,6 +294,7 @@ bool BrowserHost::spawnPage(int port) {
         pid_ = spawnHelper(args, toHelper_, fromHelper_);
     }
     if (pid_ <= 0) return false;
+    send(plexNative_ ? "plexnative 1" : "plexnative 0");
     PIXELVR_LOG_INFO("Browser: page helper pid %d (%dx%d) on %s", static_cast<int>(pid_), width_, height_,
                      startUrl_.c_str());
     return true;
@@ -429,6 +431,16 @@ void BrowserHost::handleLine(const std::string& line) {
             ev.cursor = cursor;
         }
         focusEvents_.push_back(std::move(ev));
+    } else if (cmd == "plex") {
+        pvrjson::Value v;
+        if (pvrjson::parse(rest.c_str(), v) && !v.getString("url").empty()) {
+            PlexPlay p;
+            p.url = v.getString("url");
+            p.title = v.getString("title");
+            p.offset = v.getNumber("offset");
+            p.duration = v.getNumber("duration");
+            plexPlays_.push_back(std::move(p));
+        }
     } else if (cmd == "value") {
         int cursor = 0, used = 0;
         pvrjson::Value v;
@@ -501,6 +513,20 @@ void BrowserHost::setVolume(float volume) {
     send("volume " + std::to_string(pct));
 }
 
+void BrowserHost::setPlexNative(bool on) {
+    if (on == plexNative_) return;
+    plexNative_ = on;
+    send(on ? "plexnative 1" : "plexnative 0");
+}
+void BrowserHost::plexTimeline(const char* state, int64_t ms) {
+    send(std::string("plextimeline ") + state + " " + std::to_string(ms));
+}
+bool BrowserHost::takePlexPlay(PlexPlay& out) {
+    if (plexPlays_.empty()) return false;
+    out = std::move(plexPlays_.front());
+    plexPlays_.erase(plexPlays_.begin());
+    return true;
+}
 bool BrowserHost::takeFocusEvent(FocusEvent& out) {
     if (focusEvents_.empty()) return false;
     out = std::move(focusEvents_.front());

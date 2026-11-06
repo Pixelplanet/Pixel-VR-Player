@@ -111,6 +111,20 @@ public:
     bool takeFieldValue(int& cursor, std::string& value);
     void requestFocusReport() { send("keyboard"); }
 
+    // Plex Web hand-off: with it on, pressing play on Plex's page is
+    // intercepted and reported here (the page is paused) so the app can play
+    // the original file itself.
+    struct PlexPlay {
+        std::string url;
+        std::string title;
+        double offset = 0.0;
+        double duration = 0.0;
+    };
+    void setPlexNative(bool on);
+    bool takePlexPlay(PlexPlay& out);
+    void plexReturn(int64_t ms) { send("plexreturn " + std::to_string(ms)); }  // close Plex's player, report "stopped" at ms
+    void plexTimeline(const char* state, int64_t ms);  // playing | paused | stopped
+
     const std::string& url() const { return url_; }
     const std::string& title() const { return title_; }
     // The helper's last error (e.g. "Chromium is not installed ..."), for the user.
@@ -151,6 +165,8 @@ private:
     int mutedState_ = -1;
     int volumeState_ = -1;  // percent last sent
     std::vector<FocusEvent> focusEvents_;
+    std::vector<PlexPlay> plexPlays_;
+    bool plexNative_ = true;
     bool fieldValueNew_ = false;
     int fieldCursor_ = 0;
     std::string fieldValue_;

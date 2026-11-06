@@ -118,7 +118,7 @@ hardware VP9/H.264 in our player (works with multi-screen).
 ### S. Other streaming sources (after YouTube)
 - [ ] **S1. yt-dlp generic** — the same Open URL path works for many sites yt-dlp supports
   (Vimeo, Twitch VODs, …); live streams (HLS) via FFmpeg.
-- [ ] **S2. Plex (decided 2026-11-06): keep Plex Web as the UI, play natively.** Plex Web runs
+- [x] **S2. Plex (decided 2026-11-06, implemented 2026-11-06 — needs in-headset test): keep Plex Web as the UI, play natively.** Plex Web runs
   in the browser screen (works, transcodes to 1080p in Chromium). Instead of a Plex client
   of our own, intercept playback like YouTube: the helper watches the page's requests
   (`Network.requestWillBeSent`) for `/library/metadata/<id>` or the `transcode/universal`
