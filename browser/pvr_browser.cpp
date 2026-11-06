@@ -1137,6 +1137,10 @@ int runScreen(const ScreenOptions& opt) {
              t.session);
         // Every window believes it has focus (caret, focus events, typing).
         send("Emulation.setFocusEmulationEnabled", "{\"enabled\":true}", t.session);
+        // Headless has no system theme, so sites that follow it (Plex Web, many
+        // others) render their light theme: white pages in a dark room. Ask for dark.
+        send("Emulation.setEmulatedMedia",
+             "{\"features\":[{\"name\":\"prefers-color-scheme\",\"value\":\"dark\"}]}", t.session);
         send("Runtime.enable", "{}", t.session);  // binding calls arrive only with Runtime on
         send("Runtime.addBinding", "{\"name\":\"pvrSelect\"}", t.session);
         send("Page.addScriptToEvaluateOnNewDocument", "{\"source\":" + pvrjson::quote(kSelectJs) + "}", t.session);

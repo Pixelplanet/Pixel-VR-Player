@@ -118,9 +118,37 @@ hardware VP9/H.264 in our player (works with multi-screen).
 ### S. Other streaming sources (after YouTube)
 - [ ] **S1. yt-dlp generic** — the same Open URL path works for many sites yt-dlp supports
   (Vimeo, Twitch VODs, …); live streams (HLS) via FFmpeg.
-- [ ] **S2. Jellyfin / Plex** — their HTTP APIs give direct-play URLs FFmpeg can open; library
-  browsing in the Streaming tab.
-- [ ] DRM services (Netflix, Disney+, …) are out of scope (Widevine).
+- [ ] **S2. Plex (decided 2026-11-06): keep Plex Web as the UI, play natively.** Plex Web runs
+  in the browser screen (works, transcodes to 1080p in Chromium). Instead of a Plex client
+  of our own, intercept playback like YouTube: the helper watches the page's requests
+  (`Network.requestWillBeSent`) for `/library/metadata/<id>` or the `transcode/universal`
+  start, takes server base + `X-Plex-Token` from the URL, asks
+  `/library/metadata/<id>?X-Plex-Token=` for `Media/Part.key`, and the app opens
+  `base + part.key + ?X-Plex-Token=` in MediaEngine on the same screen (original file,
+  hardware decode, zero-copy, our 3D/180 detection, chapters) while pausing the page's
+  player. Needs HTTP(S) in the media path: either `--enable-network` for our FFmpeg
+  (gnutls is already on) or a libcurl read-ahead reader shared with WebDAV. Setting
+  "Plex: play with the player" (default on). Jellyfin: same pattern afterwards.
+- [ ] **S3. Browser bugs found with Plex (2026-11-06):**
+  - typing a URL: the keyboard stayed open after Enter although the address bar had taken
+    it; Enter on the address bar should navigate and close the keyboard.
+  - no keyboard for Plex's sign-in fields: they live in a cross-origin iframe
+    (plex.tv/vendors) and our focus detection only runs in the main frame — attach to
+    child frames too (`Target.setAutoAttach` with flatten, run the focus script there).
+  - laser beam looked like it passed through the dock: the beam is in the projection
+    layer, the dock is a composition layer drawn over it. Fix: draw the beam itself as a
+    thin quad layer (gradient texture, billboarded from controller to hit) — SteamVR
+    depth-sorts layers, so it is then occluded / visible correctly.
+  - Plex rendered its light theme (white page, unreadable): headless has no system theme →
+    `Emulation.setEmulatedMedia prefers-color-scheme: dark` for all pages (done).
+- [ ] **S4. More share protocols (plan agreed 2026-11-06):** SFTP first (libssh: `sftp_opendir`
+  listing + pipelined `sftp_async_read` reader, 8–16 requests in flight; password auth;
+  "SFTP" quick filter beside SMB Shares with the same connect dialog / credential store),
+  then WebDAV over libcurl (PROPFIND listing, ranged GET read-ahead; shares the HTTP reader
+  with S2). NFS (libnfs, host-based auth) and DLNA only if asked. Check on the headset which
+  of libssh / libssh2 / libnfs / libcurl SteamOS ships.
+- DRM services: Prime Video verified working in the browser screen (Widevine L3, 1080p);
+  Netflix / Disney+ use the same path.
 
 ### W. Browser engine (needed by Y2)
 - [ ] **W1. Evaluate engines**: **WPE WebKit** (fdo backend exports dma-buf frames → zero-copy
