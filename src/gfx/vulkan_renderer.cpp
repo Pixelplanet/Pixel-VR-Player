@@ -733,6 +733,7 @@ VulkanRenderer::~VulkanRenderer() {
         // UI composition layer resources.
         destroyLayerTargets(uiLayerTargets_);
         destroyLayerTargets(cursorTargets_);
+        destroyLayerTargets(beamTargets_);
         for (ScreenLayer& L : screenLayers_) destroyLayerTargets(L.targets);
         for (VkPipeline p : {uiPipelineLayer_, uiPipelineLayerAlpha_, textPipelineLayer_, thumbPipelineLayer_,
                              pipelineLayer_, glassPipelineLayer_}) {
@@ -1602,6 +1603,12 @@ bool VulkanRenderer::createLayerResources(XrContext& xr, int64_t colorFormat) {
         xr.destroyLayerSwapchain(cursorSwapchain_);
         destroyLayerTargets(cursorTargets_);
     }
+    if (!xr.createLayerSwapchain(colorFormat, 32, 512, beamSwapchain_) ||
+        !createLayerTargets(beamSwapchain_, beamTargets_)) {
+        xr.destroyLayerSwapchain(beamSwapchain_);
+        destroyLayerTargets(beamTargets_);
+    }
+    beamDrawn_ = false;
     uiLayerReady_ = true;
     PIXELVR_LOG_INFO("Composition layers ready (UI %dx%d, %s)", uiSwapchain_.width, uiSwapchain_.height,
                      uiLayerCylinder_ ? "cylinder" : "flat quad only");
@@ -3227,8 +3234,40 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
         cursorPending = true;
     }
 
-    if (copies.empty() && !cursorPending) {
-        return;
+    // Laser beams: one thin quad layer per hand with its laser on. The beam
+    // texture (a soft capsule) is drawn once; every frame only the quad's
+    // pose and length change.
+    struct Beam {
+        Vec3 a, b;
+    };
+    std::vector<Beam> beams;
+    if (beamSwapchain_.handle != XR_NULL_HANDLE) {
+        for (int h = 0; h < 2; ++h) {
+            if (!controllers_[h].active || !laserOn_[h]) continue;
+            const Quat q{controllers_[h].orientation[0], controllers_[h].orientation[1],
+                         controllers_[h].orientation[2], controllers_[h].orientation[3]};
+            const Vec3 o{controllers_[h].position[0], controllers_[h].position[1], controllers_[h].position[2]};
+            const Vec3 d = normalize(rotate(q, Vec3{0.0f, 0.0f, -1.0f}));
+            float len = 2.5f;
+            if (pointerActive_ && pointerHand_ == h) {
+                len = std::max(length(Vec3{pointerHit_[0], pointerHit_[1], pointerHit_[2]} - o) - 0.01f, 0.05f);
+            }
+            beams.push_back({o + d * 0.02f, o + d * len});
+        }
+    }
+    bool beamPending = false;
+    uint32_t beamImage = 0;
+    if (!beams.empty() && !beamDrawn_ && xr.acquireLayerImage(beamSwapchain_, beamImage) &&
+        beamImage < beamTargets_.framebuffers.size()) {
+        beamPending = true;
+    }
+
+    if (copies.empty() && !cursorPending && !beamPending) {
+        if (!beams.empty()) {
+            // (texture already drawn) fall through to submit the beam quads
+        } else {
+            return;
+        }
     }
 
     // One command buffer for all the copies (pass slot 3).
@@ -3245,10 +3284,46 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
     if (vkBeginCommandBuffer(commandBuffer_, &beginInfo) != VK_SUCCESS) {
         for (const Pending& p : copies) xr.releaseLayerImage(screenLayers_[p.slot].sc);
         if (cursorPending) xr.releaseLayerImage(cursorSwapchain_);
+        if (beamPending) xr.releaseLayerImage(beamSwapchain_);
         return;
     }
     for (const Pending& p : copies) {
         recordScreenCopy(p.slot, screenLayers_[p.slot], p.imageIndex);
+    }
+    if (beamPending) {
+        // Soft accent capsule, full height, fading at the sides.
+        VkClearValue clear{};
+        clear.color = {{0.0f, 0.0f, 0.0f, 0.0f}};
+        VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+        rp.renderPass = uiLayerPass_;
+        rp.framebuffer = beamTargets_.framebuffers[beamImage];
+        rp.renderArea = {{0, 0}, {static_cast<uint32_t>(beamTargets_.width), static_cast<uint32_t>(beamTargets_.height)}};
+        rp.clearValueCount = 1;
+        rp.pClearValues = &clear;
+        vkCmdBeginRenderPass(commandBuffer_, &rp, VK_SUBPASS_CONTENTS_INLINE);
+        VkViewport vp{0.0f, 0.0f, static_cast<float>(beamTargets_.width), static_cast<float>(beamTargets_.height), 0.0f, 1.0f};
+        vkCmdSetViewport(commandBuffer_, 0, 1, &vp);
+        VkRect2D sc = rp.renderArea;
+        vkCmdSetScissor(commandBuffer_, 0, 1, &sc);
+        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipelineLayer_);
+        static const float kAccents[5][3] = {{0.25f, 0.78f, 1.00f}, {0.18f, 0.85f, 0.52f}, {1.00f, 0.68f, 0.20f},
+                                             {0.68f, 0.42f, 1.00f}, {0.96f, 0.28f, 0.36f}};
+        const float* ac = kAccents[std::clamp(uiAccentColorIdx_, 0, 4)];
+        const Mat4 ortho = orthographicVulkan(-1.0f, 1.0f, -1.0f, 1.0f);
+        UiPush push{};
+        std::memcpy(push.mvp, ortho.m, sizeof(push.mvp));
+        const float col[4] = {ac[0], ac[1], ac[2], 0.85f};
+        std::memcpy(push.color, col, sizeof(push.color));
+        push.params[0] = static_cast<float>(UiShape::SoftGlow);
+        push.params[1] = 1.0f;
+        push.params[2] = 0.55f;
+        push.rect[2] = 1.0f;
+        push.rect[3] = 1.0f;
+        vkCmdPushConstants(commandBuffer_, uiPipelineLayout_,
+                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(UiPush), &push);
+        vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
+        vkCmdEndRenderPass(commandBuffer_);
+        beamDrawn_ = true;
     }
     if (cursorPending) {
         // Glow + dot, like the in-scene cursor.
@@ -3301,6 +3376,34 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
         viewFenceInFlight_[slotCb] = true;
     }
     for (const Pending& p : copies) xr.releaseLayerImage(screenLayers_[p.slot].sc);
+    if (beamPending) xr.releaseLayerImage(beamSwapchain_);
+    for (const Beam& bm : beams) {
+        // Billboard strip: +Y along the beam, +Z toward the head.
+        const Vec3 mid = (bm.a + bm.b) * 0.5f;
+        const Vec3 axis = bm.b - bm.a;
+        const float len = length(axis);
+        if (len < 1e-4f) continue;
+        const Vec3 up = axis * (1.0f / len);
+        Vec3 toEye = head - mid;
+        toEye = toEye - up * dot(toEye, up);
+        if (length(toEye) < 1e-4f) continue;
+        toEye = normalize(toEye);
+        const Vec3 right = normalize(cross(up, toEye));
+        Mat4 m;
+        m.m[0] = right.x; m.m[1] = right.y; m.m[2] = right.z;
+        m.m[4] = up.x;    m.m[5] = up.y;    m.m[6] = up.z;
+        m.m[8] = toEye.x; m.m[9] = toEye.y; m.m[10] = toEye.z;
+        CompositionLayer cl;
+        cl.swapchain = beamSwapchain_.handle;
+        cl.blend = true;
+        cl.width = 0.012f;
+        cl.height = len;
+        const Quat q = quatFromMat(m);
+        cl.pose.orientation = {q.x, q.y, q.z, q.w};
+        cl.pose.position = {mid.x, mid.y, mid.z};
+        cl.imageRect = {{0, 0}, {beamTargets_.width, beamTargets_.height}};
+        out.push_back(cl);
+    }
     if (cursorPending) {
         xr.releaseLayerImage(cursorSwapchain_);
         // 8 cm billboard at the hit, a hair toward the viewer, facing the head.
@@ -7168,6 +7271,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 // the beam a little short of it instead of vanishing into it.
                 if (cursorInLayer) rayLen = std::max(rayLen - 0.03f, 0.05f);
             }
+            if (uiLayerLive() && beamSwapchain_.handle != XR_NULL_HANDLE) continue;  // beam is a layer
             // Tapered beam: thin at the controller, widening toward the hit, so
             // it reads as a 3D cone rather than a flat stick.
             const Vec3 start = o + d * 0.02f;

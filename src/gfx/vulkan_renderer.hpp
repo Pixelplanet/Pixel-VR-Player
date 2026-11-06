@@ -741,6 +741,12 @@ private:
     uint64_t frameSerial_[kMaxVideoSlots] = {};   // bumps with every new video / page frame
     ViewSwapchain cursorSwapchain_;                // pointer cursor over layer screens
     ViewTargets cursorTargets_;
+    // The laser beam as a thin billboard layer: the compositor depth-sorts
+    // layers, so it is hidden behind panels and visible in front of them
+    // (drawn into the eye buffers it would always be behind every layer).
+    ViewSwapchain beamSwapchain_;
+    ViewTargets beamTargets_;
+    bool beamDrawn_ = false;
     void recordScreenCopy(int slot, const ScreenLayer& L, uint32_t imageIndex);
     VkPipeline uiPipelineLayer_ = VK_NULL_HANDLE;
     // Writes alpha only (no blend): stamps alpha = coverage over a glass panel
