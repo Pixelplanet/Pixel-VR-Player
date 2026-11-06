@@ -132,7 +132,10 @@ hardware VP9/H.264 in our player (works with multi-screen).
   **Seamless return:** the browser page is kept (paused, hidden behind the video) while the
   file plays on that screen; closing the video (stop / ✕ / end of file) brings the same
   Plex page back exactly where it was, like the YouTube flow. Report the watched position
-  back to Plex (`/:/timeline`) so Continue Watching stays right.
+  back to Plex (`/:/timeline`) so Continue Watching stays right. The hidden page belongs
+  to the screen slot, not to a position: when the user moves / resizes / re-arranges
+  screens while the video plays, the page must follow (same slot, same placement), so it
+  is never out of place when it comes back.
 - [ ] **S3. Browser bugs found with Plex (2026-11-06):**
   - typing a URL: the keyboard stayed open after Enter although the address bar had taken
     it; Enter on the address bar should navigate and close the keyboard.

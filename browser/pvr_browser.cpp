@@ -47,6 +47,8 @@
 #include <fcntl.h>
 #include <fstream>
 #include <functional>
+#include <map>
+#include <memory>
 #include <iterator>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
@@ -981,6 +983,14 @@ int runScreen(const ScreenOptions& opt) {
     double pressOffsetY = 0.0;
     bool mouseDown = false;
     std::string keySession;  // keyboard target: page or toolbar
+    // Cross-origin iframes (sign-in forms: plex.tv, Google, PayPal) run in their
+    // own targets. Each attached frame session maps to its tab's root session:
+    // focus is probed in the frames too, keys are dispatched to the root.
+    std::map<std::string, std::string> frameRoot;
+    auto inputSession = [&](const std::string& s) -> std::string {
+        const auto it = frameRoot.find(s);
+        return it == frameRoot.end() ? s : it->second;
+    };
     std::string lastToolbarState;
     bool toolbarReady = false;
     std::string lastMedia;
@@ -1124,6 +1134,8 @@ int runScreen(const ScreenOptions& opt) {
 
     auto setupTab = [&](Tab& t) {
         send("Page.enable", "{}", t.session);
+        send("Target.setAutoAttach", "{\"autoAttach\":true,\"waitForDebuggerOnStart\":false,\"flatten\":true}",
+             t.session);
         if (!userAgent.empty()) {
             send("Emulation.setUserAgentOverride", "{\"userAgent\":" + pvrjson::quote(userAgent) + "}", t.session);
         }
@@ -1279,18 +1291,34 @@ int runScreen(const ScreenOptions& opt) {
     };
 
     auto probeFocus = [&](const std::string& session, bool click) {
-        evalIn(session, kEditableJs, [&, session, click](const pvrjson::Value* v) {
-            const bool editable = v && v->type == pvrjson::Value::Type::Object;
-            if (session != toolbar) lastPageEditable = editable ? 1 : 0;
-            if (!editable) {
+        // The root and its iframe sessions are asked in turn; the first that
+        // has an editable element focused wins, else "no field".
+        std::vector<std::string> order{session};
+        for (const auto& fr : frameRoot) {
+            if (fr.second == session) order.push_back(fr.first);
+        }
+        auto step = std::make_shared<std::function<void(size_t)>>();
+        *step = [&, order, session, click, step](size_t i) {
+            if (i >= order.size()) {
+                if (session != toolbar) lastPageEditable = 0;
                 if (click) emitLine("focus c 0");
                 return;
             }
-            keySession = session;
-            emitLine(std::string("focus ") + (click ? "c" : "p") + " 1 " +
-                     std::to_string(static_cast<int>(v->getNumber("pw"))) + " " +
-                     std::to_string(static_cast<int>(v->getNumber("c"))) + " " + pvrjson::quote(v->getString("v")));
-        });
+            const std::string s = order[i];
+            evalIn(s, kEditableJs, [&, s, i, session, click, step](const pvrjson::Value* v) {
+                const bool editable = v && v->type == pvrjson::Value::Type::Object;
+                if (!editable) {
+                    (*step)(i + 1);
+                    return;
+                }
+                if (session != toolbar) lastPageEditable = 1;
+                keySession = s;
+                emitLine(std::string("focus ") + (click ? "c" : "p") + " 1 " +
+                         std::to_string(static_cast<int>(v->getNumber("pw"))) + " " +
+                         std::to_string(static_cast<int>(v->getNumber("c"))) + " " + pvrjson::quote(v->getString("v")));
+            });
+        };
+        (*step)(0);
     };
 
     auto handleToolbar = [&](const std::string& payload) {
@@ -1476,8 +1504,26 @@ int runScreen(const ScreenOptions& opt) {
         } else if (method == "Target.targetDestroyed") {
             const int i = tabByTarget(params->getString("targetId"));
             if (i >= 0) removeTab(i);
+        } else if (method == "Target.attachedToTarget") {
+            // A tab's cross-origin iframe (auto-attached, flattened): remember
+            // whose it is and make it probe-able.
+            const pvrjson::Value* info = params->get("targetInfo");
+            const std::string child = params->getString("sessionId");
+            if (info && info->getString("type") == "iframe" && !child.empty() && tabBySession(session) >= 0) {
+                frameRoot[child] = session;
+                send("Runtime.enable", "{}", child);
+                send("Emulation.setFocusEmulationEnabled", "{\"enabled\":true}", child);
+            }
         } else if (method == "Target.detachedFromTarget") {
-            const int i = tabBySession(params->getString("sessionId"));
+            const std::string gone = params->getString("sessionId");
+            if (frameRoot.erase(gone) > 0) {
+                if (keySession == gone) {
+                    keySession.clear();
+                    emitLine("focus p 0");
+                }
+                return;
+            }
+            const int i = tabBySession(gone);
             if (i >= 0) removeTab(i);
         } else if (method == "Browser.downloadWillBegin") {
             if (tabByTarget(params->getString("frameId")) < 0) return;  // another screen's
@@ -1579,11 +1625,11 @@ int runScreen(const ScreenOptions& opt) {
         std::string down = std::string("{\"type\":\"keyDown\",\"key\":") + pvrjson::quote(k->key) +
                            ",\"code\":" + pvrjson::quote(k->code) + ",\"windowsVirtualKeyCode\":" + std::to_string(k->vk);
         if (k->text) down += ",\"text\":" + pvrjson::quote(k->text);
-        send("Input.dispatchKeyEvent", down + "}", keySession);
+        send("Input.dispatchKeyEvent", down + "}", inputSession(keySession));
         send("Input.dispatchKeyEvent", std::string("{\"type\":\"keyUp\",\"key\":") + pvrjson::quote(k->key) +
                                            ",\"code\":" + pvrjson::quote(k->code) +
                                            ",\"windowsVirtualKeyCode\":" + std::to_string(k->vk) + "}",
-             keySession);
+             inputSession(keySession));
     };
 
     auto handleCommand = [&](const std::string& line) {
@@ -1640,7 +1686,9 @@ int runScreen(const ScreenOptions& opt) {
                 }
             }
         } else if (cmd == "text" && !rest.empty()) {
-            if (!keySession.empty()) send("Input.insertText", "{\"text\":" + pvrjson::quote(rest) + "}", keySession);
+            if (!keySession.empty()) {
+                send("Input.insertText", "{\"text\":" + pvrjson::quote(rest) + "}", inputSession(keySession));
+            }
             valueAt = Clock::now() + std::chrono::milliseconds(80);
         } else if (cmd == "nav" && !rest.empty() && tab) {
             std::string target = rest;
@@ -1782,7 +1830,9 @@ int runScreen(const ScreenOptions& opt) {
                 compose();
             }
             const int editable = static_cast<int>(v->getNumber("e"));
-            if (lastPageEditable && !editable && keySession == session) emitLine("focus p 0");
+            if (lastPageEditable && !editable && keySession == session && !frameRoot.count(keySession)) {
+                emitLine("focus p 0");
+            }
             lastPageEditable = editable;
             std::string media = "media 0";
             const pvrjson::Value* m = v->get("m");
