@@ -21,6 +21,7 @@ public:
         ToggleRailShortcut3,
         ToggleRailShortcut4,
         ToggleRailShortcut5,
+        ToggleRailShortcut6,
         ToggleSwapEyes,
         ToggleModels,
         ToggleStats,

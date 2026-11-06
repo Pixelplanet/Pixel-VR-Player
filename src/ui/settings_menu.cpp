@@ -39,6 +39,9 @@ const SettingsMenu::RailShortcut kRailShortcuts[] = {
     {"Plex", "https://app.plex.tv", true},
 };
 constexpr int kRailShortcutCount = 7;
+static_assert(static_cast<int>(SettingsMenu::Action::ToggleRailShortcut0) + kRailShortcutCount - 1 ==
+                  static_cast<int>(SettingsMenu::Action::ToggleRailShortcut6),
+              "one ToggleRailShortcutN action per shortcut");
 
 const char* kLangNames[] = {"Auto",    "English",  "German",  "French",
                            "Spanish", "Japanese", "Italian", "Russian",
@@ -372,7 +375,8 @@ SettingsMenu::Action SettingsMenu::activate() {
         case Action::ToggleRailShortcut2:
         case Action::ToggleRailShortcut3:
         case Action::ToggleRailShortcut4:
-        case Action::ToggleRailShortcut5: {
+        case Action::ToggleRailShortcut5:
+        case Action::ToggleRailShortcut6: {
             const int i = static_cast<int>(act) - static_cast<int>(Action::ToggleRailShortcut0);
             railShortcutMask_ ^= (1 << i);
             saveConfig();

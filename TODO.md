@@ -154,6 +154,10 @@ hardware VP9/H.264 in our player (works with multi-screen).
   then WebDAV over libcurl (PROPFIND listing, ranged GET read-ahead; shares the HTTP reader
   with S2). NFS (libnfs, host-based auth) and DLNA only if asked. Check on the headset which
   of libssh / libssh2 / libnfs / libcurl SteamOS ships.
+- [ ] **R1. Room / environment colour (after S2-S4):** user-selectable room backdrop —
+  presets (current navy, pure black "cinema" with no distractions, a few tinted / themed
+  rooms), later optional environment scenes. Applies to the projection-layer clear colour
+  and the floor/ambient; pure black must also drop the ambilight glow when chosen.
 - DRM services: Prime Video verified working in the browser screen (Widevine L3, 1080p);
   Netflix / Disney+ use the same path.
 

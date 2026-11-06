@@ -3027,10 +3027,13 @@ void VulkanRenderer::renderLayersBefore(XrContext& xr, const XrView* views, uint
         pass.hw = kPanelW + kMargin;
         pass.hh = kPanelTop + kMargin;
     } else {
-        // Dock plus the scrub bubble / keyframe preview that pops up above it.
+        // Dock, plus the scrub bubble / keyframe preview above it only while
+        // they show: SteamVR hides the layers behind a layer's whole rectangle,
+        // transparent texels included, so an always-reserved bubble area cut a
+        // band out of the screen above the dock.
         const float rowExtra = screenControlsVisible_ ? kDockScreenRowExtra : 0.0f;
         const float bottom = kBarY - kDockHalfH - rowExtra - kMargin;
-        const float top = kBarY + 0.40f + kMargin;
+        const float top = kBarY + (pointerOnTimeline_ ? 0.40f : kDockHalfH) + kMargin;
         pass.cx = 0.0f;
         pass.cy = 0.5f * (bottom + top);
         pass.hw = kDockHalfW + kMargin;
