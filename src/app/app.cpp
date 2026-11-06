@@ -1070,8 +1070,6 @@ void App::startPlexPlay(int slot, const BrowserHost::PlexPlay& play) {
         sc.engine.seek(play.offset);
     }
     const auto now = std::chrono::steady_clock::now();
-    notice_ = play.title;
-    noticeUntil_ = now + std::chrono::seconds(4);
     hudDismissed_ = false;  // the dock shows, with the hint above it
     lastControllerActivity_ = now;
     renderer_.setDockHint("Press Stop or Close to return to Plex", 8.0f);

@@ -4920,9 +4920,25 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
 
         // Button hover tooltip pills
         const bool rowTip = is_screen_row_button(pointerButton_) && screenControlsVisible_;
+        std::string rowTipText;
+        float rowTipHw = 0.110f;  // the pill grows with its text (long tips were cut off)
+        if (rowTip) {
+            const auto cbT = static_cast<CtrlButton>(pointerButton_);
+            rowTipText = (cbT == CtrlButton::ScreenMute) ? (screenControlsMuted_ ? "Unmute" : "Mute")
+                       : (cbT == CtrlButton::ScreenAudioFollow)
+                           ? (audioFollow_ ? "Audio follows selection: on" : "Audio follows selection: off")
+                       : (cbT == CtrlButton::ScreenLock) ? (screensUnlocked_ ? "Lock screens" : "Unlock screens")
+                       : (cbT == CtrlButton::ScreenFrames) ? (screenFramesOn_ ? "Hide borders" : "Show borders")
+                       : (cbT == CtrlButton::ScreenLayout) ? "Arrange" : "Close screen";
+            if (textReady_) {
+                const float tipSc = (0.029f * tScale) / fontAtlas_.lineHeight * 0.90f;
+                rowTipHw = std::max(rowTipHw, 0.5f * measureString(tipSc, rowTipText) + 0.022f);
+            }
+        }
         if (rowTip) {
             const CtrlButtonRect rT = get_ctrl_button_rect(pointerButton_);
-            drawUiElement(vpPanel, rT.cx, rT.cy + 0.080f, 0.110f, 0.026f,
+            const float tipCx = std::clamp(rT.cx, -kDockHalfW + rowTipHw + 0.01f, kDockHalfW - rowTipHw - 0.01f);
+            drawUiElement(vpPanel, tipCx, rT.cy + 0.080f, rowTipHw, 0.026f,
                           UiShape::RoundedBox, glassControlT.data(), 1.0f, 0.06f, kGlassRim);
         } else if (pointerButton_ == static_cast<int>(CtrlButton::HideHud)) {
             const CtrlButtonRect rH = get_ctrl_button_rect(static_cast<int>(CtrlButton::HideHud));
@@ -5038,14 +5054,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             // Tooltip text for button hover
             if (rowTip) {
                 const CtrlButtonRect rT = get_ctrl_button_rect(pointerButton_);
-                const auto cbT = static_cast<CtrlButton>(pointerButton_);
-                const char* tip = (cbT == CtrlButton::ScreenMute) ? (screenControlsMuted_ ? "Unmute" : "Mute")
-                                : (cbT == CtrlButton::ScreenAudioFollow)
-                                    ? (audioFollow_ ? "Audio follows selection: on" : "Audio follows selection: off")
-                                : (cbT == CtrlButton::ScreenLock) ? (screensUnlocked_ ? "Lock screens" : "Unlock screens")
-                                : (cbT == CtrlButton::ScreenFrames) ? (screenFramesOn_ ? "Hide borders" : "Show borders")
-                                : (cbT == CtrlButton::ScreenLayout) ? "Arrange" : "Close screen";
-                drawFitCentered(rT.cx, rT.cy + 0.080f, 0.21f, pillSc * 0.90f, themeTextCol, tip);
+                const float tipCx = std::clamp(rT.cx, -kDockHalfW + rowTipHw + 0.01f, kDockHalfW - rowTipHw - 0.01f);
+                drawFitCentered(tipCx, rT.cy + 0.080f, 2.0f * rowTipHw - 0.02f, pillSc * 0.90f, themeTextCol,
+                                rowTipText);
             } else if (pointerButton_ == static_cast<int>(CtrlButton::HideHud)) {
                 const CtrlButtonRect rH = get_ctrl_button_rect(static_cast<int>(CtrlButton::HideHud));
                 drawFitCentered(rH.cx, rH.cy + 0.075f, 0.12f, pillSc * 0.90f, themeTextCol, "Hide UI");

@@ -158,6 +158,18 @@ hardware VP9/H.264 in our player (works with multi-screen).
   hand; ours uses the raw aim pose. Filter the aim ray (One Euro filter on direction +
   origin: strong smoothing when slow, little lag on fast moves), applied to the ray used
   for hit testing and drawing alike; button presses keep the hit of the press frame.
+- [ ] **D1. Real-time 2D → 3D (idea, 2026-11-06):** Moonlight XR
+  (github.com/Gilleece/moonlight-android-xr) converts mono video to stereo on the headset:
+  downscale → small depth model on the GPU on its own thread (MiDaS small ~22 ms; v0.4 uses
+  "ZipDepth") → guided depth upsample → occlusion-aware warp, one view per eye → two quad
+  layers. That pipeline fits ours (we already submit one layer per eye for SBS/TB).
+  **Licence:** Moonlight XR is a Moonlight fork → GPLv3. Copying its code would force the
+  player to GPLv3 (selling stays allowed, but the full source must be offered and the MIT
+  licence would have to go). To keep selling closed/MIT: reimplement the technique from
+  the description (not the code) and pick a permissive model — MiDaS v2.1 small (MIT),
+  Depth Anything V2 *Small* (Apache-2.0; Base/Large are CC-BY-NC → not usable); check
+  ZipDepth's licence before using it. Inference runtime on the Frame: Vulkan compute (ncnn,
+  BSD-3) or the Adreno NPU if exposed. Prototype on 1080p flat first.
 - [ ] **R1. Room / environment colour (after S2-S4):** user-selectable room backdrop —
   presets (current navy, pure black "cinema" with no distractions, a few tinted / themed
   rooms), later optional environment scenes. Applies to the projection-layer clear colour

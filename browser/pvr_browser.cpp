@@ -1072,7 +1072,8 @@ int runScreen(const ScreenOptions& opt) {
         std::string session, base, token, ratingKey, key, url;
         long long durationMs = 0;
         bool restoring = false;          // a request nobody asked for: keep the page paused, do not hand off
-        Clock::time_point lastInputAt{};
+        Clock::time_point playIntentAt{};  // the user last pressed something that looks like a play control
+        Clock::time_point playPressAt{};   // ... and the last time that was a play button itself (not a dialog item)
         Clock::time_point pauseUntil{};  // the player starts a moment after its request: keep it paused
         Clock::time_point nextPauseAt{};
         Clock::time_point closeAt{};
@@ -1544,7 +1545,7 @@ int runScreen(const ScreenOptions& opt) {
             }
             if (path.rfind("/library/metadata/", 0) != 0 || hostEnd == std::string::npos || token.empty()) return;
             const auto nowT = Clock::now();
-            if (plex.lastInputAt == Clock::time_point{} || nowT - plex.lastInputAt > std::chrono::seconds(4)) {
+            if (plex.playIntentAt == Clock::time_point{} || nowT - plex.playIntentAt > std::chrono::seconds(4)) {
                 // Plex Web restores its last play queue on load; that is not the user pressing play.
                 plex.restoring = true;
                 plex.session = session;
@@ -1783,7 +1784,31 @@ int runScreen(const ScreenOptions& opt) {
         double x = 0, y = 0;
         int d = 0;
         Tab* tab = activeTab();
-        if (cmd == "down" || cmd == "up" || cmd == "wheel" || cmd == "key" || cmd == "text") plex.lastInputAt = Clock::now();
+        // Does the element under a press (or the focused one for Enter / Space) look like a play
+        // control? Language-independent: data-testid, aria-label or class name says play / resume.
+        auto notePlayIntent = [&](const std::string& session, const std::string& target) {
+            if (!plex.enabled || session.empty() || session == toolbar) return;
+            const auto pressedAt = Clock::now();
+            const std::string js =
+                "(()=>{const re=/(^|[^A-Za-z])([Pp]lay(?!er)|[Rr]esume)/;"
+                "let e=" + target + ";for(let i=0;e&&i<7;i++,e=e.parentElement){"
+                "const g=n=>(e.getAttribute&&e.getAttribute(n))||'';"
+                "const c=typeof e.className==='string'?e.className:'';"
+                "if(re.test(g('data-testid'))||re.test(g('aria-label'))||re.test(c))return 1;"
+                "if(/ListModalItem/.test(c))return 2}return 0})()";
+            evalIn(session, js, [&, pressedAt](const pvrjson::Value* v) {
+                if (!v || v->type != pvrjson::Value::Type::Number) return;
+                if (v->number == 1) {
+                    plex.playIntentAt = plex.playPressAt = pressedAt;
+                } else if (v->number == 2 && plex.playPressAt != Clock::time_point{} &&
+                           pressedAt - plex.playPressAt < std::chrono::seconds(60)) {
+                    // "Resume from ..." / "Start from the beginning": an item of the dialog a play
+                    // button opened (its text is localised and its markup has no play marker).
+                    plex.playIntentAt = pressedAt;
+                }
+            });
+        };
+        if (cmd == "key" && (rest == "Enter" || rest == "Space")) notePlayIntent(keySession, "document.activeElement");
         if (cmd == "move" && std::sscanf(rest.c_str(), "%lf %lf", &x, &y) == 2) {
             updateReveal(y);
             double off = 0.0;
@@ -1798,6 +1823,11 @@ int runScreen(const ScreenOptions& opt) {
                 evalIn(toolbar, "document.activeElement&&document.activeElement.blur()");
             }
             mouseDown = true;
+            {
+                char at[96];
+                std::snprintf(at, sizeof(at), "document.elementFromPoint(%.1f,%.1f)", x, y - pressOffsetY);
+                notePlayIntent(pressSession, at);
+            }
             mouse(pressSession, "mousePressed", x, y - pressOffsetY, "left", 1);
         } else if (cmd == "up" && std::sscanf(rest.c_str(), "%lf %lf", &x, &y) == 2) {
             if (!mouseDown) return;
