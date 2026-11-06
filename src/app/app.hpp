@@ -130,14 +130,18 @@ private:
         bool isNew = true;
         std::string origHost;
         std::string origShare;
+        std::string origProtocol = "smb";
+        int origPort = 0;
+        std::string protocol = "smb";  // smb | sftp | dav | davs
+        std::string port;              // digits; empty = the protocol's default
         std::string host;
-        std::string share;
+        std::string share;             // the start folder for sftp / dav
         bool anon = false;
         std::string user;
         std::string pass;
         std::string workgroup = "WORKGROUP";
         std::string label;
-        enum class Field { None, Host, Share, User, Pass, Workgroup, Label } editingField = Field::None;
+        enum class Field { None, Host, Share, User, Pass, Workgroup, Port, Label } editingField = Field::None;
     } smbModal_{};
     void openSmbModal(bool isNew, const std::string& smbPath = "");
     void updateSmbModalMenu();

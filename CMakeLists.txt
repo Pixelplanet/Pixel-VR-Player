@@ -130,6 +130,7 @@ add_library(pixelvr_core STATIC
     src/xr/render_model.cpp
     src/xr/vr_keyboard.cpp
     src/net/smb_credentials.cpp
+    src/net/remote_fs.cpp
     src/gfx/vulkan_renderer.cpp
     src/gfx/gltf_mesh.cpp
     src/ui/settings_menu.cpp
@@ -225,6 +226,18 @@ if(PkgConfig_FOUND)
         target_link_libraries(pixelvr_core PUBLIC PkgConfig::SMBCLIENT)
         target_compile_definitions(pixelvr_core PUBLIC PIXELVR_HAVE_SMB=1)
     endif()
+
+    # SFTP (libssh) and WebDAV (libcurl) shares; both optional like smbclient.
+    pkg_check_modules(LIBSSH IMPORTED_TARGET libssh)
+    if(LIBSSH_FOUND)
+        target_link_libraries(pixelvr_core PUBLIC PkgConfig::LIBSSH)
+        target_compile_definitions(pixelvr_core PUBLIC PIXELVR_HAVE_LIBSSH=1)
+    endif()
+    pkg_check_modules(LIBCURL IMPORTED_TARGET libcurl)
+    if(LIBCURL_FOUND)
+        target_link_libraries(pixelvr_core PUBLIC PkgConfig::LIBCURL)
+        target_compile_definitions(pixelvr_core PUBLIC PIXELVR_HAVE_CURL=1)
+    endif()
 endif()
 
 # Warnings
@@ -305,6 +318,13 @@ if(UNIX AND PIXELVR_TURBOJPEG_LIB AND PIXELVR_TURBOJPEG_INCLUDE)
     target_link_libraries(pvr-browser PRIVATE "${PIXELVR_TURBOJPEG_LIB}" rt)
 else()
     message(STATUS "pvr-browser: libjpeg-turbo not found, browser screen disabled")
+endif()
+
+# Development tool for the SFTP / WebDAV access layer (never part of a release).
+option(PIXELVR_BUILD_TOOLS "Build development tools (tools/remote_fs_test)" OFF)
+if(PIXELVR_BUILD_TOOLS)
+    add_executable(remote_fs_test tools/remote_fs_test.cpp)
+    target_link_libraries(remote_fs_test PRIVATE pixelvr_core)
 endif()
 
 # ---------------------------------------------------------------------------

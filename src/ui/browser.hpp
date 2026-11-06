@@ -18,7 +18,7 @@ class Browser {
 public:
     struct Entry {
         std::string label;        // text shown in the list
-        std::string path;         // local path or smb:// URI (empty for actions)
+        std::string path;         // local path or smb:// / sftp:// / dav(s):// URI (empty for actions)
         bool isDir = false;       // navigable container
         bool isVideo = false;     // playable file
         bool isBack = false;      // ".." navigation
@@ -214,6 +214,10 @@ private:
     void startDownloadFile(const std::string& uri, const std::string& local);
     void startDownloadFolder(const std::string& uri, const std::string& name);
     void startNextQueued();
+    // SFTP / WebDAV downloads: copied in-process through remote_fs, via a .part file.
+    bool copyRemoteFile(const std::string& uri, const std::string& local, bool setTotal);
+    void downloadRemoteFile(const std::string& uri, const std::string& local, const std::string& name);
+    void downloadRemoteFolder(const std::string& uri, const std::string& destDir);
 
     struct FolderViewState {
         int selected = 0;

@@ -1,6 +1,7 @@
 #include "ui/browser.hpp"
 
 #include "app/vault_manager.hpp"
+#include "net/remote_fs.hpp"
 #include "net/smb_credentials.hpp"
 
 #include "util/logging.hpp"
@@ -80,11 +81,41 @@ bool ensure_smb() {
 #endif
 
 std::string smb_parent(const std::string& uri) {
+    if (isRemoteFsPath(uri)) {
+        const std::string p = remoteParent(uri);
+        return p.empty() ? "smb://" : p;  // above a server: the network list
+    }
     if (uri.size() <= 6) return "";  // "smb://" -> leave the network
     const std::string rest = uri.substr(6);
     const auto slash = rest.find_last_of('/');
     if (slash == std::string::npos) return "smb://";  // server -> discovery
     return "smb://" + rest.substr(0, slash);
+}
+
+// The scheme-less part of a network URI, for labels.
+std::string without_scheme(const std::string& uri) {
+    const std::size_t at = uri.find("://");
+    return at == std::string::npos ? uri : uri.substr(at + 3);
+}
+
+// Where a configured server starts: smb://host[/share], sftp://host[:port]/folder, ...
+std::string share_uri(const SmbShare& s) {
+    if (s.protocol == "smb") {
+        std::string child = "smb://" + s.host;
+        if (!s.share.empty()) child += "/" + s.share;
+        return child;
+    }
+    std::string child = s.protocol + "://" + s.host;
+    if (s.port > 0) child += ":" + std::to_string(s.port);
+    std::string folder = s.share;
+    while (!folder.empty() && folder.back() == '/') folder.pop_back();
+    // SFTP: a folder without a leading '/' (or none) is in the user's home,
+    // written "/~/..." in the URI; the server resolves relative paths there.
+    if (s.protocol == "sftp" && (folder.empty() || folder.front() != '/')) {
+        return child + "/~" + (folder.empty() ? "" : "/" + folder);
+    }
+    while (!folder.empty() && folder.front() == '/') folder.erase(folder.begin());
+    return child + "/" + folder;
 }
 
 // Seconds since the filesystem clock's epoch; only used to order entries.
@@ -289,6 +320,32 @@ void Browser::scanSmbInto(const std::string& uri, ScanResult& out) {
     out.entries.clear();
     out.entries.push_back({".. (up)", "", false, false, true, false});
 
+    if (isRemoteFsPath(uri)) {
+        std::vector<RemoteEntry> list;
+        std::string err;
+        if (!remoteList(uri, list, err)) {
+            out.status = "Cannot browse " + without_scheme(uri) + ": " + err;
+            return;
+        }
+        std::vector<Entry> rdirs, rfiles;
+        std::string base = uri;
+        while (base.size() > 1 && base.back() == '/') base.pop_back();
+        for (const RemoteEntry& e : list) {
+            if (e.name.empty() || e.name[0] == '.') continue;
+            const std::string child = base + "/" + e.name;
+            if (e.dir) {
+                rdirs.push_back({e.name + "/", child, true, false, false, false});
+            } else {
+                const long long sz = static_cast<long long>(e.size);
+                rfiles.push_back({e.name, child, false, is_video(e.name), false, false, format_size(sz), sz, "",
+                                  static_cast<long long>(e.mtime)});
+            }
+        }
+        sort_and_append(out.entries, rdirs, rfiles, sortMode_.load());
+        out.status = std::to_string(out.entries.size() - 1) + " items";
+        return;
+    }
+
 #ifdef PIXELVR_HAVE_SMB
     std::vector<Entry> dirs, files;
     bool browsed = false;
@@ -344,22 +401,21 @@ void Browser::scanSmbInto(const std::string& uri, ScanResult& out) {
     if (uri == "smb://") {
         std::set<std::string> seen;
         // The very first entry in the SMB list is the "+ Add SMB Share" button!
-        dirs.push_back({"+ Add SMB Share", "smb://__add_share__", true, false, false, false, "Configure New Network Share"});
+        dirs.push_back({"+ Add Network Share", "smb://__add_share__", true, false, false, false, "SMB, SFTP or WebDAV"});
         seen.insert("smb://__add_share__");
 
-        // Prepend all user-configured manual SMB shares so private/unadvertised shares always appear
+        // Prepend all user-configured manual shares (SMB, SFTP, WebDAV) so private/unadvertised servers always appear
         const auto configuredShares = SmbCredentialsManager::instance().shares();
         for (const auto& s : configuredShares) {
             if (s.host.empty()) continue;
-            std::string child = "smb://" + s.host;
-            if (!s.share.empty()) {
-                if (child.back() != '/') child += '/';
-                child += s.share;
-            }
+            const std::string child = share_uri(s);
             if (!seen.insert(child).second) continue;
             std::string label = s.name.empty() ? s.host : s.name;
             std::string detail = s.anonymous ? "Configured (Guest)" : "Configured (Protected)";
-            if (!s.share.empty()) {
+            if (s.protocol != "smb") {
+                detail = std::string(remoteProtocolLabel(child)) + (s.anonymous ? " (Guest)" : "");
+                dirs.push_back({label + "  (" + s.host + ")", child, true, false, false, false, detail});
+            } else if (!s.share.empty()) {
                 dirs.push_back({label + "  (" + s.host + "/" + s.share + ")", child, true, false, false, false, detail});
             } else {
                 dirs.push_back({label + "  (" + s.host + ")", child, true, false, false, false, detail});
@@ -408,7 +464,7 @@ void Browser::scanSmbInto(const std::string& uri, ScanResult& out) {
 void Browser::updateActiveFilterFor(const std::string& loc, bool isSmb) {
     if (loc == "bookmarks://") {
         activeFilter_ = 4;
-    } else if (isSmb || loc.rfind("smb://", 0) == 0) {
+    } else if (isSmb || isRemotePath(loc)) {
         activeFilter_ = 2;
     } else if (VaultManager::instance().isVaultPath(loc)) {
         activeFilter_ = 5;
@@ -550,8 +606,8 @@ void Browser::addBookmark(const std::string& path, const std::string& label) {
     }
     std::string l = label;
     if (l.empty()) {
-        if (path.rfind("smb://", 0) == 0) {
-            std::string rest = path.substr(6);
+        if (isRemotePath(path)) {
+            std::string rest = without_scheme(path);
             while (!rest.empty() && rest.back() == '/') rest.pop_back();
             l = rest;
         } else {
@@ -667,14 +723,14 @@ void Browser::scanBookmarksInto(ScanResult& out) {
 
     for (const auto& bm : bookmarks_) {
         if (bm.path.empty()) continue;
-        const bool isSmb = (bm.path.rfind("smb://", 0) == 0);
+        const bool isSmb = isRemotePath(bm.path);
         std::error_code ec;
         const bool isVid = is_video(bm.path);
         const bool isDir = isSmb ? !isVid : fs::is_directory(bm.path, ec);
         std::string label = bm.label;
         if (label.empty()) {
             if (isSmb) {
-                label = bm.path.substr(6);
+                label = without_scheme(bm.path);
                 while (!label.empty() && label.back() == '/') label.pop_back();
             } else {
                 fs::path p(bm.path);
@@ -682,7 +738,8 @@ void Browser::scanBookmarksInto(ScanResult& out) {
                 if (label.empty()) label = bm.path;
             }
         }
-        std::string detail = isSmb ? (isVid ? "SMB Video" : "SMB Share") : (isDir ? "Folder" : "Video File");
+        std::string detail = isSmb ? std::string(remoteProtocolLabel(bm.path)) + (isVid ? " Video" : " Share")
+                                   : (isDir ? "Folder" : "Video File");
         std::string previewPath = isDir ? "" : bm.path;
         out.entries.push_back({label, bm.path, isDir, isVid, false, false, detail, 0, previewPath});
     }
@@ -887,7 +944,7 @@ Browser::Result Browser::activate(std::string& playPath) {
     }
     if (e.isDir) {
         saveCurrentFolderState();
-        const bool isSmb = e.isNetwork || (e.path.rfind("smb://", 0) == 0);
+        const bool isSmb = e.isNetwork || isRemotePath(e.path);
         beginScan(e.path, isSmb, false);
         return Result::Navigated;
     }
@@ -911,7 +968,7 @@ bool Browser::downloadFocused() {
     const Entry e = entries_[static_cast<std::size_t>(selected_)];
     if (!inSmb_ || e.isBack || e.isNetwork || e.isDir || e.path.empty()) {
         status_ = inSmb_ ? "Highlight a file to download (folders ask to confirm)"
-                         : "Downloads are for network (SMB) files";
+                         : "Downloads are for network files";
         PIXELVR_LOG_WARN("Download: nothing downloadable focused (dir=%d smb=%d)",
                          e.isDir ? 1 : 0, inSmb_ ? 1 : 0);
         return false;
@@ -1022,6 +1079,11 @@ void Browser::startDownloadFile(const std::string& uri, const std::string& local
     }
     const std::string name = dlName_;
     dlLocalPath_ = local;
+    if (isRemoteFsPath(uri)) {
+        dlLocalPath_ = local + ".part";  // poll() measures progress from this file
+        dlThread_ = std::thread([this, uri, local, name]() { downloadRemoteFile(uri, local, name); });
+        return;
+    }
     // Copy with a curl child process: it opens its own SMB connection, so the
     // browser's libsmbclient is never blocked and browsing keeps working.
     dlThread_ = std::thread([this, uri, local, name]() {
@@ -1184,6 +1246,10 @@ void Browser::startDownloadFolder(const std::string& uri,
             }
         }
     }
+    if (isRemoteFsPath(uri)) {
+        dlThread_ = std::thread([this, uri, destDir]() { downloadRemoteFolder(uri, destDir); });
+        return;
+    }
     dlThread_ = std::thread([this, uri, destDir]() {
         std::error_code ec;
         long long got = 0;
@@ -1335,6 +1401,137 @@ void Browser::startDownloadFolder(const std::string& uri,
     (void)destDir;
     status_ = "SMB support not built";
 #endif
+}
+
+// Copies `uri` to `local` (via local.part, renamed when complete). With
+// `setTotal` the file's size becomes the download's total (single files).
+bool Browser::copyRemoteFile(const std::string& uri, const std::string& local, bool setTotal) {
+    std::string err;
+    auto src = remoteOpen(uri, err);
+    if (!src) {
+        PIXELVR_LOG_WARN("Download: cannot open %s: %s", uri.c_str(), err.c_str());
+        return false;
+    }
+    const int64_t size = src->size();
+    if (setTotal) dlTotal_.store(size);
+    std::error_code ec;
+    fs::create_directories(fs::path(local).parent_path(), ec);
+    if (size > 0 && fs::is_regular_file(local, ec) && static_cast<int64_t>(fs::file_size(local, ec)) == size) {
+        return true;  // a previous complete download
+    }
+    const std::string part = local + ".part";
+    FILE* out = std::fopen(part.c_str(), "wb");
+    if (out == nullptr) {
+        PIXELVR_LOG_WARN("Download: cannot write %s", part.c_str());
+        return false;
+    }
+    std::vector<uint8_t> buf(1u << 20);
+    int64_t got = 0;
+    bool ok = true;
+    for (;;) {
+        while (!dlAbort_.load() && dlPaused_.load()) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        if (dlAbort_.load()) {
+            ok = false;
+            break;
+        }
+        const int n = src->read(buf.data(), static_cast<int>(buf.size()));
+        if (n < 0) {
+            PIXELVR_LOG_WARN("Download: read error at %lld of %s", static_cast<long long>(got), uri.c_str());
+            ok = false;
+            break;
+        }
+        if (n == 0) break;
+        if (std::fwrite(buf.data(), 1, static_cast<std::size_t>(n), out) != static_cast<std::size_t>(n)) {
+            ok = false;
+            break;
+        }
+        got += n;
+    }
+    ok = (std::fclose(out) == 0) && ok && (size < 0 || got == size);
+    if (ok) {
+        fs::rename(part, local, ec);
+        ok = !ec;
+    }
+    if (!ok) fs::remove(part, ec);
+    return ok;
+}
+
+void Browser::downloadRemoteFile(const std::string& uri, const std::string& local, const std::string& name) {
+    const bool ok = copyRemoteFile(uri, local, true);
+    if (dlStopped_.load()) {
+        std::error_code ec;
+        fs::remove(local + ".part", ec);
+    }
+    dlOk_.store(ok);
+    dlDone_.store(true);
+    dlActive_.store(false);
+    PIXELVR_LOG_INFO("Download %s: ok=%d -> %s", name.c_str(), ok ? 1 : 0, local.c_str());
+}
+
+void Browser::downloadRemoteFolder(const std::string& uri, const std::string& destDir) {
+    long long got = 0;
+    bool ok = true;
+    std::function<long long(const std::string&)> sumSizes = [&](const std::string& src) -> long long {
+        std::vector<RemoteEntry> list;
+        std::string err;
+        if (!remoteList(src, list, err)) return 0;
+        long long total = 0;
+        for (const RemoteEntry& e : list) {
+            if (e.name.empty() || dlAbort_.load()) continue;
+            total += e.dir ? sumSizes(src + (src.back() == '/' ? "" : "/") + e.name) : static_cast<long long>(e.size);
+        }
+        return total;
+    };
+    dlTotal_.store(sumSizes(uri));
+    std::function<void(const std::string&, const std::string&)> copyDir = [&](const std::string& src, const std::string& dst) {
+        std::error_code ec;
+        fs::create_directories(dst, ec);
+        std::vector<RemoteEntry> list;
+        std::string err;
+        if (!remoteList(src, list, err)) {
+            PIXELVR_LOG_WARN("Download: cannot list %s: %s", src.c_str(), err.c_str());
+            ok = false;
+            return;
+        }
+        for (const RemoteEntry& e : list) {
+            if (e.name.empty() || e.name == "." || e.name == "..") continue;
+            const std::string s = src + (src.back() == '/' ? "" : "/") + e.name;
+            const std::string t = dst + "/" + e.name;
+            if (e.dir) {
+                copyDir(s, t);
+            } else {
+                {
+                    std::lock_guard<std::mutex> lk(dlCurMutex_);
+                    dlCurFile_ = t + ".part";  // live progress in poll()
+                }
+                const bool fileOk = copyRemoteFile(s, t, false);
+                {
+                    std::lock_guard<std::mutex> lk(dlCurMutex_);
+                    dlCurFile_.clear();
+                }
+                if (!fileOk) {
+                    ok = false;
+                } else {
+                    got += static_cast<long long>(e.size);
+                    dlBaseBytes_.store(got);
+                    dlBytes_.store(got);
+                }
+            }
+            if (!ok || dlAbort_.load()) return;
+        }
+    };
+    copyDir(uri, destDir);
+    if (dlAbort_.load()) {
+        std::error_code rec;
+        fs::remove_all(destDir, rec);  // no partial folder
+        dlStopped_.store(true);
+        dlOk_.store(false);
+    } else {
+        dlOk_.store(ok);
+    }
+    dlDone_.store(true);
+    dlActive_.store(false);
+    PIXELVR_LOG_INFO("Download folder done: %lld bytes (ok=%d)", got, ok ? 1 : 0);
 }
 
 void Browser::togglePause() {

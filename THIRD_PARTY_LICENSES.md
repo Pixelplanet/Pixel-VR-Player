@@ -104,6 +104,14 @@ Dynamically linked for SMB network share streaming and discovery.
 
 ---
 
+## 8b. libssh and libcurl
+- **License:** libssh: GNU Lesser General Public License (LGPL), version 2.1 or later; libcurl: curl license (MIT/X-style)
+- **Websites:** https://www.libssh.org, https://curl.se
+
+Dynamically linked (the system's copies) for SFTP and WebDAV network share browsing and streaming.
+
+---
+
 ## 8a. libjpeg-turbo (TurboJPEG)
 - **License:** BSD 3-Clause / IJG License
 - **Website:** https://libjpeg-turbo.org

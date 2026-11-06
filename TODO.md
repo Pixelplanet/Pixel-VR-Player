@@ -148,7 +148,7 @@ hardware VP9/H.264 in our player (works with multi-screen).
     depth-sorts layers, so it is then occluded / visible correctly.
   - Plex rendered its light theme (white page, unreadable): headless has no system theme →
     `Emulation.setEmulatedMedia prefers-color-scheme: dark` for all pages (done).
-- [ ] **S4. More share protocols (plan agreed 2026-11-06):** SFTP first (libssh: `sftp_opendir`
+- [x] **S4. More share protocols (implemented 2026-11-06 — needs in-headset UI test, real LAN SFTP/SMB check):** SFTP first (libssh: `sftp_opendir`
   listing + pipelined `sftp_async_read` reader, 8–16 requests in flight; password auth;
   "SFTP" quick filter beside SMB Shares with the same connect dialog / credential store),
   then WebDAV over libcurl (PROPFIND listing, ranged GET read-ahead; shares the HTTP reader

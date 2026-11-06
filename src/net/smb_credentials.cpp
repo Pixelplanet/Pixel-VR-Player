@@ -125,6 +125,26 @@ static std::string trim(const std::string& s) {
 
 } // namespace
 
+static int defaultPortOf(const std::string& protocol) {
+    if (protocol == "sftp") return 22;
+    if (protocol == "dav") return 80;
+    if (protocol == "davs") return 443;
+    return 0;
+}
+
+static std::string lowered(std::string s) {
+    std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+    return s;
+}
+
+// Same server: protocol and host match; for SFTP / WebDAV the port too.
+static bool sameServer(const SmbShare& s, const std::string& protocol, const std::string& hostLower, int port) {
+    if (s.protocol != protocol || lowered(s.host) != hostLower) return false;
+    if (protocol == "smb") return true;
+    const int def = defaultPortOf(protocol);
+    return (s.port ? s.port : def) == (port ? port : def);
+}
+
 SmbCredentialsManager& SmbCredentialsManager::instance() {
     static SmbCredentialsManager sInstance;
     return sInstance;
@@ -266,6 +286,9 @@ void SmbCredentialsManager::load() {
         if (s.workgroup.empty()) s.workgroup = "WORKGROUP";
         s.username = extractField("username");
         s.anonymous = (extractField("anonymous") == "true");
+        s.protocol = extractField("protocol");
+        if (s.protocol != "sftp" && s.protocol != "dav" && s.protocol != "davs") s.protocol = "smb";
+        s.port = std::atoi(extractField("port").c_str());
 
         std::string passCipher = extractField("password_enc");
         std::string passIv = extractField("iv");
@@ -280,6 +303,7 @@ void SmbCredentialsManager::load() {
             if (s.id.empty()) {
                 s.id = s.host + (!s.share.empty() ? ("/" + s.share) : "");
             }
+
             shares_.push_back(s);
         }
     }
@@ -319,6 +343,8 @@ void SmbCredentialsManager::save() {
         json << "    \"username\": \"" << s.username << "\",\n";
         json << "    \"password_enc\": \"" << encPass << "\",\n";
         json << "    \"iv\": \"" << ivHex << "\",\n";
+        json << "    \"protocol\": \"" << s.protocol << "\",\n";
+        json << "    \"port\": " << s.port << ",\n";
         json << "    \"anonymous\": " << (s.anonymous ? "true" : "false") << "\n";
         json << "  }" << (i + 1 < shares_.size() ? ",\n" : "\n");
     }
@@ -352,7 +378,8 @@ void SmbCredentialsManager::addOrUpdateShare(const SmbShare& share) {
         std::lock_guard<std::mutex> lk(mutex_);
         bool found = false;
         for (auto& s : shares_) {
-            if (s.host == share.host && s.share == share.share) {
+            if (s.protocol == share.protocol && s.host == share.host && s.share == share.share &&
+                (share.protocol == "smb" || s.port == share.port)) {
                 s = share;
                 found = true;
                 break;
@@ -365,12 +392,13 @@ void SmbCredentialsManager::addOrUpdateShare(const SmbShare& share) {
     save();
 }
 
-bool SmbCredentialsManager::deleteShare(const std::string& host, const std::string& share) {
+bool SmbCredentialsManager::deleteShare(const std::string& host, const std::string& share,
+                                        const std::string& protocol, int port) {
     bool removed = false;
     {
         std::lock_guard<std::mutex> lk(mutex_);
         auto it = std::remove_if(shares_.begin(), shares_.end(), [&](const SmbShare& s) {
-            if (s.host == host) {
+            if (s.protocol == protocol && s.host == host && (protocol == "smb" || s.port == port)) {
                 if (share.empty() || s.share == share || s.share.empty()) {
                     return true;
                 }
@@ -389,9 +417,24 @@ bool SmbCredentialsManager::deleteShare(const std::string& host, const std::stri
     return removed;
 }
 
+bool SmbCredentialsManager::findRemote(const std::string& protocol, const std::string& host, int port,
+                                       SmbShare& out) const {
+    std::lock_guard<std::mutex> lk(mutex_);
+    const std::string h = lowered(host);
+    for (const auto& s : shares_) {
+        if (sameServer(s, protocol, h, port)) {
+            out = s;
+            return true;
+        }
+    }
+    return false;
+}
+
 bool SmbCredentialsManager::findShare(const std::string& hostIn,
                                       const std::string& shareIn,
-                                      SmbShare& outShare) const {
+                                      SmbShare& outShare,
+                                      const std::string& protocol,
+                                      int port) const {
     std::lock_guard<std::mutex> lk(mutex_);
     if (hostIn.empty()) return false;
 
@@ -403,7 +446,7 @@ bool SmbCredentialsManager::findShare(const std::string& hostIn,
     for (const auto& s : shares_) {
         std::string sHost = s.host;
         std::transform(sHost.begin(), sHost.end(), sHost.begin(), ::tolower);
-        if (sHost == host) {
+        if (s.protocol == protocol && sHost == host && (protocol == "smb" || sameServer(s, protocol, host, port))) {
             std::string sShare = s.share;
             std::transform(sShare.begin(), sShare.end(), sShare.begin(), ::tolower);
             if (sShare == share || (share.empty() && sShare.empty())) {
@@ -432,7 +475,7 @@ bool SmbCredentialsManager::findCredentials(const std::string& hostIn,
     for (const auto& s : shares_) {
         std::string sHost = s.host;
         std::transform(sHost.begin(), sHost.end(), sHost.begin(), ::tolower);
-        if (sHost == host) {
+        if (s.protocol == "smb" && sHost == host) {
             std::string sShare = s.share;
             std::transform(sShare.begin(), sShare.end(), sShare.begin(), ::tolower);
             if (!share.empty() && sShare == share) {

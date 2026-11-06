@@ -1,5 +1,6 @@
 #include "app/app.hpp"
 #include "app/vault_manager.hpp"
+#include "net/remote_fs.hpp"
 #include "net/smb_credentials.hpp"
 #include "xr/vr_keyboard.hpp"
 #include "util/ipv4.hpp"
@@ -1191,6 +1192,10 @@ void App::openSmbModal(bool isNew, const std::string& smbPath) {
     if (isNew) {
         smbModal_.origHost.clear();
         smbModal_.origShare.clear();
+        smbModal_.origProtocol = "smb";
+        smbModal_.origPort = 0;
+        smbModal_.protocol = "smb";
+        smbModal_.port.clear();
         smbModal_.host.clear();
         smbModal_.share.clear();
         smbModal_.anon = false;
@@ -1199,15 +1204,32 @@ void App::openSmbModal(bool isNew, const std::string& smbPath) {
         smbModal_.workgroup = "WORKGROUP";
         smbModal_.label.clear();
     } else {
-        std::string rest = smbPath;
-        if (rest.rfind("smb://", 0) == 0) rest = rest.substr(6);
-        while (!rest.empty() && rest.back() == '/') rest.pop_back();
-        auto slash = rest.find('/');
-        std::string host = (slash == std::string::npos) ? rest : rest.substr(0, slash);
-        std::string share = (slash == std::string::npos) ? "" : rest.substr(slash + 1);
+        std::string protocol = "smb";
+        int port = 0;
+        std::string host, share;
+        RemoteUri ru;
+        if (parseRemoteUri(smbPath, ru)) {
+            protocol = ru.protocol;
+            port = ru.port;
+            host = ru.host;
+            share = ru.path;
+            while (!share.empty() && share.front() == '/') share.erase(share.begin());
+            while (!share.empty() && share.back() == '/') share.pop_back();
+        } else {
+            std::string rest = smbPath;
+            if (rest.rfind("smb://", 0) == 0) rest = rest.substr(6);
+            while (!rest.empty() && rest.back() == '/') rest.pop_back();
+            auto slash = rest.find('/');
+            host = (slash == std::string::npos) ? rest : rest.substr(0, slash);
+            share = (slash == std::string::npos) ? "" : rest.substr(slash + 1);
+        }
 
         smbModal_.origHost = host;
         smbModal_.origShare = share;
+        smbModal_.origProtocol = protocol;
+        smbModal_.origPort = port;
+        smbModal_.protocol = protocol;
+        smbModal_.port = port > 0 ? std::to_string(port) : std::string();
         smbModal_.host = host;
         smbModal_.share = share;
         smbModal_.anon = false;
@@ -1217,7 +1239,7 @@ void App::openSmbModal(bool isNew, const std::string& smbPath) {
         smbModal_.label.clear();
 
         SmbShare existing;
-        if (SmbCredentialsManager::instance().findShare(host, share, existing)) {
+        if (SmbCredentialsManager::instance().findShare(host, share, existing, protocol, port)) {
             smbModal_.anon = existing.anonymous;
             smbModal_.user = existing.username;
             smbModal_.pass = existing.password;
@@ -1235,7 +1257,7 @@ void App::openSmbModal(bool isNew, const std::string& smbPath) {
 
 void App::updateSmbModalMenu() {
 #ifdef PIXELVR_HAVE_FREETYPE
-    actionMenu_.title = smbModal_.isNew ? "Add SMB Network Share" : "Edit SMB Network Share";
+    actionMenu_.title = smbModal_.isNew ? "Add Network Share" : "Edit Network Share";
     if (actionMenu_.subtitle.rfind("Error", 0) != 0 || !smbModal_.host.empty()) {
         actionMenu_.subtitle = "Point at a field and pull the trigger to type  \xB7  B: back";
     }
@@ -1248,8 +1270,9 @@ void App::updateSmbModalMenu() {
     const int liveCur = static_cast<int>(textEntry_.cursor);
 
     // Plain values (the renderer shows placeholders for empty fields). Option
-    // ids are fixed: 0 host, 1 share, 2 auth ("guest"/"account"), 3 user,
-    // 4 password, 5 workgroup, 6 nickname, 7 save, 8 cancel, 9 delete.
+    // ids are fixed: 0 host, 1 share / folder, 2 auth ("guest"/"account"), 3 user,
+    // 4 password, 5 workgroup (SMB) or port, 6 nickname, 7 save, 8 cancel,
+    // 9 delete (empty for a new share), 10 type (SMB / SFTP / WebDAV / WebDAV (https)).
     auto fieldVal = [&](SmbModalState::Field f, int rowIdx, const std::string& saved, bool mask) {
         if (kbActive && smbModal_.editingField == f) {
             actionMenu_.editingRow = rowIdx;
@@ -1264,13 +1287,19 @@ void App::updateSmbModalMenu() {
     actionMenu_.options.push_back(smbModal_.anon ? "guest" : "account");
     actionMenu_.options.push_back(fieldVal(SmbModalState::Field::User, 3, smbModal_.user, false));
     actionMenu_.options.push_back(fieldVal(SmbModalState::Field::Pass, 4, smbModal_.pass, true));
-    actionMenu_.options.push_back(fieldVal(SmbModalState::Field::Workgroup, 5, smbModal_.workgroup, false));
+    if (smbModal_.protocol == "smb") {
+        actionMenu_.options.push_back(fieldVal(SmbModalState::Field::Workgroup, 5, smbModal_.workgroup, false));
+    } else {
+        actionMenu_.options.push_back(fieldVal(SmbModalState::Field::Port, 5, smbModal_.port, false));
+    }
     actionMenu_.options.push_back(fieldVal(SmbModalState::Field::Label, 6, smbModal_.label, false));
     actionMenu_.options.push_back("Save");
     actionMenu_.options.push_back("Cancel");
-    if (!smbModal_.isNew) {
-        actionMenu_.options.push_back("Delete");
-    }
+    actionMenu_.options.push_back(smbModal_.isNew ? "" : "Delete");
+    actionMenu_.options.push_back(smbModal_.protocol == "sftp"   ? "SFTP"
+                                  : smbModal_.protocol == "dav"  ? "WebDAV"
+                                  : smbModal_.protocol == "davs" ? "WebDAV (https)"
+                                                                 : "SMB");
 #endif
 }
 
@@ -1290,10 +1319,19 @@ void App::saveSmbModal() {
         actionMenu_.subtitle = "Error: Server IP or Hostname is required!";
         return;
     }
-    if (!smbModal_.isNew && (smbModal_.host != smbModal_.origHost || smbModal_.share != smbModal_.origShare)) {
-        SmbCredentialsManager::instance().deleteShare(smbModal_.origHost, smbModal_.origShare);
+    const int port = smbModal_.protocol == "smb" ? 0 : std::atoi(smbModal_.port.c_str());
+    if (port < 0 || port > 65535) {
+        actionMenu_.subtitle = "Error: the port must be between 1 and 65535";
+        return;
+    }
+    if (!smbModal_.isNew && (smbModal_.host != smbModal_.origHost || smbModal_.share != smbModal_.origShare ||
+                             smbModal_.protocol != smbModal_.origProtocol || port != smbModal_.origPort)) {
+        SmbCredentialsManager::instance().deleteShare(smbModal_.origHost, smbModal_.origShare, smbModal_.origProtocol,
+                                                      smbModal_.origPort);
     }
     SmbShare s;
+    s.protocol = smbModal_.protocol;
+    s.port = port;
     s.host = smbModal_.host;
     s.share = smbModal_.share;
     s.username = smbModal_.user;
@@ -1316,7 +1354,8 @@ void App::saveSmbModal() {
 void App::deleteSmbModal() {
 #ifdef PIXELVR_HAVE_FREETYPE
     if (!smbModal_.isNew) {
-        SmbCredentialsManager::instance().deleteShare(smbModal_.origHost, smbModal_.origShare);
+        SmbCredentialsManager::instance().deleteShare(smbModal_.origHost, smbModal_.origShare, smbModal_.origProtocol,
+                                                      smbModal_.origPort);
     }
     smbModal_.active = false;
     smbModal_.editingField = SmbModalState::Field::None;
@@ -2424,12 +2463,12 @@ void App::openActionMenu() {
     actionMenu_.subtitle = fe->label;
 
     const bool isSmbRoot = (browser_.currentPath() == "smb://" || browser_.currentPath().empty());
-    const bool isSmbEntry = (fe->path.rfind("smb://", 0) == 0);
+    const bool isSmbEntry = isRemotePath(fe->path);
 
     if (isSmbRoot && isSmbEntry) {
         actionMenu_.options.push_back("Open Share");
-        actionMenu_.options.push_back("Edit SMB Share");
-        actionMenu_.options.push_back("Delete SMB Share");
+        actionMenu_.options.push_back("Edit Network Share");
+        actionMenu_.options.push_back("Delete Network Share");
         if (browser_.isBookmarked(fe->path)) {
             actionMenu_.options.push_back("Remove from Bookmarks");
         } else {
@@ -3504,7 +3543,7 @@ int App::run() {
                         const std::string thumbTarget = !e.previewPath.empty()
                             ? e.previewPath
                             : (e.isVideo ? e.path : "");
-                        if (!thumbTarget.empty() && thumbTarget.rfind("smb://", 0) != 0) {
+                        if (!thumbTarget.empty() && !isRemotePath(thumbTarget)) {
                             thumbnailCache_.request(thumbTarget, /*highPriority=*/true);
                         }
                     }
@@ -3528,7 +3567,7 @@ int App::run() {
 
                     ThumbnailCache::MediaMeta meta{};
                     bool hasMeta = false;
-                    if (!thumbTarget.empty() && thumbTarget.rfind("smb://", 0) != 0) {
+                    if (!thumbTarget.empty() && !isRemotePath(thumbTarget)) {
                         thumbnailCache_.request(thumbTarget);
                         hasMeta = thumbnailCache_.getMeta(thumbTarget, meta);
                     }
@@ -4015,19 +4054,27 @@ int App::run() {
                                             browser_.setOpen(false);
                                         }
                                         actionMenu_.visible = false;
-                                    } else if (opt == "Edit SMB Share") {
+                                    } else if (opt == "Edit Network Share") {
                                         if (fe) {
                                             openSmbModal(false, fe->path);
                                         }
-                                    } else if (opt == "Delete SMB Share") {
+                                    } else if (opt == "Delete Network Share") {
                                         if (fe) {
-                                            std::string rest = fe->path;
-                                            if (rest.rfind("smb://", 0) == 0) rest = rest.substr(6);
-                                            while (!rest.empty() && rest.back() == '/') rest.pop_back();
-                                            auto slash = rest.find('/');
-                                            std::string host = (slash == std::string::npos) ? rest : rest.substr(0, slash);
-                                            std::string share = (slash == std::string::npos) ? "" : rest.substr(slash + 1);
-                                            SmbCredentialsManager::instance().deleteShare(host, share);
+                                            RemoteUri ru;
+                                            if (parseRemoteUri(fe->path, ru)) {
+                                                std::string folder = ru.path;
+                                                while (!folder.empty() && folder.front() == '/') folder.erase(folder.begin());
+                                                while (!folder.empty() && folder.back() == '/') folder.pop_back();
+                                                SmbCredentialsManager::instance().deleteShare(ru.host, folder, ru.protocol, ru.port);
+                                            } else {
+                                                std::string rest = fe->path;
+                                                if (rest.rfind("smb://", 0) == 0) rest = rest.substr(6);
+                                                while (!rest.empty() && rest.back() == '/') rest.pop_back();
+                                                auto slash = rest.find('/');
+                                                std::string host = (slash == std::string::npos) ? rest : rest.substr(0, slash);
+                                                std::string share = (slash == std::string::npos) ? "" : rest.substr(slash + 1);
+                                                SmbCredentialsManager::instance().deleteShare(host, share);
+                                            }
                                             browser_.openNetwork();
                                         }
                                         actionMenu_.visible = false;
@@ -4277,6 +4324,7 @@ int App::run() {
                         const int maxOpt = static_cast<int>(actionMenu_.options.size()) - 1;
                         if (dy != 0) {
                             actionMenu_.selectedOption += dy;
+                            if (smbModal_.isNew && actionMenu_.selectedOption == 9) actionMenu_.selectedOption += dy;
                             if (actionMenu_.selectedOption < 0) actionMenu_.selectedOption = 0;
                             if (actionMenu_.selectedOption > maxOpt) actionMenu_.selectedOption = maxOpt;
                         }
@@ -4300,10 +4348,24 @@ int App::run() {
                                             if (!smbModal_.active) return;
                                             if (field == SmbModalState::Field::Host) {
                                                 std::string h = text;
-                                                if (h.rfind("smb://", 0) == 0) h = h.substr(6);
+                                                if (const std::size_t sch = h.find("://"); sch != std::string::npos) h = h.substr(sch + 3);
                                                 while (!h.empty() && (std::isspace(static_cast<unsigned char>(h.front())) || h.front() == '/' || h.front() == '\\')) h.erase(h.begin());
                                                 while (!h.empty() && (std::isspace(static_cast<unsigned char>(h.back())) || h.back() == '/' || h.back() == '\\')) h.pop_back();
+                                                if (smbModal_.protocol != "smb") {  // "host:port"
+                                                    const std::size_t colon = h.rfind(':');
+                                                    if (colon != std::string::npos && h.find(':') == colon && colon + 1 < h.size() &&
+                                                        h.find_first_not_of("0123456789", colon + 1) == std::string::npos) {
+                                                        smbModal_.port = h.substr(colon + 1);
+                                                        h = h.substr(0, colon);
+                                                    }
+                                                }
                                                 smbModal_.host = h;
+                                            } else if (field == SmbModalState::Field::Port) {
+                                                std::string d;
+                                                for (char c : text) {
+                                                    if (c >= '0' && c <= '9') d += c;
+                                                }
+                                                smbModal_.port = d;
                                             } else if (field == SmbModalState::Field::Share) {
                                                 std::string s = text;
                                                 while (!s.empty() && (s.front() == '/' || s.front() == '\\')) s.erase(s.begin());
@@ -4330,9 +4392,12 @@ int App::run() {
                                 };
 
                                 if (chosen == 0) {
-                                    openKeyboardForField(SmbModalState::Field::Host, "SMB Server IP / Hostname", smbModal_.host, false);
+                                    openKeyboardForField(SmbModalState::Field::Host, "Server IP / Hostname", smbModal_.host, false);
                                 } else if (chosen == 1) {
-                                    openKeyboardForField(SmbModalState::Field::Share, "SMB Share Name (empty for all)", smbModal_.share, false);
+                                    openKeyboardForField(SmbModalState::Field::Share,
+                                                         smbModal_.protocol == "smb" ? "SMB Share Name (empty for all)"
+                                                                                     : "Start folder (empty for the root)",
+                                                         smbModal_.share, false);
                                 } else if (chosen == 2) {
                                     // Pointing at a segment picks it; stick + A toggles.
                                     const int seg = renderer_.actionMenuKeyHovered();
@@ -4341,13 +4406,17 @@ int App::run() {
                                 } else if ((chosen == 3 || chosen == 4) && smbModal_.anon) {
                                     // Guest access needs no credentials.
                                 } else if (chosen == 3) {
-                                    openKeyboardForField(SmbModalState::Field::User, "SMB Username", smbModal_.user, false);
+                                    openKeyboardForField(SmbModalState::Field::User, "Username", smbModal_.user, false);
                                 } else if (chosen == 4) {
-                                    openKeyboardForField(SmbModalState::Field::Pass, "SMB Password", smbModal_.pass, true);
+                                    openKeyboardForField(SmbModalState::Field::Pass, "Password", smbModal_.pass, true);
                                 } else if (chosen == 5) {
-                                    openKeyboardForField(SmbModalState::Field::Workgroup, "SMB Workgroup / Domain", smbModal_.workgroup, false);
+                                    if (smbModal_.protocol == "smb") {
+                                        openKeyboardForField(SmbModalState::Field::Workgroup, "SMB Workgroup / Domain", smbModal_.workgroup, false);
+                                    } else {
+                                        openKeyboardForField(SmbModalState::Field::Port, "Port (empty for the default)", smbModal_.port, false);
+                                    }
                                 } else if (chosen == 6) {
-                                    openKeyboardForField(SmbModalState::Field::Label, "SMB Nickname", smbModal_.label, false);
+                                    openKeyboardForField(SmbModalState::Field::Label, "Nickname", smbModal_.label, false);
                                 } else if (chosen == 7) {
                                     // Save SMB Share
                                     saveSmbModal();
@@ -4359,6 +4428,13 @@ int App::run() {
                                     if (textEntry_.active) cancelKeyboard();
                                 } else if (chosen == 9 && !smbModal_.isNew) {
                                     deleteSmbModal();
+                                } else if (chosen == 10) {
+                                    smbModal_.protocol = smbModal_.protocol == "smb"    ? "sftp"
+                                                         : smbModal_.protocol == "sftp" ? "dav"
+                                                         : smbModal_.protocol == "dav"  ? "davs"
+                                                                                        : "smb";
+                                    smbModal_.port.clear();
+                                    updateSmbModalMenu();
                                 }
                             }
                             interacted = true;
@@ -4906,7 +4982,9 @@ int App::run() {
             }
             // Timeline hover preview: follow the current clip/stereo layout, ask
             // for the hovered time and upload whatever the worker has finished.
-            scrubPreview_.setSource(cur().open && !cur().web && !cur().webSuspended ? cur().path : std::string(),
+            scrubPreview_.setSource(cur().open && !cur().web && !cur().webSuspended && !isRemotePath(cur().path)
+                                        ? cur().path
+                                        : std::string(),
                                     settings_.stereoMode());
             if (cur().open && renderer_.pointerOnTimeline() && cur().engine.duration() > 0.0) {
                 scrubPreview_.request(renderer_.pointerScrub() * cur().engine.duration());

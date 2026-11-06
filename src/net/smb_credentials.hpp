@@ -10,11 +10,13 @@ struct SmbShare {
     std::string id;         // Unique identifier (typically host or host:share)
     std::string name;       // User-friendly display label (e.g. "Home NAS")
     std::string host;       // IP address or hostname (e.g. "192.168.1.50")
-    std::string share;      // Optional default share name (e.g. "movies", or empty for all)
+    std::string share;      // Optional default share name (e.g. "movies", or empty for all); start folder for sftp/dav
     std::string workgroup;  // Workgroup/Domain (defaults to "WORKGROUP")
     std::string username;   // SMB Username (or empty for anonymous)
     std::string password;   // SMB Password (decrypted in memory, encrypted on disk)
     bool anonymous = false; // True for guest / public shares
+    std::string protocol = "smb";  // "smb" | "sftp" | "dav" | "davs"
+    int port = 0;                  // 0 = the protocol's default (22 / 80 / 443)
 };
 
 class SmbCredentialsManager {
@@ -34,14 +36,20 @@ public:
     void addOrUpdateShare(const SmbShare& share);
 
     // Deletes a configured share and wipes its stored credentials
-    bool deleteShare(const std::string& host, const std::string& share = "");
+    bool deleteShare(const std::string& host, const std::string& share = "",
+                     const std::string& protocol = "smb", int port = 0);
 
     // Lookup a configured share
     bool findShare(const std::string& host,
                    const std::string& share,
-                   SmbShare& outShare) const;
+                   SmbShare& outShare,
+                   const std::string& protocol = "smb",
+                   int port = 0) const;
 
-    // Lookup credentials for a given host and optional share
+    // Lookup of an SFTP / WebDAV server by protocol, host and port.
+    bool findRemote(const std::string& protocol, const std::string& host, int port, SmbShare& out) const;
+
+    // Lookup credentials for a given SMB host and optional share
     bool findCredentials(const std::string& host,
                          const std::string& share,
                          std::string& outUser,

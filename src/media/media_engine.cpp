@@ -50,11 +50,11 @@ extern "C" {
 #include <cerrno>
 #endif
 
+#include "net/remote_fs.hpp"
 #include "net/smb_credentials.hpp"
 
 namespace pixelvr {
 
-#ifdef PIXELVR_HAVE_SMB
 namespace {
 
 // Other processes with the hardware decoder node open, as "comm (pid), ...".
@@ -86,6 +86,7 @@ std::string decoderHolders() {
     return out;
 }
 
+#ifdef PIXELVR_HAVE_SMB
 void smb_auth(SMBCCTX*, const char* srv, const char* shr, char* wg, int wglen, char* un, int unlen,
               char* pw, int pwlen) {
     std::string u, p, w;
@@ -108,20 +109,53 @@ void smb_auth(SMBCCTX*, const char* srv, const char* shr, char* wg, int wglen, c
     if (pw != nullptr && pwlen > 0) pw[0] = '\0';
 }
 
-// Streams an smb:// URL through libsmbclient behind a FFmpeg AVIOContext. A
+// An opened smb:// file. libsmbclient is not thread-safe, so every call takes
+// the process-wide SMB lock (per call, so scans and downloads interleave).
+class SmbFile : public RemoteFile {
+public:
+    SmbFile(SMBCCTX* c, SMBCFILE* f) : ctx_(c), file_(f) {
+        readFn_ = smbc_getFunctionRead(ctx_);
+        lseekFn_ = smbc_getFunctionLseek(ctx_);
+        closeFn_ = smbc_getFunctionClose(ctx_);
+        smbc_fstat_fn fstatFn = smbc_getFunctionFstat(ctx_);
+        struct stat st{};
+        size_ = (fstatFn != nullptr && fstatFn(ctx_, file_, &st) == 0) ? static_cast<int64_t>(st.st_size) : -1;
+    }
+    ~SmbFile() override {
+        std::lock_guard<std::mutex> smb(smbGlobalLock());
+        if (file_ != nullptr && closeFn_ != nullptr) closeFn_(ctx_, file_);
+        if (ctx_ != nullptr) smbc_free_context(ctx_, 1);
+    }
+    int64_t size() const override { return size_; }
+    int read(uint8_t* buf, int n) override {
+        std::lock_guard<std::mutex> smb(smbGlobalLock());
+        return static_cast<int>(readFn_(ctx_, file_, buf, static_cast<size_t>(n)));
+    }
+    bool seek(int64_t pos) override {
+        std::lock_guard<std::mutex> smb(smbGlobalLock());
+        return lseekFn_(ctx_, file_, static_cast<off_t>(pos), SEEK_SET) >= 0;
+    }
+
+private:
+    SMBCCTX* ctx_;
+    SMBCFILE* file_;
+    smbc_read_fn readFn_ = nullptr;
+    smbc_lseek_fn lseekFn_ = nullptr;
+    smbc_close_fn closeFn_ = nullptr;
+    int64_t size_ = -1;
+};
+#endif
+
+// Streams a network file (SMB, SFTP, WebDAV) behind a FFmpeg AVIOContext. A
 // background thread prefetches the file into a ring buffer so the demux read
 // callback serves from memory; network jitter then no longer stalls decoding.
-// Only the prefetch thread touches the SMB handle (read/lseek); the AVIO
+// Only the prefetch thread touches the remote file (read/seek); the AVIO
 // callbacks only touch the ring and request seeks.
-struct SmbReadAhead {
+struct ReadAhead {
     static constexpr std::size_t kCapacity = 64u << 20;  // 64 MiB cushion
     static constexpr std::size_t kChunk = 256u << 10;    // 256 KiB network reads
 
-    SMBCCTX* ctx = nullptr;
-    SMBCFILE* file = nullptr;
-    smbc_read_fn readFn = nullptr;
-    smbc_lseek_fn lseekFn = nullptr;
-    smbc_close_fn closeFn = nullptr;
+    std::unique_ptr<RemoteFile> source;
     int64_t fileSize = -1;
 
     std::mutex mutex;
@@ -137,17 +171,9 @@ struct SmbReadAhead {
     bool eof = false;
     bool stop = false;
 
-    bool start(SMBCCTX* c, SMBCFILE* f) {
-        ctx = c;
-        file = f;
-        readFn = smbc_getFunctionRead(ctx);
-        lseekFn = smbc_getFunctionLseek(ctx);
-        closeFn = smbc_getFunctionClose(ctx);
-        smbc_fstat_fn fstatFn = smbc_getFunctionFstat(ctx);
-        struct stat st{};
-        fileSize = (fstatFn != nullptr && fstatFn(ctx, file, &st) == 0)
-                       ? static_cast<int64_t>(st.st_size)
-                       : -1;
+    bool start(std::unique_ptr<RemoteFile> src) {
+        source = std::move(src);
+        fileSize = source->size();
         head = fill = 0;
         consumePos = prefetchPos = 0;
         pendingSeek = eof = stop = false;
@@ -180,18 +206,9 @@ struct SmbReadAhead {
                 if (eof) continue;
                 want = std::min(ring.size() - fill, chunk.size());
             }
-            // libsmbclient is not thread-safe; serialize the network syscalls
-            // against the browser's scans/downloads (per chunk, so they interleave).
-            if (doSeek) {
-                std::lock_guard<std::mutex> smb(smbGlobalLock());
-                lseekFn(ctx, file, static_cast<off_t>(seekPos), SEEK_SET);
-            }
+            if (doSeek) source->seek(seekPos);
             if (want == 0) continue;
-            ssize_t n;
-            {
-                std::lock_guard<std::mutex> smb(smbGlobalLock());
-                n = readFn(ctx, file, chunk.data(), want);
-            }
+            const int n = source->read(chunk.data(), static_cast<int>(want));
             std::lock_guard<std::mutex> lk(mutex);
             if (stop || pendingSeek) continue;  // a seek/stop superseded this read
             if (n <= 0) {
@@ -266,28 +283,21 @@ struct SmbReadAhead {
             spaceCv.notify_all();
         }
         if (thread.joinable()) thread.join();
-        {
-            std::lock_guard<std::mutex> smb(smbGlobalLock());
-            if (file != nullptr && closeFn != nullptr) closeFn(ctx, file);
-            if (ctx != nullptr) smbc_free_context(ctx, 1);
-        }
-        ctx = nullptr;
-        file = nullptr;
+        source.reset();
         ring.clear();
         ring.shrink_to_fit();
     }
 };
 
-int smb_read(void* opaque, uint8_t* buf, int size) {
-    return static_cast<SmbReadAhead*>(opaque)->read(buf, size);
+int remote_read(void* opaque, uint8_t* buf, int size) {
+    return static_cast<ReadAhead*>(opaque)->read(buf, size);
 }
 
-int64_t smb_seek(void* opaque, int64_t offset, int whence) {
-    return static_cast<SmbReadAhead*>(opaque)->seek(offset, whence);
+int64_t remote_seek(void* opaque, int64_t offset, int whence) {
+    return static_cast<ReadAhead*>(opaque)->seek(offset, whence);
 }
 
 }  // namespace
-#endif
 
 // Playback clock in the VIDEO PTS timeline. It starts when the first frame is
 // presented and advances with wall time, so consumer-side selection is smooth at
@@ -336,10 +346,8 @@ struct MediaEngine::Impl {
     AVFormatContext* format = nullptr;
     AVCodecContext* codec = nullptr;
     SwsContext* sws = nullptr;
-#ifdef PIXELVR_HAVE_SMB
     AVIOContext* avio = nullptr;
-    SmbReadAhead smbReader;
-#endif
+    ReadAhead remoteReader;
     int videoStream = -1;
     int width = 0;
     int height = 0;
@@ -451,13 +459,11 @@ struct MediaEngine::Impl {
         if (format) {
             avformat_close_input(&format);
         }
-#ifdef PIXELVR_HAVE_SMB
         if (avio != nullptr) {
             av_freep(&avio->buffer);
             avio_context_free(&avio);
         }
-        smbReader.shutdown();
-#endif
+        remoteReader.shutdown();
         clearQueues();
         maxQueue = kMaxQueue;
         usingDrm.store(false);
@@ -1033,8 +1039,18 @@ bool MediaEngine::open(const std::string& path) {
     close();
     impl_->lastError = "the file could not be opened";
 
+    if (isRemotePath(path)) {
+        std::unique_ptr<RemoteFile> remote;
+        if (path.rfind("smb://", 0) != 0) {
+            std::string err;
+            remote = remoteOpen(path, err);
+            if (!remote) {
+                impl_->lastError = err;
+                PIXELVR_LOG_ERROR("MediaEngine: cannot open %s: %s", path.c_str(), err.c_str());
+                return false;
+            }
+        } else {
 #ifdef PIXELVR_HAVE_SMB
-    if (path.rfind("smb://", 0) == 0) {
         // libsmbclient is not thread-safe; serialize context setup against the
         // browser's scans/downloads, which share Samba's global state.
         SMBCCTX* ctx = nullptr;
@@ -1062,18 +1078,24 @@ bool MediaEngine::open(const std::string& path) {
             PIXELVR_LOG_ERROR("MediaEngine: cannot open SMB stream %s", path.c_str());
             return false;
         }
-        impl_->smbReader.start(ctx, file);
+        remote = std::make_unique<SmbFile>(ctx, file);
+#else
+            impl_->lastError = "SMB support not built";
+            return false;
+#endif
+        }
+        impl_->remoteReader.start(std::move(remote));
 
         constexpr int kBuf = 1 << 16;  // 64 KiB AVIO buffer (ring is separate)
         auto* buffer = static_cast<unsigned char*>(av_malloc(kBuf));
         impl_->avio = (buffer != nullptr)
-                          ? avio_alloc_context(buffer, kBuf, 0, &impl_->smbReader,
-                                               &smb_read, nullptr, &smb_seek)
+                          ? avio_alloc_context(buffer, kBuf, 0, &impl_->remoteReader,
+                                               &remote_read, nullptr, &remote_seek)
                           : nullptr;
         if (impl_->avio == nullptr) {
             av_free(buffer);
             close();
-            PIXELVR_LOG_ERROR("MediaEngine: SMB AVIO alloc failed");
+            PIXELVR_LOG_ERROR("MediaEngine: network AVIO alloc failed");
             return false;
         }
         impl_->format = avformat_alloc_context();
@@ -1084,12 +1106,11 @@ bool MediaEngine::open(const std::string& path) {
         impl_->format->pb = impl_->avio;
         impl_->format->flags |= AVFMT_FLAG_CUSTOM_IO;
         if (avformat_open_input(&impl_->format, path.c_str(), nullptr, nullptr) < 0) {
-            PIXELVR_LOG_ERROR("MediaEngine: cannot open SMB stream %s", path.c_str());
+            PIXELVR_LOG_ERROR("MediaEngine: cannot open network stream %s", path.c_str());
             close();
             return false;
         }
     } else
-#endif
     if (avformat_open_input(&impl_->format, path.c_str(), nullptr, nullptr) < 0) {
         PIXELVR_LOG_ERROR("MediaEngine: cannot open %s", path.c_str());
         return false;
@@ -1440,9 +1461,7 @@ void MediaEngine::close() {
         impl_->audioThread.join();
     }
 #endif
-#ifdef PIXELVR_HAVE_SMB
-    impl_->smbReader.abort();  // unblock a decode thread stalled in smb_read
-#endif
+    impl_->remoteReader.abort();  // unblock a decode thread stalled in remote_read
     if (impl_->thread.joinable()) {
         impl_->thread.join();
     }

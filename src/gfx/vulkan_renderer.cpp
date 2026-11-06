@@ -4,6 +4,7 @@
 
 #include "gfx/gltf_mesh.hpp"
 #include "media/media_engine.hpp"
+#include "net/remote_fs.hpp"
 #include "xr/xr_context.hpp"
 #include "util/logging.hpp"
 #include "util/math.hpp"
@@ -357,9 +358,10 @@ inline UiRect actionMenuOption(int i, int count) {
     return {0.0f, startY - static_cast<float>(i) * kActionMenuStepY, 0.38f, 0.028f};
 }
 inline UiRect deleteConfirmButton(int i) { return {i == 0 ? -0.15f : 0.15f, -0.12f, 0.13f, 0.042f}; }
-// SMB share editor form (action menu page 4). Option ids: 0 host, 1 share,
-// 2 authentication, 3 username, 4 password, 5 workgroup, 6 nickname,
-// 7 save, 8 cancel, 9 delete (existing shares only).
+// Network share editor form (action menu page 4). Option ids: 0 host, 1 share
+// (folder for SFTP / WebDAV), 2 authentication, 3 username, 4 password,
+// 5 workgroup (SMB) or port, 6 nickname, 7 save, 8 cancel, 9 delete (existing
+// shares only; the option is empty for a new one), 10 type (protocol).
 constexpr float kSmbHalfW = 0.60f;
 constexpr float kSmbHalfH = 0.43f;
 constexpr float kSmbColCx = 0.2775f;    // half-width columns at -/+ this
@@ -372,6 +374,7 @@ inline UiRect smbFieldWell(int i) {
         case 1: return {-kSmbColCx, 0.073f, kSmbColHalfW, kSmbWellHalfH};
         case 6: return {kSmbColCx, 0.073f, kSmbColHalfW, kSmbWellHalfH};
         case 2: return {0.0f, -0.042f, 0.54f, kSmbWellHalfH};
+        case 10: return {kSmbColCx, -0.272f, kSmbColHalfW, kSmbWellHalfH};
         case 3: return {-kSmbColCx, -0.157f, kSmbColHalfW, kSmbWellHalfH};
         case 4: return {kSmbColCx, -0.157f, kSmbColHalfW, kSmbWellHalfH};
         default: return {-kSmbColCx, -0.272f, kSmbColHalfW, kSmbWellHalfH};  // 5 workgroup
@@ -2379,8 +2382,8 @@ void VulkanRenderer::updatePointer() {
                     }
                 } else if (actionMenu_.page == 4) {
                     // SMB share editor form (fixed option ids, see hub::smbFieldWell)
-                    for (int i = 0; i < 7 && i < optCount; ++i) {
-                        if (hub::smbFieldHit(i).contains(hx, hyy)) {
+                    for (int i : {0, 1, 2, 3, 4, 5, 6, 10}) {
+                        if (i < optCount && hub::smbFieldHit(i).contains(hx, hyy)) {
                             actionMenuBtnHovered_ = i;
                             break;
                         }
@@ -2392,7 +2395,7 @@ void VulkanRenderer::updatePointer() {
                     }
                     if (actionMenuBtnHovered_ < 0) {
                         for (int id : {7, 8, 9, 10}) {
-                            if (id == 9 && optCount < 10) continue;  // no Delete for a new share
+                            if (id == 9 && (optCount < 10 || actionMenu_.options[9].empty())) continue;  // no Delete for a new share
                             if (hub::smbButton(id).contains(hx, hyy, 0.004f)) {
                                 actionMenuBtnHovered_ = (id == 10) ? 8 : id;  // close X = cancel
                                 break;
@@ -4086,9 +4089,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
 
     auto formatBreadcrumbs = [](const std::string& path) -> std::string {
         if (path.empty()) return "Local Storage";
-        if (path.rfind("smb://", 0) == 0) {
-            std::string s = path.substr(6);
-            std::string res = "SMB";
+        if (isRemotePath(path)) {
+            std::string s = path.substr(path.find("://") + 3);
+            std::string res = remoteProtocolLabel(path);
             std::size_t start = 0;
             while (start < s.size()) {
                 std::size_t slash = s.find('/', start);
@@ -6629,7 +6632,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 drawUiElement(vpPanel, 0.0f, -0.312f, hub::kSmbHalfW - 0.04f, 0.0012f,
                               UiShape::RoundedBox, kGlassDivider, 1.0f);
             }
-            for (int i = 0; i < 7 && i < optCount; ++i) {
+            for (int i : {0, 1, 2, 3, 4, 5, 6, 10}) {
+                if (i >= optCount) continue;
                 const UiRect w = hub::smbFieldWell(i);
                 const bool hov = (actionMenuBtnHovered_ == i) || (actionMenu_.selectedOption == i);
                 const bool editing = (actionMenu_.editingRow == i);
@@ -6666,7 +6670,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
             // Footer buttons: Save (primary), Cancel, Delete (existing shares)
             for (int id : {7, 8, 9}) {
-                if (id == 9 && optCount < 10) continue;
+                if (id == 9 && (optCount < 10 || actionMenu_.options[9].empty())) continue;
                 const UiRect r = hub::smbButton(id);
                 const bool hov = (actionMenuBtnHovered_ == id) || (actionMenu_.selectedOption == id);
                 if (id == 7) {
@@ -6834,12 +6838,17 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             const float dimText[4] = {themeTextCol[0] * 0.55f, themeTextCol[1] * 0.60f,
                                       themeTextCol[2] * 0.70f, 0.75f};
             const float errCol[4] = {1.0f, 0.45f, 0.45f, 1.0f};
-            static const char* const kLabels[7] = {"Server / host", "Share", "Sign in",
-                                                   "Username", "Password", "Workgroup / domain",
-                                                   "Nickname"};
-            static const char* const kPlaceholders[7] = {"IP address or hostname", "All shares",
-                                                         "", "Username", "Password", "WORKGROUP",
-                                                         "Optional display name"};
+            const std::string kind = optCount > 10 ? actionMenu_.options[10] : std::string("SMB");
+            const bool smbKind = kind == "SMB";
+            const std::string defPort = kind == "SFTP" ? "22" : (kind == "WebDAV" ? "80" : "443");
+            const std::string labels[11] = {"Server / host", smbKind ? "Share" : "Folder", "Sign in",
+                                            "Username", "Password", smbKind ? "Workgroup / domain" : "Port",
+                                            "Nickname", "", "", "", "Type"};
+            const std::string placeholders[11] = {"IP address or hostname",
+                                                  smbKind ? "All shares" : (kind == "SFTP" ? "Home, or /absolute/path" : "Start folder (optional)"),
+                                                  "", "Username", "Password",
+                                                  smbKind ? "WORKGROUP" : defPort + " (default)",
+                                                  "Optional display name", "", "", "", ""};
             // Header: title (heading weight) + hint / error line
             withHeadingFont([&] {
                 drawFit(-hub::kSmbHalfW + 0.055f, 0.362f, 0.95f, sc * 1.10f, themeTextCol,
@@ -6849,13 +6858,14 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             drawFit(-hub::kSmbHalfW + 0.055f, 0.318f, 1.0f, labelSc * 1.05f,
                     isError ? errCol : slateCol, actionMenu_.subtitle);
 
-            for (int i = 0; i < 7 && i < optCount; ++i) {
+            for (int i : {0, 1, 2, 3, 4, 5, 6, 10}) {
+                if (i >= optCount) continue;
                 const UiRect w = hub::smbFieldWell(i);
                 const bool hov = (actionMenuBtnHovered_ == i) || (actionMenu_.selectedOption == i);
                 const bool editing = (actionMenu_.editingRow == i);
                 const bool disabled = anon && (i == 3 || i == 4);
                 drawFit(w.cx - w.hw + 0.010f, w.cy + hub::kSmbLabelLift, w.hw * 2.0f, labelSc,
-                        (hov && !disabled) ? themeTextCol : dimCol, kLabels[i]);
+                        (hov && !disabled) ? themeTextCol : dimCol, labels[i]);
                 if (i == 2) {
                     for (int seg = 0; seg < 2; ++seg) {
                         const UiRect r = hub::smbAuthSegment(seg);
@@ -6877,7 +6887,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 } else if (disabled) {
                     drawFit(left, w.cy, right - left, valSc, dimText, "Not needed for guest access");
                 } else if (val.empty()) {
-                    drawFit(left, w.cy, right - left, valSc, dimText, kPlaceholders[i]);
+                    drawFit(left, w.cy, right - left, valSc, dimText, placeholders[i]);
                 } else {
                     drawFit(left, w.cy, right - left, valSc, themeTextCol, val);
                 }
@@ -6886,7 +6896,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             const float darkText[4] = {0.03f, 0.05f, 0.09f, 1.0f};
             const float redText[4] = {1.0f, 0.55f, 0.55f, 1.0f};
             for (int id : {7, 8, 9}) {
-                if (id == 9 && optCount < 10) continue;
+                if (id == 9 && (optCount < 10 || actionMenu_.options[9].empty())) continue;
                 const UiRect r = hub::smbButton(id);
                 const char* label = (id == 7) ? (actionMenu_.title.rfind("Add", 0) == 0 ? "Add Share" : "Save")
                                   : (id == 8) ? "Cancel" : "Delete";
