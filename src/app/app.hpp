@@ -305,6 +305,10 @@ private:
     float webDownY_ = 0.0f;
     bool webHoverValid_ = false;
     float webWheelAccum_ = 0.0f;
+    // The stick belongs to the page: latched while held, and shortly after the
+    // laser leaves a web screen (no screen push from a slipped hit test).
+    bool webStickLatched_ = false;
+    std::chrono::steady_clock::time_point webStickUntil_{};
     // YouTube / Browser tabs: pick a screen (or use the main one) for `url`;
     // `kiosk` = just the page (YouTube), else a full browser with toolbar.
     void openWebScreen(const std::string& url, bool kiosk);

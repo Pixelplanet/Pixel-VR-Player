@@ -2921,8 +2921,10 @@ int App::run() {
                             host->wheel(webMouseX_, webMouseY_, steps);
                             webWheelAccum_ -= static_cast<float>(steps);
                         }
-                        in.thumbstickY = 0.0f;
                     }
+                    // On a page the stick never moves the screen, also below the
+                    // scroll threshold (the screen push starts at 0.15).
+                    in.thumbstickY = 0.0f;
                     if (in.buttonDown[XrInputState::BtnB]) {
                         host->back();
                         in.buttonDown[XrInputState::BtnB] = false;
@@ -2930,6 +2932,17 @@ int App::run() {
                 } else if (!onWeb) {
                     webHoverValid_ = false;
                 }
+                // The stick stays with the page while it is held after scrolling
+                // there, and briefly after the laser leaves: a frame where the hit
+                // test slips off the screen (Plex's menus reach its edge) must not
+                // nudge the screen.
+                const bool stickHeld = std::fabs(in.thumbstickY) > 0.15f;
+                if (onWeb) {
+                    webStickUntil_ = nowT + std::chrono::milliseconds(400);
+                    if (stickHeld) webStickLatched_ = true;
+                }
+                if (!stickHeld) webStickLatched_ = false;
+                if (!onWeb && (webStickLatched_ || nowT < webStickUntil_)) in.thumbstickY = 0.0f;
                 if (host && webMouseDown_ && !in.selectHeld) {
                     // A press that never left the slop is a clean click where it started.
                     if (webDragging_) host->mouseUp(webMouseX_, webMouseY_);
@@ -4015,11 +4028,14 @@ int App::run() {
                                 browser_.openPath(j.localPath);
                                 downloadsWindow_ = false;
                             } else {
-#ifdef PIXELVR_HAVE_MEDIA
-                                loadMedia(j.localPath);
+                                // Like a file from the file browser: the screen
+                                // picker / VR question appear in the Files hub.
                                 downloadsWindow_ = false;
-                                browser_.setOpen(false);
-#endif
+                                browser_.setOpen(true);
+                                playFromBrowser(j.localPath);
+                                // The picker it may open must not take this click too.
+                                in.select = false;
+                                in.togglePlay = false;
                             }
                             interacted = true;
                         }
@@ -4071,13 +4087,10 @@ int App::run() {
                                 if (actionMenu_.page == 0) {
                                     if (opt == "Open Share" || opt == "Open Bookmark") {
                                         std::string playPath;
+                                        actionMenu_.visible = false;  // before: the picker may reopen it
                                         if (browser_.activate(playPath) == Browser::Result::Play && !playPath.empty()) {
-#ifdef PIXELVR_HAVE_MEDIA
-                                            loadMedia(playPath);
-#endif
-                                            browser_.setOpen(false);
+                                            playFromBrowser(playPath);
                                         }
-                                        actionMenu_.visible = false;
                                     } else if (opt == "Edit Network Share") {
                                         if (fe) {
                                             openSmbModal(false, fe->path);

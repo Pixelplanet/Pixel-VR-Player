@@ -20,14 +20,14 @@ triggers `.github/workflows/release.yml`). Headset: `ssh -i
 "$HOME/AppData/Local/steamos-devkit/steamos-devkit/devkit_rsa" steamos@192.168.178.61`;
 installed app is `~/PixelVRPlayer` (`pixelvr.bak` = pre-download-change binary).
 
-- [ ] **N1. Play from the Downloads list ignores multi-screen:** pressing Play on a
+- [x] **N1. Play from the Downloads list ignores multi-screen:** FIXED 2026-11-07 (not yet user-verified): the Downloads row and "Open Share/Bookmark" go through `playFromBrowser` (picker / VR question in the Files hub; the click is consumed so the picker cannot take it). Original report: pressing Play on a
   finished item in the Downloads window plays it immediately on the current screen. It
   must behave like opening a file from the file browser: with Multiple Screens on and
   screens open, show the screen picker (and 180/360 media replace everything, as elsewhere).
   Look at the Downloads-window play action in `src/app/app.cpp` (downloads window
   buttons/rows near the `drows`/`dbtns` code ~line 3430) vs. the file-browser play path
   (`loadMedia` / screen-picker logic ~lines 1897-1910, 2286-2303).
-- [ ] **N2. Thumbstick input leaks to screen movement while using a Plex menu:** with
+- [x] **N2. Thumbstick input leaks to screen movement while using a Plex menu:** FIXED 2026-11-07 (not yet user-verified): two leaks — the page took the stick only above 0.2 while the screen push starts at 0.15, and a frame where the hit test slipped off the screen pushed it. Now the page always takes stick Y, latched while held and for 400 ms after the laser leaves (`webStickLatched_` / `webStickUntil_`). Original report: with
   Plex's "…" submenu open on a browser screen, moving the stick up/down repeatedly
   sometimes nudges the screen Plex is on by a tiny amount, as if the laser were beside the
   screen (move/zoom-screen stick handling). Stick input while the laser is on a web
