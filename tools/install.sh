@@ -310,6 +310,13 @@ def main():
 
     key, entry = find(shortcuts, name, exe)
 
+    if mode == "vrflag":
+        # Prints the entry's "Include in VR Library" flag (1 / 0).
+        if entry is None:
+            return 1
+        print(1 if entry.get("OpenVR", [INT, 0])[1] else 0)
+        return 0
+
     if mode == "remove":
         if entry is None:
             print("no matching shortcut, nothing to remove")
@@ -333,6 +340,12 @@ def main():
             renumbered[str(index)] = shortcuts[old]
         root[root_key][1] = renumbered
         print("removed '%s' and grid artwork" % name)
+    elif mode == "setvr":
+        # Only while Steam is closed: it rewrites the file from memory.
+        if entry is None:
+            return 1
+        entry["OpenVR"] = [INT, 1]
+        print("turned on 'Include in VR Library' for '%s'" % name)
     else:
         quoted_exe = '"%s"' % exe
         created = entry is None
@@ -437,6 +450,18 @@ art_needs_restart() {  # <shortcuts.vdf> <appid>
     [ -n "$newer" ]
 }
 
+# Without "Include in VR Library" (OpenVR=1) SteamVR does not know the shortcut
+# is a VR app: its dashboard stays up on "Resume Game" at every launch. Steam's
+# own add-shortcut path leaves the flag off and only takes the change while it
+# is closed, so it is set on the next Steam restart (restart_steam_now).
+check_vr_flag() {  # <shortcuts.vdf>
+    flag=$(run_vdf_helper vrflag "$1" "$APP_NAME" "$INSTALL_DIR/run.sh" 2>/dev/null) || flag=""
+    if [ "$flag" = 0 ]; then
+        VR_FLAG_OFF=1
+        warn "'Include in VR Library' is off for '$APP_NAME' - Steam will show 'Resume Game' at launch until it is on"
+    fi
+}
+
 # Steam only reads shortcuts.vdf at startup and rewrites it from memory, so
 # while it runs the entry must be added through Steam itself (steam://).
 # Returns 0 when the entry is in the library, 1 when Steam did not confirm it.
@@ -448,6 +473,7 @@ register_via_steam() {  # <shortcuts.vdf>
         found_exe="${found#*|}"
         if [ "$found_exe" = "$INSTALL_DIR/run.sh" ]; then
             ok "'$APP_NAME' is already in the Steam library"
+            check_vr_flag "$vdf"
             run_vdf_helper art "$vdf" "$found_appid" "$INSTALL_DIR" >/dev/null 2>&1 || true
             ! art_needs_restart "$vdf" "$found_appid" || ART_NEEDS_RESTART=1
             return 0
@@ -480,6 +506,7 @@ register_via_steam() {  # <shortcuts.vdf>
             run_vdf_helper art "$vdf" "${found%%|*}" "$INSTALL_DIR" >/dev/null 2>&1 || warn "could not install the library artwork"
             ! art_needs_restart "$vdf" "${found%%|*}" || ART_NEEDS_RESTART=1
             ok "Steam added '$APP_NAME' to the library (appid ${found%%|*})"
+            check_vr_flag "$vdf"
             return 0
         fi
         sleep 1
@@ -761,6 +788,7 @@ STEAM_REGISTERED=0
 STEAM_PENDING=0
 STEAM_OTHER=0
 ART_NEEDS_RESTART=0
+VR_FLAG_OFF=0
 if [ "$DO_STEAM" -eq 1 ]; then
     info "Adding '$APP_NAME' to the Steam library"
     if register_steam_shortcut; then
@@ -802,9 +830,13 @@ else
     result="Pixel VR Player $version_label is installed, but it could not be added to Steam automatically.<br><br>Add $INSTALL_DIR/run.sh as a Non-Steam Game."
 fi
 printf 'RESULT: %s\n' "$result"
-if [ "$ART_NEEDS_RESTART" -eq 1 ]; then
+if [ "$ART_NEEDS_RESTART" -eq 1 ] || [ "$VR_FLAG_OFF" -eq 1 ]; then
     printf 'RESTART_STEAM: 1\n'
-    info "Steam shows the new icon and artwork after it restarts"
+    [ "$ART_NEEDS_RESTART" -eq 0 ] || info "Steam shows the new icon and artwork after it restarts"
+fi
+if [ "$VR_FLAG_OFF" -eq 1 ] && [ "${PIXELVR_GUI:-}" != 1 ]; then
+    info "To open straight into the player: in Steam, Properties of '$APP_NAME' > turn on 'Include in VR Library'"
+    info "(or run this installer again with --restart-steam, which sets it while Steam is closed)"
 fi
 
 restart_steam_now() {
@@ -815,6 +847,12 @@ restart_steam_now() {
         sleep 1
         waited=$((waited + 1))
     done
+    # Now that Steam has written its shortcuts, mark ours as a VR app (before
+    # a Gaming Mode session starts Steam again).
+    if [ "$VR_FLAG_OFF" -eq 1 ] && ! steam_running; then
+        vr_vdf=$(find_steam_userdata) && run_vdf_helper setvr "$vr_vdf" "$APP_NAME" "$INSTALL_DIR/run.sh" || \
+            warn "could not turn on 'Include in VR Library' - turn it on in the shortcut's Steam properties"
+    fi
     # In a Gaming Mode session the session brings Steam back by itself.
     waited=0
     while ! steam_running && [ "$waited" -lt 5 ]; do
@@ -828,8 +866,10 @@ restart_steam_now() {
 
 # Started from the desktop icons (they set PIXELVR_GUI=1): the final message box.
 if [ "${PIXELVR_GUI:-}" = 1 ] && command -v kdialog >/dev/null 2>&1; then
-    if [ "$ART_NEEDS_RESTART" -eq 1 ]; then
-        if kdialog --title "Pixel VR Player" --yesno "$result<br><br>Restart Steam now so its icon and artwork appear? (Takes a few seconds; you can also just reboot later.)"; then
+    if [ "$ART_NEEDS_RESTART" -eq 1 ] || [ "$VR_FLAG_OFF" -eq 1 ]; then
+        why="so its icon and artwork appear"
+        [ "$VR_FLAG_OFF" -eq 0 ] || why="so it opens straight into the player (marks it as a VR app)"
+        if kdialog --title "Pixel VR Player" --yesno "$result<br><br>Restart Steam now $why? (Takes a few seconds; you can also just reboot later.)"; then
             restart_steam_now
         fi
     else

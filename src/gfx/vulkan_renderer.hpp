@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstring>
 #include <deque>
+#include <future>
 #include <memory>
 #include <string>
 #include <utility>
@@ -32,6 +33,10 @@ public:
 
     // Creates the Vulkan instance, physical device, logical device, and queue
     // via the OpenXR XR_KHR_vulkan_enable2 helpers on `xr`.
+    // Starts building the UI font atlases on worker threads (CPU only, about a
+    // second each), so they are ready by the time the session starts. Call it
+    // first thing; initText() waits for them (or builds them itself).
+    void prebuildFonts();
     bool createDevice(XrContext& xr);
 
     // The graphics binding to pass to XrContext::createSession.
@@ -982,6 +987,7 @@ private:
     bool listShowDuration_ = true;
 
     // Text rendering (FreeType glyph atlas) + file browser overlay.
+    std::future<std::pair<FontAtlas, std::string>> fontFuture_, fontBoldFuture_;
     FontAtlas fontAtlas_;
     VkImage fontImage_ = VK_NULL_HANDLE;
     VkDeviceMemory fontMemory_ = VK_NULL_HANDLE;

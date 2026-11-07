@@ -347,6 +347,8 @@ std::size_t utf16ToByteOffset(const std::string& s, int units) {
 }  // namespace
 
 bool App::init(const std::string& mediaPath) {
+    // The fonts take about a second each: build them while the runtime starts.
+    renderer_.prebuildFonts();
     if (!xr_.createInstanceAndSystem("Pixel VR Player")) {
         return false;
     }

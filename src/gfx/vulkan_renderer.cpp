@@ -2867,9 +2867,10 @@ bool VulkanRenderer::uploadFontAtlas(const FontAtlas& atlas, VkImage& image,
     return true;
 }
 
-bool VulkanRenderer::initText() {
-    // Bundled Inter (assets/fonts, installed next to the binary) first, then
-    // system fonts. Bold headings use a second atlas when its file is present.
+namespace {
+// Bundled Inter (assets/fonts, installed next to the binary) first, then
+// system fonts. Bold headings use a second atlas when its file is present.
+std::vector<std::string> uiFontCandidates(bool bold) {
     std::vector<std::string> fontDirs;
     if (const char* dir = std::getenv("PIXELVR_FONT_DIR")) fontDirs.emplace_back(dir);
     if (const char* dir = std::getenv("PIXELVR_SHADER_DIR")) fontDirs.push_back(std::string(dir) + "/../fonts");
@@ -2890,6 +2891,13 @@ bool VulkanRenderer::initText() {
         }
         return {};
     };
+    std::vector<std::string> out;
+    if (bold) {
+        if (std::string f = findFont("Inter-SemiBold.ttf"); !f.empty()) out.push_back(f);
+        out.emplace_back("/usr/share/fonts/noto/NotoSans-SemiBold.ttf");
+        out.emplace_back("/usr/share/fonts/noto/NotoSans-Bold.ttf");
+        return out;
+    }
     static const char* const kSystemFonts[] = {
         "/usr/share/fonts/noto/NotoSans-Medium.ttf",
         "/usr/share/fonts/noto/NotoSans-Regular.ttf",
@@ -2899,34 +2907,48 @@ bool VulkanRenderer::initText() {
         "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
         "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
     };
-    std::vector<std::string> regularCandidates;
-    if (std::string f = findFont("Inter-Medium.ttf"); !f.empty()) regularCandidates.push_back(f);
-    for (const char* f : kSystemFonts) regularCandidates.emplace_back(f);
-    for (const std::string& path : regularCandidates) {
-        fontAtlas_ = buildFontAtlas(path.c_str(), 96);
-        if (fontAtlas_.ok) {
-            PIXELVR_LOG_INFO("UI font: %s", path.c_str());
-            break;
-        }
+    if (std::string f = findFont("Inter-Medium.ttf"); !f.empty()) out.push_back(f);
+    for (const char* f : kSystemFonts) out.emplace_back(f);
+    return out;
+}
+
+// The first candidate that builds, with its path ("" when none does).
+std::pair<FontAtlas, std::string> buildFirstFont(const std::vector<std::string>& candidates) {
+    for (const std::string& path : candidates) {
+        FontAtlas atlas = buildFontAtlas(path.c_str(), 96);
+        if (atlas.ok) return {std::move(atlas), path};
     }
+    return {FontAtlas{}, std::string()};
+}
+}  // namespace
+
+void VulkanRenderer::prebuildFonts() {
+    // Each build has its own FreeType library, so the two can run at once.
+    fontFuture_ = std::async(std::launch::async, [c = uiFontCandidates(false)] { return buildFirstFont(c); });
+    fontBoldFuture_ = std::async(std::launch::async, [c = uiFontCandidates(true)] { return buildFirstFont(c); });
+}
+
+bool VulkanRenderer::initText() {
+    const auto t0 = std::chrono::steady_clock::now();
+    std::pair<FontAtlas, std::string> regular =
+        fontFuture_.valid() ? fontFuture_.get() : buildFirstFont(uiFontCandidates(false));
+    std::pair<FontAtlas, std::string> bold =
+        fontBoldFuture_.valid() ? fontBoldFuture_.get() : buildFirstFont(uiFontCandidates(true));
+    PIXELVR_LOG_INFO("Font atlases ready after %.0f ms on the main thread",
+                     std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count());
+    fontAtlas_ = std::move(regular.first);
     if (!fontAtlas_.ok) {
         PIXELVR_LOG_WARN("No usable font found; text and browser disabled");
         return false;
     }
+    PIXELVR_LOG_INFO("UI font: %s", regular.second.c_str());
     if (!uploadFontAtlas(fontAtlas_, fontImage_, fontMemory_, fontView_)) {
         return false;
     }
-    std::vector<std::string> boldCandidates;
-    if (std::string f = findFont("Inter-SemiBold.ttf"); !f.empty()) boldCandidates.push_back(f);
-    boldCandidates.emplace_back("/usr/share/fonts/noto/NotoSans-SemiBold.ttf");
-    boldCandidates.emplace_back("/usr/share/fonts/noto/NotoSans-Bold.ttf");
-    for (const std::string& path : boldCandidates) {
-        fontAtlasBold_ = buildFontAtlas(path.c_str(), 96);
-        if (fontAtlasBold_.ok &&
-            uploadFontAtlas(fontAtlasBold_, fontImageBold_, fontMemoryBold_, fontViewBold_)) {
-            PIXELVR_LOG_INFO("UI heading font: %s", path.c_str());
-            break;
-        }
+    fontAtlasBold_ = std::move(bold.first);
+    if (fontAtlasBold_.ok && uploadFontAtlas(fontAtlasBold_, fontImageBold_, fontMemoryBold_, fontViewBold_)) {
+        PIXELVR_LOG_INFO("UI heading font: %s", bold.second.c_str());
+    } else {
         fontAtlasBold_.ok = false;
     }
 
