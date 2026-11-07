@@ -634,7 +634,11 @@ if [ -f "$0" ]; then
 fi
 
 tmp=""
-cleanup() { [ -z "$tmp" ] || rm -rf "$tmp"; }
+cleanup() {
+    [ -z "$tmp" ] || rm -rf "$tmp"
+    # Handed over from an older installer (below): its download folder.
+    [ -z "${PIXELVR_HANDOFF_TMP:-}" ] || rm -rf "$PIXELVR_HANDOFF_TMP"
+}
 trap cleanup EXIT INT TERM
 
 if [ "$DO_UPDATE" -eq 0 ] && [ -n "$script_dir" ] && [ -f "$script_dir/pixelvr" ] && [ -d "$script_dir/shaders" ]; then
@@ -684,6 +688,19 @@ else
     tar -xzf "$tmp/$ASSET" -C "$tmp/unpacked" || die "cannot unpack $ASSET"
     srcdir="$tmp/unpacked/PixelVRPlayer"
     [ -x "$srcdir/pixelvr" ] || [ -f "$srcdir/pixelvr" ] || die "unexpected archive layout"
+
+    # An update runs the installed copy of this script, which can be older than
+    # the release: let the release's own installer do the rest, so its newer
+    # steps (e.g. the Steam VR flag) apply on this update already.
+    if [ -z "${PIXELVR_HANDOFF:-}" ] && [ -f "$srcdir/install.sh" ] && ! cmp -s "$0" "$srcdir/install.sh" 2>/dev/null; then
+        info "Continuing with the installer from $version_label"
+        set -- --dir "$INSTALL_DIR"
+        [ "$DO_STEAM" -eq 1 ] || set -- "$@" --no-steam
+        [ "$RESTART_STEAM" -eq 0 ] || set -- "$@" --restart-steam
+        [ "$FORCE" -eq 0 ] || set -- "$@" --force
+        trap - EXIT INT TERM
+        PIXELVR_HANDOFF=1 PIXELVR_HANDOFF_TMP="$tmp" exec sh "$srcdir/install.sh" "$@"
+    fi
 fi
 
 # ---------------------------------------------------------------------------

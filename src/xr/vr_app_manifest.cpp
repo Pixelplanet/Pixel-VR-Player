@@ -8,6 +8,7 @@
 #include <cstring>
 #include <filesystem>
 #include <fstream>
+#include <iterator>
 #include <string>
 #include <thread>
 #include <vector>
@@ -68,29 +69,51 @@ std::string exeDir() {
 }
 
 #if defined(__linux__)
-// Registers ~/.config/pixelvr/pixelvr.vrmanifest for `appKey` (see the header).
-bool registerManifest(vr::IVRApplications* apps, const std::string& appKey, uint32_t appId) {
+// Our manifest for `appKey`: the "Up next" screen shows image_path (Steam's own
+// games use their 460x215 store header there).
+std::string manifestText(const std::string& appKey, uint32_t appId) {
     const uint64_t gameId = (static_cast<uint64_t>(appId) << 32) | 0x02000000ull;
+    const std::string dir = exeDir();
+    std::error_code ec;
+    auto art = [&](const char* name) {
+        const std::string p = dir + "/" + name;
+        return std::filesystem::is_regular_file(p, ec) ? p : std::string();
+    };
+    std::string header = art("header.png");
+    if (header.empty()) header = art("icon.png");
+    const std::string capsule = art("capsule.png");
+    std::string t = "{\n  \"source\": \"pixelvr\",\n  \"applications\": [{\n";
+    t += "    \"app_key\": \"" + appKey + "\",\n";
+    t += "    \"launch_type\": \"url\",\n";
+    t += "    \"url\": \"steam://rungameid/" + std::to_string(gameId) + "\",\n";
+    if (!header.empty()) t += "    \"image_path\": \"" + jsonEscape(header) + "\",\n";
+    if (!capsule.empty()) t += "    \"image_path_capsule\": \"" + jsonEscape(capsule) + "\",\n";
+    t += "    \"strings\": { \"en_us\": { \"name\": \"Pixel VR Player\" } }\n  }]\n}\n";
+    return t;
+}
+
+// Registers ~/.config/pixelvr/pixelvr.vrmanifest for `appKey` when SteamVR does
+// not know the key or the file's content changed (new art, moved install).
+// SteamVR keeps what it read first, so a changed file is removed and re-added.
+bool ensureManifest(vr::IVRApplications* apps, const std::string& appKey, uint32_t appId) {
     const std::string dir = configDir();
     std::error_code ec;
     std::filesystem::create_directories(dir, ec);
     const std::string path = dir + "/pixelvr.vrmanifest";
-    const std::string icon = exeDir() + "/icon.png";
+    const std::string text = manifestText(appKey, appId);
+    std::string current;
     {
-        std::ofstream f(path, std::ios::trunc);
-        f << "{\n  \"source\": \"pixelvr\",\n  \"applications\": [{\n"
-          << "    \"app_key\": \"" << appKey << "\",\n"
-          << "    \"launch_type\": \"url\",\n"
-          << "    \"url\": \"steam://rungameid/" << gameId << "\",\n";
-        if (std::filesystem::is_regular_file(icon, ec)) {
-            f << "    \"image_path\": \"" << jsonEscape(icon) << "\",\n";
-        }
-        f << "    \"strings\": { \"en_us\": { \"name\": \"Pixel VR Player\" } }\n  }]\n}\n";
+        std::ifstream f(path, std::ios::binary);
+        current.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
     }
+    const bool installed = apps->IsApplicationInstalled(appKey.c_str());
+    if (installed && current == text) return true;
+    std::ofstream(path, std::ios::binary | std::ios::trunc) << text;
+    if (installed) apps->RemoveApplicationManifest(path.c_str());
     const vr::EVRApplicationError ae = apps->AddApplicationManifest(path.c_str(), false);
     const bool ok = apps->IsApplicationInstalled(appKey.c_str());
-    PIXELVR_LOG_INFO("SteamVR prelaunch: registered %s for %s: %s, installed now: %d", path.c_str(),
-                     appKey.c_str(), apps->GetApplicationsErrorNameFromEnum(ae), static_cast<int>(ok));
+    PIXELVR_LOG_INFO("SteamVR prelaunch: %s %s for %s: %s, installed now: %d", installed ? "updated" : "registered",
+                     path.c_str(), appKey.c_str(), apps->GetApplicationsErrorNameFromEnum(ae), static_cast<int>(ok));
     return ok;
 }
 #endif
@@ -131,7 +154,7 @@ int runSteamVrPrelaunchHelper() {
     auto* apps = reinterpret_cast<vr::IVRApplications*>(get(vr::IVRApplications_Version, &err));
     if (!apps || err != vr::VRInitError_None) {
         rc = 4;
-    } else if (!apps->IsApplicationInstalled(appKey.c_str()) && !registerManifest(apps, appKey, appId)) {
+    } else if (!ensureManifest(apps, appKey, appId)) {
         rc = 5;
     } else {
         // What Steam does before starting one of its own VR games: SteamVR
