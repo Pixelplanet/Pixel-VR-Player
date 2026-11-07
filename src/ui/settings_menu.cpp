@@ -95,7 +95,7 @@ const float kPanelCurveValues[] = {0.0f, 0.45f, 1.0f};
 constexpr int kPanelCurveCount = 3;
 
 // Default flat-screen distance presets: 1.5 m .. 5.0 m in 0.5 m steps.
-constexpr float kDistanceMin = 1.5f;
+constexpr float kDistanceMin = 2.0f;  // closer and the screen sits in front of the menus
 constexpr float kDistanceStep = 0.5f;
 constexpr int kDistanceSteps = 8;
 
@@ -766,7 +766,7 @@ void SettingsMenu::loadConfig() {
             else if (key == "swap_eyes") swapEyes_ = (val == "1");
             else if (key == "draw_models") drawModels_ = (val == "1");
             else if (key == "show_stats") showStats_ = (val == "1");
-            else if (key == "distance") screenDistance_ = std::clamp(std::stof(val), 1.0f, 10.0f);
+            else if (key == "distance") screenDistance_ = std::clamp(std::stof(val), kDistanceMin, 10.0f);
             else if (key == "bind_play_btn") bindPlayBtn_ = std::clamp(std::stoi(val), 0, kButtonCount - 1);
             else if (key == "bind_menu_btn") bindMenuBtn_ = std::clamp(std::stoi(val), 0, kButtonCount - 1);
             else if (key == "bind_recenter_btn") {

@@ -231,7 +231,7 @@ private:
     bool swapEyes_ = false;
     bool drawModels_ = false;  // off: SteamVR draws the real controllers; laser stays
     bool showStats_ = false;
-    float screenDistance_ = 3.0f;
+    float screenDistance_ = 4.0f;  // room for several screens without crowding
 
     // Function -> physical button (XrInputState::Button index); press-to-bind.
     int bindPlayBtn_ = 0;      // default A
