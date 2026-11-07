@@ -1079,7 +1079,7 @@ void Browser::startDownloadFile(const std::string& uri, const std::string& local
     }
     const std::string name = dlName_;
     dlLocalPath_ = local;
-    if (isRemoteFsPath(uri)) {
+    if (isRemoteFsPath(uri) || isHttpUrl(uri)) {
         dlLocalPath_ = local + ".part";  // poll() measures progress from this file
         dlThread_ = std::thread([this, uri, local, name]() { downloadRemoteFile(uri, local, name); });
         return;

@@ -34,6 +34,8 @@ inline bool hasPrefix(const std::string& s, const char* p) { return s.rfind(p, 0
 inline bool isRemoteFsPath(const std::string& p) {
     return hasPrefix(p, "sftp://") || hasPrefix(p, "dav://") || hasPrefix(p, "davs://");
 }
+// A plain web URL: only ever downloaded (read-only), never browsed.
+inline bool isHttpUrl(const std::string& p) { return hasPrefix(p, "http://") || hasPrefix(p, "https://"); }
 // Any network path: SMB or one of the above.
 inline bool isRemotePath(const std::string& p) { return hasPrefix(p, "smb://") || isRemoteFsPath(p); }
 // "SMB" / "SFTP" / "WebDAV" for display; empty for local paths.
@@ -45,7 +47,8 @@ inline const char* remoteProtocolLabel(const std::string& p) {
 }
 
 struct RemoteUri {
-    std::string protocol;  // sftp | dav | davs
+    std::string protocol;  // sftp | dav | davs | http | https
+    std::string url;       // http(s) only: the address, used verbatim (query string included)
     std::string host;
     int port = 0;          // 0 = the protocol's default
     std::string path;      // starts with '/'

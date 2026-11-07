@@ -235,6 +235,7 @@ bool BrowserHost::start(const std::string& url, int width, int height, const Opt
     volumeState_ = -1;
     focusEvents_.clear();
     plexPlays_.clear();
+    saveFiles_.clear();
     fieldValueNew_ = false;
 
     // Shared memory for frames (the app owns and unlinks it).
@@ -441,6 +442,11 @@ void BrowserHost::handleLine(const std::string& line) {
             p.duration = v.getNumber("duration");
             plexPlays_.push_back(std::move(p));
         }
+    } else if (cmd == "savefile") {
+        pvrjson::Value v;
+        if (pvrjson::parse(rest.c_str(), v) && !v.getString("url").empty() && !v.getString("name").empty()) {
+            saveFiles_.push_back({v.getString("url"), v.getString("name")});
+        }
     } else if (cmd == "value") {
         int cursor = 0, used = 0;
         pvrjson::Value v;
@@ -520,6 +526,12 @@ void BrowserHost::setPlexNative(bool on) {
 }
 void BrowserHost::plexTimeline(const char* state, int64_t ms) {
     send(std::string("plextimeline ") + state + " " + std::to_string(ms));
+}
+bool BrowserHost::takeSaveFile(SaveFile& out) {
+    if (saveFiles_.empty()) return false;
+    out = std::move(saveFiles_.front());
+    saveFiles_.erase(saveFiles_.begin());
+    return true;
 }
 bool BrowserHost::takePlexPlay(PlexPlay& out) {
     if (plexPlays_.empty()) return false;

@@ -122,6 +122,12 @@ public:
     };
     void setPlexNative(bool on);
     bool takePlexPlay(PlexPlay& out);
+    // A Plex Web download the helper cancelled in Chromium: the app downloads `url` as `name`.
+    struct SaveFile {
+        std::string url;
+        std::string name;
+    };
+    bool takeSaveFile(SaveFile& out);
     void plexRelease() { send("plexrelease"); }  // close the page's player, no timeline report
     void plexReturn(int64_t ms) { send("plexreturn " + std::to_string(ms)); }  // close Plex's player, report "stopped" at ms
     void plexTimeline(const char* state, int64_t ms);  // playing | paused | stopped
@@ -167,6 +173,7 @@ private:
     int volumeState_ = -1;  // percent last sent
     std::vector<FocusEvent> focusEvents_;
     std::vector<PlexPlay> plexPlays_;
+    std::vector<SaveFile> saveFiles_;
     bool plexNative_ = true;
     bool fieldValueNew_ = false;
     int fieldCursor_ = 0;

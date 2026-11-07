@@ -28,6 +28,8 @@
 //     | videoinfo W H FRAMES DROPPED "CODECS"
 //     | focus c|p 0 | focus c|p 1 PASSWORD CURSOR "VALUE" (c = after a click)
 //     | value CURSOR "VALUE" | download NAME | eval RESULT | error TEXT
+//     | plex {"url","title","offset","duration"} | savefile {"url","name"}
+//       (a Plex Web download, cancelled in Chromium: the app downloads it itself)
 #include "browser_protocol.hpp"
 #include "mini_json.hpp"
 #include "toolbar_html.hpp"
@@ -85,7 +87,7 @@ std::string redactToken(std::string s) {
 }
 
 void emitLine(const std::string& line) {
-    const std::string l = (line.rfind("plex ", 0) == 0 ? line : redactToken(line)) + "\n";
+    const std::string l = (line.rfind("plex ", 0) == 0 || line.rfind("savefile ", 0) == 0 ? line : redactToken(line)) + "\n";
     std::fwrite(l.data(), 1, l.size(), stdout);
     std::fflush(stdout);
 }
@@ -1671,7 +1673,51 @@ int runScreen(const ScreenOptions& opt) {
             const int i = tabBySession(gone);
             if (i >= 0) removeTab(i);
         } else if (method == "Browser.downloadWillBegin") {
-            if (tabByTarget(params->getString("frameId")) < 0) return;  // another screen's
+            const int dti = tabByTarget(params->getString("frameId"));
+            if (dti < 0) return;  // another screen's
+            {
+                // Plex Web "Download": Chromium would save it headless, without progress or a real
+                // name. Cancel it and hand the part URL to the app's download manager instead.
+                const std::string dlUrl = params->getString("url");
+                const size_t hostEnd = dlUrl.find('/', dlUrl.find("://") == std::string::npos ? 0 : dlUrl.find("://") + 3);
+                if (hostEnd != std::string::npos && dlUrl.compare(hostEnd, 15, "/library/parts/") == 0 &&
+                    !queryParam(dlUrl, "X-Plex-Token").empty()) {
+                    send("Browser.cancelDownload", "{\"guid\":" + pvrjson::quote(params->getString("guid")) + ctxParam + "}", "");
+                    const std::string suggested = params->getString("suggestedFilename");
+                    const std::string pathPart = dlUrl.substr(hostEnd, dlUrl.find('?') == std::string::npos ? std::string::npos : dlUrl.find('?') - hostEnd);
+                    const std::string partId = [&] {
+                        const std::string rest = pathPart.substr(15);
+                        return rest.substr(0, rest.find('/'));
+                    }();
+                    std::string ext;
+                    {
+                        const size_t slash = pathPart.rfind('/');
+                        const size_t dot = pathPart.rfind('.');
+                        if (dot != std::string::npos && slash != std::string::npos && dot > slash) ext = pathPart.substr(dot);
+                    }
+                    const std::string js =
+                        "(async()=>{try{const u=new URL(" + pvrjson::quote(dlUrl) + ");const pid=u.pathname.split('/')[3];"
+                        "const tok=u.searchParams.get('X-Plex-Token');"
+                        "const key=new URLSearchParams((location.hash.split('?')[1])||'').get('key');if(!key)return '';"
+                        "const find=async k=>{const r=await fetch(u.origin+k+'?X-Plex-Token='+encodeURIComponent(tok),"
+                        "{headers:{Accept:'application/json'}});const j=await r.json();"
+                        "for(const m of (j.MediaContainer.Metadata||[]))for(const md of (m.Media||[]))"
+                        "for(const p of (md.Part||[]))if(String(p.id)===pid)return p.file||'';return ''};"
+                        "let f=await find(key);if(!f)f=await find(key+'/allLeaves');"
+                        "return f.split(/[\\\\/]/).pop()}catch(e){return ''}})()";
+                    evalIn(tabs[dti].session, js, [&, dlUrl, suggested, partId, ext](const pvrjson::Value* v) {
+                        std::string name = (v && v->type == pvrjson::Value::Type::String) ? v->str : std::string();
+                        if (name.empty() && !suggested.empty() && suggested != "download") name = suggested;
+                        if (name.empty()) name = "Plex " + partId + ext;
+                        std::string clean;
+                        for (const char c : name) {
+                            if (c != '/' && c != '\\' && static_cast<unsigned char>(c) >= 0x20) clean += c;
+                        }
+                        emitLine("savefile {\"url\":" + pvrjson::quote(dlUrl) + ",\"name\":" + pvrjson::quote(clean) + "}");
+                    }, true);
+                    return;
+                }
+            }
             downloads.emplace_back(params->getString("guid"), params->getString("suggestedFilename"));
             downloadText = downloads.back().second;
             downloadClearAt = {};

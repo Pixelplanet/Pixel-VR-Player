@@ -2841,6 +2841,8 @@ int App::run() {
                     if (playing) host.plexRelease();
                     else startPlexPlay(slot, plexPlay);
                 }
+                BrowserHost::SaveFile saveFile;
+                while (host.takeSaveFile(saveFile)) browser_.startDownload(saveFile.url, saveFile.name, false);
                 // Text fields: a click into one opens the keyboard, which then
                 // types straight into the page; it closes when the field does.
                 BrowserHost::FocusEvent fe;

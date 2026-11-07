@@ -11,8 +11,10 @@
 #include <deque>
 #include <filesystem>
 #include <map>
+#include <chrono>
 #include <mutex>
 #include <strings.h>
+#include <thread>
 
 #ifdef PIXELVR_HAVE_LIBSSH
 #include <fcntl.h>
@@ -79,7 +81,11 @@ bool parseRemoteUri(const std::string& uri, RemoteUri& out) {
     if (sch == std::string::npos) return false;
     out = RemoteUri{};
     out.protocol = uri.substr(0, sch);
-    if (out.protocol != "sftp" && out.protocol != "dav" && out.protocol != "davs") return false;
+    if (out.protocol != "sftp" && out.protocol != "dav" && out.protocol != "davs" && out.protocol != "http" &&
+        out.protocol != "https") {
+        return false;
+    }
+    if (out.protocol == "http" || out.protocol == "https") out.url = uri;
     const size_t slash = uri.find('/', sch + 3);
     std::string authority = uri.substr(sch + 3, slash == std::string::npos ? std::string::npos : slash - sch - 3);
     out.path = slash == std::string::npos ? "/" : uri.substr(slash);
@@ -467,9 +473,9 @@ struct DavHandle {
 
 void davPrepare(CURL* c, const RemoteUri& u, const SmbShare& cred, const std::string& path, Collected& col) {
     curl_easy_reset(c);
-    const std::string url = davUrl(u, path);
+    const std::string url = u.url.empty() ? davUrl(u, path) : u.url;
     curl_easy_setopt(c, CURLOPT_URL, url.c_str());
-    if (!cred.username.empty() && !cred.anonymous) {
+    if (u.url.empty() && !cred.username.empty() && !cred.anonymous) {
         curl_easy_setopt(c, CURLOPT_USERNAME, cred.username.c_str());
         curl_easy_setopt(c, CURLOPT_PASSWORD, cred.password.c_str());
         curl_easy_setopt(c, CURLOPT_HTTPAUTH, static_cast<long>(CURLAUTH_ANY));
@@ -663,7 +669,13 @@ public:
         if (pos_ < chunkOff_ || pos_ >= chunkOff_ + static_cast<int64_t>(chunk_.size())) {
             const int64_t want = std::min<int64_t>(kDavRange, size_ - pos_);
             std::string e;
-            if (!fetch(pos_, want, nullptr, &e) && !fetch(pos_, want, nullptr, &e)) return -1;  // one retry
+            bool fetched = false;
+            // A long transfer sees dropped connections now and then: back off and retry.
+            for (int attempt = 0; attempt < 6 && !fetched; ++attempt) {
+                if (attempt > 0) std::this_thread::sleep_for(std::chrono::milliseconds(250 << attempt));
+                fetched = fetch(pos_, want, nullptr, &e);
+            }
+            if (!fetched) return -1;
             chunkOff_ = pos_;
         }
         const size_t at = static_cast<size_t>(pos_ - chunkOff_);
@@ -720,6 +732,10 @@ bool remoteList(const std::string& uri, std::vector<RemoteEntry>& out, std::stri
     RemoteUri u;
     if (!parseRemoteUri(uri, u)) {
         err = "not a network address";
+        return false;
+    }
+    if (!u.url.empty()) {
+        err = "not a folder";
         return false;
     }
     if (u.protocol == "sftp") {

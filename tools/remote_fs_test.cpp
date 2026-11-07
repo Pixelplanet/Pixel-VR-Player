@@ -2,6 +2,7 @@
 //   remote_fs_test cred <sftp|dav|davs> <host> <port> <user> <password> [folder]
 //   remote_fs_test shares                 list the stored shares
 //   remote_fs_test ls <uri>
+//   remote_fs_test get <uri> <outfile>     copy the whole file (http(s) URLs work too)
 //   remote_fs_test read <uri> [seeks [local-copy]]   sequential read, then random seeks
 //                                          (bytes compared with the local copy when given)
 // Run with HOME pointing at a scratch directory: credentials are stored in
@@ -61,6 +62,31 @@ int main(int argc, char** argv) {
         }
         std::printf("%zu entries in %.3f s\n", entries.size(), secondsSince(t0));
         return 0;
+    }
+    if (cmd == "get" && argc >= 4) {
+        std::string err;
+        auto f = remoteOpen(argv[2], err);
+        if (!f) {
+            std::printf("open failed: %s\n", err.c_str());
+            return 1;
+        }
+        FILE* out = std::fopen(argv[3], "wb");
+        std::vector<uint8_t> buf(1 << 20);
+        int64_t got = 0;
+        const auto t0 = Clock::now();
+        for (;;) {
+            const int n = f->read(buf.data(), static_cast<int>(buf.size()));
+            if (n < 0) {
+                std::printf("read error at %lld\n", static_cast<long long>(got));
+                return 1;
+            }
+            if (n == 0) break;
+            std::fwrite(buf.data(), 1, static_cast<size_t>(n), out);
+            got += n;
+        }
+        std::fclose(out);
+        std::printf("got %lld of %lld bytes in %.1f s\n", static_cast<long long>(got), static_cast<long long>(f->size()), secondsSince(t0));
+        return got == f->size() ? 0 : 1;
     }
     if (cmd == "read") {
         std::string err;
