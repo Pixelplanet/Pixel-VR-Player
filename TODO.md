@@ -97,7 +97,7 @@ Scope: flat 2D and every 3D format (SBS / half-SBS / TB) on flat or curved scree
     current distance; thumbstick Y = distance, thumbstick X = size; trigger drops it.
   - Per-screen menu (Y on a screen): Move, Resize, Curvature, Format, Mute, Close.
   - Optional: remember the layout between sessions.
-- [ ] **M5. Decoder capacity / admission control** — a first rough budget (1000 Mpx/s,
+- [~] **M5. Decoder capacity / admission control** — budget + "no decoder capacity" message exist; 180/360 now simply replace all screens (no picker). Remaining: calibrate the budget on device. — a first rough budget (1000 Mpx/s,
   logged as "Decoder budget: …") is in `App::decoderBudgetAllows`; still to calibrate.
   - Measure on device: how many concurrent `*_v4l2m2m` sessions open, and the aggregate
     pixel-rate budget (e.g. 3× 4K30 HEVC, 2× 4K60, 8K + 1080p…). Record results here.
@@ -128,7 +128,7 @@ hardware VP9/H.264 in our player (works with multi-screen).
     local DASH MPD for FFmpeg's dash demuxer. Reconnect/timeouts, buffering indicator,
     seeking over HTTP.
   - Temporary "Open URL" field (in-app keyboard) for testing.
-- [ ] **Y2. Embedded browser panel** (engine evaluation = W1 below)
+- [~] **Y2. Embedded browser panel** — PANEL DONE (headless Chromium browser screens, see W1; YouTube shortcut opens m.youtube.com and plays IN the page). NOT done: intercepting watch URLs to play natively (no yt-dlp anywhere in the code yet — Y1/Y3 still open).
   - Glass panel showing m.youtube.com with a mobile user agent; laser → touch/mouse events,
     thumbstick → scroll, in-app keyboard → text input; back / reload / home.
   - **Intercept navigation** to `youtube.com/watch?v=…`, `youtu.be/…`, `/shorts/…`,
@@ -148,7 +148,7 @@ hardware VP9/H.264 in our player (works with multi-screen).
 ### S. Other streaming sources (after YouTube)
 - [ ] **S1. yt-dlp generic** — the same Open URL path works for many sites yt-dlp supports
   (Vimeo, Twitch VODs, …); live streams (HLS) via FFmpeg.
-- [x] **S2. Plex (decided 2026-11-06, implemented 2026-11-06 — needs in-headset test): keep Plex Web as the UI, play natively.** Plex Web runs
+- [x] **S2. Plex — DONE & user-verified 2026-11-07** (native original-quality playback only after a real play click, return to the page, slot following, timeline reports, reconnect, "Stop or Close returns to Plex" hint; Plex downloads go through the app's Downloads window with the server file name). Original plan: Plex Web runs
   in the browser screen (works, transcodes to 1080p in Chromium). Instead of a Plex client
   of our own, intercept playback like YouTube: the helper watches the page's requests
   (`Network.requestWillBeSent`) for `/library/metadata/<id>` or the `transcode/universal`
@@ -166,7 +166,7 @@ hardware VP9/H.264 in our player (works with multi-screen).
   to the screen slot, not to a position: when the user moves / resizes / re-arranges
   screens while the video plays, the page must follow (same slot, same placement), so it
   is never out of place when it comes back.
-- [ ] **S3. Browser bugs found with Plex (2026-11-06):**
+- [x] **S3. Browser bugs found with Plex (2026-11-06) — ALL FIXED** (Enter closes keyboard 69feaf3, iframe keyboard 7c419bb, laser layer 81e66ae, Plex theme = software page rendering by default 859b6f8; `PVR_BROWSER_GPU=1` restores GPU):
   - typing a URL: the keyboard stayed open after Enter although the address bar had taken
     it; Enter on the address bar should navigate and close the keyboard.
   - no keyboard for Plex's sign-in fields: they live in a cross-origin iframe
@@ -178,7 +178,7 @@ hardware VP9/H.264 in our player (works with multi-screen).
     depth-sorts layers, so it is then occluded / visible correctly.
   - Plex rendered its light theme (white page, unreadable): headless has no system theme →
     `Emulation.setEmulatedMedia prefers-color-scheme: dark` for all pages (done).
-- [x] **S4. More share protocols (implemented 2026-11-06 — needs in-headset UI test, real LAN SFTP/SMB check):** SFTP first (libssh: `sftp_opendir`
+- [x] **S4. More share protocols — DONE** (SFTP via libssh, WebDAV/https via libcurl; "SMB Shares" renamed "Network"; type chosen with 4 buttons; SMB re-verified by user). Still open: testing SFTP/WebDAV against REAL servers (only loopback-tested; release notes ask users to report). Original plan: SFTP first (libssh: `sftp_opendir`
   listing + pipelined `sftp_async_read` reader, 8–16 requests in flight; password auth;
   "SFTP" quick filter beside SMB Shares with the same connect dialog / credential store),
   then WebDAV over libcurl (PROPFIND listing, ranged GET read-ahead; shares the HTTP reader
@@ -214,11 +214,11 @@ hardware VP9/H.264 in our player (works with multi-screen).
   Netflix / Disney+ use the same path.
 
 ### W. Browser engine (needed by Y2)
-- [ ] **W1. Evaluate engines**: **WPE WebKit** (fdo backend exports dma-buf frames → zero-copy
+- [x] **W1. DECIDED/DONE: headless system Chromium driven over CDP** (`browser/pvr_browser.cpp`, helper compiled into `pixelvr`; Widevine DRM works: Prime/Netflix/Disney+). Original options were: **WPE WebKit** (fdo backend exports dma-buf frames → zero-copy
   Vulkan import, lighter) vs **CEF** offscreen rendering (Chromium, heavy, CPU copy). Check
   aarch64 SteamOS availability/packaging, memory, Google login support, touch/mouse/key input
   injection and navigation interception hooks.
-- [ ] **W2. General browsing (later)** — URL bar, back/forward, a couple of tabs; same panel.
+- [x] **W2. General browsing — DONE** (toolbar with URL bar, back/forward/reload, tabs, popups as tabs, downloads, configurable shortcut rail incl. Plex; B never goes back to the initial about:blank).
 
 ---
 
@@ -308,7 +308,7 @@ hardware VP9/H.264 in our player (works with multi-screen).
 ## Carried over & Completed
 
 - [ ] A. Full-pitch recenter (usable lying down) — reorient screen + controls + 360/180 to full head orientation, not just horizon yaw.
-- [ ] B. Real controller models (glTF) rendered with depth.
+- [x] B. Real controller models — DONE (see F1).
 - [ ] C. Dynamic controller button labels from the user's bindings.
 
 Completed (2026-10-18):
@@ -419,7 +419,7 @@ wsl -d Ubuntu -- bash -lc 'rsync -az -e "ssh -i $HOME/.config/steamos-devkit/dev
   `updateVideoTexture` (blit mip gen), `createSamplerAndDescriptors` (sampler).
   Watch the per-frame blit cost; only regenerate when a new frame is uploaded.
 
-### B2. High-res 360/180 video won't play + stale frame + controls disappear
+### B2. High-res 360/180 video won't play + stale frame + controls disappear — MOSTLY DONE (8K immersive: other screens close first + HW decoder retry, d714ea8; controls done; verify stale-frame-on-failure item 2)
 - **Symptom:** a ~3600p video (meant to be 180°/360°) shows the LAST FRAME of the
   previous test clip and never plays; and the control bar/transport vanish (they
   only render for `ProjectionMode::Flat`).
@@ -445,7 +445,7 @@ wsl -d Ubuntu -- bash -lc 'rsync -az -e "ssh -i $HOME/.config/steamos-devkit/dev
 
 ## 4. TODO — FEATURES
 
-### F1. Real controller models (`XR_EXT_render_model`)  — user's top ask
+### F1. Real controller models (`XR_EXT_render_model`) — DONE (RenderModelSystem + `renderer_.loadControllerModel`, animated nodes in `app.cpp`); plan kept for reference
 Runtime supports `XR_EXT_render_model` + `XR_EXT_interaction_render_model` (verified
 via `--xrext`). Our pinned OpenXR SDK **1.1.43** only declares the older
 `XR_FB_render_model` (which this runtime does NOT support). Phased plan:
