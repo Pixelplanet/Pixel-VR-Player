@@ -3021,6 +3021,8 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
 
 void VulkanRenderer::renderLayersBefore(XrContext& xr, const XrView* views, uint32_t viewCount,
                                         std::vector<CompositionLayer>& out) {
+    (void)out;  // the UI layer is submitted by renderLayersAfter, over the screens
+    uiLayerPending_ = false;
     if (!uiLayerLive() || viewCount == 0) {
         return;
     }
@@ -3119,7 +3121,11 @@ void VulkanRenderer::renderLayersBefore(XrContext& xr, const XrView* views, uint
     cl.pose.position = {poseMat.m[12], poseMat.m[13], poseMat.m[14]};
     cl.imageRect.offset = {pass.px, pass.py};
     cl.imageRect.extent = {pass.pw, pass.ph};
-    out.push_back(cl);
+    // Kept back: SteamVR composites layers in submission order with a depth
+    // test, so a UI layer submitted before the screens hides them wherever it
+    // covers them (even where transparent) instead of blending over them.
+    uiLayer_ = cl;
+    uiLayerPending_ = true;
 }
 
 // Flat video / browser screens as composition layers, back to front, then the
@@ -3129,7 +3135,14 @@ void VulkanRenderer::renderLayersBefore(XrContext& xr, const XrView* views, uint
 // and the compositor only ever samples near 1:1.
 void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint32_t viewCount,
                                        std::vector<CompositionLayer>& out) {
+    // The UI layer (from renderLayersBefore) goes over the screens, under the
+    // beam and cursor.
+    auto submitUiLayer = [&]() {
+        if (uiLayerPending_) out.push_back(uiLayer_);
+        uiLayerPending_ = false;
+    };
     if (!uiLayerLive() || viewCount == 0 || device_ == VK_NULL_HANDLE) {
+        submitUiLayer();
         return;
     }
     using namespace math;
@@ -3252,6 +3265,8 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
             }
         }
     }
+
+    submitUiLayer();
 
     // Pointer cursor over a layer screen: the dot in the eye buffers would be
     // composited behind the layer, so it becomes a small billboard layer.

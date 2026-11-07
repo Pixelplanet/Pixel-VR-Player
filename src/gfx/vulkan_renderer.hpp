@@ -768,6 +768,10 @@ private:
     VkPipelineLayout glassPipelineLayout_ = VK_NULL_HANDLE;  // NV12 textures + GlassPush
     VkPipeline glassPipelineLayer_ = VK_NULL_HANDLE;
     ViewTargets uiLayerTargets_;
+    // This frame's UI layer, recorded before the eye passes and submitted after
+    // the screen layers (see renderLayersBefore).
+    CompositionLayer uiLayer_{};
+    bool uiLayerPending_ = false;
 
     VkInstance instance_ = VK_NULL_HANDLE;
     VkPhysicalDevice physicalDevice_ = VK_NULL_HANDLE;
