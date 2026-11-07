@@ -110,7 +110,7 @@ int main(int argc, char** argv) {
     if (first == "--pvr-browser") return pvrBrowserMain(argc - 1, argv + 1);
 #endif
     // Short-lived helper started by App::init (see vr_app_manifest.hpp).
-    if (first == "--register-vr-manifest") return pixelvr::registerVrAppManifest();
+    if (first == "--steamvr-prelaunch") return pixelvr::runSteamVrPrelaunchHelper();
     // Release builds: restart on the bundled, patched FFmpeg (zero-copy decode).
     pixelvr::useBundledFfmpeg(argv);
 

@@ -349,6 +349,8 @@ std::size_t utf16ToByteOffset(const std::string& s, int units) {
 bool App::init(const std::string& mediaPath) {
     // The fonts take about a second each: build them while the runtime starts.
     renderer_.prebuildFonts();
+    // Before we connect: SteamVR's "Up next" launch, like Steam's own VR games.
+    steamVrPrelaunch();
     if (!xr_.createInstanceAndSystem("Pixel VR Player")) {
         return false;
     }
@@ -409,7 +411,6 @@ bool App::init(const std::string& mediaPath) {
     }
 
     PIXELVR_LOG_INFO("Initialization complete");
-    spawnVrAppManifestRegistration();  // lets SteamVR show "Up next" on later launches
     return true;
 }
 

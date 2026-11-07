@@ -2,22 +2,26 @@
 
 namespace pixelvr {
 
-// Makes SteamVR know this non-Steam shortcut as a VR app, so a launch from the
-// Steam library gets SteamVR's "Up next" transition (and the dashboard closes by
-// itself) instead of ending on "Resume Game".
+// Makes a launch of this non-Steam shortcut look to SteamVR like a launch of
+// one of Steam's own VR games: SteamVR shows its "Up next" transition and the
+// dashboard closes by itself once we connect, instead of ending on
+// "Resume Game".
 //
-// Steam generates the shortcut's entry in steamapps.vrmanifest with only
-// "binary_path_linux"; SteamVR on the ARM Steam Frame wants
-// "binary_path_linux_arm" and skips the entry, so Steam's prelaunch check never
-// finds the app. This registers a valid manifest for the same app key through
-// the public IVRApplications::AddApplicationManifest.
+// Steam runs IVRApplications::PerformApplicationPrelaunchCheck before starting
+// its own VR games, but not for shortcuts. It also writes the shortcut's
+// steamapps.vrmanifest entry with only "binary_path_linux", which SteamVR on the
+// ARM Steam Frame rejects, so SteamVR does not know the app key at all. The
+// helper registers a valid manifest for the same key (public
+// IVRApplications::AddApplicationManifest) when needed, then runs the check.
 //
-// Runs as a short-lived child process (`pixelvr --register-vr-manifest`, started
-// by App::init) so the player never holds an extra OpenVR connection. Returns
-// a process exit code; logs what it did.
-int registerVrAppManifest();
+// It is a short-lived child process (`pixelvr --steamvr-prelaunch`) without
+// Steam's id variables, so SteamVR never takes its connection for the app.
 
-// Starts the helper above in the background (no-op outside a Steam launch).
-void spawnVrAppManifestRegistration();
+// The helper's entry point (process exit code; logs what it did).
+int runSteamVrPrelaunchHelper();
+
+// Runs the helper and waits for it (at most 3 s). Call before the OpenXR
+// instance is created. No-op when not launched by Steam.
+void steamVrPrelaunch();
 
 }  // namespace pixelvr
