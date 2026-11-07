@@ -3192,6 +3192,7 @@ int App::run() {
                                       settings_.uiAccentColorIdx(),
                                       settings_.uiDistance());
             renderer_.setAmbilightIntensity(settings_.ambilightIntensity());
+            renderer_.setAmbilightAllScreens(settings_.ambilightAllScreens());
             {
                 std::vector<VulkanRenderer::RailShortcut> rail;
                 for (const SettingsMenu::RailShortcut* sc : settings_.railShortcuts()) {
@@ -3202,6 +3203,7 @@ int App::run() {
             renderer_.setUiFollowMode(settings_.uiFollowMode());
             renderer_.setPanelCurve(settings_.panelCurve());
             renderer_.setUiOpacity(settings_.uiOpacity());
+            renderer_.setPanelStyle(settings_.panelStyle());
 
             // Multi-screen bookkeeping: turning the setting off returns to the
             // classic single main screen; audio follows the chosen mode.
@@ -3274,7 +3276,7 @@ int App::run() {
             renderer_.setMultiScreen(multiScreenEnabled() && openScreenCount() > 0, selectedScreen_);
             if (!multiScreenEnabled() || openScreenCount() == 0) screensUnlocked_ = false;
             renderer_.setScreenControls(multiScreenEnabled() && cur().open, selectedScreen_ + 1,
-                                        cur().muted, screensUnlocked_, settings_.screenFrames());
+                                        cur().muted, screensUnlocked_, settings_.screenNumbers());
             renderer_.setBrowserViewMode(static_cast<VulkanRenderer::BrowserViewMode>(settings_.browserViewMode()));
             renderer_.setBrowserQuickPath(browser_.isCurrentBookmarked());
 #ifdef PIXELVR_HAVE_FREETYPE
@@ -4790,8 +4792,8 @@ int App::run() {
                         }
                     } else if (cb == VulkanRenderer::CtrlButton::ScreenLock) {
                         screensUnlocked_ = !screensUnlocked_;
-                    } else if (cb == VulkanRenderer::CtrlButton::ScreenFrames) {
-                        settings_.setScreenFrames(!settings_.screenFrames());
+                    } else if (cb == VulkanRenderer::CtrlButton::ScreenNumbers) {
+                        settings_.setScreenNumbers(!settings_.screenNumbers());
                     } else if (cb == VulkanRenderer::CtrlButton::ScreenLayout) {
                         openArrangeMenu();
                     } else if (cb == VulkanRenderer::CtrlButton::ScreenClose) {

@@ -61,6 +61,7 @@ public:
         TogglePrivateBrowsing,
         CycleBrowserSort,
         BackToUI,
+        CycleAmbilightScope,
     };
 
     // How a row's value is presented: the renderer draws a stepped slider for
@@ -150,14 +151,16 @@ public:
     // New browser screens open in a private (incognito) browser context.
     bool privateBrowsing() const { return privateBrowsing_; }
     // Borders around the screens in multi-screen mode (dock toggle).
-    bool screenFrames() const { return screenFrames_; }
-    void setScreenFrames(bool on) { screenFrames_ = on; saveConfig(); }
+    // Multi-screen: a big number on each screen (dock toggle).
+    bool screenNumbers() const { return screenNumbers_; }
+    void setScreenNumbers(bool on) { screenNumbers_ = on; saveConfig(); }
     // Multi-screen: the selected screen is heard, the others are muted (dock
     // button). Off: every screen plays its own audio (per-screen mute / volume).
     bool audioFollow() const { return audioFollow_; }
     void setAudioFollow(bool on) { audioFollow_ = on; saveConfig(); }
-    // Panel transparency: 0 = solid .. 3 = clear; uiOpacity() is the renderer factor.
+    // Panel style: 0 = Solid, 1 = Frosted, 2 = Glass; uiOpacity() is the glass slab's opacity.
     int uiOpacityIdx() const { return uiOpacityIdx_; }
+    int panelStyle() const { return uiOpacityIdx_; }
     float uiOpacity() const;
     // File browser sort order: 0 = name, 1 = newest first, 2 = largest first.
     int browserSort() const { return browserSort_; }
@@ -203,6 +206,7 @@ public:
     // Ambient screen glow ("ambilight") behind the flat cinema screen.
     int ambilightIdx() const { return ambilightIdx_; }
     float ambilightIntensity() const;  // 0 = off
+    bool ambilightAllScreens() const { return ambilightAllScreens_; }  // else only the selected screen
 
     // OpenXR swapchain supersampling / render resolution scale.
 
@@ -239,13 +243,13 @@ private:
     int uiFollowMode_ = 0;     // 0=World Lock (default, zero drift/tilt), 1=Smooth Gaze Follow
     int browserViewMode_ = 0;  // 0=Large Cards (3x2), 1=Smaller Cards (4x3), 2=Compact List (1-Col)
     int panelCurveIdx_ = 1;    // 0=Flat, 1=Gentle (default), 2=Wrap
-    int uiOpacityIdx_ = 2;     // 0=Solid, 1=Frosted, 2=Glass (default), 3=Clear
+    int uiOpacityIdx_ = 1;     // panel style: 0=Solid, 1=Frosted (default), 2=Glass
     bool multiScreen_ = true; // off = classic single-screen player
     bool pauseOnRemoval_ = true;
     int keyboardLayout_ = 0;
     bool pauseLivestreams_ = false;
     bool privateBrowsing_ = false;
-    bool screenFrames_ = true;
+    bool screenNumbers_ = false;
     bool audioFollow_ = false;
     int browserSort_ = 0;      // 0=Name, 1=Newest, 2=Largest
     bool listShowFormat_ = true;
@@ -256,6 +260,7 @@ private:
     bool hoverHapticsEnabled_ = true;
     int hoverHapticsStrengthIdx_ = 1;
     int ambilightIdx_ = 2;     // 0=Off, 1=Subtle, 2=Medium (default), 3=Strong
+    bool ambilightAllScreens_ = true;  // multi-screen: glow around every screen
 
     int section_ = 0;   // 0=Display, 1=UI, 2=Audio, 3=Controls, 4=Vault; 10..12=sub-lists
     std::vector<std::pair<int, std::string>> videoStreams_;  // (index, label)

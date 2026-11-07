@@ -61,18 +61,22 @@ struct TextPush {
 };
 static_assert(sizeof(TextPush) <= 128, "TextPush exceeds the guaranteed push-constant size");
 
-// Frosted-glass backdrop (glass.vert + glass_*.frag): the video behind a
-// panel, blurred. h0..h2 are the rows of the homography that maps unit-quad
-// coordinates to (u*w, v*w, w) on the screen; their .w carry the video's range
-// / crop parameters.
+// Frosted-glass backdrop (glass.vert + glass_*.frag): one screen behind a
+// panel, blurred. See glass.vert for the fields.
 struct GlassPush {
-    float mvp[16];
-    float h0[4];
-    float h1[4];
-    float h2[4];
+    float ndc[4];   // clip rect of the panel element: vCoord * xy + zw
+    float win[4];   // layer pixel -> panel metres at rest
+    float hu[4];    // panel point (x, y, z, 1) -> screen chord-plane (x*w, y*w, w)
+    float hv[4];
+    float hw[4];
     float misc[4];  // x: blur lod + 10 * stereo mode, y: alpha, z: corner radius, w: aspect
+    float tex[4];   // xy: crop scale / luma offset+scale, z: sRGB decode, w: panel bend radius
+    float scr[4];   // screen half width (arc), half height, bend radius, edge fade (metres)
+    float eye[4];   // the head in screen-local metres
 };
-static_assert(sizeof(GlassPush) <= 128, "GlassPush exceeds the guaranteed push-constant size");
+// 144 bytes: above the guaranteed 128 (Turnip / Adreno 750 offers 256); the
+// backdrop is switched off on a device with less (see createLayerResources).
+static_assert(sizeof(GlassPush) <= 256, "GlassPush exceeds the push-constant size we rely on");
 
 // One batched glyph (instance data for text.vert).
 struct GlyphInstance {
@@ -124,7 +128,7 @@ constexpr float kDockScreenRowExtra = 0.100f;
 inline bool is_screen_row_button(int b) {
     using Btn = VulkanRenderer::CtrlButton;
     const auto cb = static_cast<Btn>(b);
-    return cb == Btn::ScreenMute || cb == Btn::ScreenAudioFollow || cb == Btn::ScreenLock || cb == Btn::ScreenFrames ||
+    return cb == Btn::ScreenMute || cb == Btn::ScreenAudioFollow || cb == Btn::ScreenLock || cb == Btn::ScreenNumbers ||
            cb == Btn::ScreenLayout || cb == Btn::ScreenClose;
 }
 
@@ -152,7 +156,7 @@ inline CtrlButtonRect get_ctrl_button_rect(int b) {
         case Btn::ScreenMute:   return {-0.03f, kBarY - 0.250f, 0.046f, 0.046f};
         case Btn::ScreenAudioFollow: return { 0.10f, kBarY - 0.250f, 0.046f, 0.046f};
         case Btn::ScreenLock:   return { 0.23f, kBarY - 0.250f, 0.046f, 0.046f};
-        case Btn::ScreenFrames: return { 0.36f, kBarY - 0.250f, 0.046f, 0.046f};
+        case Btn::ScreenNumbers: return { 0.36f, kBarY - 0.250f, 0.046f, 0.046f};
         case Btn::ScreenLayout: return { 0.49f, kBarY - 0.250f, 0.046f, 0.046f};
         case Btn::ScreenClose:  return { 0.62f, kBarY - 0.250f, 0.046f, 0.046f};
         default: return {0.0f, 0.0f, 0.0f, 0.0f};
@@ -691,6 +695,8 @@ VulkanRenderer::~VulkanRenderer() {
             vkDestroyDescriptorSetLayout(device_, descriptorSetLayout_, nullptr);
         if (pipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, pipeline_, nullptr);
         if (ambilightPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, ambilightPipeline_, nullptr);
+        if (ambilightWebPipeline_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, ambilightWebPipeline_, nullptr);
+        if (ambilightWebLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(device_, ambilightWebLayout_, nullptr);
         if (pipelineLayout_ != VK_NULL_HANDLE)
             vkDestroyPipelineLayout(device_, pipelineLayout_, nullptr);
         if (spherePipeline_ != VK_NULL_HANDLE)
@@ -749,9 +755,10 @@ VulkanRenderer::~VulkanRenderer() {
         for (ScreenLayer& L : screenLayers_) destroyLayerTargets(L.targets);
         for (VkPipeline p : {uiPipelineLayer_, uiPipelineLayerAlpha_, uiPipelineLayerFade_, textPipelineLayer_,
                              thumbPipelineLayer_,
-                             pipelineLayer_, glassPipelineLayer_}) {
+                             pipelineLayer_, glassPipelineLayer_, glassPipelineWebLayer_}) {
             if (p != VK_NULL_HANDLE) vkDestroyPipeline(device_, p, nullptr);
         }
+        if (glassWebLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(device_, glassWebLayout_, nullptr);
         if (glassPipelineLayout_ != VK_NULL_HANDLE)
             vkDestroyPipelineLayout(device_, glassPipelineLayout_, nullptr);
         if (uiLayerPass_ != VK_NULL_HANDLE)
@@ -1603,7 +1610,11 @@ bool VulkanRenderer::createLayerResources(XrContext& xr, int64_t colorFormat) {
                            true)) {
             uiPipelineLayerFade_ = VK_NULL_HANDLE;
         }
-        // Frosted-glass backdrop over the CPU NV12 textures (best effort).
+        // Frosted-glass backdrop over the CPU NV12 textures (best effort; its
+        // push block needs more than the guaranteed 128 bytes).
+        VkPhysicalDeviceProperties pdp{};
+        vkGetPhysicalDeviceProperties(physicalDevice_, &pdp);
+        glassPushOk_ = pdp.limits.maxPushConstantsSize >= sizeof(GlassPush);
         VkPushConstantRange glassPush{};
         glassPush.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
         glassPush.size = sizeof(GlassPush);
@@ -1612,7 +1623,7 @@ bool VulkanRenderer::createLayerResources(XrContext& xr, int64_t colorFormat) {
         gl.pSetLayouts = &descriptorSetLayout_;
         gl.pushConstantRangeCount = 1;
         gl.pPushConstantRanges = &glassPush;
-        if (vkCreatePipelineLayout(device_, &gl, nullptr, &glassPipelineLayout_) != VK_SUCCESS ||
+        if (!glassPushOk_ || vkCreatePipelineLayout(device_, &gl, nullptr, &glassPipelineLayout_) != VK_SUCCESS ||
             !buildPipeline("glass.vert.spv", "glass_nv12.frag.spv", glassPipelineLayout_,
                            glassPipelineLayer_, true, uiLayerPass_, VK_SAMPLE_COUNT_1_BIT)) {
             PIXELVR_LOG_WARN("Frosted-glass backdrop unavailable");
@@ -3243,6 +3254,7 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
     struct Pending {
         int slot;
         uint32_t imageIndex;
+        int badge;
     };
     std::vector<Pending> copies;
     bool cursorPending = false;
@@ -3311,11 +3323,20 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
             L.drawnSerial = 0;
         }
         L.web = web;
-        if (L.drawnSerial != frameSerial_[slot]) {
+        // Screen number (dock toggle, and while screens are unlocked to move):
+        // drawn into the copy, so a change also needs one.
+        const bool numbers = multiScreenActive_ && (screenNumbersOn_ || screensUnlocked_);
+        const int badge = numbers ? (slot + 1) + (slot == selectedScreen_ ? 10 : 0) : 0;
+        // Its look also depends on the 3D layout and the accent colour.
+        const int badgeKey = badge == 0 ? 0
+                                        : badge | (static_cast<int>(st) << 8) |
+                                              (std::clamp(uiAccentColorIdx_, 0, 4) << 12);
+        if (L.drawnSerial != frameSerial_[slot] || L.drawnBadge != badgeKey) {
             uint32_t idx = 0;
             if (xr.acquireLayerImage(L.sc, idx) && idx < L.targets.framebuffers.size()) {
-                copies.push_back({slot, idx});
+                copies.push_back({slot, idx, badge});
                 L.drawnSerial = frameSerial_[slot];
+                L.drawnBadge = badgeKey;
             }
         }
 
@@ -3429,8 +3450,9 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
         if (beamPending) xr.releaseLayerImage(beamSwapchain_);
         return;
     }
+    uint32_t glyphCursor = 0;
     for (const Pending& p : copies) {
-        recordScreenCopy(p.slot, screenLayers_[p.slot], p.imageIndex);
+        recordScreenCopy(p.slot, screenLayers_[p.slot], p.imageIndex, p.badge, glyphCursor);
     }
     if (beamPending) {
         // Soft accent capsule, full height, fading at the sides.
@@ -3587,7 +3609,8 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
 
 // Copies the current frame of a layer screen into its swapchain image: the
 // whole frame (both views of 3D content), flat, filling the image.
-void VulkanRenderer::recordScreenCopy(int slot, const ScreenLayer& L, uint32_t imageIndex) {
+void VulkanRenderer::recordScreenCopy(int slot, const ScreenLayer& L, uint32_t imageIndex, int badge,
+                                      uint32_t& glyphCursor) {
     using namespace math;
     // The compositor draws layer outlines without anti-aliasing, so the frame
     // is drawn one texel inside a transparent border: its bilinear sampling
@@ -3648,6 +3671,90 @@ void VulkanRenderer::recordScreenCopy(int slot, const ScreenLayer& L, uint32_t i
             vkCmdPushConstants(commandBuffer_, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
                                sizeof(PushConstants), &push);
             vkCmdDraw(commandBuffer_, 64 * 6, 1, 0, 0);
+        }
+    }
+    // Screen number: a dark disc with the number in the middle of each eye's
+    // view (3D: each half of the image), drawn into the copy so it sits on
+    // the screen layer itself. The selected screen's disc has an accent rim.
+    const int number = badge % 10;
+    if (number > 0 && uiPipelineLayer_ != VK_NULL_HANDLE && textPipelineLayer_ != VK_NULL_HANDLE && textReady_ &&
+        glyphMapped_[3] != nullptr) {
+        const bool sel = badge >= 10;
+        const StereoMode st = L.web ? StereoMode::Mono
+                                    : ((slot == 0) ? stereoMode_ : screenPlacements_[slot].stereo);
+        const int views = (st == StereoMode::Mono) ? 1 : 2;
+        const float w = static_cast<float>(L.targets.width);
+        const float h = static_cast<float>(L.targets.height);
+        static const float kAccents[5][3] = {{0.25f, 0.78f, 1.00f}, {0.18f, 0.85f, 0.52f}, {1.00f, 0.68f, 0.20f},
+                                             {0.68f, 0.42f, 1.00f}, {0.96f, 0.28f, 0.36f}};
+        const float* ac = kAccents[std::clamp(uiAccentColorIdx_, 0, 4)];
+        const bool bold = fontAtlasBold_.ok;
+        const FontAtlas& font = bold ? fontAtlasBold_ : fontAtlas_;
+        const VkDescriptorSet fontSet = bold ? textSetBold_ : textSet_;
+        const Glyph& g = font.glyphs[static_cast<unsigned char>('0' + number)];
+        for (int e = 0; e < views; ++e) {
+            VkViewport hv{1.0f, 1.0f, w - 2.0f, h - 2.0f, 0.0f, 1.0f};
+            if (st == StereoMode::SideBySide) {
+                hv.x = 1.0f + e * std::floor(w * 0.5f);
+                hv.width = std::floor(w * 0.5f) - 2.0f;
+            } else if (st == StereoMode::TopBottom) {
+                hv.y = 1.0f + e * std::floor(h * 0.5f);
+                hv.height = std::floor(h * 0.5f) - 2.0f;
+            }
+            if (hv.width < 8.0f || hv.height < 8.0f) continue;
+            vkCmdSetViewport(commandBuffer_, 0, 1, &hv);
+            // The ortho spans 3.2 x 1.8 model units over this view, which is
+            // shown at the screen's aspect: widen x by that so the disc and
+            // the digit keep their shape (wide films, half-SBS, browser
+            // screens with their toolbar).
+            const ScreenHitInfo& shb = screenHit_[slot];
+            const float dispAspect = (shb.valid && shb.halfH > 0.0f) ? shb.halfW / shb.halfH : hv.width / hv.height;
+            const float ax = (16.0f / 9.0f) / dispAspect;
+            UiPush up{};
+            const Mat4 discMvp = multiply(ortho, scaling(Vec3{ax, 1.0f, 1.0f}));  // square rect: a true circle
+            std::memcpy(up.mvp, discMvp.m, sizeof(up.mvp));
+            const float disc[4] = {0.0f, 0.0f, 0.0f, 0.55f};
+            std::memcpy(up.color, disc, sizeof(up.color));
+            up.params[0] = static_cast<float>(UiShape::RoundedBox);
+            up.params[1] = 1.0f;
+            up.params[2] = sel ? 0.07f : 0.04f;
+            up.params[3] = 0.0f;
+            const float rim[4] = {sel ? ac[0] : 1.0f, sel ? ac[1] : 1.0f, sel ? ac[2] : 1.0f, sel ? 1.0f : 0.75f};
+            std::memcpy(up.borderColor, rim, sizeof(up.borderColor));
+            up.rect[0] = 0.0f;
+            up.rect[1] = 0.0f;
+            up.rect[2] = 0.30f;
+            up.rect[3] = 0.30f;
+            vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipelineLayer_);
+            vkCmdPushConstants(commandBuffer_, uiPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                               0, sizeof(UiPush), &up);
+            vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
+            // The digit, centred, about 0.34 units tall.
+            if (g.width > 0.0f && g.height > 0.0f && glyphCursor < kMaxGlyphsPerView) {
+                const float scale = 0.34f / g.height;
+                GlyphInstance& gi = static_cast<GlyphInstance*>(glyphMapped_[3])[glyphCursor];
+                gi.rect[0] = -0.5f * g.width * scale * ax;
+                gi.rect[1] = -0.5f * g.height * scale;
+                gi.rect[2] = g.width * scale * ax;
+                gi.rect[3] = g.height * scale;
+                gi.uv[0] = g.u0;
+                gi.uv[1] = g.v0;
+                gi.uv[2] = g.u1;
+                gi.uv[3] = g.v1;
+                const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+                std::memcpy(gi.color, white, sizeof(gi.color));
+                vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipelineLayer_);
+                vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipelineLayout_, 0, 1,
+                                        &fontSet, 0, nullptr);
+                const VkDeviceSize off = 0;
+                vkCmdBindVertexBuffers(commandBuffer_, 0, 1, &glyphBuffer_[3], &off);
+                TextPush tp{};
+                std::memcpy(tp.mvp, ortho.m, sizeof(tp.mvp));
+                vkCmdPushConstants(commandBuffer_, textPipelineLayout_,
+                                   VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(TextPush), &tp);
+                vkCmdDraw(commandBuffer_, 6, 1, 0, glyphCursor);
+                ++glyphCursor;
+            }
         }
     }
     vkCmdEndRenderPass(commandBuffer_);
@@ -3947,85 +4054,144 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
     // translucent glass surface (layer pass only; the eye-buffer path keeps
     // plain glass). Each point of the panel is projected from the viewer's
     // head onto the flat plane of the video screen, as a homography.
+    // Draws every flat screen behind the panel rect (far to near, each clipped
+    // to its outline and opaque inside it, so a nearer screen covers a farther
+    // one); returns whether anything was drawn. Between screens the panel
+    // stays translucent and SteamVR blends it over the room.
     auto drawGlassBackdrop = [&](float cx, float cy, float hw, float hh, float radius) -> bool {
-        if (!layerPass || projectionMode_ != ProjectionMode::Flat) return false;
-        const int slot = multiScreenActive_ ? selectedScreen_ : 0;
-        if (slot < 0 || slot >= kMaxVideoSlots) return false;
-        const VideoSlot& v = videoSlots_[slot];
-        const ScreenHitInfo& sh = screenHit_[slot];
-        if (!v.hasVideo || !sh.valid || sh.halfW <= 0.0f || sh.halfH <= 0.0f) return false;
-        const bool ycbcr = v.usingDmabuf && v.resolveImage != VK_NULL_HANDLE &&
-                           v.glassPipelineLayer != VK_NULL_HANDLE;
-        const VkPipeline pipe = ycbcr ? v.glassPipelineLayer : glassPipelineLayer_;
-        const VkPipelineLayout pl = ycbcr ? v.glassLayout : glassPipelineLayout_;
-        const VkDescriptorSet set = ycbcr ? v.resolveSet : v.descriptorSet;
-        if (pipe == VK_NULL_HANDLE || set == VK_NULL_HANDLE) return false;
+        if (!layerPass || projectionMode_ != ProjectionMode::Flat || !glassPushOk_) return false;
+        // Panel element rect in clip space (follows the open / close animation).
+        const Vec3 c0 = transformPoint(vpPanel, Vec3{cx - hw, cy - hh, 0.0f});
+        const Vec3 c1 = transformPoint(vpPanel, Vec3{cx + hw, cy + hh, 0.0f});
+        // Layer pixel -> panel metres where SteamVR shows it (at rest).
+        const float mppX = 2.0f * layer->hw / static_cast<float>(std::max(layer->pw, 1));
+        const float mppY = 2.0f * layer->hh / static_cast<float>(std::max(layer->ph, 1));
+        const float panelR = panelBendRadius(placement.dist);
+        bool drew = false;
+        for (int oi = 0; oi < kMaxVideoSlots; ++oi) {
+            const int slot = screenDrawOrder_[oi];
+            if (slot < 0 || slot >= kMaxVideoSlots) continue;
+            if (slot > 0 && !screenPlacements_[slot].active) continue;
+            if (musicViews_[slot].active) continue;  // its overlay is not in the texture
+            const ScreenHitInfo& sh = screenHit_[slot];
+            if (!sh.valid || sh.halfW <= 0.0f || sh.halfH <= 0.0f) continue;
+            const VideoSlot& v = videoSlots_[slot];
+            const bool web = webSlots_[slot] && webTex_[slot].initialized && webTex_[slot].set != VK_NULL_HANDLE;
+            if (!web && !v.hasVideo) continue;
+            if (web && glassPipelineWebLayer_ == VK_NULL_HANDLE && !glassWebTried_) {
+                // Built on first use (the text descriptor layout exists by then).
+                glassWebTried_ = true;
+                VkPushConstantRange range{};
+                range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+                range.size = sizeof(GlassPush);
+                VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+                li.setLayoutCount = 1;
+                li.pSetLayouts = &textSetLayout_;
+                li.pushConstantRangeCount = 1;
+                li.pPushConstantRanges = &range;
+                if (textSetLayout_ == VK_NULL_HANDLE || !glassPushOk_ ||
+                    vkCreatePipelineLayout(device_, &li, nullptr, &glassWebLayout_) != VK_SUCCESS ||
+                    !buildPipeline("glass.vert.spv", "glass_rgba.frag.spv", glassWebLayout_, glassPipelineWebLayer_,
+                                   true, uiLayerPass_, VK_SAMPLE_COUNT_1_BIT)) {
+                    PIXELVR_LOG_WARN("Frosted-glass backdrop for browser screens unavailable");
+                    glassPipelineWebLayer_ = VK_NULL_HANDLE;
+                }
+            }
+            const bool ycbcr = !web && v.usingDmabuf && v.resolveImage != VK_NULL_HANDLE &&
+                               v.glassPipelineLayer != VK_NULL_HANDLE;
+            const VkPipeline pipe = web ? glassPipelineWebLayer_ : (ycbcr ? v.glassPipelineLayer : glassPipelineLayer_);
+            const VkPipelineLayout pl = web ? glassWebLayout_ : (ycbcr ? v.glassLayout : glassPipelineLayout_);
+            const VkDescriptorSet set = web ? webTex_[slot].set : (ycbcr ? v.resolveSet : v.descriptorSet);
+            if (pipe == VK_NULL_HANDLE || pl == VK_NULL_HANDLE || set == VK_NULL_HANDLE) continue;
 
-        // Panel rect -> screen-local frame (flat; curvature is ignored here).
-        const Mat4 screenFrame = multiply(
-            translation(Vec3{sh.center[0], sh.center[1], sh.center[2]}),
-            orientFromYawPitchRoll(sh.yaw, sh.pitch, sh.roll));
-        const Mat4 toScreen = multiply(rigidInverse(screenFrame), panelBase);
-        const Vec3 ax = transformDir(toScreen, Vec3{hw, 0.0f, 0.0f});
-        const Vec3 ay = transformDir(toScreen, Vec3{0.0f, hh, 0.0f});
-        const Vec3 ac = transformPoint(toScreen, Vec3{cx, cy, 0.0f});
-        const Vec3 head = transformPoint(rigidInverse(screenFrame),
-                                         Vec3{layer->headPos[0], layer->headPos[1], layer->headPos[2]});
-        // Linear functionals of (x, y, 1): screen-local S, then the ray from
-        // the head through S hits z = 0 at (head.z*S - S.z*head) / (head.z - S.z).
-        const float sx[3] = {ax.x, ay.x, ac.x};
-        const float sy[3] = {ax.y, ay.y, ac.y};
-        const float sz[3] = {ax.z, ay.z, ac.z};
-        const float den[3] = {-sz[0], -sz[1], head.z - sz[2]};
-        GlassPush push{};
-        for (int i = 0; i < 3; ++i) {
-            const float nx = head.z * sx[i] - head.x * sz[i];
-            const float ny = head.z * sy[i] - head.y * sz[i];
-            push.h0[i] = nx / (2.0f * sh.halfW) + 0.5f * den[i];
-            push.h1[i] = -ny / (2.0f * sh.halfH) + 0.5f * den[i];
-            push.h2[i] = den[i];
-        }
-        if (ycbcr) {
-            push.h0[3] = v.drmUvScaleX;
-            push.h1[3] = v.drmUvScaleY;
-        } else {
-            push.h0[3] = v.range[0];
-            push.h1[3] = v.range[1];
-        }
-        push.h2[3] = v.range[2];
-        const Mat4 mvp = multiply(vpPanel, multiply(translation(Vec3{cx, cy, 0.0f}),
-                                                    scaling(Vec3{hw, hh, 1.0f})));
-        std::memcpy(push.mvp, mvp.m, sizeof(push.mvp));
-        // Blur to roughly 48 texels across the frame; left view of 3D content.
-        const float texW = static_cast<float>(ycbcr ? v.resolveW : v.videoWidth);
-        const float lod = std::clamp(std::log2(std::max(texW, 48.0f) / 48.0f), 0.0f, 9.0f);
-        const StereoMode st = (slot == 0) ? stereoMode_ : screenPlacements_[slot].stereo;
-        push.misc[0] = lod + 10.0f * static_cast<float>(static_cast<int>(st));
-        push.misc[1] = 0.92f;
-        push.misc[2] = radius;
-        push.misc[3] = hw / std::max(hh, 1e-4f);
+            // Panel point (x, y, z) -> screen-local S; the shader follows the
+            // line of sight from the head through S to the screen surface
+            // (plane, or the cylinder of a curved screen layer).
+            const Mat4 screenFrame = multiply(translation(Vec3{sh.center[0], sh.center[1], sh.center[2]}),
+                                              orientFromYawPitchRoll(sh.yaw, sh.pitch, sh.roll));
+            const Mat4 toScreen = multiply(rigidInverse(screenFrame), panelBase);
+            const Vec3 head = transformPoint(rigidInverse(screenFrame),
+                                             Vec3{layer->headPos[0], layer->headPos[1], layer->headPos[2]});
+            GlassPush push{};
+            for (int k = 0; k < 4; ++k) {
+                // Column k of toScreen (column-major): the k-th coefficient of S.
+                push.hu[k] = toScreen.m[k * 4 + 0];
+                push.hv[k] = toScreen.m[k * 4 + 1];
+                push.hw[k] = toScreen.m[k * 4 + 2];
+            }
+            push.eye[0] = head.x;
+            push.eye[1] = head.y;
+            push.eye[2] = head.z;
+            push.ndc[0] = 0.5f * (c1.x - c0.x);
+            push.ndc[1] = 0.5f * (c1.y - c0.y);
+            push.ndc[2] = 0.5f * (c1.x + c0.x);
+            push.ndc[3] = 0.5f * (c1.y + c0.y);
+            push.win[0] = layer->cx - layer->hw - static_cast<float>(layer->px) * mppX;
+            push.win[1] = layer->cy + layer->hh + static_cast<float>(layer->py) * mppY;
+            push.win[2] = mppX;
+            push.win[3] = -mppY;
+            float texW;
+            if (web) {
+                push.tex[0] = 1.0f;
+                push.tex[1] = 1.0f;
+                push.tex[2] = 1.0f;  // sRGB bytes in a UNORM image
+                texW = static_cast<float>(webTex_[slot].width);
+            } else if (ycbcr) {
+                push.tex[0] = v.drmUvScaleX;
+                push.tex[1] = v.drmUvScaleY;
+                push.tex[2] = v.range[2];
+                texW = static_cast<float>(v.resolveW);
+            } else {
+                push.tex[0] = v.range[0];
+                push.tex[1] = v.range[1];
+                push.tex[2] = v.range[2];
+                texW = static_cast<float>(v.videoWidth);
+            }
+            push.tex[3] = panelR;
+            push.scr[0] = sh.halfW;
+            push.scr[1] = sh.halfH;
+            // Bent only if the compositor shows it as a cylinder (renderLayersAfter).
+            push.scr[2] = (sh.bendR > 0.0f && uiLayerCylinder_) ? sh.bendR : 0.0f;
+            // Each eye (~32 mm off the head centre) sees the screen's edge
+            // shifted on the screen by ipd/2 * (screen - panel) / panel.
+            {
+                const float dScreen = std::max(std::fabs(head.z), 0.3f);
+                const float dPanel = std::max(placement.dist, 0.3f);
+                push.scr[3] = std::clamp(0.032f * std::max(dScreen - dPanel, 0.0f) / dPanel, 0.004f, 0.15f);
+            }
+            // Blur to roughly 48 texels across the frame; left view of 3D content.
+            const float lod = std::clamp(std::log2(std::max(texW, 48.0f) / 48.0f), 0.0f, 9.0f);
+            const StereoMode st = web ? StereoMode::Mono
+                                      : ((slot == 0) ? stereoMode_ : screenPlacements_[slot].stereo);
+            push.misc[0] = lod + 10.0f * static_cast<float>(static_cast<int>(st));
+            push.misc[1] = 1.0f;
+            push.misc[2] = radius;
+            push.misc[3] = hw / std::max(hh, 1e-4f);
 
-        flushText();
-        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
-        vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pl, 0, 1, &set, 0, nullptr);
-        vkCmdPushConstants(commandBuffer_, pl, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
-                           0, sizeof(GlassPush), &push);
-        vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
-        return true;
+            flushText();
+            vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+            vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pl, 0, 1, &set, 0, nullptr);
+            vkCmdPushConstants(commandBuffer_, pl, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                               0, sizeof(GlassPush), &push);
+            vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
+            drew = true;
+        }
+        return drew;
     };
     // Large glass surfaces (hub panel, dock, modals): frosted backdrop, then
     // the glass slab with bevel + reflection sheen. Leaves the UI pipeline bound.
     auto drawGlass = [&](float cx, float cy, float hw, float hh, const float col[4],
                          float radius, float borderWidth, const float rimCol[4]) {
-        if (drawGlassBackdrop(cx, cy, hw, hh, radius)) {
+        // Frosted: the screens behind, blurred. Glass: nothing; SteamVR blends
+        // the translucent slab over the screen layers and the room.
+        if (panelStyle_ == 1 && drawGlassBackdrop(cx, cy, hw, hh, radius)) {
             bindPipe(uiPipeline_);
         }
         const float rim[4] = {rimCol[0], rimCol[1], rimCol[2], glassPhase};
         drawUiElement(vpPanel, cx, cy, hw, hh, UiShape::GlassPanel, col, radius, borderWidth, rim);
-        if (layerPass && uiPipelineLayerAlpha_ != VK_NULL_HANDLE) {
-            // The panel's colour is already the right blend of glass over the
-            // frosted backdrop; make the layer opaque there (alpha = coverage,
-            // anti-aliased at the rim), see uiPipelineLayerAlpha_.
+        if (layerPass && panelStyle_ == 0 && uiPipelineLayerAlpha_ != VK_NULL_HANDLE) {
+            // Solid: opaque over the whole panel (alpha = coverage, anti-aliased
+            // at the rim), see uiPipelineLayerAlpha_.
             flushText();
             vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipelineLayerAlpha_);
             const float solid[4] = {0.0f, 0.0f, 0.0f, 1.0f};
@@ -4368,14 +4534,12 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
     // Draw each video slot that has a frame; otherwise the render pass just
     // clears the eye image. Slot 0 is the main screen (recenter-anchored, also
     // 360/180); slots 1..2 are extra flat screens placed by the user. Each flat
-    // screen's model matrix and half-size are kept for the selection outline.
+    // screen's bend is kept for the music view drawn on it.
     if (viewIndex == 0 && drawWorld) {
         for (ScreenHitInfo& h : screenHit_) h.valid = false;  // refreshed below
         for (bool& l : screenLayerLive_) l = false;
     }
-    math::Mat4 screenModels[kMaxVideoSlots];
     float screenBend[kMaxVideoSlots] = {};
-    float screenScaleX[kMaxVideoSlots] = {};
     if (drawWorld) {
         using namespace math;
         const Mat4 viewMatV = rigidInverse(rigidTransform(
@@ -4415,18 +4579,6 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         } else {
             std::memcpy(order, screenDrawOrder_, sizeof(order));
         }
-        // Frames: always while screens are unlocked (grab mode), otherwise only
-        // when more than one screen is visible.
-        int visibleScreens = 0;
-        for (int slot = 0; slot < kMaxVideoSlots; ++slot) {
-            const bool flatMain = (projectionMode_ == ProjectionMode::Flat);
-            const bool picture = videoSlots_[slot].hasVideo || (webSlots_[slot] && webTex_[slot].initialized);
-            if (picture && flatMain && (slot == 0 || screenPlacements_[slot].active)) {
-                ++visibleScreens;
-            }
-        }
-        const bool drawFrames = multiScreenActive_ && (screensUnlocked_ || (screenFramesOn_ && visibleScreens > 1)) &&
-                                uiPipeline_ != VK_NULL_HANDLE;
 
         // Pass 0 draws the ambilight glow, pass 1 the screens: every screen then
         // covers the glow, so it never spills onto a screen in front or behind.
@@ -4497,15 +4649,39 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 }
                 const float widthScale = eyeAspect / (16.0f / 9.0f);
 
-                // Cinema Screen Ambilight Glow: only around one screen (the main
-                // one, or the selected one in multi-screen mode).
-                const bool glowHere = (multiScreenActive_ ? slot == selectedScreen_ : slot == 0);
-                if (pass == 0 && ambilightIntensity_ > 0.01f && glowHere && !webHere) {
-                    VkPipeline ambPipe = ycbcr ? v.ycbcrAmbilightPipeline : ambilightPipeline_;
-                    if (ambPipe != VK_NULL_HANDLE) {
+                // Cinema Screen Ambilight Glow: around every screen (or only the
+                // selected one, per setting). All glows are drawn in pass 0 and
+                // every screen covers them (in-scene in pass 1, or as a layer
+                // over the eye buffers), so a glow never shows on a neighbour.
+                const bool glowHere = !multiScreenActive_ ? slot == 0
+                                                          : (ambilightAllScreens_ || slot == selectedScreen_);
+                if (pass == 0 && webHere && ambilightWebPipeline_ == VK_NULL_HANDLE && !ambilightWebTried_) {
+                    ambilightWebTried_ = true;  // built on first use, like the web backdrop
+                    VkPushConstantRange range{};
+                    range.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
+                    range.size = sizeof(PushConstants);
+                    VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+                    li.setLayoutCount = 1;
+                    li.pSetLayouts = &textSetLayout_;
+                    li.pushConstantRangeCount = 1;
+                    li.pPushConstantRanges = &range;
+                    if (textSetLayout_ == VK_NULL_HANDLE ||
+                        vkCreatePipelineLayout(device_, &li, nullptr, &ambilightWebLayout_) != VK_SUCCESS ||
+                        !buildPipeline("quad.vert.spv", "ambilight.frag.spv", ambilightWebLayout_,
+                                       ambilightWebPipeline_, true)) {
+                        PIXELVR_LOG_WARN("Screen glow for browser screens unavailable");
+                        ambilightWebPipeline_ = VK_NULL_HANDLE;
+                    }
+                }
+                if (pass == 0 && ambilightIntensity_ > 0.01f && glowHere) {
+                    VkPipeline ambPipe = webHere ? ambilightWebPipeline_
+                                                 : (ycbcr ? v.ycbcrAmbilightPipeline : ambilightPipeline_);
+                    const VkPipelineLayout ambLayout = webHere ? ambilightWebLayout_ : layout;
+                    const VkDescriptorSet ambSet = webHere ? webTex_[slot].set : videoSet;
+                    if (ambPipe != VK_NULL_HANDLE && ambLayout != VK_NULL_HANDLE) {
                         vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, ambPipe);
                         vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                                layout, 0, 1, &videoSet, 0, nullptr);
+                                                ambLayout, 0, 1, &ambSet, 0, nullptr);
                         const Vec3 ambCenter = center + fwd * 0.015f;
                         const Mat4 ambModel = multiply(
                             multiply(translation(ambCenter), rot),
@@ -4513,13 +4689,21 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         const Mat4 ambMvp = multiply(vpV, ambModel);
                         PushConstants ambPush{};
                         std::memcpy(ambPush.mvp, ambMvp.m, sizeof(ambPush.mvp));
-                        fillCommon(ambPush.conversion, ambPush.range);
-                        ambPush.range[3] = ambilightIntensity_;
-                        ambPush.stereo[0] = static_cast<float>(static_cast<int>(stereo));
+                        if (webHere) {
+                            // Whole page, sRGB bytes; a bit softer (white pages glare).
+                            ambPush.conversion[0] = 1.0f;
+                            ambPush.conversion[1] = 1.0f;
+                            ambPush.range[2] = 1.0f;
+                            ambPush.range[3] = ambilightIntensity_ * 0.7f;
+                        } else {
+                            fillCommon(ambPush.conversion, ambPush.range);
+                            ambPush.range[3] = ambilightIntensity_;
+                        }
+                        ambPush.stereo[0] = webHere ? 0.0f : static_cast<float>(static_cast<int>(stereo));
                         ambPush.stereo[1] = static_cast<float>(viewIndex);
                         ambPush.stereo[2] = swapEyes_ ? 1.0f : 0.0f;
                         ambPush.stereo[3] = curvature;
-                        vkCmdPushConstants(commandBuffer_, layout,
+                        vkCmdPushConstants(commandBuffer_, ambLayout,
                                            VK_SHADER_STAGE_VERTEX_BIT |
                                                VK_SHADER_STAGE_FRAGMENT_BIT,
                                            0, sizeof(PushConstants), &ambPush);
@@ -4580,10 +4764,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     vkCmdDraw(commandBuffer_, 64 * 6, 1, 0, 0);
                 }
 
-                // Outline geometry in the screen's own (unscaled) model space:
+                // The screen's bend in its own (unscaled) model space:
                 // quad.vert's screen is 3.2 x 1.8 and bends with radius
                 // 3.2 / (curvature * 1.75), the same bend ui.vert applies.
-                screenModels[slot] = model;
                 screenBend[slot] = (curvature > 0.005f) ? 3.2f / (curvature * 1.75f) : 0.0f;
                 if (viewIndex == 0) {
                     ScreenHitInfo& hit = screenHit_[slot];
@@ -4600,7 +4783,6 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     // are both scaled by widthScale * scale).
                     hit.bendR = (curvature > 0.005f) ? widthScale * scale * 3.2f / (curvature * 1.75f) : 0.0f;
                 }
-                screenScaleX[slot] = widthScale * scale;
 
                 const MusicView& mv = musicViews_[slot];
                 if (mv.active && textReady_ && uiPipeline_ != VK_NULL_HANDLE && glyphOut != nullptr) {
@@ -4709,21 +4891,42 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     curTextBend = prevBend;
                     uiBendOverride = -1.0f;
                 }
-
-                if (drawFrames) {
-                    vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipeline_);
+                // Screen number on a screen drawn in-scene (layer screens get it
+                // in their copy, recordScreenCopy).
+                if (!screenLayerLive_[slot] && multiScreenActive_ && (screenNumbersOn_ || screensUnlocked_) &&
+                    uiPipeline_ != VK_NULL_HANDLE && textReady_ && glyphOut != nullptr) {
                     const bool sel = (slot == selectedScreen_);
-                    uiBendOverride = screenBend[slot];
-                    // Model space is unscaled (half 1.6 x 0.9); pad ~2.5 cm outside.
-                    const float padX = 0.025f / std::max(screenScaleX[slot], 0.1f);
-                    const float frameCol[4] = {0.0f, 0.0f, 0.0f, 0.0f};
-                    const float unlockedRim[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.75f};
-                    const float* rim = sel ? themeAccentCol : (screensUnlocked_ ? unlockedRim : kGlassRim);
-                    const float width = sel ? 0.012f : (screensUnlocked_ ? 0.010f : 0.006f);
-                    drawUiElement(mvp, 0.0f, 0.0f, 1.6f + padX, 0.9f + 0.025f,
-                                  UiShape::RoundedBox, frameCol, 0.03f, width, rim);
+                    // Undo the screen's width scale so the disc is round; a
+                    // hair toward the viewer, flat (it is small).
+                    const Mat4 mvpBadge = multiply(mvp, multiply(translation(Vec3{0.0f, 0.0f, 0.02f}),
+                                                                 scaling(Vec3{1.0f / std::max(widthScale, 0.05f), 1.0f, 1.0f})));
+                    uiBendOverride = 0.0f;
+                    bindPipe(uiPipeline_);
+                    const float disc[4] = {0.0f, 0.0f, 0.0f, 0.55f};
+                    const float rim[4] = {sel ? themeAccentCol[0] : 1.0f, sel ? themeAccentCol[1] : 1.0f,
+                                          sel ? themeAccentCol[2] : 1.0f, sel ? 1.0f : 0.75f};
+                    drawUiElement(mvpBadge, 0.0f, 0.0f, 0.30f, 0.30f, UiShape::RoundedBox, disc, 1.0f,
+                                  sel ? 0.07f : 0.04f, rim);
+                    const Mat4* prevVpB = curTextVp;
+                    const float prevBendB = curTextBend;
+                    curTextVp = &mvpBadge;
+                    curTextBend = 0.0f;
+                    withHeadingFont([&] {
+                        const Glyph& g = curFont->glyphs[static_cast<unsigned char>('1' + slot)];
+                        if (g.height > 0.0f) {
+                            const float sc = 0.34f / g.height;
+                            const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+                            drawString(-0.5f * g.width * sc - g.bearingX * sc,
+                                       -0.5f * g.height * sc + (g.height - g.bearingY) * sc, sc, white,
+                                       std::string(1, static_cast<char>('1' + slot)));
+                        }
+                    });
+                    flushText();
+                    curTextVp = prevVpB;
+                    curTextBend = prevBendB;
                     uiBendOverride = -1.0f;
                 }
+
             } else {
                 // Straight from the decoder's frame (see updateVideoDmabuf), else
                 // the resolved RGBA copy / the CPU-uploaded texture.
@@ -4916,7 +5119,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 else if (cb == CtrlButton::ScreenAudioFollow) iconShape = UiShape::AudioFollow;
                 else if (cb == CtrlButton::ScreenLock)
                     iconShape = screensUnlocked_ ? UiShape::Unlocked : UiShape::Lock;
-                else if (cb == CtrlButton::ScreenFrames) iconShape = UiShape::Frame;
+                else if (cb == CtrlButton::ScreenNumbers) iconShape = UiShape::ScreenNumber;
                 else if (cb == CtrlButton::ScreenLayout) iconShape = UiShape::Layout;
                 else if (cb == CtrlButton::ScreenClose) iconShape = UiShape::Close;
                 const float iconK = is_screen_row_button(b) ? 0.64f : 0.42f;
@@ -4924,7 +5127,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const float* iconCol = (cb == CtrlButton::ScreenAudioFollow && audioFollow_) ? themeAccentCol
                                      : (cb == CtrlButton::ScreenAudioFollow) ? framesOffCol
                                      : (cb == CtrlButton::ScreenLock && screensUnlocked_) ? themeAccentCol
-                                     : (cb == CtrlButton::ScreenFrames && !screenFramesOn_) ? framesOffCol
+                                     : (cb == CtrlButton::ScreenNumbers && !screenNumbersOn_) ? framesOffCol
                                                                                             : themeTextCol;
                 drawUiElement(vpPanel, r.cx, r.cy, r.hw * iconK, r.hh * iconK, iconShape, iconCol);
             }
@@ -5057,7 +5260,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                        : (cbT == CtrlButton::ScreenAudioFollow)
                            ? (audioFollow_ ? "Audio follows selection: on" : "Audio follows selection: off")
                        : (cbT == CtrlButton::ScreenLock) ? (screensUnlocked_ ? "Lock screens" : "Unlock screens")
-                       : (cbT == CtrlButton::ScreenFrames) ? (screenFramesOn_ ? "Hide borders" : "Show borders")
+                       : (cbT == CtrlButton::ScreenNumbers) ? (screenNumbersOn_ ? "Hide screen numbers" : "Show screen numbers")
                        : (cbT == CtrlButton::ScreenLayout) ? "Arrange" : "Close screen";
             if (textReady_) {
                 const float tipSc = (0.029f * tScale) / fontAtlas_.lineHeight * 0.90f;
@@ -8093,7 +8296,7 @@ bool VulkanRenderer::createYcbcrPipeline(VideoSlot& v, uint32_t fourcc, int colo
         gl.pSetLayouts = &v.resolveSetLayout;
         gl.pushConstantRangeCount = 1;
         gl.pPushConstantRanges = &glassPush;
-        if (vkCreatePipelineLayout(device_, &gl, nullptr, &v.glassLayout) != VK_SUCCESS ||
+        if (!glassPushOk_ || vkCreatePipelineLayout(device_, &gl, nullptr, &v.glassLayout) != VK_SUCCESS ||
             !buildPipeline("glass.vert.spv", "glass_rgba.frag.spv", v.glassLayout,
                            v.glassPipelineLayer, true, uiLayerPass_, VK_SAMPLE_COUNT_1_BIT)) {
             v.glassPipelineLayer = VK_NULL_HANDLE;

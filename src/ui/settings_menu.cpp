@@ -83,9 +83,12 @@ const char* kAmbilightNames[] = {"Off", "Subtle", "Medium", "Strong"};
 const float kAmbilightValues[] = {0.0f, 0.30f, 0.55f, 0.85f};
 constexpr int kAmbilightCount = 4;
 
-const char* kUiOpacityNames[] = {"Solid", "Frosted", "Glass", "Clear"};
-const float kUiOpacityValues[] = {1.0f, 0.82f, 0.64f, 0.46f};
-constexpr int kUiOpacityCount = 4;
+// Panel style: Solid = opaque; Frosted = the screens behind, blurred, under a
+// tinted slab; Glass = see-through (the compositor blends it over everything).
+// The value is the glass slab's opacity factor.
+const char* kUiOpacityNames[] = {"Solid", "Frosted", "Glass"};
+const float kUiOpacityValues[] = {1.0f, 0.60f, 0.45f};
+constexpr int kUiOpacityCount = 3;
 
 const char* kPanelCurveNames[] = {"Flat", "Gentle", "Wrap"};
 const float kPanelCurveValues[] = {0.0f, 0.45f, 1.0f};
@@ -197,6 +200,10 @@ void SettingsMenu::refresh() {
         choice("Ambient Screen Glow", kAmbilightNames[ambilightIdx_ % kAmbilightCount],
                kAmbilightCount, ambilightIdx_ % kAmbilightCount, Action::CycleAmbilight,
                projectionMode_ == 0);
+        if (multiScreen_ && ambilightIdx_ % kAmbilightCount > 0) {
+            segmented("Glow Around", {"Selected Screen", "All Screens"}, ambilightAllScreens_ ? 1 : 0,
+                      Action::CycleAmbilightScope);
+        }
         std::ostringstream distStream;
         distStream << std::fixed;
         distStream.precision(1);
@@ -225,8 +232,7 @@ void SettingsMenu::refresh() {
         segmented("Main Panel Shape",
                   {kPanelCurveNames[0], kPanelCurveNames[1], kPanelCurveNames[2]},
                   panelCurveIdx_ % kPanelCurveCount, Action::CyclePanelCurve);
-        segmented("Panel Transparency",
-                  {kUiOpacityNames[0], kUiOpacityNames[1], kUiOpacityNames[2], kUiOpacityNames[3]},
+        segmented("Panel Style", {kUiOpacityNames[0], kUiOpacityNames[1], kUiOpacityNames[2]},
                   uiOpacityIdx_ % kUiOpacityCount, Action::CycleUiOpacity);
         segmented("UI in 360/180 Videos", {"Fixed", "Follow Gaze"}, uiFollowMode_ % 2,
                   Action::CycleUiFollowMode);
@@ -454,6 +460,11 @@ SettingsMenu::Action SettingsMenu::activate() {
             break;
         case Action::CycleAmbilight:
             ambilightIdx_ = (ambilightIdx_ + 1) % kAmbilightCount;
+            saveConfig();
+            refresh();
+            break;
+        case Action::CycleAmbilightScope:
+            ambilightAllScreens_ = !ambilightAllScreens_;
             saveConfig();
             refresh();
             break;
@@ -716,6 +727,8 @@ void SettingsMenu::loadConfig() {
         return;
     }
     std::string line;
+    bool panelStyleSeen = false;
+    int oldOpacityIdx = -1;
     while (std::getline(file, line)) {
         auto eq = line.find('=');
         if (eq == std::string::npos) continue;
@@ -757,20 +770,28 @@ void SettingsMenu::loadConfig() {
             else if (key == "hover_haptics") hoverHapticsEnabled_ = (val == "1" || val == "true");
             else if (key == "hover_haptics_strength") hoverHapticsStrengthIdx_ = std::clamp(std::stoi(val), 0, kHoverHapticsStrengthCount - 1);
             else if (key == "ambilight") ambilightIdx_ = std::clamp(std::stoi(val), 0, kAmbilightCount - 1);
+            else if (key == "ambilight_all") ambilightAllScreens_ = (val == "1");
             else if (key == "multi_screen") multiScreen_ = (val == "1" || val == "true");
             else if (key == "pause_on_removal") pauseOnRemoval_ = (val == "1" || val == "true");
             else if (key == "keyboard_layout") keyboardLayout_ = std::clamp(std::stoi(val), 0, 1);
             else if (key == "pause_livestreams") pauseLivestreams_ = (val == "1" || val == "true");
             else if (key == "private_browsing") privateBrowsing_ = (val == "1" || val == "true");
-            else if (key == "screen_frames") screenFrames_ = (val == "1" || val == "true");
+            else if (key == "screen_numbers") screenNumbers_ = (val == "1");
             else if (key == "audio_follow") audioFollow_ = (val == "1" || val == "true");
-            else if (key == "ui_opacity") uiOpacityIdx_ = std::clamp(std::stoi(val), 0, kUiOpacityCount - 1);
+            else if (key == "panel_style") {
+                uiOpacityIdx_ = std::clamp(std::stoi(val), 0, kUiOpacityCount - 1);
+                panelStyleSeen = true;
+            } else if (key == "ui_opacity") oldOpacityIdx = std::stoi(val);  // before panel_style
             else if (key == "panel_curve") panelCurveIdx_ = std::clamp(std::stoi(val), 0, kPanelCurveCount - 1);
             else if (key == "browser_sort") browserSort_ = std::clamp(std::stoi(val), 0, 2);
         } catch (const std::exception&) {
             PIXELVR_LOG_WARN("Ignoring malformed setting '%s' in %s", key.c_str(), path.c_str());
         }
     }
+    // Older files had Panel Transparency (Solid / Frosted / Glass / Clear, the
+    // translucent ones faked): keep an explicit Solid, everyone else gets
+    // the new default Frosted.
+    if (!panelStyleSeen) uiOpacityIdx_ = (oldOpacityIdx == 0) ? 0 : 1;
     PIXELVR_LOG_INFO("Loaded settings from %s", path.c_str());
 }
 
@@ -810,14 +831,15 @@ void SettingsMenu::saveConfig() const {
             file << "hover_haptics=" << (hoverHapticsEnabled_ ? 1 : 0) << "\n";
             file << "hover_haptics_strength=" << hoverHapticsStrengthIdx_ << "\n";
             file << "ambilight=" << ambilightIdx_ << "\n";
+            file << "ambilight_all=" << (ambilightAllScreens_ ? 1 : 0) << "\n";
             file << "panel_curve=" << panelCurveIdx_ << "\n";
-            file << "ui_opacity=" << uiOpacityIdx_ << "\n";
+            file << "panel_style=" << uiOpacityIdx_ << "\n";
             file << "multi_screen=" << (multiScreen_ ? 1 : 0) << "\n";
             file << "pause_on_removal=" << (pauseOnRemoval_ ? 1 : 0) << "\n";
             file << "keyboard_layout=" << keyboardLayout_ << "\n";
             file << "pause_livestreams=" << (pauseLivestreams_ ? 1 : 0) << "\n";
             file << "private_browsing=" << (privateBrowsing_ ? 1 : 0) << "\n";
-            file << "screen_frames=" << (screenFrames_ ? 1 : 0) << "\n";
+            file << "screen_numbers=" << (screenNumbers_ ? 1 : 0) << "\n";
             file << "audio_follow=" << (audioFollow_ ? 1 : 0) << "\n";
             file << "browser_sort=" << browserSort_ << "\n";
             if (!quickPath_.empty()) {

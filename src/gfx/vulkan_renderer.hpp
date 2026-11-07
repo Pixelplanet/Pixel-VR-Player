@@ -348,6 +348,8 @@ public:
         bool kiosk = true;   // Play icon (streaming page) vs. Globe (full browser)
     };
     void setRailShortcuts(const std::vector<RailShortcut>& shortcuts);
+    // Multi-screen: glow around every screen, else only around the selected one.
+    void setAmbilightAllScreens(bool all) { ambilightAllScreens_ = all; }
     void setAmbilightIntensity(float intensity) {
         ambilightIntensity_ = intensity < 0.0f ? 0.0f : (intensity > 1.0f ? 1.0f : intensity);
     }
@@ -420,6 +422,8 @@ public:
     // distance; values in between bend more gently.
     // Panel surface opacity (1 = solid, lower = more see-through glass).
     void setUiOpacity(float o) { uiOpacity_ = o < 0.3f ? 0.3f : (o > 1.0f ? 1.0f : o); }
+    // 0 = Solid (opaque), 1 = Frosted (blurred screens behind), 2 = Glass (see-through).
+    void setPanelStyle(int s) { panelStyle_ = s < 0 ? 0 : (s > 2 ? 2 : s); }
     void setPanelCurve(float amount) { panelCurve_ = amount < 0.0f ? 0.0f : (amount > 1.0f ? 1.0f : amount); }
     // Label of the file browser's sort button (e.g. "Name", "Newest").
     void setBrowserSortLabel(const std::string& label) { browserSortLabel_ = label; }
@@ -531,7 +535,7 @@ public:
         Move = 27,          // four-way arrows
         Unlocked = 28,      // open padlock
         Layout = 29,        // three screens: two below, one above
-        Frame = 30,         // hollow screen outline
+        ScreenNumber = 30,  // a screen with a "1" (screen numbers toggle)
         SwapH = 31,         // double-headed arrow, horizontal
         SwapV = 32,         // double-headed arrow, vertical
         Globe = 33,         // web: circle with meridian + parallels
@@ -566,7 +570,7 @@ public:
         ScreenMute,    // multi-screen row: mute / unmute the selected screen
         ScreenAudioFollow,  // multi-screen row: audio follows the selected screen
         ScreenLock,    // multi-screen row: unlock / lock all screens for grabbing
-        ScreenFrames,  // multi-screen row: show / hide the borders around screens
+        ScreenNumbers, // multi-screen row: show / hide a number on each screen
         ScreenLayout,  // multi-screen row: arrange screens with a preset
         ScreenClose,   // multi-screen row: close the selected screen
         Volume,        // left pill: this screen's volume (stick = adjust, click = mute)
@@ -574,12 +578,12 @@ public:
     };
     // Multi-screen row under the dock (shown while Multiple Screens is on and a
     // video plays): which screen the dock controls and its mute state.
-    void setScreenControls(bool visible, int screenNumber, bool muted, bool unlocked, bool frames) {
+    void setScreenControls(bool visible, int screenNumber, bool muted, bool unlocked, bool numbers) {
         screenControlsVisible_ = visible;
         screenControlsNumber_ = screenNumber;
         screenControlsMuted_ = muted;
         screensUnlocked_ = unlocked;
-        screenFramesOn_ = frames;
+        screenNumbersOn_ = numbers;
     }
     void setControlBar(bool visible) { controlBarVisible_ = visible; }
     // A trigger / A press this frame: click feedback where the laser is on the panel.
@@ -750,6 +754,7 @@ private:
         ViewSwapchain sc;
         ViewTargets targets;
         uint64_t drawnSerial = 0;   // frameSerial_ last copied
+        int drawnBadge = -1;        // screen number drawn into it (0 = none)
         bool web = false;
     };
     ScreenLayer screenLayers_[kMaxVideoSlots];
@@ -763,7 +768,9 @@ private:
     ViewSwapchain beamSwapchain_;
     ViewTargets beamTargets_;
     bool beamDrawn_ = false;
-    void recordScreenCopy(int slot, const ScreenLayer& L, uint32_t imageIndex);
+    // badge: 0 = none, else the screen number (+10 when it is the selected one);
+    // glyphCursor: next free glyph instance in pass slot 3 (shared by the copies).
+    void recordScreenCopy(int slot, const ScreenLayer& L, uint32_t imageIndex, int badge, uint32_t& glyphCursor);
     VkPipeline uiPipelineLayer_ = VK_NULL_HANDLE;
     // Writes alpha only (no blend): stamps alpha = coverage over a glass panel
     // so the layer is opaque there. SteamVR shows the layers underneath only
@@ -778,6 +785,16 @@ private:
     // Frosted-glass backdrop: the blurred video behind a panel (layer pass only).
     VkPipelineLayout glassPipelineLayout_ = VK_NULL_HANDLE;  // NV12 textures + GlassPush
     VkPipeline glassPipelineLayer_ = VK_NULL_HANDLE;
+    // Glow around browser screens (page texture in the text descriptor layout).
+    VkPipelineLayout ambilightWebLayout_ = VK_NULL_HANDLE;
+    VkPipeline ambilightWebPipeline_ = VK_NULL_HANDLE;
+    bool ambilightWebTried_ = false;
+    bool ambilightAllScreens_ = true;
+    // The same over browser pages (RGBA in the text descriptor layout).
+    VkPipelineLayout glassWebLayout_ = VK_NULL_HANDLE;
+    VkPipeline glassPipelineWebLayer_ = VK_NULL_HANDLE;
+    bool glassWebTried_ = false;
+    bool glassPushOk_ = false;  // the device takes GlassPush (> 128 bytes)
     ViewTargets uiLayerTargets_;
     // This frame's UI layer, recorded before the eye passes and submitted after
     // the screen layers (see renderLayersBefore).
@@ -951,6 +968,7 @@ private:
     int uiFollowMode_ = 0; // 0 = World Lock (Default, zero drift/tilt), 1 = Smooth Gaze Follow
     float panelCurve_ = 0.0f;
     float uiOpacity_ = 1.0f;
+    int panelStyle_ = 1;
     std::string browserSortLabel_ = "Name";
     bool listShowFormat_ = true;
     bool listShowRes_ = true;
@@ -1186,7 +1204,7 @@ private:
     int screenControlsNumber_ = 1;
     bool screenControlsMuted_ = false;
     bool screensUnlocked_ = false;  // screens can be grabbed with the laser
-    bool screenFramesOn_ = true;    // borders around screens (multi-screen)
+    bool screenNumbersOn_ = false;  // a number on each screen (multi-screen)
     // Last drawn flat-screen geometry per slot (for laser hit-testing): centre,
     // yaw/pitch and half-size in metres; valid only while the slot is drawn.
     struct ScreenHitInfo {
