@@ -34,7 +34,9 @@ mkdir -p "$work"
 cd "$work"
 
 if [[ ! -f "$tarball" ]]; then
-    curl -fsSL "https://ffmpeg.org/releases/$tarball" -o "$tarball.part"
+    # Retried: a single TLS hiccup at ffmpeg.org once failed a release build.
+    curl -fsSL --retry 5 --retry-delay 10 --retry-all-errors \
+        "https://ffmpeg.org/releases/$tarball" -o "$tarball.part"
     mv "$tarball.part" "$tarball"
 fi
 printf '%s  %s\n' "$sha" "$tarball" | sha256sum -c
