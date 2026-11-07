@@ -198,11 +198,10 @@ void SettingsMenu::refresh() {
         choice("Cinema Screen Curve", kCurvatureNames[curvatureIdx_ % kCurvatureCount],
                kCurvatureCount, curvatureIdx_ % kCurvatureCount, Action::CycleCurvature);
         segmented("Room", {"Midnight", "Black", "Slate", "Warm"}, roomIdx_ % 4, Action::CycleRoom);
-        choice("Ambient Screen Glow", roomIdx_ == 1 ? std::string("Off (Black room)")
-                                                    : std::string(kAmbilightNames[ambilightIdx_ % kAmbilightCount]),
-               kAmbilightCount, roomIdx_ == 1 ? 0 : ambilightIdx_ % kAmbilightCount, Action::CycleAmbilight,
-               projectionMode_ == 0 && roomIdx_ != 1);
-        if (multiScreen_ && roomIdx_ != 1 && ambilightIdx_ % kAmbilightCount > 0) {
+        choice("Ambient Screen Glow", kAmbilightNames[ambilightIdx_ % kAmbilightCount],
+               kAmbilightCount, ambilightIdx_ % kAmbilightCount, Action::CycleAmbilight,
+               projectionMode_ == 0);
+        if (multiScreen_ && ambilightIdx_ % kAmbilightCount > 0) {
             segmented("Glow Around", {"Selected Screen", "All Screens"}, ambilightAllScreens_ ? 1 : 0,
                       Action::CycleAmbilightScope);
         }
@@ -731,7 +730,6 @@ const char* SettingsMenu::hoverHapticsStrengthStr() const {
 }
 
 float SettingsMenu::ambilightIntensity() const {
-    if (roomIdx_ == 1) return 0.0f;  // the Black room is for no distractions at all
     return kAmbilightValues[ambilightIdx_ % kAmbilightCount];
 }
 

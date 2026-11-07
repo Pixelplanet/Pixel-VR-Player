@@ -208,7 +208,7 @@ public:
 
     // Ambient screen glow ("ambilight") behind the flat cinema screen.
     int ambilightIdx() const { return ambilightIdx_; }
-    float ambilightIntensity() const;  // 0 = off (also with the Black room)
+    float ambilightIntensity() const;  // 0 = off
     // Room around the screens (the projection layer's clear colour), RGB.
     const float* roomColor() const;
     int roomIdx() const { return roomIdx_; }  // 0 Midnight, 1 Black, 2 Slate, 3 Warm
