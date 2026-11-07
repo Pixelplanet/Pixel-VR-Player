@@ -28,8 +28,10 @@ namespace fs = std::filesystem;
 
 namespace pixelvr {
 
-constexpr int kThumbW = 256;
-constexpr int kThumbH = 144;
+constexpr int kThumbW = ThumbnailCache::kWidth;
+constexpr int kThumbH = ThumbnailCache::kHeight;
+// Thumbnails kept in memory (~330 KB each); older ones reload from the disk cache.
+constexpr std::size_t kMaxCached = 300;
 constexpr std::size_t kThumbBytes = kThumbW * kThumbH * 4;
 
 struct DiskMetaHeader {
@@ -156,6 +158,12 @@ void ThumbnailCache::request(const std::string& videoPath, bool highPriority) {
         if (f->second == fileStamp(videoPath)) return;  // unchanged: it would fail again
         failed_.erase(f);  // changed since (e.g. its download finished): try again
     }
+    // Background requests only fill in what is unknown: with the in-memory cap,
+    // re-loading evicted pixels for every listed file would churn forever.
+    // Visible cards ask with high priority and get their pixels back.
+    if (!highPriority) {
+        if (const auto m = metaCache_.find(videoPath); m != metaCache_.end() && m->second.ready) return;
+    }
     if (highPriority) {
         // If already queued, move it to the front so visible items decode immediately
         auto it = std::find(queue_.begin(), queue_.end(), videoPath);
@@ -173,6 +181,15 @@ void ThumbnailCache::request(const std::string& videoPath, bool highPriority) {
     queuedPaths_[videoPath] = true;
     queue_.push_back(videoPath);
     cv_.notify_one();
+}
+
+void ThumbnailCache::remember(const std::string& path, std::vector<uint8_t>&& rgba) {
+    if (cache_.find(path) == cache_.end()) cacheOrder_.push_back(path);
+    cache_[path] = std::move(rgba);
+    while (cache_.size() > kMaxCached && !cacheOrder_.empty()) {
+        cache_.erase(cacheOrder_.front());
+        cacheOrder_.pop_front();
+    }
 }
 
 bool ThumbnailCache::get(const std::string& videoPath, std::vector<uint8_t>& outRgba) {
@@ -200,6 +217,9 @@ bool ThumbnailCache::getMeta(const std::string& videoPath, MediaMeta& outMeta) {
 void ThumbnailCache::clearVaultThumbs(const std::string& vaultDir) {
     if (vaultDir.empty()) return;
     std::lock_guard<std::mutex> lk(mutex_);
+    cacheOrder_.erase(std::remove_if(cacheOrder_.begin(), cacheOrder_.end(),
+                                     [&](const std::string& p) { return p.rfind(vaultDir, 0) == 0; }),
+                      cacheOrder_.end());
     for (auto it = cache_.begin(); it != cache_.end(); ) {
         if (it->first.rfind(vaultDir, 0) == 0) {
             it = cache_.erase(it);
@@ -446,7 +466,7 @@ void ThumbnailCache::workerLoop() {
                 }
                 fs::last_write_time(cacheFile, fs::file_time_type::clock::now(), ec);  // recently used
                 std::lock_guard<std::mutex> lk(mutex_);
-                cache_[path] = std::move(data);
+                remember(path, std::move(data));
                 if (meta.ready) metaCache_[path] = meta;
                 continue;
             }
@@ -466,7 +486,7 @@ void ThumbnailCache::workerLoop() {
                 out.write(reinterpret_cast<const char*>(rgba.data()), kThumbBytes);
             }
             std::lock_guard<std::mutex> lk(mutex_);
-            cache_[path] = std::move(rgba);
+            remember(path, std::move(rgba));
             PIXELVR_LOG_INFO("Thumbnail generated for %s (%dx%d, %.0fs)",
                              path.c_str(), meta.width, meta.height, meta.durationSec);
         } else {

@@ -2878,6 +2878,7 @@ int App::run() {
                 int ws = -1;
                 float u = 0.0f, v = 0.0f;
                 const bool onWeb = renderer_.webPointer(ws, u, v) && screens_[ws].web;
+                const float rawStickY = in.thumbstickY;  // before the page takes it (latch below)
                 // A press stays with the screen it started on.
                 if (onWeb && !webMouseDown_ && ws != webMouseSlot_) {
                     webMouseSlot_ = ws;
@@ -2936,7 +2937,7 @@ int App::run() {
                 // there, and briefly after the laser leaves: a frame where the hit
                 // test slips off the screen (Plex's menus reach its edge) must not
                 // nudge the screen.
-                const bool stickHeld = std::fabs(in.thumbstickY) > 0.15f;
+                const bool stickHeld = std::fabs(rawStickY) > 0.15f;
                 if (onWeb) {
                     webStickUntil_ = nowT + std::chrono::milliseconds(400);
                     if (stickHeld) webStickLatched_ = true;
@@ -3788,7 +3789,8 @@ int App::run() {
                         if (!thumbTarget.empty()) {
                             std::vector<uint8_t> rgba;
                             if (thumbnailCache_.get(thumbTarget, rgba)) {
-                                renderer_.updateCardThumbnail(slot, thumbTarget, rgba.data(), 256, 144);
+                                renderer_.updateCardThumbnail(slot, thumbTarget, rgba.data(), ThumbnailCache::kWidth,
+                                                              ThumbnailCache::kHeight);
                             }
                         }
                     }
@@ -3905,6 +3907,8 @@ int App::run() {
                 };
                 renderer_.setControllers(build(0), build(1));
             }
+            // Click feedback on the panel (the renderer checks the laser is on it).
+            if (in.select || in.togglePlay) renderer_.notifyPress();
 
             // Spatial haptic feedback on pointer hover transitions
             static int lastBrowserHov = -1;

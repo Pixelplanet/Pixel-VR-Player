@@ -747,7 +747,8 @@ VulkanRenderer::~VulkanRenderer() {
         destroyLayerTargets(cursorTargets_);
         destroyLayerTargets(beamTargets_);
         for (ScreenLayer& L : screenLayers_) destroyLayerTargets(L.targets);
-        for (VkPipeline p : {uiPipelineLayer_, uiPipelineLayerAlpha_, textPipelineLayer_, thumbPipelineLayer_,
+        for (VkPipeline p : {uiPipelineLayer_, uiPipelineLayerAlpha_, uiPipelineLayerFade_, textPipelineLayer_,
+                             thumbPipelineLayer_,
                              pipelineLayer_, glassPipelineLayer_}) {
             if (p != VK_NULL_HANDLE) vkDestroyPipeline(device_, p, nullptr);
         }
@@ -1194,7 +1195,7 @@ bool VulkanRenderer::buildPipeline(const std::string& vertName,
                                    bool blend, VkRenderPass pass,
                                    VkSampleCountFlagBits samples,
                                    const VkPipelineVertexInputStateCreateInfo* vertexInputOverride,
-                                   VkColorComponentFlags writeMask) {
+                                   VkColorComponentFlags writeMask, bool fade) {
     const VkRenderPass rp = (pass != VK_NULL_HANDLE) ? pass : renderPass_;
     const VkSampleCountFlagBits sc =
         (samples != VK_SAMPLE_COUNT_FLAG_BITS_MAX_ENUM) ? samples : sampleCount_;
@@ -1249,6 +1250,15 @@ bool VulkanRenderer::buildPipeline(const std::string& vertName,
         blendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
         blendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
         blendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+        blendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
+    }
+    if (fade) {  // target *= source alpha (premultiplied colour and alpha alike)
+        blendAttachment.blendEnable = VK_TRUE;
+        blendAttachment.srcColorBlendFactor = VK_BLEND_FACTOR_ZERO;
+        blendAttachment.dstColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+        blendAttachment.colorBlendOp = VK_BLEND_OP_ADD;
+        blendAttachment.srcAlphaBlendFactor = VK_BLEND_FACTOR_ZERO;
+        blendAttachment.dstAlphaBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
         blendAttachment.alphaBlendOp = VK_BLEND_OP_ADD;
     }
 
@@ -1585,6 +1595,14 @@ bool VulkanRenderer::createLayerResources(XrContext& xr, int64_t colorFormat) {
             PIXELVR_LOG_WARN("UI layer pipelines failed; the UI stays in the eye buffers");
             return false;
         }
+        // Closing fade (best effort: without it panels close without fading).
+        if (!buildPipeline("ui.vert.spv", "ui.frag.spv", uiPipelineLayout_, uiPipelineLayerFade_, false,
+                           uiLayerPass_, VK_SAMPLE_COUNT_1_BIT, nullptr,
+                           VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
+                               VK_COLOR_COMPONENT_A_BIT,
+                           true)) {
+            uiPipelineLayerFade_ = VK_NULL_HANDLE;
+        }
         // Frosted-glass backdrop over the CPU NV12 textures (best effort).
         VkPushConstantRange glassPush{};
         glassPush.stageFlags = VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT;
@@ -1721,6 +1739,9 @@ void VulkanRenderer::setBrowserItems(bool visible, const std::string& title,
                                      const std::vector<BrowserItem>& items, int selected,
                                      const std::string& status) {
     browserVisible_ = visible;
+    // Hidden: keep the last page, which the closing animation still draws
+    // (everything else reading it is gated on browserVisible_).
+    if (!visible) return;
     browserTitle_ = title;
     browserItems_ = items;
     browserSelected_ = selected;
@@ -2172,6 +2193,7 @@ void VulkanRenderer::setSettings(bool visible, const std::string& title,
                                  const std::vector<SettingsRowVis>& rows, int selected,
                                  const std::string& status) {
     settingsVisible_ = visible;
+    if (!visible) return;  // keep the last rows for the closing animation
     settingsTitle_ = title;
     settingsRows_ = rows;
     settingsSelected_ = selected;
@@ -3026,6 +3048,46 @@ void VulkanRenderer::renderLayersBefore(XrContext& xr, const XrView* views, uint
     if (!uiLayerLive() || viewCount == 0) {
         return;
     }
+    // Closing animation: when the hub / a dialog or the dock goes away, keep
+    // drawing it from its last flags while it scales and fades out (~150 ms).
+    // Only the drawing sees these flags; hit tests already use the real ones.
+    const PanelFlags real = currentPanelFlags();
+    if (closeAnim_ <= 0.0f) closingHub_ = false;
+    {
+        auto panel = [](const PanelFlags& f) {
+            return f.browser || f.settings || f.downloads || f.actionMenu || f.keyboard;
+        };
+        // The downloads window / confirm and the keyboard get new content as
+        // they close, so they close without the animation.
+        const bool contentKept = !shownFlags_.downloads && !shownFlags_.downloadsModal && !shownFlags_.keyboard;
+        if (panel(shownFlags_) && !panel(real) && contentKept && uiPipelineLayerFade_ != VK_NULL_HANDLE) {
+            ghostFlags_ = shownFlags_;
+            ghostFlags_.controlBar = false;
+            closingHub_ = true;
+            closeAnim_ = 1.0f;
+            pressAnim_ = 0.0f;
+            pressDockBtn_ = -1;
+        } else if (shownFlags_.controlBar && !real.controlBar && !panel(real) && !closingHub_ &&
+                   uiPipelineLayerFade_ != VK_NULL_HANDLE) {
+            ghostFlags_ = PanelFlags{};
+            ghostFlags_.controlBar = true;
+            closingHub_ = false;
+            closeAnim_ = 1.0f;
+            pressAnim_ = 0.0f;
+            pressDockBtn_ = -1;
+        }
+        // Something new on the panel ends the ghost at once (the dock waits
+        // for a closing hub, so the two never share the layer).
+        if (panel(real) || (!closingHub_ && real.controlBar)) closeAnim_ = 0.0f;
+        shownFlags_ = real;
+    }
+    struct RestoreFlags {
+        VulkanRenderer* r;
+        PanelFlags f;
+        bool active;
+        ~RestoreFlags() { if (active) r->applyPanelFlags(f); }
+    } restore{this, real, closeAnim_ > 0.0f};
+    if (closeAnim_ > 0.0f) applyPanelFlags(ghostFlags_);
     // What is on the panel plane this frame: the hub (and anything over it)
     // or, during playback, the transport dock. Nothing -> no layer.
     const bool hubOpen = browserVisible_ || settingsVisible_ ||
@@ -3034,6 +3096,8 @@ void VulkanRenderer::renderLayersBefore(XrContext& xr, const XrView* views, uint
     const bool overlayOpen = actionMenu_.visible || keyboardModal_.visible;
     const bool dock = controlBarVisible_ && !hubOpen && !modalOpen;
     if (!hubOpen && !modalOpen && !overlayOpen && !dock) {
+        pressAnim_ = 0.0f;  // no stale click ring on the next panel
+        pressDockBtn_ = -1;
         return;
     }
 
@@ -3128,6 +3192,28 @@ void VulkanRenderer::renderLayersBefore(XrContext& xr, const XrView* views, uint
     uiLayerPending_ = true;
 }
 
+VulkanRenderer::PanelFlags VulkanRenderer::currentPanelFlags() const {
+    PanelFlags f;
+    f.browser = browserVisible_;
+    f.settings = settingsVisible_;
+    f.downloads = downloadsVisible_;
+    f.downloadsModal = downloadsModal_;
+    f.actionMenu = actionMenu_.visible;
+    f.keyboard = keyboardModal_.visible;
+    f.controlBar = controlBarVisible_;
+    return f;
+}
+
+void VulkanRenderer::applyPanelFlags(const PanelFlags& f) {
+    browserVisible_ = f.browser;
+    settingsVisible_ = f.settings;
+    downloadsVisible_ = f.downloads;
+    downloadsModal_ = f.downloadsModal;
+    actionMenu_.visible = f.actionMenu;
+    keyboardModal_.visible = f.keyboard;
+    controlBarVisible_ = f.controlBar;
+}
+
 // Flat video / browser screens as composition layers, back to front, then the
 // pointer cursor over them. Each screen's swapchain is sized to the screen's
 // angular size (about 1.4x the headset's pixel density, never above the
@@ -3196,6 +3282,18 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
                 tw = std::min(stp, srcW);
                 break;
             }
+        }
+        // Hysteresis: a rebuild waits for the GPU, so keep the current size
+        // until the wanted size is clearly past a step (10% up, 15% under the
+        // step below), not every time the viewer sways across a boundary.
+        if (L.sc.handle != XR_NULL_HANDLE && L.sc.width <= srcW) {
+            const int cur = L.sc.width;
+            int lower = 0;
+            for (int stp : kSteps) {
+                if (stp < cur) lower = stp;
+            }
+            const int curTh = std::max(2, static_cast<int>(std::lround(static_cast<double>(cur) * srcH / srcW)) & ~1);
+            if (curTh == L.sc.height && wantW <= cur + cur / 10 && wantW >= lower - lower * 3 / 20) tw = cur;
         }
         tw &= ~1;
         const int th = std::max(2, static_cast<int>(std::lround(static_cast<double>(tw) * srcH / srcW)) & ~1);
@@ -3945,7 +4043,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
     };
     auto faceFor = [&](float scale) -> TextFace {
         if (curFont == &fontAtlas_ && fontAtlasBold_.ok &&
-            scale * fontAtlas_.lineHeight < kSmallTextLine) {
+            scale * fontAtlas_.lineHeight * (1.2f / std::clamp(uiTextScale_, 0.85f, 1.75f)) < kSmallTextLine) {
+            // Judged at the size the role has at the default text scale (120%),
+            // so Compact / Large keep the default's weight hierarchy.
             return {&fontAtlasBold_, textSetBold_};
         }
         return {curFont, curTextSet};
@@ -4011,7 +4111,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                        const float col[4], const std::string& str) {
         if (str.empty()) return;
         const std::string out = truncateString(fixedScale, maxW, str);
-        const float baseline = centerY - 0.35f * fontAtlas_.ascent * fixedScale;
+        const float baseline = centerY - 0.35f * curFont->ascent * fixedScale;  // the active face's
         drawString(x, baseline, fixedScale, col, out);
     };
     auto drawFitCentered = [&](float cx, float centerY, float maxW, float fixedScale,
@@ -4019,7 +4119,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         if (str.empty()) return;
         const std::string out = truncateString(fixedScale, maxW, str);
         const float finalW = measureString(fixedScale, out);
-        const float baseline = centerY - 0.35f * fontAtlas_.ascent * fixedScale;
+        const float baseline = centerY - 0.35f * curFont->ascent * fixedScale;  // the active face's
         drawString(cx - finalW * 0.5f, baseline, fixedScale, col, out);
     };
 
@@ -4171,6 +4271,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
     // Motion tick: eased states move toward their targets once per frame.
     // Open states only ease in (closing is immediate, since the panels stop
     // being drawn); the eased value drives a scale-in / slide-in below.
+    // This pass draws the closing state it started with: the frame that takes
+    // closeAnim_ to 0 is still the ghost's last (nearly invisible) frame.
+    const float closeNow = layerPass ? closeAnim_ : 0.0f;
     if (layerPass || (!uiLayerLive() && viewIndex == 0)) {
         const auto nowT = std::chrono::steady_clock::now();
         float dt = animLastT_.time_since_epoch().count() == 0
@@ -4196,11 +4299,20 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             ease(railHoverAnim_[s], (hubOpen && browserSidebarHovered_ == hub::mainTabHoverId(s)) ? 1.0f : 0.0f,
                  16.0f);
         }
+        pressAnim_ = std::max(0.0f, pressAnim_ - dt * 4.0f);   // ~250 ms
+        if (layerPass) closeAnim_ = std::max(0.0f, closeAnim_ - dt * 7.0f);  // ~150 ms
+        if (closeNow > 0.0f) {  // the closing panel is drawn at rest, then shrinks
+            hubOpenAnim_ = 1.0f;
+            dockOpenAnim_ = 1.0f;
+        }
     }
     // Ease-out curves for the open animations.
     auto easeOut = [](float t) { t = std::clamp(t, 0.0f, 1.0f); return 1.0f - (1.0f - t) * (1.0f - t) * (1.0f - t); };
-    const float hubIn = easeOut(hubOpenAnim_);
-    const float dockIn = easeOut(dockOpenAnim_);
+    // Closing: the same transforms run backwards (to 94% / 6 cm down) while
+    // the fade at the end of the pass takes the layer's opacity down.
+    const float closeT = (closeNow > 0.0f) ? closeNow : 1.0f;
+    const float hubIn = easeOut(hubOpenAnim_) * closeT;
+    const float dockIn = easeOut(dockOpenAnim_) * closeT;
     // Panel-space transform of the animated content: the hub scales in from
     // 94% around its centre; the dock rises 6 cm and scales in from 96%.
     const Mat4 vpPanelHub = (hubIn < 0.999f)
@@ -4718,8 +4830,10 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             const bool hovered = (pointerButton_ == b);
             // Eased hover: the button grows 5% and its colours cross-fade.
             const float ha = (b < 32) ? dockHoverAnim_[b] : (hovered ? 1.0f : 0.0f);
-            r.hw *= 1.0f + 0.05f * ha;
-            r.hh *= 1.0f + 0.05f * ha;
+            // A press dips the button 8% and lets it spring back.
+            const float pd = (b == pressDockBtn_) ? pressAnim_ : 0.0f;
+            r.hw *= (1.0f + 0.05f * ha) * (1.0f - 0.08f * pd);
+            r.hh *= (1.0f + 0.05f * ha) * (1.0f - 0.08f * pd);
             float bgMix[4], borderMix[4];
             for (int k = 0; k < 4; ++k) {
                 bgMix[k] = glassControlT[k] + (btnBgHover[k] - glassControlT[k]) * ha;
@@ -4819,7 +4933,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         // Scrubber bar track + tick marks + hover time tooltip
         const float trackHalfW = 0.56f;
         const float trackHalfH = 0.009f;
-        const float trackY = kBarY + 0.152f;
+        const float trackY = kBarY + 0.150f;  // centred in the groove, same as the hit test
         // Brighter with chapters, so the dark gaps between them stand out.
         const bool chapterTrack = !transportChapters_.empty() && transportLive_ == 0;
         const float trackBg[4] = {chapterTrack ? 0.38f : 0.16f, chapterTrack ? 0.42f : 0.19f,
@@ -5434,6 +5548,16 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const float target = (entryIdx >= 0 && entryIdx < total && entryIdx == browserHovered_) ? 1.0f : 0.0f;
                 cardHoverAnim_[i] += (target - cardHoverAnim_[i]) * std::clamp(14.0f * dtCard, 0.0f, 1.0f);
             }
+            // Hovered card grows 2.5% around its centre (a z-lift does nothing
+            // on the flat UI layer).
+            auto cardHoverVp = [&](int i, const CardLayout& lay) -> Mat4 {
+                const float a = (i >= 0 && i < 12) ? cardHoverAnim_[i] : 0.0f;
+                if (a < 0.002f) return vpPanel;
+                const float k = 1.0f + 0.025f * a;
+                return multiply(vpPanel, multiply(translation(Vec3{lay.cx, lay.cy, 0.0f}),
+                                                  multiply(scaling(Vec3{k, k, 1.0f}),
+                                                           translation(Vec3{-lay.cx, -lay.cy, 0.0f}))));
+            };
 
             for (int i = 0; i < perPage; ++i) {
                 const int entryIdx = first + i;
@@ -5442,8 +5566,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const CardLayout lay = getCardLayout(i);
                 const bool hovered = (entryIdx == browserHovered_);
                 const bool selected = (entryIdx == browserSelected_);
-                const float zLift = (i < 12) ? (0.012f * cardHoverAnim_[i]) : 0.0f;
-                const Mat4 vpCard = (zLift > 0.0002f) ? multiply(vpPanel, translation(Vec3{0.0f, 0.0f, zLift})) : vpPanel;
+                const Mat4 vpCard = cardHoverVp(i, lay);
 
                 // Corner radii in metres, converted to the shader's relative units
                 const float cardR = 0.016f / std::min(lay.cardHalfW, lay.cardHalfH);
@@ -5503,8 +5626,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                                 textPipelineLayout_, 0, 1, &cardThumbs_[i].set, 0, nullptr);
                         const CardLayout lay = getCardLayout(i);
-                        const float zLift = (i < 12) ? (0.012f * cardHoverAnim_[i]) : 0.0f;
-                        const Mat4 vpCard = (zLift > 0.0002f) ? multiply(vpPanel, translation(Vec3{0.0f, 0.0f, zLift})) : vpPanel;
+                        const Mat4 vpCard = cardHoverVp(i, lay);
                         TextPush push{};
                         push.bend[0] = bendR;
                         push.bend[1] = static_cast<float>(kThumbBendSegments);
@@ -5539,8 +5661,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 if (entryIdx >= total) break;
                 const auto& item = browserItems_[static_cast<std::size_t>(entryIdx)];
                 const CardLayout lay = getCardLayout(i);
-                const float zLift = (i < 12) ? (0.012f * cardHoverAnim_[i]) : 0.0f;
-                const Mat4 vpCard = (zLift > 0.0002f) ? multiply(vpPanel, translation(Vec3{0.0f, 0.0f, zLift})) : vpPanel;
+                const Mat4 vpCard = cardHoverVp(i, lay);
 
                 if (browserViewMode_ == BrowserViewMode::BigCards) {
                     drawUiElement(vpCard, lay.cx - lay.thumbHalfW + 0.062f, lay.thumbCy + lay.thumbHalfH - 0.024f,
@@ -5661,8 +5782,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const CardLayout lay = getCardLayout(i);
                 const std::string cardDet = item.detail.empty() ? (item.isDir ? "Folder" : "Media") : item.detail;
                 const std::string& bTag = item.tag.empty() ? (item.isVideo ? "VIDEO" : "FILE") : item.tag;
-                const float zLift = (i < 12) ? (0.012f * cardHoverAnim_[i]) : 0.0f;
-                const Mat4 vpCard = (zLift > 0.0002f) ? multiply(vpPanel, translation(Vec3{0.0f, 0.0f, zLift})) : vpPanel;
+                const Mat4 vpCard = cardHoverVp(i, lay);
                 curTextVp = &vpCard;
 
                 if (browserViewMode_ == BrowserViewMode::BigCards) {
@@ -7289,6 +7409,25 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                       UiShape::SoftGlow, cursorGlow, 1.0f, 0.75f);
         drawUiElement(vpPanel, pointerPanel_[0], pointerPanel_[1], 0.020f, 0.020f,
                       UiShape::Cursor, cursorCol, 1.0f);
+    }
+    // Click feedback: a ring spreading from where the press landed.
+    if (layerPass && pressAnim_ > 0.0f && closeNow <= 0.0f && uiPipeline_ != VK_NULL_HANDLE) {
+        bindPipe(uiPipeline_);
+        const float t = 1.0f - pressAnim_;
+        const float r = 0.016f + 0.030f * (1.0f - (1.0f - t) * (1.0f - t));
+        const float ringCol[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.70f * pressAnim_};
+        drawUiElement(vpPanel, pressPos_[0], pressPos_[1], r, r, UiShape::GlowRing, ringCol, 1.0f);
+    }
+    // Closing: scale the whole layer image's opacity down (premultiplied, so
+    // colour and alpha together).
+    if (closeNow > 0.0f && uiPipelineLayerFade_ != VK_NULL_HANDLE) {
+        flushText();
+        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipelineLayerFade_);
+        const float k = closeNow * closeNow;
+        const float keep[4] = {0.0f, 0.0f, 0.0f, k};
+        drawUiElement(vpPanel, layer->cx, layer->cy, layer->hw * 1.2f, layer->hh * 1.2f, UiShape::RoundedBox,
+                      keep, 0.0f);
+        bindPipe(uiPipeline_);
     }
 
     // Tracked controllers: a short body stub, a pointer ray and the UI cursor,

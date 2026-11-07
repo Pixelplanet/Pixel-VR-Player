@@ -582,6 +582,14 @@ public:
         screenFramesOn_ = frames;
     }
     void setControlBar(bool visible) { controlBarVisible_ = visible; }
+    // A trigger / A press this frame: click feedback where the laser is on the panel.
+    void notifyPress() {
+        if (!pointerActive_ || !pointerOnPanel_) return;
+        pressAnim_ = 1.0f;
+        pressPos_[0] = pointerPanel_[0];
+        pressPos_[1] = pointerPanel_[1];
+        pressDockBtn_ = pointerButton_;
+    }
     // A one-line glass pill just above the dock (e.g. how to leave a hand-off).
     // `seconds` count down only while the dock is visible; it hides while the
     // scrub bubble shows.
@@ -681,7 +689,8 @@ private:
                            VK_SAMPLE_COUNT_FLAG_BITS_MAX_ENUM,
                        const VkPipelineVertexInputStateCreateInfo* vertexInput = nullptr,
                        VkColorComponentFlags writeMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
-                                                         VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT);
+                                                         VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
+                       bool fade = false);  // fade: multiplies the target by the source alpha
     struct VideoSlot;
     bool createVideoResources(VideoSlot& v, int width, int height);
     void destroyVideoResources(VideoSlot& v);
@@ -761,6 +770,8 @@ private:
     // where a layer's alpha is exactly zero, so partial alpha has to stay
     // confined to anti-aliased edges.
     VkPipeline uiPipelineLayerAlpha_ = VK_NULL_HANDLE;
+    // Scales the whole layer image by the source alpha (closing fade-out).
+    VkPipeline uiPipelineLayerFade_ = VK_NULL_HANDLE;
     VkPipeline textPipelineLayer_ = VK_NULL_HANDLE;
     VkPipeline thumbPipelineLayer_ = VK_NULL_HANDLE;
     VkPipeline pipelineLayer_ = VK_NULL_HANDLE;   // NV12 video quad (screen picker preview)
@@ -914,6 +925,23 @@ private:
     float dockHintAlpha_ = 0.0f;                  // fade 0..1
     float dockHoverAnim_[32]{};                   // per transport button
     float railHoverAnim_[16]{};                   // per rail main tab
+    // Click feedback (notifyPress): a ring spreading from the press point on
+    // the panel and a short dip of the pressed dock button.
+    float pressAnim_ = 0.0f;                      // 1 at the press, falls to 0
+    float pressPos_[2] = {0.0f, 0.0f};
+    int pressDockBtn_ = -1;
+    // Closing animation (layer only): the panel the app just closed keeps being
+    // drawn from its last visible flags while it scales and fades out.
+    struct PanelFlags {
+        bool browser = false, settings = false, downloads = false, downloadsModal = false;
+        bool actionMenu = false, keyboard = false, controlBar = false;
+    };
+    PanelFlags shownFlags_{};   // last frame's
+    PanelFlags ghostFlags_{};   // what is closing
+    float closeAnim_ = 0.0f;    // 1 -> 0 while it closes
+    bool closingHub_ = false;   // hub / dialog (else the dock)
+    PanelFlags currentPanelFlags() const;
+    void applyPanelFlags(const PanelFlags& f);
     std::chrono::steady_clock::time_point animLastT_{};
     VkPipeline thumbPipeline_ = VK_NULL_HANDLE;
     VkDescriptorPool thumbPool_ = VK_NULL_HANDLE;
