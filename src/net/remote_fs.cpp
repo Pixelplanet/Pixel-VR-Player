@@ -436,6 +436,7 @@ std::string davUrl(const RemoteUri& u, const std::string& path) {
 struct Collected {
     std::string body;
     std::string contentRange;
+    std::string disposition;
     int64_t limit = -1;  // stop receiving past this many bytes
     int64_t received = 0;
 };
@@ -458,7 +459,41 @@ size_t onHeader(char* p, size_t sz, size_t n, void* ud) {
     auto* c = static_cast<Collected*>(ud);
     const std::string line(p, sz * n);
     if (line.size() > 14 && strncasecmp(line.c_str(), "content-range:", 14) == 0) c->contentRange = line.substr(14);
+    if (line.size() > 20 && strncasecmp(line.c_str(), "content-disposition:", 20) == 0) c->disposition = line.substr(20);
     return sz * n;
+}
+
+// The file name of a Content-Disposition value: filename*=UTF-8''... first, else filename=...
+std::string dispositionFileName(const std::string& header) {
+    auto lower = header;
+    std::transform(lower.begin(), lower.end(), lower.begin(), ::tolower);
+    std::string name;
+    size_t at = lower.find("filename*=");
+    if (at != std::string::npos) {
+        std::string v = header.substr(at + 10);
+        v = v.substr(0, v.find(';'));
+        const size_t q = v.find("''");
+        if (q != std::string::npos) v = v.substr(q + 2);
+        name = urlDecode(v);
+    } else if ((at = lower.find("filename=")) != std::string::npos) {
+        std::string v = header.substr(at + 9);
+        const size_t first = v.find_first_not_of(" \t");
+        v = first == std::string::npos ? std::string() : v.substr(first);
+        if (!v.empty() && v[0] == '"') {
+            const size_t end = v.find('"', 1);
+            name = v.substr(1, end == std::string::npos ? std::string::npos : end - 1);
+        } else {
+            name = v.substr(0, v.find(';'));
+        }
+    }
+    const size_t slash = name.find_last_of("/\\");
+    if (slash != std::string::npos) name = name.substr(slash + 1);
+    std::string clean;
+    for (const char c : name) {
+        if (static_cast<unsigned char>(c) >= 0x20 && c != 0x7f) clean += c;
+    }
+    while (!clean.empty() && (clean.back() == ' ' || clean.back() == '\r' || clean.back() == '\n')) clean.pop_back();
+    return clean;
 }
 
 // One keep-alive handle per request thread of use; owner locks around it.
@@ -642,6 +677,7 @@ public:
         long code = 0;
         curl_easy_getinfo(curl_, CURLINFO_RESPONSE_CODE, &code);
         curl_off_t len = -1;
+        disposition_ = col.disposition;
         if (rc == CURLE_OK && code / 100 == 2) curl_easy_getinfo(curl_, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &len);
         if (len < 0) {  // HEAD refused: ask for one byte
             std::string e;
@@ -662,6 +698,7 @@ public:
     }
 
     int64_t size() const override { return size_; }
+    std::string fileName() const override { return uri_.url.empty() ? std::string() : dispositionFileName(disposition_); }
 
     int read(uint8_t* out, int n) override {
         if (n <= 0) return 0;
@@ -707,6 +744,7 @@ private:
             if (err) *err = httpError(code, rc, curl_);
             return false;
         }
+        if (!col.disposition.empty()) disposition_ = col.disposition;
         if (total) {
             const size_t slash = col.contentRange.find('/');
             *total = slash == std::string::npos ? -1 : std::atoll(col.contentRange.c_str() + slash + 1);
@@ -717,6 +755,7 @@ private:
 
     RemoteUri uri_;
     SmbShare cred_;
+    std::string disposition_;
     CURL* curl_ = nullptr;
     int64_t size_ = 0;
     int64_t pos_ = 0;

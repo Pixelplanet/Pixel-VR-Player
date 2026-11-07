@@ -215,7 +215,8 @@ private:
     void startDownloadFolder(const std::string& uri, const std::string& name);
     void startNextQueued();
     // SFTP / WebDAV downloads: copied in-process through remote_fs, via a .part file.
-    bool copyRemoteFile(const std::string& uri, const std::string& local, bool setTotal);
+    bool copyRemoteFile(const std::string& uri, const std::string& local, bool setTotal, std::string* usedLocal = nullptr);
+    void applyPendingRename();  // main thread: the server named the file differently (Content-Disposition)
     void downloadRemoteFile(const std::string& uri, const std::string& local, const std::string& name);
     void downloadRemoteFolder(const std::string& uri, const std::string& destDir);
 
@@ -275,6 +276,10 @@ private:
     // Folder progress: bytes of completed files + the in-flight file's path.
     std::atomic<long long> dlBaseBytes_{0};
     std::mutex dlCurMutex_;
+    std::mutex dlRenameMutex_;
+    bool hasRename_ = false;
+    std::string pendingRenameName_;
+    std::string pendingRenameLocal_;
     std::string dlCurFile_;
     bool pausedByBrowse_ = false;  // child SIGSTOPped because the panel is open
     int spawnCurl(const std::string& uri, const std::string& local);

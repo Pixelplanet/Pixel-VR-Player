@@ -398,6 +398,7 @@ bool App::init(const std::string& mediaPath) {
 #else
     (void)mediaPath;
 #endif
+    browser_.setDownloadDir(settings_.downloadDir());
     // No clip requested: open the file browser instead of a test video.
     if (mediaPath.empty()) {
 #ifdef PIXELVR_HAVE_FREETYPE
@@ -2842,7 +2843,10 @@ int App::run() {
                     else startPlexPlay(slot, plexPlay);
                 }
                 BrowserHost::SaveFile saveFile;
-                while (host.takeSaveFile(saveFile)) browser_.startDownload(saveFile.url, saveFile.name, false);
+                while (host.takeSaveFile(saveFile)) {
+                    browser_.setDownloadDir(settings_.downloadDir());
+                    browser_.startDownload(saveFile.url, saveFile.name, false);
+                }
                 // Text fields: a click into one opens the keyboard, which then
                 // types straight into the page; it closes when the field does.
                 BrowserHost::FocusEvent fe;

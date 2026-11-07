@@ -70,6 +70,7 @@ int main(int argc, char** argv) {
             std::printf("open failed: %s\n", err.c_str());
             return 1;
         }
+        std::printf("fileName: [%s]\n", f->fileName().c_str());
         FILE* out = std::fopen(argv[3], "wb");
         std::vector<uint8_t> buf(1 << 20);
         int64_t got = 0;

@@ -27,6 +27,8 @@ public:
     virtual int64_t size() const = 0;
     virtual int read(uint8_t* buf, int n) = 0;  // <0 error, 0 eof
     virtual bool seek(int64_t pos) = 0;
+    // File name the server suggests (Content-Disposition; http(s) only), else "".
+    virtual std::string fileName() const { return {}; }
 };
 
 inline bool hasPrefix(const std::string& s, const char* p) { return s.rfind(p, 0) == 0; }

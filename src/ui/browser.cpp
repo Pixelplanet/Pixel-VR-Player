@@ -1405,13 +1405,27 @@ void Browser::startDownloadFolder(const std::string& uri,
 
 // Copies `uri` to `local` (via local.part, renamed when complete). With
 // `setTotal` the file's size becomes the download's total (single files).
-bool Browser::copyRemoteFile(const std::string& uri, const std::string& local, bool setTotal) {
+bool Browser::copyRemoteFile(const std::string& uri, const std::string& localIn, bool setTotal, std::string* usedLocal) {
     std::string err;
     auto src = remoteOpen(uri, err);
     if (!src) {
         PIXELVR_LOG_WARN("Download: cannot open %s: %s", uri.c_str(), err.c_str());
         return false;
     }
+    std::string local = localIn;
+    if (setTotal && isHttpUrl(uri)) {
+        // The server's own name (Content-Disposition) beats whatever the page guessed;
+        // switch before anything is written. poll() applies it to the job on the main thread.
+        const std::string suggested = src->fileName();
+        if (!suggested.empty() && suggested != fs::path(local).filename().string()) {
+            local = (fs::path(local).parent_path() / suggested).string();
+            std::lock_guard<std::mutex> lk(dlRenameMutex_);
+            pendingRenameName_ = suggested;
+            pendingRenameLocal_ = local;
+            hasRename_ = true;
+        }
+    }
+    if (usedLocal) *usedLocal = local;
     const int64_t size = src->size();
     if (setTotal) dlTotal_.store(size);
     std::error_code ec;
@@ -1457,15 +1471,16 @@ bool Browser::copyRemoteFile(const std::string& uri, const std::string& local, b
 }
 
 void Browser::downloadRemoteFile(const std::string& uri, const std::string& local, const std::string& name) {
-    const bool ok = copyRemoteFile(uri, local, true);
+    std::string used = local;
+    const bool ok = copyRemoteFile(uri, local, true, &used);
     if (dlStopped_.load()) {
         std::error_code ec;
-        fs::remove(local + ".part", ec);
+        fs::remove(used + ".part", ec);
     }
     dlOk_.store(ok);
     dlDone_.store(true);
     dlActive_.store(false);
-    PIXELVR_LOG_INFO("Download %s: ok=%d -> %s", name.c_str(), ok ? 1 : 0, local.c_str());
+    PIXELVR_LOG_INFO("Download %s: ok=%d -> %s", name.c_str(), ok ? 1 : 0, used.c_str());
 }
 
 void Browser::downloadRemoteFolder(const std::string& uri, const std::string& destDir) {
@@ -1677,7 +1692,25 @@ void Browser::measureFolder(const std::string& uri) {
 #endif
 }
 
+void Browser::applyPendingRename() {
+    std::string name, local;
+    {
+        std::lock_guard<std::mutex> lk(dlRenameMutex_);
+        if (!hasRename_) return;
+        name = pendingRenameName_;
+        local = pendingRenameLocal_;
+        hasRename_ = false;
+    }
+    dlName_ = name;
+    dlLocalPath_ = local + ".part";  // poll() measures progress from this file
+    if (dlActiveJob_ >= 0 && dlActiveJob_ < static_cast<int>(dlJobs_.size())) {
+        dlJobs_[static_cast<std::size_t>(dlActiveJob_)].name = name;
+        dlJobs_[static_cast<std::size_t>(dlActiveJob_)].localPath = local;
+    }
+}
+
 Browser::Result Browser::poll(std::string& playPath) {
+    applyPendingRename();
     // Publish a finished async directory scan (SMB discovery / large dirs).
     if (scanReady_.exchange(false)) {
         if (scanThread_.joinable()) scanThread_.join();
@@ -1792,6 +1825,7 @@ Browser::Result Browser::poll(std::string& playPath) {
         }
         return Result::None;
     }
+    applyPendingRename();  // a download that finished within this very frame
     if (dlDone_.exchange(false)) {
         if (dlThread_.joinable()) dlThread_.join();
         if (dlActiveJob_ >= 0 && dlActiveJob_ < static_cast<int>(dlJobs_.size())) {

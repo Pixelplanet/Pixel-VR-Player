@@ -1049,6 +1049,7 @@ int runScreen(const ScreenOptions& opt) {
     // own targets. Each attached frame session maps to its tab's root session:
     // focus is probed in the frames too, keys are dispatched to the root.
     std::map<std::string, std::string> frameRoot;
+    std::map<std::string, std::string> childFrames;  // frame id of a tab's iframe -> that tab's session
     auto inputSession = [&](const std::string& s) -> std::string {
         const auto it = frameRoot.find(s);
         return it == frameRoot.end() ? s : it->second;
@@ -1213,7 +1214,12 @@ int runScreen(const ScreenOptions& opt) {
             const int cur = static_cast<int>(r->getNumber("currentIndex", 0));
             const pvrjson::Value* e = r->get("entries");
             const int n = e ? static_cast<int>(e->array.size()) : 0;
-            tabs[i].canBack = cur > 0;
+            // The tab starts as about:blank before its first page: that entry is not "back".
+            bool back = false;
+            for (int j = 0; j < cur && e && j < n; ++j) {
+                if (e->array[static_cast<size_t>(j)].getString("url") != "about:blank") back = true;
+            }
+            tabs[i].canBack = back;
             tabs[i].canFwd = cur + 1 < n;
             pushToolbar();
         });
@@ -1623,6 +1629,10 @@ int runScreen(const ScreenOptions& opt) {
             if (!tabs[i].loading) requestHistory(session);
             if (i == active) emitActiveState();
             pushToolbar();
+        } else if (method == "Page.frameAttached") {
+            if (tabBySession(session) >= 0) childFrames[params->getString("frameId")] = session;
+        } else if (method == "Page.frameDetached") {
+            childFrames.erase(params->getString("frameId"));
         } else if (method == "Page.navigatedWithinDocument") {
             requestHistory(session);
         } else if (method == "Target.targetInfoChanged") {
@@ -1673,7 +1683,11 @@ int runScreen(const ScreenOptions& opt) {
             const int i = tabBySession(gone);
             if (i >= 0) removeTab(i);
         } else if (method == "Browser.downloadWillBegin") {
-            const int dti = tabByTarget(params->getString("frameId"));
+            int dti = tabByTarget(params->getString("frameId"));
+            if (dti < 0) {  // a download started in an iframe (Plex's "Save File" link)
+                const auto cf = childFrames.find(params->getString("frameId"));
+                if (cf != childFrames.end()) dti = tabBySession(cf->second);
+            }
             if (dti < 0) return;  // another screen's
             {
                 // Plex Web "Download": Chromium would save it headless, without progress or a real
@@ -1703,7 +1717,7 @@ int runScreen(const ScreenOptions& opt) {
                         "{headers:{Accept:'application/json'}});const j=await r.json();"
                         "for(const m of (j.MediaContainer.Metadata||[]))for(const md of (m.Media||[]))"
                         "for(const p of (md.Part||[]))if(String(p.id)===pid)return p.file||'';return ''};"
-                        "let f=await find(key);if(!f)f=await find(key+'/allLeaves');"
+                        "let f=await find(key);if(!f)f=await find(key.replace(/\\/children$/,'')+'/allLeaves');"
                         "return f.split(/[\\\\/]/).pop()}catch(e){return ''}})()";
                     evalIn(tabs[dti].session, js, [&, dlUrl, suggested, partId, ext](const pvrjson::Value* v) {
                         std::string name = (v && v->type == pvrjson::Value::Type::String) ? v->str : std::string();
