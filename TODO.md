@@ -7,6 +7,36 @@
 
 ---
 
+## OPEN NOW (2026-11-07) — start here
+
+State: `main` @ `89ae7f4` (latest release v1.12.3). Plex downloads through the app's
+download manager (server Content-Disposition name, Save File in iframes, Download Folder
+setting) and "B on a shortcut start page" are done and user-verified. Not yet released —
+cut **v1.12.4** after the items below (release notes in `docs/release-notes/`, tag push
+triggers `.github/workflows/release.yml`). Headset: `ssh -i
+"$HOME/AppData/Local/steamos-devkit/steamos-devkit/devkit_rsa" steamos@192.168.178.61`;
+installed app is `~/PixelVRPlayer` (`pixelvr.bak` = pre-download-change binary).
+
+- [ ] **N1. Play from the Downloads list ignores multi-screen:** pressing Play on a
+  finished item in the Downloads window plays it immediately on the current screen. It
+  must behave like opening a file from the file browser: with Multiple Screens on and
+  screens open, show the screen picker (and 180/360 media replace everything, as elsewhere).
+  Look at the Downloads-window play action in `src/app/app.cpp` (downloads window
+  buttons/rows near the `drows`/`dbtns` code ~line 3430) vs. the file-browser play path
+  (`loadMedia` / screen-picker logic ~lines 1897-1910, 2286-2303).
+- [ ] **N2. Thumbstick input leaks to screen movement while using a Plex menu:** with
+  Plex's "…" submenu open on a browser screen, moving the stick up/down repeatedly
+  sometimes nudges the screen Plex is on by a tiny amount, as if the laser were beside the
+  screen (move/zoom-screen stick handling). Stick input while the laser is on a web
+  screen should go only to the page (scroll). Suspects: the frame(s) where the hit test
+  flickers off the screen edge / onto the menu's transparent area, or stick deadzone/
+  hysteresis in the screen-move code — check `webMouseSlot_` / pointer-on-screen gating
+  in `src/app/app.cpp` and `screensPointable` in `src/gfx/vulkan_renderer.cpp` ~2231.
+  Fix should latch "stick belongs to the page" while the pointer is on (or just left)
+  the web screen.
+
+---
+
 ## Next major features (planned 2026-11-01, after v1.8.0)
 
 Order: **Step 1 = Multi-screen**, **Step 2 = YouTube** (embedded mobile-site UI + yt-dlp
