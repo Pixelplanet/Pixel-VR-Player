@@ -9,6 +9,9 @@
 
 ## OPEN NOW (2026-11-07) — start here
 
+Priority: fix N1/N2 first, then the newer ideas (L1 laser smoothing, D1 2D→3D, R1 room
+colour, K1/K2 keyboard). Y*/S1 are parked; M5 is low priority.
+
 State: `main` @ `89ae7f4` (latest release v1.12.3). Plex downloads through the app's
 download manager (server Content-Disposition name, Save File in iframes, Download Folder
 setting) and "B on a shortcut start page" are done and user-verified. Not yet released —
@@ -97,7 +100,7 @@ Scope: flat 2D and every 3D format (SBS / half-SBS / TB) on flat or curved scree
     current distance; thumbstick Y = distance, thumbstick X = size; trigger drops it.
   - Per-screen menu (Y on a screen): Move, Resize, Curvature, Format, Mute, Close.
   - Optional: remember the layout between sessions.
-- [~] **M5. Decoder capacity / admission control** — budget + "no decoder capacity" message exist; 180/360 now simply replace all screens (no picker). Remaining: calibrate the budget on device. — a first rough budget (1000 Mpx/s,
+- [ ] **M5. Decoder capacity / admission control** (still to do, LOW priority) — budget + "no decoder capacity" message exist; 180/360 now simply replace all screens (no picker). Remaining: calibrate the budget on device. — a first rough budget (1000 Mpx/s,
   logged as "Decoder budget: …") is in `App::decoderBudgetAllows`; still to calibrate.
   - Measure on device: how many concurrent `*_v4l2m2m` sessions open, and the aggregate
     pixel-rate budget (e.g. 3× 4K30 HEVC, 2× 4K60, 8K + 1080p…). Record results here.
@@ -118,8 +121,8 @@ Approach: embedded browser shows m.youtube.com (browse, search, login); watch UR
 intercepted and played natively — **yt-dlp** resolves the streams, FFmpeg plays them with
 hardware VP9/H.264 in our player (works with multi-screen).
 
-- [ ] **Y0. Legal/ToS note** — personal use; no downloading of YouTube content by default.
-- [ ] **Y1. Play a YouTube URL natively** (testable before the browser exists)
+- [ ] **Y0. Legal/ToS note** — PARKED 2026-11-07 (current in-page playback is good enough; only revisit if it causes problems) — personal use; no downloading of YouTube content by default.
+- [ ] **Y1. Play a YouTube URL natively** — PARKED 2026-11-07 (current in-page playback is good enough; only revisit if it causes problems)
   - Ship the standalone `yt-dlp_linux_aarch64` binary (Unlicense) via the installer into the
     app dir; self-update with `yt-dlp -U` (old versions break often).
   - `yt-dlp -J <url>` → pick VP9 or H.264 video (never AV1 above 1080p) up to the chosen
@@ -128,25 +131,25 @@ hardware VP9/H.264 in our player (works with multi-screen).
     local DASH MPD for FFmpeg's dash demuxer. Reconnect/timeouts, buffering indicator,
     seeking over HTTP.
   - Temporary "Open URL" field (in-app keyboard) for testing.
-- [~] **Y2. Embedded browser panel** — PANEL DONE (headless Chromium browser screens, see W1; YouTube shortcut opens m.youtube.com and plays IN the page). NOT done: intercepting watch URLs to play natively (no yt-dlp anywhere in the code yet — Y1/Y3 still open).
+- [x] **Y2. Embedded browser panel** — DONE (kept as is). Native watch-URL intercept PARKED 2026-11-07, only if the in-page setup shows problems. PANEL DONE (headless Chromium browser screens, see W1; YouTube shortcut opens m.youtube.com and plays IN the page). NOT done: intercepting watch URLs to play natively (no yt-dlp anywhere in the code yet — Y1/Y3 still open).
   - Glass panel showing m.youtube.com with a mobile user agent; laser → touch/mouse events,
     thumbstick → scroll, in-app keyboard → text input; back / reload / home.
   - **Intercept navigation** to `youtube.com/watch?v=…`, `youtu.be/…`, `/shorts/…`,
     `/live/…`: cancel it in the browser and play the URL in our player (selected or new screen).
   - Pause/mute any page audio while our player runs.
-- [ ] **Y3. Login & Premium**
+- [ ] **Y3. Login & Premium** — PARKED 2026-11-07 (current in-page playback is good enough; only revisit if it causes problems) (browser login itself works)
   - Sign in on the mobile site inside the browser (Google login works in a normal web view).
   - Export the browser's YouTube cookies to a Netscape cookie file for `yt-dlp --cookies`
     so Premium accounts get the higher-bitrate 1080p formats (and no ads — our player never
     shows ads anyway). Store with 0600 permissions; "Sign out" clears browser + cookie file.
-- [ ] **Y4. VR formats** — VR180 (equirect 180 + SBS), 360 equirect mono/TB, and YouTube's
+- [ ] **Y4. VR formats** — PARKED 2026-11-07 (current in-page playback is good enough; only revisit if it causes problems) — VR180 (equirect 180 + SBS), 360 equirect mono/TB, and YouTube's
   **EAC cubemap** projection (new sphere shader path); auto-select from FFmpeg spherical /
   stereo3d side data and yt-dlp metadata.
-- [ ] **Y5. Player features** — quality picker in the HUD (warn when a quality needs software
+- [ ] **Y5. Player features** — PARKED 2026-11-07 (current in-page playback is good enough; only revisit if it causes problems) — quality picker in the HUD (warn when a quality needs software
   decode), captions (WebVTT → text overlay), chapters on the timeline, playback speed.
 
 ### S. Other streaming sources (after YouTube)
-- [ ] **S1. yt-dlp generic** — the same Open URL path works for many sites yt-dlp supports
+- [ ] **S1. yt-dlp generic** — PARKED 2026-11-07 (current in-page playback is good enough; only revisit if it causes problems) — the same Open URL path works for many sites yt-dlp supports
   (Vimeo, Twitch VODs, …); live streams (HLS) via FFmpeg.
 - [x] **S2. Plex — DONE & user-verified 2026-11-07** (native original-quality playback only after a real play click, return to the page, slot following, timeline reports, reconnect, "Stop or Close returns to Plex" hint; Plex downloads go through the app's Downloads window with the server file name). Original plan: Plex Web runs
   in the browser screen (works, transcodes to 1080p in Chromium). Instead of a Plex client
@@ -406,7 +409,7 @@ wsl -d Ubuntu -- bash -lc 'rsync -az -e "ssh -i $HOME/.config/steamos-devkit/dev
 
 ## 3. TODO — BUGS (from latest in-headset testing)
 
-### B1. Video fringing / white-pixel aliasing when the screen is farther away
+### B1. Video fringing / white-pixel aliasing when the screen is farther away — DONE (video mip chain; user-verified 2026-11-07)
 - **Symptom:** high-res video shows white-pixel fringing around objects when the
   screen is a bit further; gone when moved much closer.
 - **Cause:** the NV12 video textures have NO mipmaps (`mipLevels=1`) and the sampler
@@ -419,7 +422,7 @@ wsl -d Ubuntu -- bash -lc 'rsync -az -e "ssh -i $HOME/.config/steamos-devkit/dev
   `updateVideoTexture` (blit mip gen), `createSamplerAndDescriptors` (sampler).
   Watch the per-frame blit cost; only regenerate when a new frame is uploaded.
 
-### B2. High-res 360/180 video won't play + stale frame + controls disappear — MOSTLY DONE (8K immersive: other screens close first + HW decoder retry, d714ea8; controls done; verify stale-frame-on-failure item 2)
+### B2. High-res 360/180 video won't play + stale frame + controls disappear — DONE (user-verified 2026-11-07; 8K immersive closes other screens + HW decoder retry, d714ea8)
 - **Symptom:** a ~3600p video (meant to be 180°/360°) shows the LAST FRAME of the
   previous test clip and never plays; and the control bar/transport vanish (they
   only render for `ProjectionMode::Flat`).
@@ -481,7 +484,10 @@ via `--xrext`). Our pinned OpenXR SDK **1.1.43** only declares the older
   options (Projection Mode, Stereo 3D Mode, Screen Distance, Reset View).
 - Settings automatically persist to `~/.config/pixelvr/settings.conf` across restarts.
 
-### F4. Variable-speed joystick fast-forward/rewind
+### F4. Variable-speed joystick fast-forward/rewind — NOT implemented (today: fixed-interval skips)
+- First EVALUATE feasibility across all sources (local, SMB/SFTP/WebDAV, Plex https, browser
+  pages) — continuous seeking over network sources may thrash. Flat video only: in 180/360
+  the right stick already tilts/zooms the view.
 - Replace the discrete ±10 s edge-triggered seek (thumbstick X) with CONTINUOUS seek
   whose rate scales with deflection: `rate = sign(x) * (deadzone(|x|))^2 * maxRate`,
   applied per-frame (`* dt`). Show the seek speed on the HUD. Files: `app.cpp` (per-
