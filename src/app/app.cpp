@@ -2589,6 +2589,22 @@ int App::run() {
             const auto nowT = std::chrono::steady_clock::now();
             XrInputState in = xr_.input();
             if (!in.selectHeld) volumeDragging_ = false;  // a volume-bar drag ends with the trigger
+            {
+                // Laser smoothing (One Euro): steady while the hand is still,
+                // quick on fast moves. Everything downstream (hit tests, the
+                // beam, grabbing) uses this ray.
+                static const OneEuroParams kPos[4] = {{}, {6.0f, 20.0f, 2.5f}, {3.0f, 15.0f, 2.5f}, {2.0f, 10.0f, 2.5f}};
+                static const OneEuroParams kRot[4] = {{}, {3.0f, 3.0f, 2.5f}, {1.5f, 2.5f, 2.5f}, {0.8f, 2.0f, 2.5f}};
+                const int lvl = std::clamp(settings_.laserSmoothing(), 0, 3);
+                for (int h = 0; h < 2; ++h) {
+                    XrInputState::ControllerPose& c = in.controllers[h];
+                    if (!c.active || lvl == 0) {
+                        aimFilter_[h].reset();
+                        continue;
+                    }
+                    aimFilter_[h].filter(c.position, c.orientation, dt, kPos[lvl], kRot[lvl]);
+                }
+            }
 
             // In-app keyboard (text entry). It owns all controller input while open:
             // trigger / A press the key under the laser, stick left/right moves
@@ -3194,6 +3210,7 @@ int App::run() {
                                       settings_.uiDistance());
             renderer_.setAmbilightIntensity(settings_.ambilightIntensity());
             renderer_.setAmbilightAllScreens(settings_.ambilightAllScreens());
+            renderer_.setRoomColor(settings_.roomColor());
             {
                 std::vector<VulkanRenderer::RailShortcut> rail;
                 for (const SettingsMenu::RailShortcut* sc : settings_.railShortcuts()) {

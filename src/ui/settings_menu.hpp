@@ -62,6 +62,8 @@ public:
         CycleBrowserSort,
         BackToUI,
         CycleAmbilightScope,
+        CycleLaserSmoothing,
+        CycleRoom,
     };
 
     // How a row's value is presented: the renderer draws a stepped slider for
@@ -146,6 +148,7 @@ public:
     bool pauseOnRemoval() const { return pauseOnRemoval_; }
     // In-app keyboard: 0 = English (QWERTY), 1 = German (QWERTZ).
     int keyboardLayout() const { return keyboardLayout_; }
+    int laserSmoothing() const { return laserSmoothing_; }  // 0 Off, 1 Low, 2 Medium, 3 High
     // ...including livestreams on browser screens (off: they keep running).
     bool pauseLivestreams() const { return pauseLivestreams_; }
     // New browser screens open in a private (incognito) browser context.
@@ -205,7 +208,10 @@ public:
 
     // Ambient screen glow ("ambilight") behind the flat cinema screen.
     int ambilightIdx() const { return ambilightIdx_; }
-    float ambilightIntensity() const;  // 0 = off
+    float ambilightIntensity() const;  // 0 = off (also with the Black room)
+    // Room around the screens (the projection layer's clear colour), RGB.
+    const float* roomColor() const;
+    int roomIdx() const { return roomIdx_; }  // 0 Midnight, 1 Black, 2 Slate, 3 Warm
     bool ambilightAllScreens() const { return ambilightAllScreens_; }  // else only the selected screen
 
     // OpenXR swapchain supersampling / render resolution scale.
@@ -247,6 +253,8 @@ private:
     bool multiScreen_ = true; // off = classic single-screen player
     bool pauseOnRemoval_ = true;
     int keyboardLayout_ = 0;
+    int laserSmoothing_ = 2;
+    int roomIdx_ = 0;
     bool pauseLivestreams_ = false;
     bool privateBrowsing_ = false;
     bool screenNumbers_ = false;

@@ -197,10 +197,12 @@ void SettingsMenu::refresh() {
         title_ = "Settings > Display & Cinema";
         choice("Cinema Screen Curve", kCurvatureNames[curvatureIdx_ % kCurvatureCount],
                kCurvatureCount, curvatureIdx_ % kCurvatureCount, Action::CycleCurvature);
-        choice("Ambient Screen Glow", kAmbilightNames[ambilightIdx_ % kAmbilightCount],
-               kAmbilightCount, ambilightIdx_ % kAmbilightCount, Action::CycleAmbilight,
-               projectionMode_ == 0);
-        if (multiScreen_ && ambilightIdx_ % kAmbilightCount > 0) {
+        segmented("Room", {"Midnight", "Black", "Slate", "Warm"}, roomIdx_ % 4, Action::CycleRoom);
+        choice("Ambient Screen Glow", roomIdx_ == 1 ? std::string("Off (Black room)")
+                                                    : std::string(kAmbilightNames[ambilightIdx_ % kAmbilightCount]),
+               kAmbilightCount, roomIdx_ == 1 ? 0 : ambilightIdx_ % kAmbilightCount, Action::CycleAmbilight,
+               projectionMode_ == 0 && roomIdx_ != 1);
+        if (multiScreen_ && roomIdx_ != 1 && ambilightIdx_ % kAmbilightCount > 0) {
             segmented("Glow Around", {"Selected Screen", "All Screens"}, ambilightAllScreens_ ? 1 : 0,
                       Action::CycleAmbilightScope);
         }
@@ -275,7 +277,10 @@ void SettingsMenu::refresh() {
         binding("Open Menu / Browser", pressLabel(1, bindMenuBtn_), Action::ListenMenu);
         binding("Recenter View", pressLabel(2, bindRecenterBtn_), Action::ListenRecenter);
         binding("Bookmarks Shortcut", pressLabel(4, bindQuickPathBtn_), Action::ListenQuickPath);
-        segmented("Keyboard Layout", {"English", "Deutsch"}, keyboardLayout_ % 2, Action::CycleKeyboardLayout);
+        segmented("Keyboard Layout", {"US", "Deutsch", "UK", "Français", "Nordic"}, keyboardLayout_ % 5,
+                  Action::CycleKeyboardLayout);
+        segmented("Laser Smoothing", {"Off", "Low", "Medium", "High"}, laserSmoothing_ % 4,
+                  Action::CycleLaserSmoothing);
         toggle("Controller Models", drawModels_, Action::ToggleModels);
         toggle("Laser Hover Rumble", hoverHapticsEnabled_, Action::ToggleHoverHaptics);
         choice("Rumble Strength", hoverHapticsStrengthStr(), kHoverHapticsStrengthCount,
@@ -468,6 +473,16 @@ SettingsMenu::Action SettingsMenu::activate() {
             saveConfig();
             refresh();
             break;
+        case Action::CycleLaserSmoothing:
+            laserSmoothing_ = (laserSmoothing_ + 1) % 4;
+            saveConfig();
+            refresh();
+            break;
+        case Action::CycleRoom:
+            roomIdx_ = (roomIdx_ + 1) % 4;
+            saveConfig();
+            refresh();
+            break;
         case Action::ListenQuickPath:
             listeningFunc_ = 4;
             status_ = "Press a controller button for Bookmarks shortcut";
@@ -557,7 +572,7 @@ SettingsMenu::Action SettingsMenu::activate() {
             refresh();
             break;
         case Action::CycleKeyboardLayout:
-            keyboardLayout_ = (keyboardLayout_ + 1) % 2;
+            keyboardLayout_ = (keyboardLayout_ + 1) % 5;
             saveConfig();
             refresh();
             break;
@@ -716,7 +731,18 @@ const char* SettingsMenu::hoverHapticsStrengthStr() const {
 }
 
 float SettingsMenu::ambilightIntensity() const {
+    if (roomIdx_ == 1) return 0.0f;  // the Black room is for no distractions at all
     return kAmbilightValues[ambilightIdx_ % kAmbilightCount];
+}
+
+const float* SettingsMenu::roomColor() const {
+    static const float kRooms[4][3] = {
+        {0.020f, 0.020f, 0.050f},  // Midnight (the original navy)
+        {0.000f, 0.000f, 0.000f},  // Black: cinema, nothing else
+        {0.036f, 0.040f, 0.046f},  // Slate: neutral grey
+        {0.052f, 0.033f, 0.022f},  // Warm: dim amber
+    };
+    return kRooms[std::clamp(roomIdx_, 0, 3)];
 }
 
 
@@ -771,9 +797,11 @@ void SettingsMenu::loadConfig() {
             else if (key == "hover_haptics_strength") hoverHapticsStrengthIdx_ = std::clamp(std::stoi(val), 0, kHoverHapticsStrengthCount - 1);
             else if (key == "ambilight") ambilightIdx_ = std::clamp(std::stoi(val), 0, kAmbilightCount - 1);
             else if (key == "ambilight_all") ambilightAllScreens_ = (val == "1");
+            else if (key == "laser_smoothing") laserSmoothing_ = std::clamp(std::stoi(val), 0, 3);
+            else if (key == "room") roomIdx_ = std::clamp(std::stoi(val), 0, 3);
             else if (key == "multi_screen") multiScreen_ = (val == "1" || val == "true");
             else if (key == "pause_on_removal") pauseOnRemoval_ = (val == "1" || val == "true");
-            else if (key == "keyboard_layout") keyboardLayout_ = std::clamp(std::stoi(val), 0, 1);
+            else if (key == "keyboard_layout") keyboardLayout_ = std::clamp(std::stoi(val), 0, 4);
             else if (key == "pause_livestreams") pauseLivestreams_ = (val == "1" || val == "true");
             else if (key == "private_browsing") privateBrowsing_ = (val == "1" || val == "true");
             else if (key == "screen_numbers") screenNumbers_ = (val == "1");
@@ -832,6 +860,8 @@ void SettingsMenu::saveConfig() const {
             file << "hover_haptics_strength=" << hoverHapticsStrengthIdx_ << "\n";
             file << "ambilight=" << ambilightIdx_ << "\n";
             file << "ambilight_all=" << (ambilightAllScreens_ ? 1 : 0) << "\n";
+            file << "laser_smoothing=" << laserSmoothing_ << "\n";
+            file << "room=" << roomIdx_ << "\n";
             file << "panel_curve=" << panelCurveIdx_ << "\n";
             file << "panel_style=" << uiOpacityIdx_ << "\n";
             file << "multi_screen=" << (multiScreen_ ? 1 : 0) << "\n";

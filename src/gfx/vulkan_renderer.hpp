@@ -350,6 +350,10 @@ public:
     void setRailShortcuts(const std::vector<RailShortcut>& shortcuts);
     // Multi-screen: glow around every screen, else only around the selected one.
     void setAmbilightAllScreens(bool all) { ambilightAllScreens_ = all; }
+    // The room around the screens: the scene's clear colour (RGB).
+    void setRoomColor(const float rgb[3]) {
+        for (int k = 0; k < 3; ++k) clearColor_[k] = rgb[k];
+    }
     void setAmbilightIntensity(float intensity) {
         ambilightIntensity_ = intensity < 0.0f ? 0.0f : (intensity > 1.0f ? 1.0f : intensity);
     }
@@ -398,7 +402,7 @@ public:
     // Code / character a key index produces (see hub::keyboardKeys); used by the app.
     static int keyboardKeyCode(int index);
     static std::string keyboardKeyText(int index, bool shift, bool symbols);  // UTF-8
-    static void setKeyboardLayout(int layout);  // 0 = English, 1 = German
+    static void setKeyboardLayout(int layout);  // 0 US, 1 German, 2 UK, 3 French, 4 Nordic
     void setKeyboardModal(bool visible, const std::string& prompt,
                           const std::string& text, bool isPassword = false,
                           const float* transform = nullptr,

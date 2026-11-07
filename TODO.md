@@ -9,8 +9,8 @@
 
 ## OPEN NOW (2026-11-07) — start here
 
-Priority: fix N1/N2 first, then the newer ideas (L1 laser smoothing, D1 2D→3D, R1 room
-colour, K1/K2 keyboard). Y*/S1 are parked; M5 is low priority.
+Priority: N1/N2, L1, R1, K1/K2 are done (await user verification). Next: D1 2D→3D (needs a
+model/runtime decision). Y*/S1 are parked; M5 is low priority.
 
 State: `main` @ `89ae7f4` (latest release v1.12.3). Plex downloads through the app's
 download manager (server Content-Disposition name, Save File in iframes, Download Folder
@@ -187,7 +187,7 @@ hardware VP9/H.264 in our player (works with multi-screen).
   then WebDAV over libcurl (PROPFIND listing, ranged GET read-ahead; shares the HTTP reader
   with S2). NFS (libnfs, host-based auth) and DLNA only if asked. Check on the headset which
   of libssh / libssh2 / libnfs / libcurl SteamOS ships.
-- [ ] **L1. Laser smoothing (later):** SteamOS's own laser is steady even with a shaky
+- [x] **L1. Laser smoothing:** DONE 2026-11-07 (not yet user-verified): One Euro filter on the aim pose (`src/util/one_euro.hpp`, applied in `App::run` right after `xr_.input()`, so hit tests, beam and grabbing all use it); Settings › Controls › Laser Smoothing Off/Low/Medium/High (default Medium, `laser_smoothing`). Original note: SteamOS's own laser is steady even with a shaky
   hand; ours uses the raw aim pose. Filter the aim ray (One Euro filter on direction +
   origin: strong smoothing when slow, little lag on fast moves), applied to the ray used
   for hit testing and drawing alike; button presses keep the hit of the press frame.
@@ -203,14 +203,14 @@ hardware VP9/H.264 in our player (works with multi-screen).
   Depth Anything V2 *Small* (Apache-2.0; Base/Large are CC-BY-NC → not usable); check
   ZipDepth's licence before using it. Inference runtime on the Frame: Vulkan compute (ncnn,
   BSD-3) or the Adreno NPU if exposed. Prototype on 1080p flat first.
-- [ ] **R1. Room / environment colour (after S2-S4):** user-selectable room backdrop —
+- [x] **R1. Room colour:** DONE 2026-11-07 (not yet user-verified): Settings › Display › Room Midnight/Black/Slate/Warm (`room`); Black also turns the screen glow off. Environment scenes not done. Original note: user-selectable room backdrop —
   presets (current navy, pure black "cinema" with no distractions, a few tinted / themed
   rooms), later optional environment scenes. Applies to the projection-layer clear colour
   and the floor/ambient; pure black must also drop the ambilight glow when chosen.
-- [ ] **K1. Keyboard closer to the Steam Frame default (2026-11-07):** make our in-app
+- [x] **K1. Keyboard closer to the Steam Frame default:** DONE 2026-11-07 (not yet user-verified), modelled on the SteamOS/PC layout (number row + Backspace, Enter on the home row, two Shifts, bottom row ?123 / @ / Space / arrows); compare with the real Frame keyboard. Original note: make our in-app
   keyboard's key arrangement, sizes and special keys (shift, symbols, backspace, enter,
   space) match the SteamOS/Steam Frame on-screen keyboard so it feels familiar.
-- [ ] **K2. More keyboard layouts in Settings:** add a layout choice (e.g. QWERTY US/UK,
+- [x] **K2. More keyboard layouts:** DONE 2026-11-07 (not yet user-verified): US, Deutsch, UK, Français (AZERTY), Nordic (SE/FI, æ ø on the symbols page); `keyboard_layout` 0..4 keeps old values. Original note: add a layout choice (e.g. QWERTY US/UK,
   QWERTZ German, AZERTY French, Nordic) with the matching umlauts/accents; remember the
   choice in settings.conf.
 - DRM services: Prime Video verified working in the browser screen (Widevine L3, 1080p);

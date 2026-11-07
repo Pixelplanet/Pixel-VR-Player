@@ -19,6 +19,7 @@
 #include "app/browser_host.hpp"
 #include "app/chromium_installer.hpp"
 #include "app/music_queue.hpp"
+#include "util/one_euro.hpp"
 
 #include <atomic>
 #include <chrono>
@@ -307,6 +308,7 @@ private:
     float webWheelAccum_ = 0.0f;
     // The stick belongs to the page: latched while held, and shortly after the
     // laser leaves a web screen (no screen push from a slipped hit test).
+    OneEuroPose aimFilter_[2];  // laser smoothing per hand (L1)
     bool volumeDragging_ = false;  // trigger held after a click on the volume bar
     bool webStickLatched_ = false;
     std::chrono::steady_clock::time_point webStickUntil_{};

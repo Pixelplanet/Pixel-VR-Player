@@ -437,7 +437,7 @@ constexpr float kKbFieldHalfH = 0.046f;
 constexpr float kKbSheetY = -0.272f;     // key sheet centre
 constexpr float kKbSheetHalfW = 0.68f;
 constexpr float kKbSheetHalfH = 0.250f;
-// Keyboard layout (Settings): 0 = English (US QWERTY), 1 = German (QWERTZ).
+// Keyboard layout (Settings): 0 US, 1 German (QWERTZ), 2 UK, 3 French (AZERTY), 4 Nordic.
 inline int gKeyboardLayout = 0;
 // Splits UTF-8 text into characters.
 inline std::vector<std::string> utf8Chars(const char* s) {
@@ -452,9 +452,11 @@ inline std::vector<std::string> utf8Chars(const char* s) {
 }
 inline std::vector<KbKey> buildKeyboard(int layout) {
     struct Spec { int code; std::string lower, upper, sym; float units; };
-    const float pitch = 0.107f;
+    // Laid out like the SteamOS / PC keyboard: number row with Backspace,
+    // Enter at the end of the home row, Shift on both sides.
+    const float pitch = 0.097f;
     const float keyHalfH = 0.040f;
-    const float gap = 0.010f;
+    const float gap = 0.009f;
     const float rowY[5] = {-0.080f, -0.174f, -0.268f, -0.362f, -0.456f};
     // One key per character: letters, the same row with Shift, and symbols.
     auto chars = [](const char* lo, const char* up, const char* sy) {
@@ -465,24 +467,45 @@ inline std::vector<KbKey> buildKeyboard(int layout) {
         }
         return out;
     };
+    // Symbols page (the same on every layout): everything that is hard to
+    // reach on one of them.
+    const char* sym0 = "`~\\|{}[]<>^°";
+    const char* sym1 = "@#$%&*()-_=+";
+    const char* sym2 = "€£¥§´¨\"';:!?";
+    const char* sym3 = "/,.µ²³«»¤";
+    struct Layout { const char *r0, *r0s, *r1, *r1s, *r2, *r2s, *r3, *r3s; };
+    static const Layout kLayouts[5] = {
+        // 0 English (US)
+        {"1234567890-=", "!@#$%^&*()_+", "qwertyuiop[]", "QWERTYUIOP{}", "asdfghjkl;'", "ASDFGHJKL:\"",
+         "zxcvbnm,./", "ZXCVBNM<>?"},
+        // 1 Deutsch (QWERTZ)
+        {"1234567890ß´", "!\"§$%&/()=?`", "qwertzuiopü+", "QWERTZUIOPÜ*", "asdfghjklöä#", "ASDFGHJKLÖÄ'",
+         "yxcvbnm,.-", "YXCVBNM;:_"},
+        // 2 English (UK)
+        {"1234567890-=", "!\"£$%^&*()_+", "qwertyuiop[]", "QWERTYUIOP{}", "asdfghjkl;'#", "ASDFGHJKL:@~",
+         "zxcvbnm,./", "ZXCVBNM<>?"},
+        // 3 Français (AZERTY)
+        {"&é\"'(-è_çà)=", "1234567890°+", "azertyuiop^$", "AZERTYUIOP¨£", "qsdfghjklmù*", "QSDFGHJKLM%µ",
+         "wxcvbn,;:!", "WXCVBN?./§"},
+        // 4 Nordic (Swedish / Finnish, with æ ø on the symbols page)
+        {"1234567890+´", "!\"#¤%&/()=?`", "qwertyuiopå", "QWERTYUIOPÅ", "asdfghjklöä'", "ASDFGHJKLÖÄ*",
+         "zxcvbnm,.-", "ZXCVBNM;:_"},
+    };
+    const Layout& L = kLayouts[(layout >= 0 && layout < 5) ? layout : 0];
+    const std::string s3 = (layout == 4) ? std::string("/,.æøÆØµ²³") : std::string(sym3);
     std::vector<std::vector<Spec>> rows(5);
-    if (layout == 1) {
-        rows[0] = chars("1234567890ß", "!\"§$%&/()=?", "1234567890ß");
-        rows[1] = chars("qwertzuiopü", "QWERTZUIOPÜ", "@#€[]{}<>|~");
-        rows[2] = chars("asdfghjklöä", "ASDFGHJKLÖÄ", "+*'^°_\\;:´`");
-        rows[3].push_back({kKbShift, "", "", "", 1.5f});
-        for (const Spec& sp : chars("yxcvbnm,.-@", "YXCVBNM;:_@", "!?\"§$%&/()=")) rows[3].push_back(sp);
-    } else {
-        rows[0] = chars("1234567890", "1234567890", "1234567890");
-        rows[1] = chars("qwertyuiop-", "QWERTYUIOP_", "!@#$%^&*()~");
-        rows[2] = chars("asdfghjkl.", "ASDFGHJKL.", "-=+[]{};:'");
-        rows[3].push_back({kKbShift, "", "", "", 1.5f});
-        for (const Spec& sp : chars("zxcvbnm/@", "ZXCVBNM/@", "<>?,\\|`/\"")) rows[3].push_back(sp);
-    }
+    rows[0] = chars(L.r0, L.r0s, sym0);
+    rows[1] = chars(L.r1, L.r1s, sym1);
+    rows[2] = chars(L.r2, L.r2s, sym2);
+    const float enterUnits = (rows[2].size() >= 12) ? 1.5f : 2.0f;
+    rows[2].push_back({kKbDone, "", "", "", enterUnits});
+    rows[3].push_back({kKbShift, "", "", "", 1.5f});
+    for (const Spec& sp : chars(L.r3, L.r3s, s3.c_str())) rows[3].push_back(sp);
+    rows[3].push_back({kKbShift, "", "", "", 1.5f});
     rows[0].push_back({kKbBackspace, "", "", "", 1.5f});
-    rows[4] = {{kKbSymbols, "", "", "", 1.5f}, {kKbLeft, "", "", "", 1.0f},
-               {kKbSpace, " ", " ", " ", 5.0f}, {kKbRight, "", "", "", 1.0f},
-               {kKbDone, "", "", "", 2.5f}};
+    rows[4] = {{kKbSymbols, "", "", "", 1.5f}, {kKbChar, "@", "@", "@", 1.0f},
+               {kKbSpace, " ", " ", " ", 6.0f}, {kKbLeft, "", "", "", 1.0f},
+               {kKbRight, "", "", "", 1.0f}};
     std::vector<KbKey> out;
     for (int r = 0; r < 5; ++r) {
         float units = 0.0f;
@@ -508,9 +531,9 @@ inline std::vector<KbKey> buildKeyboard(int layout) {
     return out;
 }
 inline const std::vector<KbKey>& keyboardKeys() {
-    static const std::vector<KbKey> english = buildKeyboard(0);
-    static const std::vector<KbKey> german = buildKeyboard(1);
-    return gKeyboardLayout == 1 ? german : english;
+    static const std::vector<KbKey> layouts[5] = {buildKeyboard(0), buildKeyboard(1), buildKeyboard(2),
+                                                  buildKeyboard(3), buildKeyboard(4)};
+    return layouts[(gKeyboardLayout >= 0 && gKeyboardLayout < 5) ? gKeyboardLayout : 0];
 }
 // Music view on a screen (model units: x -1.6..1.6, y -0.9..0.9). The cover is
 // part of the video frame (music::kCover*); this is everything drawn on top.
@@ -7475,7 +7498,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 case hub::kKbShift: label = "Shift"; break;
                 case hub::kKbSymbols: label = keyboardModal_.symbols ? "ABC" : "?123"; break;
                 case hub::kKbSpace: label = "Space"; break;
-                case hub::kKbDone: label = "Done"; break;
+                case hub::kKbDone: label = "Enter"; break;
                 case hub::kKbCancel: label = "Cancel"; break;
                 default: break;  // Delete / arrows use icons
             }
