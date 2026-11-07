@@ -240,7 +240,7 @@ private:
     int browserViewMode_ = 0;  // 0=Large Cards (3x2), 1=Smaller Cards (4x3), 2=Compact List (1-Col)
     int panelCurveIdx_ = 1;    // 0=Flat, 1=Gentle (default), 2=Wrap
     int uiOpacityIdx_ = 2;     // 0=Solid, 1=Frosted, 2=Glass (default), 3=Clear
-    bool multiScreen_ = false; // off = classic single-screen player
+    bool multiScreen_ = true; // off = classic single-screen player
     bool pauseOnRemoval_ = true;
     int keyboardLayout_ = 0;
     bool pauseLivestreams_ = false;

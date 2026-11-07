@@ -174,6 +174,12 @@ hardware VP9/H.264 in our player (works with multi-screen).
   presets (current navy, pure black "cinema" with no distractions, a few tinted / themed
   rooms), later optional environment scenes. Applies to the projection-layer clear colour
   and the floor/ambient; pure black must also drop the ambilight glow when chosen.
+- [ ] **K1. Keyboard closer to the Steam Frame default (2026-11-07):** make our in-app
+  keyboard's key arrangement, sizes and special keys (shift, symbols, backspace, enter,
+  space) match the SteamOS/Steam Frame on-screen keyboard so it feels familiar.
+- [ ] **K2. More keyboard layouts in Settings:** add a layout choice (e.g. QWERTY US/UK,
+  QWERTZ German, AZERTY French, Nordic) with the matching umlauts/accents; remember the
+  choice in settings.conf.
 - DRM services: Prime Video verified working in the browser screen (Widevine L3, 1080p);
   Netflix / Disney+ use the same path.
 

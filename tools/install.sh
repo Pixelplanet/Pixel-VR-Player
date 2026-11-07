@@ -684,27 +684,27 @@ if [ -d "$srcdir/fonts" ]; then
     mkdir -p "$INSTALL_DIR/fonts"
     cp "$srcdir/fonts/"* "$INSTALL_DIR/fonts/"
 fi
-cp "$srcdir/run.sh" "$INSTALL_DIR/run.sh"
-chmod 0755 "$INSTALL_DIR/run.sh"
+# Scripts are replaced via a new file + rename, never overwritten in place: an update runs
+# the installed install.sh/update.sh, and the shell keeps reading the running script from
+# its old byte offset, so overwriting it mid-run executes garbage ("syntax error near '<'").
+put_script() {
+    cp "$1" "$2.new.$$" && chmod 0755 "$2.new.$$" && mv -f "$2.new.$$" "$2"
+}
+put_script "$srcdir/run.sh" "$INSTALL_DIR/run.sh"
 if [ -f "$srcdir/install.sh" ]; then
-    cp "$srcdir/install.sh" "$INSTALL_DIR/install.sh"
-    chmod 0755 "$INSTALL_DIR/install.sh"
+    put_script "$srcdir/install.sh" "$INSTALL_DIR/install.sh"
     INSTALLED_SCRIPT=1
 elif [ -n "$script_dir" ] && [ -f "$script_dir/install.sh" ]; then
-    cp "$script_dir/install.sh" "$INSTALL_DIR/install.sh"
-    chmod 0755 "$INSTALL_DIR/install.sh"
+    put_script "$script_dir/install.sh" "$INSTALL_DIR/install.sh"
     INSTALLED_SCRIPT=1
 fi
 # Copy updater script
 if [ -f "$srcdir/update.sh" ]; then
-    cp "$srcdir/update.sh" "$INSTALL_DIR/update.sh"
-    chmod 0755 "$INSTALL_DIR/update.sh"
+    put_script "$srcdir/update.sh" "$INSTALL_DIR/update.sh"
 elif [ -n "$script_dir" ] && [ -f "$script_dir/update.sh" ]; then
-    cp "$script_dir/update.sh" "$INSTALL_DIR/update.sh"
-    chmod 0755 "$INSTALL_DIR/update.sh"
+    put_script "$script_dir/update.sh" "$INSTALL_DIR/update.sh"
 elif [ -f "tools/update.sh" ]; then
-    cp "tools/update.sh" "$INSTALL_DIR/update.sh"
-    chmod 0755 "$INSTALL_DIR/update.sh"
+    put_script "tools/update.sh" "$INSTALL_DIR/update.sh"
 fi
 
 if [ -f "$srcdir/VERSION" ]; then
