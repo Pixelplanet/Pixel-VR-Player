@@ -42,9 +42,24 @@ Captured in the headset on a Steam Frame.
 
 ## Installation
 
-Choose whichever method fits your setup:
+### Quick install: one command
 
-### Option A: Straight from the headset's browser (easiest — no typing, no PC)
+On the Steam Frame switch to **Desktop Mode**, open **Konsole** (or SSH into the headset),
+paste this line and press Enter. On GitHub, the copy button at the top right of the box
+copies it for you:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Pixelplanet/Pixel-VR-Player/main/tools/install.sh | sh
+```
+
+It downloads the latest release, installs it into `~/PixelVRPlayer` and adds
+**Pixel VR Player** to your Steam library. If it asks to restart Steam, answer **y**: that
+marks it as a VR app so it opens straight into the player. No root access needed; run the
+same line again to update.
+
+Prefer not to type anything? Choose one of these:
+
+### Option A: Straight from the headset's browser (no typing, no PC)
 
 1. On the Steam Frame switch to **Desktop Mode** and open the web browser.
 2. Go to the [latest release](https://github.com/Pixelplanet/Pixel-VR-Player/releases/latest) and download **`pixelvr-linux-arm64.tar.gz`**.
@@ -64,17 +79,7 @@ Choose whichever method fits your setup:
 2. Plug it into your Steam Frame and switch to **Desktop Mode**.
 3. Open the drive in Dolphin and double-click the `.tar.gz` (it opens like a folder), then follow steps 4–6 of Option A: drag **`PixelVRPlayer`** onto the Desktop, double-click **`Install Pixel VR Player`** there, click **OK**, and go back to Gaming Mode.
 
-### Option C: One command in headset terminal
-
-If you are already in Desktop Mode on the Steam Frame, open **Konsole** and paste:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/Pixelplanet/Pixel-VR-Player/main/tools/install.sh | sh
-```
-
-*(No root access or disabled read-only filesystem needed; it installs entirely into user space).*
-
-### Option D: From your PC over Wi-Fi (Requires SSH or Dev Mode)
+### Option C: From your PC over Wi-Fi (Requires SSH or Dev Mode)
 
 If you have SSH enabled or Developer Mode turned on with your headset paired:
 

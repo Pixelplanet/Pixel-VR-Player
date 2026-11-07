@@ -24,4 +24,8 @@ int runSteamVrPrelaunchHelper();
 // instance is created. No-op when not launched by Steam.
 void steamVrPrelaunch();
 
+// `pixelvr --steamvr-unregister` (run by the uninstaller): removes our manifest
+// from SteamVR's app list and deletes it. Settings stay.
+int runSteamVrUnregister();
+
 }  // namespace pixelvr

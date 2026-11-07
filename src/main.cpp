@@ -111,6 +111,7 @@ int main(int argc, char** argv) {
 #endif
     // Short-lived helper started by App::init (see vr_app_manifest.hpp).
     if (first == "--steamvr-prelaunch") return pixelvr::runSteamVrPrelaunchHelper();
+    if (first == "--steamvr-unregister") return pixelvr::runSteamVrUnregister();
     // Release builds: restart on the bundled, patched FFmpeg (zero-copy decode).
     pixelvr::useBundledFfmpeg(argv);
 

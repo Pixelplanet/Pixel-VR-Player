@@ -65,6 +65,9 @@ ok()   { printf '%s  ok%s %s\n' "$C_OK" "$C_OFF" "$*"; logline "  ok $*"; }
 warn() { printf '%swarn%s %s\n' "$C_WARN" "$C_OFF" "$*" >&2; logline "warn $*"; }
 die()  { printf '%serror%s %s\n' "$C_ERR" "$C_OFF" "$*" >&2; logline "error $*"; exit 1; }
 
+# A terminal to ask in (opening /dev/tty fails without one, e.g. ssh -T).
+has_tty() { ( exec < /dev/tty > /dev/tty ) 2>/dev/null; }
+
 usage() {
     cat <<'USAGE'
 Pixel VR Player installer for the Valve Steam Frame.
@@ -586,11 +589,43 @@ unregister_steam_shortcut() {
 # ---------------------------------------------------------------------------
 if [ "$UNINSTALL" -eq 1 ]; then
     info "Removing Pixel VR Player from $INSTALL_DIR"
+    # Take the player out of SteamVR's app list (it registers itself on launch).
+    if [ -x "$INSTALL_DIR/pixelvr" ]; then
+        timeout 20 "$INSTALL_DIR/pixelvr" --steamvr-unregister 2>/dev/null || true
+    fi
+    rm -f "$HOME/.config/pixelvr/pixelvr.vrmanifest" "$HOME/.config/pixelvr/vr_manifest_registered"
     if [ "$DO_STEAM" -eq 1 ]; then
-        if unregister_steam_shortcut; then
+        # Steam rewrites shortcuts.vdf from memory, so the entry can only be
+        # removed while it is closed (a Gaming Mode session starts it again).
+        steam_was_running=0
+        if steam_running; then
+            steam_was_running=1
+            info "Closing Steam to remove the shortcut..."
+            steam_session_env
+            steam -shutdown >/dev/null 2>&1 || true
+            waited=0
+            while steam_running && [ "$waited" -lt 150 ]; do
+                sleep 0.2
+                waited=$((waited + 1))
+            done
+        fi
+        if steam_running; then
+            warn "Steam did not close - delete the shortcut in Steam manually"
+        elif unregister_steam_shortcut; then
             ok "removed the Steam shortcut"
         else
             warn "could not remove the Steam shortcut; delete it in Steam manually"
+        fi
+        if [ "$steam_was_running" -eq 1 ]; then
+            waited=0
+            while ! steam_running && [ "$waited" -lt 5 ]; do
+                sleep 1
+                waited=$((waited + 1))
+            done
+            if ! steam_running && command -v steam >/dev/null 2>&1; then
+                info "Starting Steam again..."
+                nohup steam >/dev/null 2>&1 &
+            fi
         fi
     fi
     rm -rf "$INSTALL_DIR"
@@ -851,7 +886,7 @@ if [ "$ART_NEEDS_RESTART" -eq 1 ] || [ "$VR_FLAG_OFF" -eq 1 ]; then
     printf 'RESTART_STEAM: 1\n'
     [ "$ART_NEEDS_RESTART" -eq 0 ] || info "Steam shows the new icon and artwork after it restarts"
 fi
-if [ "$VR_FLAG_OFF" -eq 1 ] && [ "${PIXELVR_GUI:-}" != 1 ]; then
+if [ "$VR_FLAG_OFF" -eq 1 ] && [ "${PIXELVR_GUI:-}" != 1 ] && ! has_tty; then
     info "To open straight into the player: in Steam, Properties of '$APP_NAME' > turn on 'Include in VR Library'"
     info "(or run this installer again with --restart-steam, which sets it while Steam is closed)"
 fi
@@ -880,6 +915,24 @@ restart_steam_now() {
         nohup steam >/dev/null 2>&1 &
     fi
 }
+
+# From a terminal (also "curl ... | sh": the answer is read from the terminal,
+# not the pipe): offer the Steam restart there.
+if [ "${PIXELVR_GUI:-}" != 1 ] && { [ "$ART_NEEDS_RESTART" -eq 1 ] || [ "$VR_FLAG_OFF" -eq 1 ]; } && \
+   has_tty; then
+    if [ "$VR_FLAG_OFF" -eq 1 ]; then
+        why="so Pixel VR Player opens straight into the player (marks it as a VR app)"
+    else
+        why="so its icon and artwork appear"
+    fi
+    printf '\nRestart Steam now %s? It takes a few seconds. [y/N] ' "$why" > /dev/tty
+    answer=""
+    read -r answer < /dev/tty || answer=""
+    case "$answer" in
+        y|Y|yes|Yes|YES) restart_steam_now ;;
+        *) info "Not restarting Steam - restart it (or the headset) later to finish" ;;
+    esac
+fi
 
 # Started from the desktop icons (they set PIXELVR_GUI=1): the final message box.
 if [ "${PIXELVR_GUI:-}" = 1 ] && command -v kdialog >/dev/null 2>&1; then

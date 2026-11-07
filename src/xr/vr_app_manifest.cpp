@@ -4,6 +4,7 @@
 
 #include <chrono>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -197,6 +198,50 @@ int runSteamVrPrelaunchHelper() {
         }
     }
     shutdown();
+    return rc;
+#else
+    return 1;
+#endif
+}
+
+int runSteamVrUnregister() {
+#if defined(__linux__)
+    // Uninstall: take our manifest out of SteamVR's app list (public
+    // IVRApplications::RemoveApplicationManifest), then delete the files.
+    const std::string path = configDir() + "/pixelvr.vrmanifest";
+    std::error_code ec;
+    int rc = 0;
+    if (std::filesystem::exists(path, ec)) {
+        void* lib = nullptr;
+        for (const char* p : {"/opt/steamvr/bin/linuxarm64/libopenvr_api.so", "/opt/steamvr/bin/linux64/libopenvr_api.so",
+                              "libopenvr_api.so"}) {
+            lib = dlopen(p, RTLD_NOW | RTLD_LOCAL);
+            if (lib) break;
+        }
+        using FnInit = intptr_t (*)(vr::EVRInitError*, vr::EVRApplicationType);
+        using FnShutdown = void (*)();
+        using FnGet = intptr_t (*)(const char*, vr::EVRInitError*);
+        auto init = lib ? reinterpret_cast<FnInit>(dlsym(lib, "VR_InitInternal")) : nullptr;
+        auto shutdown = lib ? reinterpret_cast<FnShutdown>(dlsym(lib, "VR_ShutdownInternal")) : nullptr;
+        auto get = lib ? reinterpret_cast<FnGet>(dlsym(lib, "VR_GetGenericInterface")) : nullptr;
+        vr::EVRInitError err = vr::VRInitError_None;
+        bool inited = false;
+        if (init && shutdown && get) {
+            init(&err, vr::VRApplication_Utility);
+            inited = (err == vr::VRInitError_None);
+        }
+        auto* apps = inited ? reinterpret_cast<vr::IVRApplications*>(get(vr::IVRApplications_Version, &err)) : nullptr;
+        if (apps && err == vr::VRInitError_None) {
+            const vr::EVRApplicationError ae = apps->RemoveApplicationManifest(path.c_str());
+            std::printf("SteamVR: removed %s (%s)\n", path.c_str(), apps->GetApplicationsErrorNameFromEnum(ae));
+        } else {
+            std::printf("SteamVR is not running: %s is only deleted\n", path.c_str());
+            rc = 1;
+        }
+        if (inited) shutdown();
+    }
+    std::filesystem::remove(path, ec);
+    std::filesystem::remove(configDir() + "/vr_manifest_registered", ec);  // left by v1.13.0 test builds
     return rc;
 #else
     return 1;
