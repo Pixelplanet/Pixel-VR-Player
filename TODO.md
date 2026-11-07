@@ -9,16 +9,15 @@
 
 ## OPEN NOW (2026-11-07) — start here
 
-Priority: N1/N2, L1, R1, K1/K2 are done (await user verification). Next: D1 2D→3D (needs a
+Priority: N1/N2, L1, R1, K1/K2 are done and user-verified. Next: D1 2D→3D (needs a
 model/runtime decision). Y*/S1 are parked; M5 is low priority.
 
-State: `main` @ `89ae7f4` (latest release v1.12.3). Plex downloads through the app's
-download manager (server Content-Disposition name, Save File in iframes, Download Folder
-setting) and "B on a shortcut start page" are done and user-verified. Not yet released —
-cut **v1.12.4** after the items below (release notes in `docs/release-notes/`, tag push
-triggers `.github/workflows/release.yml`). Headset: `ssh -i
-"$HOME/AppData/Local/steamos-devkit/steamos-devkit/devkit_rsa" steamos@192.168.178.61`;
-installed app is `~/PixelVRPlayer` (`pixelvr.bak` = pre-download-change binary).
+State: released as **v1.13.0** (2026-11-07; notes in `docs/release-notes/v1.13.0.md`, tag push
+triggers `.github/workflows/release.yml`). The launch fix ("Up next" instead of "Resume Game")
+lives in `src/xr/vr_app_manifest.cpp` (SteamVR prelaunch check + app manifest) and
+`tools/install.sh` (OpenVR flag; `--update` hands over to the release's own installer).
+Headset: `ssh -i "$HOME/AppData/Local/steamos-devkit/steamos-devkit/devkit_rsa"
+steamos@192.168.178.61`; installed app is `~/PixelVRPlayer`.
 
 - [x] **N1. Play from the Downloads list ignores multi-screen:** FIXED 2026-11-07 (not yet user-verified): the Downloads row and "Open Share/Bookmark" go through `playFromBrowser` (picker / VR question in the Files hub; the click is consumed so the picker cannot take it). Original report: pressing Play on a
   finished item in the Downloads window plays it immediately on the current screen. It
