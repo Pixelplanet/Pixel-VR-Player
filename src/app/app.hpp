@@ -20,6 +20,7 @@
 #include "app/chromium_installer.hpp"
 #include "app/music_queue.hpp"
 #include "util/one_euro.hpp"
+#include "xr/vr_app_manifest.hpp"
 
 #include <atomic>
 #include <chrono>

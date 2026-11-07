@@ -129,6 +129,7 @@ add_library(pixelvr_core STATIC
     src/xr/xr_context.cpp
     src/xr/render_model.cpp
     src/xr/vr_keyboard.cpp
+    src/xr/vr_app_manifest.cpp
     src/net/smb_credentials.cpp
     src/net/remote_fs.cpp
     src/gfx/vulkan_renderer.cpp

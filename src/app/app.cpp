@@ -409,6 +409,7 @@ bool App::init(const std::string& mediaPath) {
     }
 
     PIXELVR_LOG_INFO("Initialization complete");
+    spawnVrAppManifestRegistration();  // lets SteamVR show "Up next" on later launches
     return true;
 }
 

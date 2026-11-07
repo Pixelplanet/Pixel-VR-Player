@@ -1,6 +1,7 @@
 #include "app/app.hpp"
 #include "app/bundled_ffmpeg.hpp"
 #include "util/logging.hpp"
+#include "xr/vr_app_manifest.hpp"
 #include "xr/openxr_headers.hpp"
 
 #include <csignal>
@@ -108,6 +109,8 @@ int main(int argc, char** argv) {
     // The browser-screen helper runs as this same executable (see BrowserHost).
     if (first == "--pvr-browser") return pvrBrowserMain(argc - 1, argv + 1);
 #endif
+    // Short-lived helper started by App::init (see vr_app_manifest.hpp).
+    if (first == "--register-vr-manifest") return pixelvr::registerVrAppManifest();
     // Release builds: restart on the bundled, patched FFmpeg (zero-copy decode).
     pixelvr::useBundledFfmpeg(argv);
 
