@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <string>
 #include <utility>
 #include <vector>
@@ -11,9 +12,6 @@ public:
     enum class Action {
         None,
         Back,
-        ListenPlay,
-        ListenMenu,
-        ListenRecenter,
         CycleDownloadDir,
         ToggleRailShortcut0,
         ToggleRailShortcut1,
@@ -32,7 +30,6 @@ public:
         CycleUiAccentColor,
         CycleUiDistance,
         CycleUiFollowMode,
-        ListenQuickPath,
         EnterVideoList,
         EnterAudioList,
         EnterLangList,
@@ -41,7 +38,6 @@ public:
         PickLanguage,
         CycleVaultAutoLockHeadset,
         CycleVaultTimeout,
-        ListenVaultMoveBtn,
         RecordVaultCombo,
         EnterListColsConfig,
         EnterRailShortcuts,
@@ -64,6 +60,9 @@ public:
         CycleAmbilightScope,
         CycleLaserSmoothing,
         CycleRoom,
+        EnterButtons,       // Controls & Input > Buttons (read-only binding pages)
+        NextButtonsPage,
+        BackToControls,
     };
 
     // How a row's value is presented: the renderer draws a stepped slider for
@@ -87,9 +86,9 @@ public:
     SettingsMenu();
 
     void open();
-    void close() { open_ = false; }
+    void close();  // also stops recording a new unlock combo
     bool isOpen() const { return open_; }
-    void setOpen(bool o) { open_ = o; if (o) refresh(); }
+    void setOpen(bool o) { if (o) { open_ = true; refresh(); } else { close(); } }
     void refresh();
 
     const std::string& title() const { return title_; }
@@ -114,11 +113,15 @@ public:
     void setSwapEyes(bool s) { swapEyes_ = s; refresh(); }
     bool drawModels() const { return drawModels_; }
     bool showStats() const { return showStats_; }
-    int bindPlay() const { return bindPlayBtn_; }
-    int bindMenu() const { return bindMenuBtn_; }
-    int bindRecenter() const { return bindRecenterBtn_; }
-    bool isListening() const { return listeningFunc_ >= 0; }
-    void assignListening(int button);
+    // Buttons are assigned in SteamVR only. The app hands over each action's
+    // label and its live bound buttons; the Buttons pages show them read-only.
+    void setControlsInfo(std::vector<std::pair<std::string, std::string>> info);
+    void openButtons();               // first Buttons page (Show Controls)
+    bool showingButtons() const { return section_ >= kButtonsSection && section_ < kButtonsSection + buttonsPages(); }
+    // settings.conf still had the old press-to-bind keys (no longer written);
+    // custom = one of them was not its default.
+    bool legacyBindingsSeen() const { return legacyBindingsSeen_; }
+    bool legacyBindingsCustom() const { return legacyBindingsCustom_; }
     std::string downloadDir() const;
     // Web shortcuts shown as tabs on the hub's rail (in table order).
     struct RailShortcut {
@@ -171,7 +174,6 @@ public:
     // Browser view mode is changed from the file browser header (not a settings row).
     int browserViewMode() const { return browserViewMode_; }
     void setBrowserViewMode(int m) { browserViewMode_ = m; saveConfig(); refresh(); }
-    int bindQuickPath() const { return bindQuickPathBtn_; }
     const std::string& quickPath() const { return quickPath_; }
     void setQuickPath(const std::string& p) { quickPath_ = p; saveConfig(); }
 
@@ -233,12 +235,14 @@ private:
     bool showStats_ = false;
     float screenDistance_ = 4.0f;  // room for several screens without crowding
 
-    // Function -> physical button (XrInputState::Button index); press-to-bind.
-    int bindPlayBtn_ = 0;      // default A
-    int bindMenuBtn_ = 1;      // default B
-    int bindRecenterBtn_ = 6;  // default Bumper (grip toggles the laser)
-    int bindQuickPathBtn_ = 7; // default Right Stick Click (BtnThumbR)
-    int listeningFunc_ = -1;   // 0=play 1=menu 2=recenter 3=move 4=quick path
+    static constexpr int kButtonsSection = 23;  // 23.. one section per Buttons page
+    static constexpr int kButtonsPerPage = 9;   // + one navigation row (10 fit)
+    int buttonsPages() const {
+        return std::max(1, (static_cast<int>(controlsInfo_.size()) + kButtonsPerPage - 1) / kButtonsPerPage);
+    }
+    std::vector<std::pair<std::string, std::string>> controlsInfo_;  // (action label, bound buttons)
+    bool legacyBindingsSeen_ = false;
+    bool legacyBindingsCustom_ = false;
     int downloadDirIdx_ = 0;   // index into the download-destination presets
     int railShortcutMask_ = (1 << 0) | (1 << 5);  // kRailShortcuts bits: YouTube + Browser
     int curvatureIdx_ = 0;     // 0=Flat (0%), 1=Gentle (25%), 2=Cinema (50%), 3=Deep (75%), 4=IMAX (100%)
@@ -270,7 +274,7 @@ private:
     int ambilightIdx_ = 2;     // 0=Off, 1=Subtle, 2=Medium (default), 3=Strong
     bool ambilightAllScreens_ = true;  // multi-screen: glow around every screen
 
-    int section_ = 0;   // 0=Display, 1=UI, 2=Audio, 3=Controls, 4=Vault; 10..12=sub-lists
+    int section_ = 0;   // 0=Display, 1=UI, 2=Audio, 3=Controls, 4=Vault; 10..12, 21, 22, 23..=sub-pages
     std::vector<std::pair<int, std::string>> videoStreams_;  // (index, label)
     std::vector<std::pair<int, std::string>> audioStreams_;
     int videoSel_ = 0;      // position within videoStreams_

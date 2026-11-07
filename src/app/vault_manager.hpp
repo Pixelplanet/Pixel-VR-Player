@@ -62,8 +62,10 @@ public:
     int autoLockTimeoutSec() const { return autoLockTimeoutSec_; }
     void setAutoLockTimeoutSec(int sec);
 
-    int moveButton() const { return moveButton_; }
-    void setMoveButton(int btn);
+    // vault.conf still had the old in-app "File Actions Button" key (no longer
+    // written); custom = it was not Y.
+    bool legacyMoveButtonSeen() const { return legacyMoveButtonSeen_; }
+    bool legacyMoveButtonCustom() const { return legacyMoveButtonCustom_; }
 
     const std::vector<int>& comboSequence() const { return comboSequence_; }
     std::string comboString() const;
@@ -98,7 +100,8 @@ private:
     // Settings
     bool autoLockHeadsetOff_ = true;
     int autoLockTimeoutSec_ = 0; // Disabled by default (headset face detection active)
-    int moveButton_ = XrInputState::BtnY;
+    bool legacyMoveButtonSeen_ = false;
+    bool legacyMoveButtonCustom_ = false;
 
     std::chrono::steady_clock::time_point lastActivity_{};
     std::chrono::steady_clock::time_point headsetLostTime_{};

@@ -215,26 +215,39 @@ rm -rf ~/.config/pixelvr ~/.cache/pixelvr ~/.pixelvr_vault
 
 ## Controls
 
-The laser pointer and the control bar are **separate** input paths, so the bar
-stays usable while a panel is open.
+The controls are SteamOS controller bindings: open **SteamVR Settings › Controllers ›
+Show Binding On Controllers in VR** to see what every button does in the player, and
+**Manage Controller Bindings** to change them (chords, long-press and double-press work
+too). **Settings › Controls & Input › Controller Buttons** in the player lists the buttons
+as they are currently bound.
 
-| Input | Action |
-| --- | --- |
-| **Trigger** | Point and click: open the entry under the laser, or press a control-bar button |
-| **A** | Open the highlighted entry — folder navigates, video plays / streams. Outside the browser it is play / pause |
-| **X** / **Y** | Download the highlighted entry (folders confirm first, showing their size) |
-| **B** | Open or close the file browser; also closes a panel and cancels the download dialog |
-| **Grip** | Toggle **that hand's** laser pointer on/off. Turn one off to navigate with the thumbstick or d-pad without the beam interfering, and to choose which controller points |
-| Thumbstick | Move the highlight in a panel; left/right seeks while playing |
-| **Bumper** | Recenter the view in front of you |
+Default buttons on the Steam Frame controllers:
+
+| Button | Label | What it does |
+| --- | --- | --- |
+| **Trigger** | Select | Point and click; hold to drag (timeline, volume, screens) |
+| **A** | Play / OK | Confirm in menus; play / pause while watching |
+| **B** | Back | One step back: close a dialog, go up a folder, close the menu, hide the controls |
+| **Menu** | Main Menu | Open or close the file browser and menus |
+| **View** | Show / Hide UI | Show or hide the player controls |
+| **Y** | Options | File actions for the highlighted entry, including Download |
+| **X** | Recenter | Bring the screens and menus back in front of you |
+| **Bumpers** | Previous / Next | Switch tabs in the menu; previous / next track in music |
+| **D-pad** | Up / Vol +, Down / Vol −, Left / −10 s, Right / +10 s | Move the highlight in menus; volume and seeking while watching |
+| **Right stick** | Scrub / Distance | Left/right scrubs through the video, up/down moves the screen nearer or farther |
+| **Left stick** | Skip / Distance | Left/right skips 30 s, up/down moves the screen |
+| **Stick click** | Show Controls | Opens the list of current buttons |
+| **Grip** | Laser Hand | Moves the laser to that hand |
+
+More actions have no default button, so you can put them on chords in SteamVR: Mute,
+Stop, Bookmarks, Next Screen, Previous Screen, Back 30 s, Forward 30 s, Lock Screens,
+Audio Track and 3D Format.
 
 The control bar has a **Download** button (arrow) that downloads the entry
 highlighted in the browser, and a **Downloads** button (list icon) that opens the
 downloads manager — where you can pause, resume, stop and clear jobs, then play a
 finished file or open a finished folder. Opening the downloads manager replaces
 the file browser rather than stacking on top of it.
-
-All button bindings can be changed in **Settings ▸ Controls** (press-to-bind).
 
 
 ## YouTube and the web browser

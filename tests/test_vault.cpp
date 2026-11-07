@@ -13,12 +13,12 @@ int main() {
 
     // Reset to default combo sequence for reproducible testing
     vm.startRecordingCombo();
-    vm.feedRecordButton(XrInputState::BtnA);
-    vm.feedRecordButton(XrInputState::BtnB);
-    vm.feedRecordButton(XrInputState::BtnB);
-    vm.feedRecordButton(XrInputState::BtnA);
-    vm.feedRecordButton(XrInputState::BtnX);
-    vm.feedRecordButton(XrInputState::BtnY);
+    vm.feedRecordButton(XrInputState::ComboPlay);
+    vm.feedRecordButton(XrInputState::ComboBack);
+    vm.feedRecordButton(XrInputState::ComboBack);
+    vm.feedRecordButton(XrInputState::ComboPlay);
+    vm.feedRecordButton(XrInputState::ComboRecenter);
+    vm.feedRecordButton(XrInputState::ComboOptions);
 
     // 1. Initial locked state
     vm.lock();
@@ -27,18 +27,18 @@ int main() {
 
     // 2. Discrete grip requirement (soft squeeze / grip=false should not advance)
     auto now = std::chrono::steady_clock::now();
-    assert(vm.feedInput(XrInputState::BtnA, false, now) == VaultManager::ComboResult::None);
-    assert(vm.feedInput(XrInputState::BtnB, false, now) == VaultManager::ComboResult::None);
+    assert(vm.feedInput(XrInputState::ComboPlay, false, now) == VaultManager::ComboResult::None);
+    assert(vm.feedInput(XrInputState::ComboBack, false, now) == VaultManager::ComboResult::None);
     assert(!vm.isUnlocked());
     std::cout << "[PASS] Soft squeeze / no grip full press does not trigger combo." << std::endl;
 
     // 3. Step through default combo: A -> B -> B -> A -> X -> Y
-    assert(vm.feedInput(XrInputState::BtnA, true, now) == VaultManager::ComboResult::StepMatched);
-    assert(vm.feedInput(XrInputState::BtnB, true, now) == VaultManager::ComboResult::StepMatched);
-    assert(vm.feedInput(XrInputState::BtnB, true, now) == VaultManager::ComboResult::StepMatched);
-    assert(vm.feedInput(XrInputState::BtnA, true, now) == VaultManager::ComboResult::StepMatched);
-    assert(vm.feedInput(XrInputState::BtnX, true, now) == VaultManager::ComboResult::StepMatched);
-    assert(vm.feedInput(XrInputState::BtnY, true, now) == VaultManager::ComboResult::Unlocked);
+    assert(vm.feedInput(XrInputState::ComboPlay, true, now) == VaultManager::ComboResult::StepMatched);
+    assert(vm.feedInput(XrInputState::ComboBack, true, now) == VaultManager::ComboResult::StepMatched);
+    assert(vm.feedInput(XrInputState::ComboBack, true, now) == VaultManager::ComboResult::StepMatched);
+    assert(vm.feedInput(XrInputState::ComboPlay, true, now) == VaultManager::ComboResult::StepMatched);
+    assert(vm.feedInput(XrInputState::ComboRecenter, true, now) == VaultManager::ComboResult::StepMatched);
+    assert(vm.feedInput(XrInputState::ComboOptions, true, now) == VaultManager::ComboResult::Unlocked);
     assert(vm.isUnlocked());
     std::cout << "[PASS] Cheat code A-B-B-A-X-Y with grip full press unlocks vault!" << std::endl;
 
@@ -50,12 +50,12 @@ int main() {
     std::cout << "[PASS] Vault directory created with secure 0700 permissions: " << vm.vaultDir() << std::endl;
 
     // 4. Test re-lock via combo
-    assert(vm.feedInput(XrInputState::BtnA, true, now) == VaultManager::ComboResult::StepMatched);
-    assert(vm.feedInput(XrInputState::BtnB, true, now) == VaultManager::ComboResult::StepMatched);
-    assert(vm.feedInput(XrInputState::BtnB, true, now) == VaultManager::ComboResult::StepMatched);
-    assert(vm.feedInput(XrInputState::BtnA, true, now) == VaultManager::ComboResult::StepMatched);
-    assert(vm.feedInput(XrInputState::BtnX, true, now) == VaultManager::ComboResult::StepMatched);
-    assert(vm.feedInput(XrInputState::BtnY, true, now) == VaultManager::ComboResult::Locked);
+    assert(vm.feedInput(XrInputState::ComboPlay, true, now) == VaultManager::ComboResult::StepMatched);
+    assert(vm.feedInput(XrInputState::ComboBack, true, now) == VaultManager::ComboResult::StepMatched);
+    assert(vm.feedInput(XrInputState::ComboBack, true, now) == VaultManager::ComboResult::StepMatched);
+    assert(vm.feedInput(XrInputState::ComboPlay, true, now) == VaultManager::ComboResult::StepMatched);
+    assert(vm.feedInput(XrInputState::ComboRecenter, true, now) == VaultManager::ComboResult::StepMatched);
+    assert(vm.feedInput(XrInputState::ComboOptions, true, now) == VaultManager::ComboResult::Locked);
     assert(!vm.isUnlocked());
     std::cout << "[PASS] Entering combo again locks the vault." << std::endl;
 
@@ -162,35 +162,35 @@ int main() {
     // 9. Custom combo recording
     vm.startRecordingCombo();
     assert(vm.isRecordingCombo());
-    assert(!vm.feedRecordButton(XrInputState::BtnX));
-    assert(!vm.feedRecordButton(XrInputState::BtnX));
-    assert(!vm.feedRecordButton(XrInputState::BtnY));
-    assert(!vm.feedRecordButton(XrInputState::BtnY));
-    assert(!vm.feedRecordButton(XrInputState::BtnA));
-    assert(vm.feedRecordButton(XrInputState::BtnB)); // 6th button finishes
+    assert(!vm.feedRecordButton(XrInputState::ComboRecenter));
+    assert(!vm.feedRecordButton(XrInputState::ComboRecenter));
+    assert(!vm.feedRecordButton(XrInputState::ComboOptions));
+    assert(!vm.feedRecordButton(XrInputState::ComboOptions));
+    assert(!vm.feedRecordButton(XrInputState::ComboPlay));
+    assert(vm.feedRecordButton(XrInputState::ComboBack)); // 6th button finishes
     assert(!vm.isRecordingCombo());
     assert(vm.comboString() == "X X Y Y A B");
     std::cout << "[PASS] Custom combo recording verified: " << vm.comboString() << std::endl;
 
     // Test new combo works
     vm.lock();
-    assert(vm.feedInput(XrInputState::BtnX, true, now) == VaultManager::ComboResult::StepMatched);
-    assert(vm.feedInput(XrInputState::BtnX, true, now) == VaultManager::ComboResult::StepMatched);
-    assert(vm.feedInput(XrInputState::BtnY, true, now) == VaultManager::ComboResult::StepMatched);
-    assert(vm.feedInput(XrInputState::BtnY, true, now) == VaultManager::ComboResult::StepMatched);
-    assert(vm.feedInput(XrInputState::BtnA, true, now) == VaultManager::ComboResult::StepMatched);
-    assert(vm.feedInput(XrInputState::BtnB, true, now) == VaultManager::ComboResult::Unlocked);
+    assert(vm.feedInput(XrInputState::ComboRecenter, true, now) == VaultManager::ComboResult::StepMatched);
+    assert(vm.feedInput(XrInputState::ComboRecenter, true, now) == VaultManager::ComboResult::StepMatched);
+    assert(vm.feedInput(XrInputState::ComboOptions, true, now) == VaultManager::ComboResult::StepMatched);
+    assert(vm.feedInput(XrInputState::ComboOptions, true, now) == VaultManager::ComboResult::StepMatched);
+    assert(vm.feedInput(XrInputState::ComboPlay, true, now) == VaultManager::ComboResult::StepMatched);
+    assert(vm.feedInput(XrInputState::ComboBack, true, now) == VaultManager::ComboResult::Unlocked);
     assert(vm.isUnlocked());
     std::cout << "[PASS] New custom combo successfully unlocked vault!" << std::endl;
 
     // Restore default combo
     vm.startRecordingCombo();
-    vm.feedRecordButton(XrInputState::BtnA);
-    vm.feedRecordButton(XrInputState::BtnB);
-    vm.feedRecordButton(XrInputState::BtnB);
-    vm.feedRecordButton(XrInputState::BtnA);
-    vm.feedRecordButton(XrInputState::BtnX);
-    vm.feedRecordButton(XrInputState::BtnY);
+    vm.feedRecordButton(XrInputState::ComboPlay);
+    vm.feedRecordButton(XrInputState::ComboBack);
+    vm.feedRecordButton(XrInputState::ComboBack);
+    vm.feedRecordButton(XrInputState::ComboPlay);
+    vm.feedRecordButton(XrInputState::ComboRecenter);
+    vm.feedRecordButton(XrInputState::ComboOptions);
     vm.lock();
 
     std::cout << "\n*** ALL VAULT MANAGER UNIT TESTS PASSED PERFECTLY! ***" << std::endl;

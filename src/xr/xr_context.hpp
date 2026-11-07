@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <functional>
+#include <string>
 #include <vector>
 
 namespace pixelvr {
@@ -35,20 +36,66 @@ struct CompositionLayer {
     XrRect2Di imageRect{{0, 0}, {0, 0}};
 };
 
+// The player's OpenXR actions that SteamVR shows and binds (one set, "Player
+// Controls"). SteamVR is the only place buttons are assigned; the app only
+// reads these. Order = the Controls page order.
+enum class InputAction : int {
+    Select, PlayOk, Back, MainMenu, Options, Recenter, ToggleUi, Previous, Next,
+    DpadUp, DpadDown, DpadLeft, DpadRight, StickRight, StickLeft, ShowControls, LaserHand,
+    Mute, Stop, Bookmarks, NextScreen, PreviousScreen, SkipBack, SkipForward,
+    LockScreens, AudioTrack, Format3d,
+    Count
+};
+
 // Per-frame controller input. Boolean fields are rising-edge (true only on the
-// frame the button was pressed). Head pose is in the app reference space.
+// frame the action was pressed) unless named *Held. Head pose is in the app
+// reference space. The meanings are the actions' (see InputAction), whatever
+// buttons SteamVR binds them to.
 struct XrInputState {
-    bool togglePlay = false;   // A / X face button: play/pause
-    bool browserToggle = false; // B / Y face button: open/close browser (menu)
     bool select = false;       // trigger: rising edge (pointer click)
     bool selectHeld = false;   // trigger: currently held (dragging the timeline)
-    bool recenter = false;     // grip squeeze: recenter the screen
-    float thumbstickX = 0.0f;  // combined (either hand)
+    bool togglePlay = false;   // "Play / OK"
+    bool back = false;         // "Back": one step back
+    bool mainMenu = false;     // "Main Menu": open / close the hub
+    bool toggleUi = false;     // "Show / Hide UI"
+    bool options = false;      // "Options": File Actions
+    bool recenter = false;     // "Recenter"
+    bool previous = false;     // "Previous": rail tab / track
+    bool next = false;         // "Next"
+    bool dpadUp = false, dpadDown = false, dpadLeft = false, dpadRight = false;
+    bool dpadUpHeld = false, dpadDownHeld = false, dpadLeftHeld = false, dpadRightHeld = false;
+    bool showControls = false; // "Show Controls": the Controls page
+    // Actions with no default binding (SteamVR chords / long presses).
+    bool mute = false, stop = false, bookmarks = false, nextScreen = false,
+         previousScreen = false, skipBack = false, skipForward = false,
+         lockScreens = false, audioTrack = false, format3d = false;
+    // Combo symbol of the face action pressed this frame, else -1. Same ids the
+    // stored unlock combo uses, so saved combos keep working on the defaults.
+    // App code never clears it (other consumers clear the actions above).
+    enum ComboSymbol { ComboPlay = 0, ComboBack = 1, ComboRecenter = 2, ComboOptions = 3 };
+    int comboEdge = -1;
+    float thumbstickX = 0.0f;  // combined: the longer of the two sticks
     float thumbstickY = 0.0f;
-    float thumbstickLX = 0.0f; // left controller stick
+    float thumbstickLX = 0.0f; // left controller stick ("Skip / Distance")
     float thumbstickLY = 0.0f;
-    float thumbstickRX = 0.0f; // right controller stick
+    float thumbstickRX = 0.0f; // right controller stick ("Scrub / Distance")
     float thumbstickRY = 0.0f;
+
+    // Consumes every button action this frame (not select, sticks, grip or
+    // comboEdge), e.g. while the keyboard or a grab owns the input.
+    void clearButtons() {
+        togglePlay = back = mainMenu = toggleUi = options = recenter = previous = next = false;
+        dpadUp = dpadDown = dpadLeft = dpadRight = false;
+        dpadUpHeld = dpadDownHeld = dpadLeftHeld = dpadRightHeld = false;
+        showControls = mute = stop = bookmarks = nextScreen = previousScreen = false;
+        skipBack = skipForward = lockScreens = audioTrack = format3d = false;
+    }
+    bool anyButton() const {
+        return togglePlay || back || mainMenu || toggleUi || options || recenter || previous ||
+               next || dpadUp || dpadDown || dpadLeft || dpadRight || showControls || mute ||
+               stop || bookmarks || nextScreen || previousScreen || skipBack || skipForward ||
+               lockScreens || audioTrack || format3d;
+    }
     bool headValid = false;
     float headPos[3] = {0.0f, 0.0f, 0.0f};
     float headForward[3] = {0.0f, 0.0f, -1.0f};
@@ -71,21 +118,9 @@ struct XrInputState {
     };
     ControllerPose controllers[2];
 
-    // Physical controller buttons (rising edge this frame). The app maps the
-    // play/menu/recenter functions onto these for user-configurable bindings.
-    enum Button {
-        BtnA, BtnB, BtnX, BtnY, BtnMenu, BtnView, BtnBumper, BtnThumb, BtnGrip,
-        BtnDpadUp, BtnDpadDown, BtnDpadLeft, BtnDpadRight, BtnCount
-    };
-    bool buttonDown[BtnCount] = {};
-
-    // Per-hand grip (squeeze) rising edge: toggles that hand's laser pointer, so
-    // one controller can drive a panel with the stick while the other points.
+    // "Laser Hand": full grip press per hand (Frame squeeze click, else the
+    // squeeze value past a threshold). Moves the laser to that hand.
     // Index 0 = left, 1 = right.
-    bool gripDown[2] = {false, false};
-
-    // Discrete full-press click per hand (Index / Frame / Touch squeeze click).
-    // Distinct from soft/resting squeeze. Index 0 = left, 1 = right.
     bool gripFullPressHeld[2] = {false, false};
     bool gripFullPressDown[2] = {false, false};
     float gripValue[2] = {0.0f, 0.0f};  // analog soft squeeze value (0.0 to 1.0)
@@ -134,6 +169,14 @@ public:
     // Controller input (OpenXR actions). Call createActions after createSession.
     bool createActions();
     const XrInputState& input() const { return input_; }
+    // The label SteamVR shows for an action ("Play / OK").
+    static const char* actionLabel(InputAction a);
+    // The buttons SteamVR currently binds to an action, e.g. "Right A", joined
+    // with ", "; "Not bound", or "See SteamVR bindings" when the runtime can't say.
+    std::string describeBinding(InputAction a);
+    // Bumped after a focused sync once focus or the interaction profile changed
+    // (bindings may have been edited in the dashboard meanwhile).
+    uint32_t bindingsGeneration() const { return bindingsGeneration_; }
     void triggerHaptic(int hand, float durationSec = 0.015f, float frequencyHz = 0.0f, float amplitude = 0.5f);
 
     // --- Runtime ---------------------------------------------------------
@@ -221,23 +264,20 @@ private:
 
     // Controller input.
     XrActionSet actionSet_ = XR_NULL_HANDLE;
-    XrAction togglePlayAction_ = XR_NULL_HANDLE;
-    XrAction recenterAction_ = XR_NULL_HANDLE;
-    XrAction browserAction_ = XR_NULL_HANDLE;
-    XrAction selectAction_ = XR_NULL_HANDLE;
-    XrAction thumbstickAction_ = XR_NULL_HANDLE;
-    XrAction thumbstickLeftAction_ = XR_NULL_HANDLE;
-    XrAction thumbstickRightAction_ = XR_NULL_HANDLE;
+    XrAction actions_[static_cast<int>(InputAction::Count)] = {};
+    XrAction act(InputAction a) const { return actions_[static_cast<int>(a)]; }
     XrAction aimPoseAction_ = XR_NULL_HANDLE;
     XrAction gripPoseAction_ = XR_NULL_HANDLE;
-    XrAction buttonActions_[XrInputState::BtnCount] = {};
-    XrAction gripFullPressAction_ = XR_NULL_HANDLE;
-    XrAction squeezeValueAction_ = XR_NULL_HANDLE;
+    XrAction squeezeValueAction_ = XR_NULL_HANDLE;  // "Laser Hand (Analog)" fallback
     XrAction hapticAction_ = XR_NULL_HANDLE;
     XrPath handPaths_[2] = {XR_NULL_PATH, XR_NULL_PATH};
     XrSpace aimSpaces_[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
     XrSpace gripSpaces_[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
     bool actionsReady_ = false;
+    bool prevFull_[2] = {false, false};  // squeeze-value full-press hysteresis
+    bool bindingsDirty_ = false;
+    uint32_t bindingsGeneration_ = 0;
+    bool bindingLogged_[static_cast<int>(InputAction::Count)] = {};
     XrInputState input_;
 
     // XR_KHR_vulkan_enable2 entry points (resolved at runtime).

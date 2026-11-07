@@ -23,17 +23,14 @@ std::string getVaultConfigPath() {
     return "pixelvr_vault.conf";
 }
 
+// Combo symbols are the face actions; on the default bindings they are the
+// A / B / X / Y buttons, so the stored letters stay.
 const char* btnName(int b) {
     switch (b) {
-        case XrInputState::BtnA: return "A";
-        case XrInputState::BtnB: return "B";
-        case XrInputState::BtnX: return "X";
-        case XrInputState::BtnY: return "Y";
-        case XrInputState::BtnMenu: return "Menu";
-        case XrInputState::BtnView: return "View";
-        case XrInputState::BtnBumper: return "Bumper";
-        case XrInputState::BtnThumb: return "Thumb";
-        case XrInputState::BtnGrip: return "Grip";
+        case XrInputState::ComboPlay: return "A";
+        case XrInputState::ComboBack: return "B";
+        case XrInputState::ComboRecenter: return "X";
+        case XrInputState::ComboOptions: return "Y";
         default: return "?";
     }
 }
@@ -65,12 +62,12 @@ VaultManager::VaultManager() {
 
     // Default sequence: A -> B -> B -> A -> X -> Y
     comboSequence_ = {
-        XrInputState::BtnA,
-        XrInputState::BtnB,
-        XrInputState::BtnB,
-        XrInputState::BtnA,
-        XrInputState::BtnX,
-        XrInputState::BtnY
+        XrInputState::ComboPlay,
+        XrInputState::ComboBack,
+        XrInputState::ComboBack,
+        XrInputState::ComboPlay,
+        XrInputState::ComboRecenter,
+        XrInputState::ComboOptions
     };
 
     loadConfig();
@@ -120,8 +117,8 @@ VaultManager::ComboResult VaultManager::feedInput(int button, bool gripFullPress
     }
 
     // Only face buttons participate in the cheat code
-    if (button != XrInputState::BtnA && button != XrInputState::BtnB &&
-        button != XrInputState::BtnX && button != XrInputState::BtnY) {
+    if (button != XrInputState::ComboPlay && button != XrInputState::ComboBack &&
+        button != XrInputState::ComboRecenter && button != XrInputState::ComboOptions) {
         return ComboResult::None;
     }
 
@@ -297,11 +294,6 @@ void VaultManager::setAutoLockTimeoutSec(int sec) {
     saveConfig();
 }
 
-void VaultManager::setMoveButton(int btn) {
-    moveButton_ = btn;
-    saveConfig();
-}
-
 std::string VaultManager::comboString() const {
     if (comboSequence_.empty()) return "None";
     std::string s;
@@ -324,8 +316,8 @@ void VaultManager::cancelRecordingCombo() {
 
 bool VaultManager::feedRecordButton(int button) {
     if (!isRecordingCombo_) return false;
-    if (button != XrInputState::BtnA && button != XrInputState::BtnB &&
-        button != XrInputState::BtnX && button != XrInputState::BtnY) {
+    if (button != XrInputState::ComboPlay && button != XrInputState::ComboBack &&
+        button != XrInputState::ComboRecenter && button != XrInputState::ComboOptions) {
         return false;
     }
     recordingBuffer_.push_back(button);
@@ -356,7 +348,10 @@ void VaultManager::loadConfig() {
         } else if (key == "auto_lock_timeout_sec") {
             try { autoLockTimeoutSec_ = std::stoi(val); } catch (...) {}
         } else if (key == "move_button") {
-            try { moveButton_ = std::stoi(val); } catch (...) {}
+            // Old in-app "File Actions Button" (Y = 3 was the default). Buttons
+            // are assigned in SteamVR now: only note a custom one for the notice.
+            legacyMoveButtonSeen_ = true;
+            try { legacyMoveButtonCustom_ = std::stoi(val) != XrInputState::ComboOptions; } catch (...) {}
         } else if (key == "combo") {
             std::vector<int> loaded;
             std::stringstream ss(val);
@@ -382,7 +377,6 @@ void VaultManager::saveConfig() const {
         if (file.is_open()) {
             file << "auto_lock_headset_off=" << (autoLockHeadsetOff_ ? 1 : 0) << "\n";
             file << "auto_lock_timeout_sec=" << autoLockTimeoutSec_ << "\n";
-            file << "move_button=" << moveButton_ << "\n";
             file << "combo=";
             for (std::size_t i = 0; i < comboSequence_.size(); ++i) {
                 if (i > 0) file << ",";

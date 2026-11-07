@@ -366,6 +366,17 @@ bool App::init(const std::string& mediaPath) {
     if (!xr_.createActions()) {
         PIXELVR_LOG_WARN("Controller input unavailable; continuing without it");
     }
+    // Buttons are assigned in SteamVR now. Old in-app choices are dropped from
+    // the config files (no longer written); custom ones get a one-time notice.
+    {
+        VaultManager& vault = VaultManager::instance();
+        if (settings_.legacyBindingsCustom() || vault.legacyMoveButtonCustom()) {
+            controlsNoticePending_ = true;
+            PIXELVR_LOG_INFO("Custom in-app button choices found: reset (buttons are assigned in SteamVR)");
+        }
+        if (settings_.legacyBindingsSeen()) settings_.saveConfig();
+        if (vault.legacyMoveButtonSeen()) vault.saveConfig();
+    }
     renderModels_.init(xr_.instance(), xr_.session(), xr_.renderModelEnabled());
 
     const std::vector<int64_t> formats = xr_.enumerateSwapchainFormats();
@@ -924,6 +935,27 @@ void App::playQueueTrack(int slot, int index) {
 #endif
 }
 
+void App::musicPrevious(int slot) {
+#ifdef PIXELVR_HAVE_MEDIA
+    ScreenState& sc = screens_[slot];
+    // Like any player: back to the start, unless just started.
+    const int prev = sc.queue.previous();
+    if (sc.engine.position() > 3.0 || prev < 0 || prev == sc.queue.current()) sc.engine.seek(0.0);
+    else playQueueTrack(slot, prev);
+#else
+    (void)slot;
+#endif
+}
+
+void App::musicNext(int slot) {
+#ifdef PIXELVR_HAVE_MEDIA
+    const int next = screens_[slot].queue.next(false);
+    if (next >= 0) playQueueTrack(slot, next);
+#else
+    (void)slot;
+#endif
+}
+
 void App::updateMusicView(int slot) {
 #ifdef PIXELVR_HAVE_MEDIA
     ScreenState& sc = screens_[slot];
@@ -1188,6 +1220,126 @@ void App::dismissHud(const XrInputState& in, std::chrono::steady_clock::time_poi
         }
     }
     PIXELVR_LOG_INFO("Player HUD dismissed");
+}
+
+void App::closeHub() {
+#ifdef PIXELVR_HAVE_FREETYPE
+    browser_.setOpen(false);
+#endif
+    settings_.close();
+    downloadsWindow_ = false;
+    pendingDl_.clear();
+    actionMenu_.visible = false;
+    smbModal_.active = false;
+    smbModal_.editingField = SmbModalState::Field::None;
+    if (textEntry_.active) cancelKeyboard();
+}
+
+void App::cycleHubTab(int dir) {
+#ifdef PIXELVR_HAVE_FREETYPE
+    // Files, Downloads, Settings. Not the web shortcuts: landing on one would
+    // open a page on every press. (Never Lock Vault or anything the vault hides.)
+    const int n = 3;
+    const int curTab = settings_.isOpen() ? 2 : (downloadsWindow_ ? 1 : 0);
+    const int next = ((curTab + dir) % n + n) % n;
+    if (next == 0) {  // the same as clicking the tab
+        downloadsWindow_ = false;
+        settings_.close();
+        if (!browser_.isOpen()) browser_.open();
+    } else if (next == 1) {
+        settings_.close();
+        browser_.setOpen(true);
+        downloadsWindow_ = true;
+    } else {
+        downloadsWindow_ = false;
+        settings_.open();
+    }
+    xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.015f, 0.0f, 0.4f);
+#else
+    (void)dir;
+#endif
+}
+
+void App::selectNextScreen(int dir) {
+    if (!multiScreenEnabled() || openScreenCount() < 2) return;
+    constexpr int n = VulkanRenderer::kMaxVideoSlots;
+    for (int k = 1; k < n; ++k) {
+        const int s = ((selectedScreen_ + dir * k) % n + n) % n;
+        if (screens_[s].open) {
+            selectScreen(s);
+            return;
+        }
+    }
+}
+
+void App::cycleAudioTrack() {
+#ifdef PIXELVR_HAVE_MEDIA
+    if (cur().open && cur().engine.audioStreams().size() > 1) {
+        const auto& streams = cur().engine.audioStreams();
+        int curStream = cur().engine.currentAudioStream();
+        int nextIdx = 0;
+        for (size_t i = 0; i < streams.size(); ++i) {
+            if (streams[i].index == curStream) {
+                nextIdx = static_cast<int>((i + 1) % streams.size());
+                break;
+            }
+        }
+        int nextStreamIndex = streams[nextIdx].index;
+        settings_.setSelectedAudioStream(nextStreamIndex);
+        cur().engine.setPreferredAudioStream(nextStreamIndex);
+        cur().engine.setPreferredAudioLanguage("");
+        switchTracks(false);
+        xr_.triggerHaptic(0, 0.02f, 0.0f, 0.5f);
+        xr_.triggerHaptic(1, 0.02f, 0.0f, 0.5f);
+    }
+#endif
+}
+
+void App::openFormatMenu() {
+    actionMenu_.visible = true;
+    actionMenu_.page = 5;
+    actionMenu_.title = "Playback Format";
+    actionMenu_.subtitle = "Select 3D / VR Projection";
+    actionMenu_.options.clear();
+    actionMenu_.options.push_back("2D Flat (Standard)");
+    actionMenu_.options.push_back("3D Side-by-Side (SBS)");
+    actionMenu_.options.push_back("3D Top-Bottom (Over-Under)");
+    if (selectedScreen_ == 0) {  // immersive only on the main screen
+        actionMenu_.options.push_back("VR 180° (Side-by-Side)");
+        actionMenu_.options.push_back("VR 360° (Mono)");
+        actionMenu_.options.push_back("VR 360° 3D (Top-Bottom)");
+    }
+    actionMenu_.options.push_back("Cancel");
+    actionMenu_.selectedOption = 0;
+    xr_.triggerHaptic(0, 0.020f, 0.0f, 0.4f);
+    xr_.triggerHaptic(1, 0.020f, 0.0f, 0.4f);
+}
+
+void App::downloadFocusedEntry() {
+#ifdef PIXELVR_HAVE_FREETYPE
+    // Folders ask for confirmation (with the measured size) first; plain
+    // files download immediately.
+    if (!browser_.isOpen() || !browser_.onNetwork()) return;
+    const Browser::Entry* fe = browser_.focused();
+    if (fe != nullptr && fe->isDir && !fe->isBack) {
+        pendingDl_ = fe->path;
+        pendingDlName_ = fe->label;
+        pendingDlFresh_ = true;
+        browser_.measureFolder(fe->path);
+    } else {
+        browser_.downloadFocused();
+    }
+#endif
+}
+
+void App::refreshControlsInfo() {
+    std::vector<std::pair<std::string, std::string>> info;
+    for (int i = 0; i < static_cast<int>(InputAction::Count); ++i) {
+        const InputAction a = static_cast<InputAction>(i);
+        info.emplace_back(XrContext::actionLabel(a), xr_.describeBinding(a));
+    }
+    settings_.setControlsInfo(std::move(info));
+    bindingsGenSeen_ = xr_.bindingsGeneration();
 }
 
 void App::openSmbModal(bool isNew, const std::string& smbPath) {
@@ -2475,6 +2627,11 @@ void App::openActionMenu() {
     const bool isSmbRoot = (browser_.currentPath() == "smb://" || browser_.currentPath().empty());
     const bool isSmbEntry = isRemotePath(fe->path);
 
+    // Network entries download from here (this used to be the X button, which
+    // is Recenter now).
+    if (browser_.onNetwork()) {
+        actionMenu_.options.push_back(fe->isDir ? "Download Folder" : "Download");
+    }
     if (isSmbRoot && isSmbEntry) {
         actionMenu_.options.push_back("Open Share");
         actionMenu_.options.push_back("Edit Network Share");
@@ -2592,6 +2749,14 @@ int App::run() {
             // Apply controller input that renderFrame synced this frame.
             const auto nowT = std::chrono::steady_clock::now();
             XrInputState in = xr_.input();
+#ifdef PIXELVR_HAVE_MEDIA
+            if (controlsNoticePending_ && xr_.sessionFocused()) {  // once the user can see it
+                controlsNoticePending_ = false;
+                notice_ = "Button choices moved to SteamOS: SteamVR Settings > Controllers. "
+                          "Your custom buttons were reset.";
+                noticeUntil_ = nowT + std::chrono::seconds(20);
+            }
+#endif
             if (!in.selectHeld) volumeDragging_ = false;  // a volume-bar drag ends with the trigger
             {
                 // Laser smoothing (One Euro): steady while the hand is still,
@@ -2610,12 +2775,36 @@ int App::run() {
                 }
             }
 
+            // Vault unlock combo gate: a full grip press held on either hand (or a
+            // combo in progress / just released). Decided before anything reads
+            // the buttons, so a combo step (B = Back, ...) can't also act on the
+            // keyboard, a grab or a web page. comboEdge itself is never cleared.
+            const bool gripFullHeld = in.gripFullPressHeld[0] || in.gripFullPressHeld[1];
+            static bool sPrevGripFullHeld = false;
+            if (gripFullHeld != sPrevGripFullHeld) {
+                if (!gripFullHeld && sPrevGripFullHeld) {
+                    lastGripFullRelease_ = nowT;
+                }
+                sPrevGripFullHeld = gripFullHeld;
+                PIXELVR_LOG_INFO("Grip full press state changed: %s (L val: %.2f, R val: %.2f)",
+                                 gripFullHeld ? "HELD" : "RELEASED",
+                                 in.gripValue[0], in.gripValue[1]);
+            }
+            const bool gripGracePeriod = (lastGripFullRelease_.time_since_epoch().count() > 0) &&
+                                         ((nowT - lastGripFullRelease_) < 300ms);
+            const bool comboActive = VaultManager::instance().isComboEntryActive(nowT);
+            const bool comboGate = gripFullHeld || comboActive || gripGracePeriod;
+            const bool recordingCombo = VaultManager::instance().isRecordingCombo();
+            // While a new combo is being recorded only comboEdge (the symbols) and
+            // Select (the Cancel row) act: no button may close or leave Settings.
+            if (comboGate || recordingCombo) in.clearButtons();
+
             // In-app keyboard (text entry). It owns all controller input while open:
-            // trigger / A press the key under the laser, stick left/right moves
-            // the cursor, B / menu cancels.
+            // trigger / Play / OK press the key under the laser, stick left/right
+            // moves the cursor, Back / Main Menu cancel.
             const bool kbOpen = textEntry_.active;
             if (kbOpen) {
-                if (in.buttonDown[settings_.bindMenu()] || in.buttonDown[XrInputState::BtnB]) {
+                if (in.back || in.mainMenu) {
                     cancelKeyboard();
                 } else {
                     using namespace std::chrono_literals;
@@ -2683,10 +2872,7 @@ int App::run() {
                 in.thumbstickY = 0.0f;
                 in.select = false;
                 in.selectHeld = false;
-                in.togglePlay = false;
-                in.browserToggle = false;
-                in.buttonDown[settings_.bindMenu()] = false;
-                in.buttonDown[XrInputState::BtnB] = false;
+                in.clearButtons();  // every action is the keyboard's while it is open
                 if (smbModal_.active && smbModal_.editingField != SmbModalState::Field::None) {
                     updateSmbModalMenu();
                 }
@@ -2737,9 +2923,8 @@ int App::run() {
                         }
                         if (!group) renderer_.setScreenPlacement(movingScreen_, pl);
                     }
-                    // Releasing the trigger drops the screen (B cancels the grab too).
-                    if (!in.selectHeld || in.buttonDown[XrInputState::BtnB] ||
-                        in.buttonDown[settings_.bindMenu()]) {
+                    // Releasing the trigger drops the screen (Back / Main Menu too).
+                    if (!in.selectHeld || in.back || in.mainMenu) {
                         // Moving one screen of an unsnapped layout ends that layout
                         // (new screens then get the default placement).
                         if (!groupedScreen(movingScreen_) && inArrangement(movingScreen_)) {
@@ -2758,13 +2943,9 @@ int App::run() {
                 }
                 in.select = false;
                 in.selectHeld = false;
-                in.togglePlay = false;
-                in.browserToggle = false;
-                in.recenter = false;
+                in.clearButtons();  // the grab owns the input
                 in.thumbstickX = 0.0f;
                 in.thumbstickY = 0.0f;
-                in.buttonDown[XrInputState::BtnB] = false;
-                in.buttonDown[settings_.bindMenu()] = false;
                 lastControllerActivity_ = nowT;
             }
 
@@ -2893,12 +3074,25 @@ int App::run() {
 #ifdef PIXELVR_HAVE_FREETYPE
             hubShown = hubShown || browser_.isOpen();
 #endif
+            // In menus the D-pad steps like the stick: a full stick push while
+            // held, so navStep / navStepX give it the same first step and repeat.
+            if ((hubShown || actionMenu_.visible || !pendingDl_.empty()) && !textEntry_.active &&
+                movingScreen_ < 0) {
+                const float dy = in.dpadUpHeld ? 1.0f : (in.dpadDownHeld ? -1.0f : 0.0f);
+                const float dx = in.dpadRightHeld ? 1.0f : (in.dpadLeftHeld ? -1.0f : 0.0f);
+                if (dy != 0.0f && std::fabs(in.thumbstickY) < 0.5f) in.thumbstickY = dy;
+                if (dx != 0.0f && std::fabs(in.thumbstickX) < 0.5f) in.thumbstickX = dx;
+                dpadRepeatDir_ = 0;  // the playback repeat starts afresh
+            }
+            bool laserOnWeb = false;  // the D-pad leaves web pages alone (for now)
+            (void)laserOnWeb;
             if (!hubShown && !actionMenu_.visible && !textEntry_.active && !screensUnlocked_ &&
                 movingScreen_ < 0) {
                 constexpr float kClickSlop = 16.0f;  // page pixels
                 int ws = -1;
                 float u = 0.0f, v = 0.0f;
                 const bool onWeb = renderer_.webPointer(ws, u, v) && screens_[ws].web;
+                laserOnWeb = onWeb;
                 const float rawStickY = in.thumbstickY;  // before the page takes it (latch below)
                 // A press stays with the screen it started on.
                 if (onWeb && !webMouseDown_ && ws != webMouseSlot_) {
@@ -2947,9 +3141,9 @@ int App::run() {
                     // On a page the stick never moves the screen, also below the
                     // scroll threshold (the screen push starts at 0.15).
                     in.thumbstickY = 0.0f;
-                    if (in.buttonDown[XrInputState::BtnB]) {
+                    if (in.back) {  // browser Back, and nothing else
                         host->back();
-                        in.buttonDown[XrInputState::BtnB] = false;
+                        in.back = false;
                     }
                 } else if (!onWeb) {
                     webHoverValid_ = false;
@@ -2992,13 +3186,9 @@ int App::run() {
                         } else if (mh == VR::kMusicPlay) {
                             sc.engine.togglePause();
                         } else if (mh == VR::kMusicPrev) {
-                            // Like any player: back to the start, unless just started.
-                            const int prev = sc.queue.previous();
-                            if (sc.engine.position() > 3.0 || prev < 0 || prev == sc.queue.current()) sc.engine.seek(0.0);
-                            else playQueueTrack(ms, prev);
+                            musicPrevious(ms);
                         } else if (mh == VR::kMusicNext) {
-                            const int next = sc.queue.next(false);
-                            if (next >= 0) playQueueTrack(ms, next);
+                            musicNext(ms);
                         } else if (mh >= 0) {
                             playQueueTrack(ms, mh);  // a queue row
                         }
@@ -3020,68 +3210,27 @@ int App::run() {
 #endif
 
             // Custom combo recording listener (active while recording new 6-button combo in Vault & Privacy)
-            if (VaultManager::instance().isRecordingCombo()) {
-                for (int b : {XrInputState::BtnA, XrInputState::BtnB, XrInputState::BtnX, XrInputState::BtnY}) {
-                    if (in.buttonDown[b]) {
-                        const bool finished = VaultManager::instance().feedRecordButton(b);
-                        if (finished) {
-                            xr_.triggerHaptic(0, 0.050f, 0.0f, 0.8f);
-                            xr_.triggerHaptic(1, 0.050f, 0.0f, 0.8f);
-                        } else {
-                            xr_.triggerHaptic(0, 0.020f, 0.0f, 0.4f);
-                            xr_.triggerHaptic(1, 0.020f, 0.0f, 0.4f);
-                        }
-                        settings_.refresh();
-                        break;
+            // The four face actions record the symbols (comboEdge is never cleared;
+            // every other button was cleared at the combo gate above).
+            if (recordingCombo) {
+                if (in.comboEdge >= 0) {
+                    const bool finished = VaultManager::instance().feedRecordButton(in.comboEdge);
+                    if (finished) {
+                        xr_.triggerHaptic(0, 0.050f, 0.0f, 0.8f);
+                        xr_.triggerHaptic(1, 0.050f, 0.0f, 0.8f);
+                    } else {
+                        xr_.triggerHaptic(0, 0.020f, 0.0f, 0.4f);
+                        xr_.triggerHaptic(1, 0.020f, 0.0f, 0.4f);
                     }
+                    settings_.refresh();
                 }
-                in.togglePlay = false;
-                in.browserToggle = false;
-                in.recenter = false;
-            } else if (settings_.isListening()) {
-                for (int b = 0; b < XrInputState::BtnCount; ++b) {
-                    if (in.buttonDown[b]) {
-                        settings_.assignListening(b);
-                        break;
-                    }
-                }
-                in.togglePlay = false;
-                in.browserToggle = false;
-                in.recenter = false;
-            } else {
-                in.togglePlay = in.buttonDown[settings_.bindPlay()];
-                in.browserToggle = in.buttonDown[settings_.bindMenu()];
-                in.recenter = in.buttonDown[settings_.bindRecenter()];
             }
-
-            // Discrete grip full-press cheat code detection:
-            // Holding full press of either grip button (bottomed out) and entering the button sequence.
-            const bool gripFullHeld = in.gripFullPressHeld[0] || in.gripFullPressHeld[1];
-            static bool sPrevGripFullHeld = false;
-            if (gripFullHeld != sPrevGripFullHeld) {
-                if (!gripFullHeld && sPrevGripFullHeld) {
-                    lastGripFullRelease_ = nowT;
-                }
-                sPrevGripFullHeld = gripFullHeld;
-                PIXELVR_LOG_INFO("Grip full press state changed: %s (L val: %.2f, R val: %.2f)",
-                                 gripFullHeld ? "HELD" : "RELEASED",
-                                 in.gripValue[0], in.gripValue[1]);
-            }
-
-            const bool gripGracePeriod = (lastGripFullRelease_.time_since_epoch().count() > 0) &&
-                                         ((nowT - lastGripFullRelease_) < 300ms);
-            const bool comboActive = VaultManager::instance().isComboEntryActive(nowT);
-            const bool comboGate = gripFullHeld || comboActive || gripGracePeriod;
 
             // Suppress laser pointer hovering, clicking, and dim the laser beam during combo entry
             renderer_.setPointerSuppressed(comboGate);
 
             // Whirligig-style Quick Path controller button shortcut
-            const int qpBtn = settings_.bindQuickPath();
-            const bool quickPathPressed =
-                !settings_.isListening() && !comboGate &&
-                !VaultManager::instance().isRecordingCombo() && !kbOpen &&
-                qpBtn >= 0 && qpBtn < XrInputState::BtnCount && in.buttonDown[qpBtn];
+            const bool quickPathPressed = !comboGate && !recordingCombo && !kbOpen && in.bookmarks;
             if (quickPathPressed) {
                 browser_.openBookmarks();
                 downloadsWindow_ = false;
@@ -3090,46 +3239,41 @@ int App::run() {
                 xr_.triggerHaptic(1, 0.040f, 0.0f, 0.6f);
             }
 
-            if (comboGate && !settings_.isListening() && !VaultManager::instance().isRecordingCombo()) {
+            if (comboGate && !recordingCombo) {
                 const int h = in.gripFullPressHeld[1] ? 1 : 0;
-                for (int b : {XrInputState::BtnA, XrInputState::BtnB, XrInputState::BtnX, XrInputState::BtnY}) {
-                    if (in.buttonDown[b]) {
-                        PIXELVR_LOG_INFO("Combo input button press: %s (hand %s)",
-                                         (b == XrInputState::BtnA) ? "A" :
-                                         (b == XrInputState::BtnB) ? "B" :
-                                         (b == XrInputState::BtnX) ? "X" : "Y",
-                                         h == 0 ? "left" : "right");
-                        auto res = VaultManager::instance().feedInput(b, true, nowT);
-                        if (res == VaultManager::ComboResult::StepMatched) {
-                            PIXELVR_LOG_INFO("Vault combo step matched");
-                            xr_.triggerHaptic(h, 0.015f, 0.0f, 0.4f);
-                        } else if (res == VaultManager::ComboResult::Unlocked) {
-                            PIXELVR_LOG_INFO("Vault combo SUCCESS: UNLOCKED");
-                            xr_.triggerHaptic(h, 0.060f, 0.0f, 0.9f);
-                            renderer_.setVaultUnlocked(true);
-                            if (settings_.isOpen()) {
-                                settings_.refresh();
-                            } else {
-                                downloadsWindow_ = false;
-                                settings_.close();
-                                browser_.openVault();
-                            }
-                        } else if (res == VaultManager::ComboResult::Locked) {
-                            PIXELVR_LOG_INFO("Vault combo: RELOCKED");
-                            xr_.triggerHaptic(h, 0.060f, 0.0f, 0.7f);
-                            performVaultLock();
+                if (const int b = in.comboEdge; b >= 0) {
+                    PIXELVR_LOG_INFO("Combo input button press: %s (hand %s)",
+                                     (b == XrInputState::ComboPlay) ? "A" :
+                                     (b == XrInputState::ComboBack) ? "B" :
+                                     (b == XrInputState::ComboRecenter) ? "X" : "Y",
+                                     h == 0 ? "left" : "right");
+                    auto res = VaultManager::instance().feedInput(b, true, nowT);
+                    if (res == VaultManager::ComboResult::StepMatched) {
+                        PIXELVR_LOG_INFO("Vault combo step matched");
+                        xr_.triggerHaptic(h, 0.015f, 0.0f, 0.4f);
+                    } else if (res == VaultManager::ComboResult::Unlocked) {
+                        PIXELVR_LOG_INFO("Vault combo SUCCESS: UNLOCKED");
+                        xr_.triggerHaptic(h, 0.060f, 0.0f, 0.9f);
+                        renderer_.setVaultUnlocked(true);
+                        if (settings_.isOpen()) {
+                            settings_.refresh();
                         } else {
-                            PIXELVR_LOG_INFO("Vault combo reset / mismatch");
+                            downloadsWindow_ = false;
+                            settings_.close();
+                            browser_.openVault();
                         }
-                        break;
+                    } else if (res == VaultManager::ComboResult::Locked) {
+                        PIXELVR_LOG_INFO("Vault combo: RELOCKED");
+                        xr_.triggerHaptic(h, 0.060f, 0.0f, 0.7f);
+                        performVaultLock();
+                    } else {
+                        PIXELVR_LOG_INFO("Vault combo reset / mismatch");
                     }
                 }
                 // Suppress normal button, trigger, and thumbstick functions while combo is active
+                // (the buttons were already cleared above).
                 in.select = false;
                 in.selectHeld = false;
-                in.togglePlay = false;
-                in.browserToggle = false;
-                in.recenter = false;
                 in.thumbstickX = 0.0f;
                 in.thumbstickY = 0.0f;
                 in.thumbstickLX = 0.0f;
@@ -3138,24 +3282,15 @@ int App::run() {
                 in.thumbstickRY = 0.0f;
             }
 
-            // X is the dedicated download button: it downloads the highlighted SMB entry.
-            // Y (or configured move button) is the dedicated File Actions Submenu button.
-            const bool downloadPressed =
-                !settings_.isListening() && !settings_.isOpen() && !comboGate &&
-                !VaultManager::instance().isRecordingCombo() &&
-                in.buttonDown[XrInputState::BtnX];
-
-            const int configuredMoveBtn = VaultManager::instance().moveButton();
-            const bool actionBtnPressed =
-                !settings_.isListening() && !settings_.isOpen() && !comboGate &&
-                !VaultManager::instance().isRecordingCombo() &&
-                (in.buttonDown[XrInputState::BtnY] ||
-                 (configuredMoveBtn >= 0 && configuredMoveBtn < XrInputState::BtnCount &&
-                  in.buttonDown[configuredMoveBtn]));
+            // "Options" opens / closes File Actions for the focused entry (it does
+            // nothing in Settings).
+            const bool actionBtnPressed = !settings_.isOpen() && !comboGate && !recordingCombo && in.options;
 
             // Grip full-press click: activate laser pointer on this hand.
             // Exactly one controller has an active laser pointer at any time.
-            if (!settings_.isListening() && !comboGate && !VaultManager::instance().isRecordingCombo()) {
+            // The press itself opens the combo gate (gripFullPressDown implies
+            // gripFullPressHeld), so only an entry already in progress blocks it.
+            if (!recordingCombo && !comboActive) {
                 for (int h = 0; h < 2; ++h) {
                     if (in.gripFullPressDown[h]) {
                         if (!renderer_.laserOn(h)) {
@@ -3356,26 +3491,28 @@ int App::run() {
                     for (int k = 0; k < 4; ++k) activityAnchorOrient_[h][k] = c.orientation[k];
                 }
             }
-            // In 360/180 the right stick tilts / zooms the scene: used blindly, and a
-            // flat dock popping up over the whole view is distracting, so it doesn't wake the UI.
+            // In 360/180 the right stick Y tilts and the left stick X zooms the
+            // scene: used blindly, and a flat dock popping up over the whole view is
+            // distracting, so they don't wake the UI. Scrubbing (right X) does.
             const bool sphereView = settings_.projectionMode() != 0;
-            // (thumbstickX/Y combine both hands, so in 360/180 only the left stick counts.)
             const bool stickMoved =
-                sphereView ? (std::fabs(in.thumbstickLX) > 0.25f || std::fabs(in.thumbstickLY) > 0.25f)
+                sphereView ? (std::fabs(in.thumbstickRX) > 0.25f || std::fabs(in.thumbstickLY) > 0.25f)
                            : (std::fabs(in.thumbstickX) > 0.25f || std::fabs(in.thumbstickY) > 0.25f ||
                               std::fabs(in.thumbstickRX) > 0.25f || std::fabs(in.thumbstickRY) > 0.25f);
-            // Only digital full grip press (gripFullPressDown) or physical buttons wake the HUD.
-            // Soft analog squeeze (gripDown / BtnGrip) is ignored to prevent accidental wake-up from resting hands.
-            bool anyButtonPressed = (in.togglePlay || in.browserToggle || in.recenter ||
+            // Only the digital full grip press or an action wakes the HUD (a soft
+            // squeeze from a resting hand doesn't). Show / Hide UI toggles it
+            // explicitly below; the combo gate and the keyboard consumed theirs.
+            const bool toggleUiPressed = in.toggleUi;
+            in.toggleUi = false;
+            // Back with the controls hidden does nothing at all (it must not
+            // bring them back only for the next Back to hide them again).
+            const bool backPressed = in.back;
+            if (hudDismissed_) in.back = false;
+            const bool anyActionPressed = in.anyButton();
+            in.back = backPressed;
+            bool anyButtonPressed = (anyActionPressed ||
                                      in.gripFullPressDown[0] || in.gripFullPressDown[1] ||
                                      stickMoved);
-            for (int b = 0; b < XrInputState::BtnCount; ++b) {
-                if (b == XrInputState::BtnGrip) continue;
-                if (in.buttonDown[b]) {
-                    anyButtonPressed = true;
-                    break;
-                }
-            }
             if (!inDismissCooldown && in.select) {
                 anyButtonPressed = true;
             }
@@ -3402,12 +3539,48 @@ int App::run() {
             if (VaultManager::instance().tick(nowT, in.headValid && xr_.sessionFocused())) {
                 performVaultLock();
             }
+            // Show / Hide UI: the player HUD on / off (ignored with the hub open).
+            if (toggleUiPressed && !hubShown && !actionMenu_.visible && pendingDl_.empty()) {
+                if (!hudDismissed_ && renderer_.controlBarVisible()) {
+                    dismissHud(in, nowT);
+                } else {  // shown like any wake
+                    hudDismissed_ = false;
+                    lastControllerActivity_ = nowT;
+                    VaultManager::instance().recordActivity(nowT);
+                }
+            }
             const bool controllersEngaged =
                 (nowT - lastControllerActivity_) < std::chrono::milliseconds(3000);
 
 #ifdef PIXELVR_HAVE_FREETYPE
-            if (in.browserToggle) {
-                if (actionMenu_.visible) {
+            // Main Menu: open the hub, or close everything that is open.
+            if (in.mainMenu) {
+                in.mainMenu = false;
+                if (browser_.isOpen() || settings_.isOpen() || downloadsWindow_ || actionMenu_.visible ||
+                    !pendingDl_.empty()) {
+                    closeHub();
+                } else {
+                    browser_.open();  // last tab / location
+                }
+            }
+            // Show Controls: the Buttons pages of Settings > Controls & Input, or
+            // close them again. (The keyboard and the combo gate consumed it.)
+            if (in.showControls) {
+                in.showControls = false;
+                if (settings_.isOpen() && settings_.showingButtons()) {
+                    closeHub();
+                } else {
+                    closeHub();
+                    settings_.openButtons();
+                }
+            }
+            // Back: one step back, never opens anything. (The keyboard, a grab and
+            // a web page under the laser took theirs already.)
+            if (in.back) {
+                in.back = false;
+                if (!pendingDl_.empty()) {
+                    pendingDl_.clear();  // just the confirmation, the hub stays
+                } else if (actionMenu_.visible) {
                     actionMenu_.visible = false;
                     smbModal_.active = false;
                     smbModal_.editingField = SmbModalState::Field::None;
@@ -3417,16 +3590,34 @@ int App::run() {
                 } else if (settings_.isOpen()) {
                     settings_.close();
                 } else if (browser_.isOpen()) {
-                    browser_.setOpen(false);
-                    smbModal_.active = false;
-                    smbModal_.editingField = SmbModalState::Field::None;
-                    if (textEntry_.active) cancelKeyboard();
+                    // A folder still loading shows a lone "Scanning..." row (no Up
+                    // entry): it is not the root, so ignore Back until it lands.
+                    // (The scan thread can finish before this frame's poll.)
+                    const auto& ents = browser_.entries();
+                    const bool loading = browser_.isScanning() ||
+                                         (ents.size() == 1 && !ents[0].isBack && ents[0].path.empty() &&
+                                          ents[0].label == "Scanning...");
+                    if (loading) {
+                        // still loading: ignore
+                    } else if (!ents.empty() && ents[0].isBack) {
+                        // Up a folder, like the header's Up button.
+                        browser_.setSelected(0);
+                        std::string playPath;
+                        browser_.activate(playPath);
+                        xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.025f, 0.0f, 0.5f);
+                    } else {  // the root of a location: close the hub
+                        closeHub();
+                    }
                 } else if (cur().open && renderer_.controlBarVisible()) {
-                    // HUD is visible during playback: B/Y dismisses the HUD!
-                    dismissHud(in, nowT);
-                } else {
-                    browser_.open();
+                    dismissHud(in, nowT);  // HUD shown during playback: hide it
                 }
+            }
+            // Previous / Next in the hub: the rail tabs (Files, Downloads,
+            // Settings, then the web shortcuts), wrapping.
+            if ((in.previous || in.next) && (browser_.isOpen() || settings_.isOpen() || downloadsWindow_) &&
+                pendingDl_.empty() && !actionMenu_.visible) {
+                cycleHubTab(in.next ? 1 : -1);
+                in.previous = in.next = false;
             }
             // Downloads run on their own thread and keep going while the browser
             // is closed; poll every frame so completion is handled regardless of
@@ -3550,7 +3741,7 @@ int App::run() {
                 dlWin, "Downloads", drows,
                 browser_.downloadActive()
                     ? browser_.downloadText()
-                    : "Trigger: Play Completed  |  B: Close Hub",
+                    : "Trigger: Play Completed  |  B: Back",
                 dbtns, djList);
 
             // Folder-download confirmation: a modal with the size and two buttons.
@@ -3559,9 +3750,7 @@ int App::run() {
                 if (pendingDlFresh_) {
                     pendingDlFresh_ = false;  // ignore the press that opened it
                 } else if (in.togglePlay) {
-                    confirmNow = true;
-                } else if (in.browserToggle) {
-                    pendingDl_.clear();
+                    confirmNow = true;  // (Back cancels it in the Back chain above)
                 }
                 if (!pendingDl_.empty()) {
                     char sz[96];
@@ -3826,6 +4015,15 @@ int App::run() {
             renderer_.setActionMenu(actionMenu_);
 #endif
 
+            // Buttons pages: re-read the live bindings when they open and after
+            // focus returns (they are edited in the SteamVR dashboard).
+            {
+                const bool shown = settings_.isOpen() && settings_.showingButtons();
+                if (shown && (!buttonsPageShown_ || xr_.bindingsGeneration() != bindingsGenSeen_)) {
+                    refreshControlsInfo();
+                }
+                buttonsPageShown_ = shown;
+            }
             // Settings panel overlay
             if (settings_.isOpen()) {
                 std::vector<VulkanRenderer::SettingsRowVis> sRows;
@@ -4113,7 +4311,10 @@ int App::run() {
                             if (chosen >= 0 && chosen < static_cast<int>(actionMenu_.options.size())) {
                                 const std::string opt = actionMenu_.options[chosen];
                                 if (actionMenu_.page == 0) {
-                                    if (opt == "Open Share" || opt == "Open Bookmark") {
+                                    if (opt == "Download" || opt == "Download Folder") {
+                                        actionMenu_.visible = false;
+                                        downloadFocusedEntry();
+                                    } else if (opt == "Open Share" || opt == "Open Bookmark") {
                                         std::string playPath;
                                         actionMenu_.visible = false;  // before: the picker may reopen it
                                         if (browser_.activate(playPath) == Browser::Result::Play && !playPath.empty()) {
@@ -4614,20 +4815,6 @@ int App::run() {
                 recenterView(in);
             }
 
-            // X: download the highlighted entry when browsing SMB shares. Folders ask for
-            // confirmation (with the measured size) first; plain files download immediately.
-            if (downloadPressed && browser_.isOpen() && !downloadsWindow_ && !settings_.isOpen() &&
-                pendingDl_.empty() && !actionMenu_.visible && browser_.onNetwork()) {
-                const Browser::Entry* fe = browser_.focused();
-                if (fe != nullptr && fe->isDir && !fe->isBack) {
-                    pendingDl_ = fe->path;
-                    pendingDlName_ = fe->label;
-                    pendingDlFresh_ = true;
-                    browser_.measureFolder(fe->path);
-                } else {
-                    browser_.downloadFocused();
-                }
-            }
 #endif
 
             if (settings_.isOpen() && sbHover < 0) {
@@ -4643,9 +4830,10 @@ int App::run() {
                     renderer_.setSettingsSelected(hovered);
                     settings_.setSelected(hovered);
                 }
-                // Trigger activates the selection made by the laser or the stick.
-                if (in.select && (hovered >= 0 || std::fabs(in.thumbstickY) > 0.25f)) {
-                    const int seg = renderer_.settingsSegmentHovered();
+                // Trigger activates the selection made by the laser or the stick;
+                // Play / OK activates the selected row, pointed at or not.
+                if ((in.select && (hovered >= 0 || std::fabs(in.thumbstickY) > 0.25f)) || in.togglePlay) {
+                    const int seg = (hovered >= 0) ? renderer_.settingsSegmentHovered() : -1;
                     auto act = (seg >= 0) ? settings_.activateSegment(seg) : settings_.activate();
                         if (act == SettingsMenu::Action::CycleDistance) {
                             renderer_.setScreenDistance(settings_.screenDistance());
@@ -4703,9 +4891,9 @@ int App::run() {
             if (barOk && renderer_.controlBarVisible() && !wasHudDismissed) {
                 // Point-and-click the media control bar with the trigger.
                 const int btn = renderer_.pointerButton();
-                // The trigger clicks the bar; A does too (A is the reliable
-                // press -- the analog trigger does not always report a click).
-                if ((in.select || in.togglePlay) && btn >= 0) {
+                // Only the trigger clicks the bar: Play / OK always plays / pauses
+                // during playback, wherever the laser points.
+                if (in.select && btn >= 0) {
                     PIXELVR_LOG_INFO("control bar click: button=%d", btn);
                     const auto cb = static_cast<VulkanRenderer::CtrlButton>(btn);
                     if (cb == VulkanRenderer::CtrlButton::Stop) {
@@ -4742,42 +4930,9 @@ int App::run() {
                             webHosts_[selectedScreen_].requestFocusReport();  // fill in the field, if any
                         }
                     } else if (cb == VulkanRenderer::CtrlButton::FormatToggle) {
-                        actionMenu_.visible = true;
-                        actionMenu_.page = 5;
-                        actionMenu_.title = "Playback Format";
-                        actionMenu_.subtitle = "Select 3D / VR Projection";
-                        actionMenu_.options.clear();
-                        actionMenu_.options.push_back("2D Flat (Standard)");
-                        actionMenu_.options.push_back("3D Side-by-Side (SBS)");
-                        actionMenu_.options.push_back("3D Top-Bottom (Over-Under)");
-                        if (selectedScreen_ == 0) {  // immersive only on the main screen
-                            actionMenu_.options.push_back("VR 180° (Side-by-Side)");
-                            actionMenu_.options.push_back("VR 360° (Mono)");
-                            actionMenu_.options.push_back("VR 360° 3D (Top-Bottom)");
-                        }
-                        actionMenu_.options.push_back("Cancel");
-                        actionMenu_.selectedOption = 0;
-                        xr_.triggerHaptic(0, 0.020f, 0.0f, 0.4f);
-                        xr_.triggerHaptic(1, 0.020f, 0.0f, 0.4f);
+                        openFormatMenu();
                     } else if (cb == VulkanRenderer::CtrlButton::AudioToggle) {
-                        if (cur().open && cur().engine.audioStreams().size() > 1) {
-                            const auto& streams = cur().engine.audioStreams();
-                            int curStream = cur().engine.currentAudioStream();
-                            int nextIdx = 0;
-                            for (size_t i = 0; i < streams.size(); ++i) {
-                                if (streams[i].index == curStream) {
-                                    nextIdx = static_cast<int>((i + 1) % streams.size());
-                                    break;
-                                }
-                            }
-                            int nextStreamIndex = streams[nextIdx].index;
-                            settings_.setSelectedAudioStream(nextStreamIndex);
-                            cur().engine.setPreferredAudioStream(nextStreamIndex);
-                            cur().engine.setPreferredAudioLanguage("");
-                            switchTracks(false);
-                            xr_.triggerHaptic(0, 0.02f, 0.0f, 0.5f);
-                            xr_.triggerHaptic(1, 0.02f, 0.0f, 0.5f);
-                        }
+                        cycleAudioTrack();
                     } else if (cb == VulkanRenderer::CtrlButton::ScreenToggle) {
                         if (settings_.projectionMode() == 0 &&
                             (selectedScreen_ > 0 || renderer_.screenPlacement(selectedScreen_).active)) {
@@ -4907,29 +5062,101 @@ int App::run() {
                         interacted = true;
                     }
                 } else if (dt > 0.0f) {
-                    // Not "interacted": these adjustments keep the UI hidden (see stickMoved).
+                    // 360/180: right stick Y tilts, left stick X zooms (right X
+                    // scrubs, below). Not "interacted": these keep the UI hidden.
                     if (std::fabs(in.thumbstickRY) > 0.15f) renderer_.adjustSpherePitch(in.thumbstickRY * dt * 0.6f);
-                    if (std::fabs(in.thumbstickRX) > 0.15f) renderer_.adjustSphereZoom(in.thumbstickRX * dt * 0.6f);
+                    if (std::fabs(in.thumbstickLX) > 0.15f) renderer_.adjustSphereZoom(in.thumbstickLX * dt * 0.6f);
                 }
 #ifdef PIXELVR_HAVE_MEDIA
                 if (in.togglePlay && cur().open) {
                     curTogglePause();
                     interacted = true;
                 }
+                // D-pad: Up / Down = volume of the selected screen, Left / Right =
+                // seek 10 s like the dock buttons; held, it repeats. Web pages are
+                // left alone for now.
+                {
+                    using namespace std::chrono_literals;
+                    const bool held[5] = {false, in.dpadUpHeld, in.dpadDownHeld, in.dpadLeftHeld, in.dpadRightHeld};
+                    int dir = in.dpadUp ? 1 : in.dpadDown ? 2 : in.dpadLeft ? 3 : in.dpadRight ? 4 : 0;
+                    if (cur().web || laserOnWeb) {
+                        dir = 0;
+                        dpadRepeatDir_ = 0;
+                    } else if (dir != 0) {
+                        dpadRepeatDir_ = dir;
+                        dpadNextRepeat_ = nowT + 350ms;
+                    } else if (dpadRepeatDir_ != 0 && held[dpadRepeatDir_]) {
+                        if (nowT >= dpadNextRepeat_) {
+                            dpadNextRepeat_ = nowT + 200ms;
+                            dir = dpadRepeatDir_;
+                        }
+                    } else {
+                        dpadRepeatDir_ = 0;
+                    }
+                    if ((dir == 1 || dir == 2) && cur().open) {
+                        cur().volume = std::clamp(cur().volume + (dir == 1 ? 0.05f : -0.05f), 0.0f, 1.0f);
+                        if (cur().volume > 0.0f) cur().muted = false;
+                        hudDismissed_ = false;  // the dock shows the level
+                        interacted = true;
+                    } else if ((dir == 3 || dir == 4) && cur().open) {
+                        curSeekRelative(dir == 3 ? -10.0 : 10.0);
+                        hudDismissed_ = false;  // the dock shows the time
+                        interacted = true;
+                    }
+                }
+                // Previous / Next: the music view's track buttons (video: nothing yet).
+                if ((in.previous || in.next) && cur().open && !cur().web && cur().engine.audioOnly()) {
+                    if (in.previous) musicPrevious(selectedScreen_);
+                    else musicNext(selectedScreen_);
+                    interacted = true;
+                }
+                // Actions with no default binding (SteamVR chords / long presses):
+                // each runs what its dock button or menu entry does.
+                if (in.mute) {
+                    cur().muted = !cur().muted;
+                    interacted = true;
+                }
+                if (in.stop && cur().open) {
+                    if (!returnFromPlex(selectedScreen_)) closeMedia();
+#ifdef PIXELVR_HAVE_FREETYPE
+                    if (openScreenCount() == 0) browser_.open();
+#endif
+                    interacted = true;
+                }
+                if (in.nextScreen || in.previousScreen) {
+                    selectNextScreen(in.nextScreen ? 1 : -1);
+                    interacted = true;
+                }
+                if ((in.skipBack || in.skipForward) && cur().open) {
+                    curSeekRelative(in.skipForward ? 30.0 : -30.0);
+                    interacted = true;
+                }
+                if (in.lockScreens && multiScreenEnabled() && cur().open) {
+                    screensUnlocked_ = !screensUnlocked_;
+                    interacted = true;
+                }
+                if (in.audioTrack && !cur().web) {
+                    cycleAudioTrack();
+                    interacted = true;
+                }
+                if (in.format3d && cur().open && !cur().web) {
+                    openFormatMenu();
+                    interacted = true;
+                }
                 if (cur().open) {
-                    // Right stick left/right steps -/+30s (flat only; in 360/180 the
-                    // right stick drives the viewpoint instead).
+                    // Left stick left/right steps -/+30s (flat only; in 360/180 the
+                    // left stick zooms instead).
                     constexpr double kStep = 30.0;
                     const bool sphereMode = settings_.projectionMode() != 0;
-                    if (!sphereMode && in.thumbstickRX > 0.6f && seekStepArmed_) {
+                    if (!sphereMode && in.thumbstickLX > 0.6f && seekStepArmed_) {
                         curSeekRelative(kStep);
                         seekStepArmed_ = false;
                         interacted = true;
-                    } else if (!sphereMode && in.thumbstickRX < -0.6f && seekStepArmed_) {
+                    } else if (!sphereMode && in.thumbstickLX < -0.6f && seekStepArmed_) {
                         curSeekRelative(-kStep);
                         seekStepArmed_ = false;
                         interacted = true;
-                    } else if (std::fabs(in.thumbstickRX) < 0.3f) {
+                    } else if (std::fabs(in.thumbstickLX) < 0.3f) {
                         seekStepArmed_ = true;
                     }
 
@@ -4942,10 +5169,12 @@ int App::run() {
                         curDuration() > 0.0) {
                         scrubTarget_ = curTimelineStart() + renderer_.pointerScrub() * (curDuration() - curTimelineStart());
                         scrubInput = true;
-                    } else if (std::fabs(in.thumbstickLX) > 0.15f && dt > 0.0f &&
+                    } else if (std::fabs(in.thumbstickRX) > 0.15f && dt > 0.0f &&
                                curDuration() > 0.0) {
+                        // Right stick X scrubs, so one (right) controller can scrub;
+                        // the left stick X steps 30 s.
                         if (!scrubbing_) scrubTarget_ = curPosition();
-                        const float ax = in.thumbstickLX;
+                        const float ax = in.thumbstickRX;
                         const float t = (std::fabs(ax) - 0.15f) / 0.85f;
                         const double rate =
                             std::copysign(static_cast<double>(t * t) * 60.0, ax);

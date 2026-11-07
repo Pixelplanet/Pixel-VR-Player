@@ -16,13 +16,11 @@ namespace pixelvr {
 
 namespace {
 
-// Must match XrInputState::Button ordering.
-const char* kButtonNames[] = {"A",          "B",          "X",
-                              "Y",          "Menu",       "View",
-                              "Bumper",     "Thumbstick", "Grip",
-                              "D-Pad Up",   "D-Pad Down", "D-Pad Left",
-                              "D-Pad Right"};
-constexpr int kButtonCount = 13;
+const char* const kDefaultStatus = "Point + Trigger: Change Setting  |  B: Close";
+const char* const kShortcutsStatus = "Shortcuts appear as tabs on the hub's rail, in this order.";
+// Buttons are assigned in SteamVR only (OpenXR can't open that page for us).
+const char* const kButtonsStatus =
+    "Change buttons in SteamOS: SteamVR Settings > Controllers > Manage Controller Bindings";
 const char* kDownloadDirs[] = {"~/media", "~/Downloads", "~/Videos"};
 constexpr int kDownloadDirCount = 3;
 
@@ -143,6 +141,9 @@ void SettingsMenu::move(int delta) {
 
 void SettingsMenu::refresh() {
     rows_.clear();
+    if (section_ >= kButtonsSection && !showingButtons()) section_ = kButtonsSection;
+    // Page hints belong to their page; transient messages stay.
+    if (status_ == kShortcutsStatus || status_ == kButtonsStatus) status_ = kDefaultStatus;
 
     auto choice = [&](const std::string& label, const std::string& value, int steps,
                       int idx, Action act, bool enabled = true) {
@@ -187,10 +188,6 @@ void SettingsMenu::refresh() {
         r.stepIdx = active ? 1 : 0;
         r.data = data;
         rows_.push_back(r);
-    };
-    auto pressLabel = [&](int func, int btn) -> std::string {
-        return listeningFunc_ == func ? std::string("Press a button...")
-                                      : std::string(kButtonNames[btn % kButtonCount]);
     };
 
     if (section_ == 0) {
@@ -272,10 +269,8 @@ void SettingsMenu::refresh() {
                          Action::EnterLangList});
     } else if (section_ == 3) {
         title_ = "Settings > Controls & Input";
-        binding("Play / Pause", pressLabel(0, bindPlayBtn_), Action::ListenPlay);
-        binding("Open Menu / Browser", pressLabel(1, bindMenuBtn_), Action::ListenMenu);
-        binding("Recenter View", pressLabel(2, bindRecenterBtn_), Action::ListenRecenter);
-        binding("Bookmarks Shortcut", pressLabel(4, bindQuickPathBtn_), Action::ListenQuickPath);
+        status_ = kButtonsStatus;
+        rows_.push_back({"Controller Buttons", "Assigned in SteamOS", Action::EnterButtons});
         segmented("Keyboard Layout", {"US", "Deutsch", "UK", "Français", "Nordic"}, keyboardLayout_ % 5,
                   Action::CycleKeyboardLayout);
         segmented("Laser Smoothing", {"Off", "Low", "Medium", "High"}, laserSmoothing_ % 4,
@@ -296,15 +291,6 @@ void SettingsMenu::refresh() {
         const char* toNames[4] = {"Disabled", "2 Minutes", "5 Minutes", "10 Minutes"};
         choice("Inactivity Auto-Lock", toNames[toIdx], 4, toIdx, Action::CycleVaultTimeout);
 
-        std::string moveLabel;
-        if (listeningFunc_ == 3) {
-            moveLabel = "Press a button...";
-        } else {
-            const int mb = VaultManager::instance().moveButton();
-            moveLabel = (mb < 0 || mb >= kButtonCount) ? "Disabled" : kButtonNames[mb];
-        }
-        binding("File Actions Button", moveLabel, Action::ListenVaultMoveBtn);
-
         std::string comboLabel;
         if (VaultManager::instance().isRecordingCombo()) {
             comboLabel = "Recording " + std::to_string(VaultManager::instance().recordedCount()) + " / 6";
@@ -312,9 +298,30 @@ void SettingsMenu::refresh() {
             comboLabel = VaultManager::instance().comboString();
         }
         binding("Unlock Combo Sequence", comboLabel, Action::RecordVaultCombo);
+    } else if (showingButtons()) {
+        // Read-only: one row per action with the buttons SteamVR binds to it.
+        const int page = section_ - kButtonsSection;
+        const int pages = buttonsPages();
+        title_ = "Settings > Controls & Input > Buttons";
+        if (pages > 1) title_ += " (" + std::to_string(page + 1) + "/" + std::to_string(pages) + ")";
+        status_ = kButtonsStatus;
+        const int n = static_cast<int>(controlsInfo_.size());
+        for (int i = page * kButtonsPerPage; i < std::min(n, (page + 1) * kButtonsPerPage); ++i) {
+            Row r{controlsInfo_[static_cast<std::size_t>(i)].first,
+                  controlsInfo_[static_cast<std::size_t>(i)].second, Action::None};
+            r.kind = Kind::Choice;  // plain value text, no control
+            rows_.push_back(r);
+        }
+        if (page + 1 < pages) {
+            rows_.push_back({"More Buttons",
+                             "Page " + std::to_string(page + 2) + " of " + std::to_string(pages),
+                             Action::NextButtonsPage});
+        } else {
+            rows_.push_back({"Back to Controls & Input", "", Action::BackToControls});
+        }
     } else if (section_ == 22) {
         title_ = "Settings > UI & Appearance > Shortcuts";
-        status_ = "Shortcuts appear as tabs on the hub's rail, in this order.";
+        status_ = kShortcutsStatus;
         for (int i = 0; i < kRailShortcutCount; ++i) {
             const bool on = (railShortcutMask_ >> i) & 1;
             toggle(kRailShortcuts[i].name, on,
@@ -365,19 +372,19 @@ SettingsMenu::Action SettingsMenu::activate() {
             selected_ = 0;
             refresh();
             break;
-        case Action::ListenPlay:
-            listeningFunc_ = 0;
-            status_ = "Press any controller button for Play / Pause";
+        case Action::EnterButtons:
+            section_ = kButtonsSection;
+            selected_ = 0;
             refresh();
             break;
-        case Action::ListenMenu:
-            listeningFunc_ = 1;
-            status_ = "Press any controller button for Open Menu";
+        case Action::NextButtonsPage:
+            ++section_;
+            selected_ = 0;
             refresh();
             break;
-        case Action::ListenRecenter:
-            listeningFunc_ = 2;
-            status_ = "Press any controller button for Recenter";
+        case Action::BackToControls:
+            section_ = 3;
+            selected_ = 0;
             refresh();
             break;
         case Action::ToggleRailShortcut0:
@@ -482,11 +489,6 @@ SettingsMenu::Action SettingsMenu::activate() {
             saveConfig();
             refresh();
             break;
-        case Action::ListenQuickPath:
-            listeningFunc_ = 4;
-            status_ = "Press a controller button for Bookmarks shortcut";
-            refresh();
-            break;
         case Action::PickVideoStream:
             videoSel_ = rows_[selected_].data;
             section_ = 2;
@@ -520,11 +522,6 @@ SettingsMenu::Action SettingsMenu::activate() {
             refresh();
             break;
         }
-        case Action::ListenVaultMoveBtn:
-            listeningFunc_ = 3;
-            status_ = "Press a controller button for Move-to-Vault";
-            refresh();
-            break;
         case Action::RecordVaultCombo:
             if (VaultManager::instance().isRecordingCombo()) {
                 VaultManager::instance().cancelRecordingCombo();
@@ -674,17 +671,23 @@ std::string SettingsMenu::audioLanguage() const {
     return kLangCodes[audioLangIdx_ % kLangCount];
 }
 
-void SettingsMenu::assignListening(int button) {
-    if (listeningFunc_ < 0) return;
-    const int b = (button < 0 || button >= kButtonCount) ? 0 : button;
-    if (listeningFunc_ == 0) bindPlayBtn_ = b;
-    else if (listeningFunc_ == 1) bindMenuBtn_ = b;
-    else if (listeningFunc_ == 2) bindRecenterBtn_ = b;
-    else if (listeningFunc_ == 3) VaultManager::instance().setMoveButton(b);
-    else if (listeningFunc_ == 4) bindQuickPathBtn_ = b;
-    listeningFunc_ = -1;
-    status_ = "Bound to " + std::string(kButtonNames[b]);
-    saveConfig();
+void SettingsMenu::setControlsInfo(std::vector<std::pair<std::string, std::string>> info) {
+    controlsInfo_ = std::move(info);
+    if (open_ && showingButtons()) refresh();
+}
+
+void SettingsMenu::close() {
+    open_ = false;
+    // A combo recording only makes sense on the Vault page: leaving Settings by
+    // any route (Main Menu, a rail tab, a web shortcut) cancels it, so later face
+    // presses during playback are never saved as a new unlock combo.
+    if (VaultManager::instance().isRecordingCombo()) VaultManager::instance().cancelRecordingCombo();
+}
+
+void SettingsMenu::openButtons() {
+    open_ = true;
+    section_ = kButtonsSection;
+    selected_ = 0;
     refresh();
 }
 
@@ -753,6 +756,10 @@ void SettingsMenu::loadConfig() {
     std::string line;
     bool panelStyleSeen = false;
     int oldOpacityIdx = -1;
+    auto noteLegacyBinding = [this](bool custom) {
+        legacyBindingsSeen_ = true;
+        legacyBindingsCustom_ = legacyBindingsCustom_ || custom;
+    };
     while (std::getline(file, line)) {
         auto eq = line.find('=');
         if (eq == std::string::npos) continue;
@@ -767,15 +774,17 @@ void SettingsMenu::loadConfig() {
             else if (key == "draw_models") drawModels_ = (val == "1");
             else if (key == "show_stats") showStats_ = (val == "1");
             else if (key == "distance") screenDistance_ = std::clamp(std::stof(val), kDistanceMin, 10.0f);
-            else if (key == "bind_play_btn") bindPlayBtn_ = std::clamp(std::stoi(val), 0, kButtonCount - 1);
-            else if (key == "bind_menu_btn") bindMenuBtn_ = std::clamp(std::stoi(val), 0, kButtonCount - 1);
+            // Old press-to-bind keys: buttons are assigned in SteamVR now, so
+            // these are only read to tell the user custom choices were reset.
+            // Defaults: play A (0), menu B (1), recenter Bumper (6; a saved
+            // Grip 8 already meant the default), bookmarks stick click (7).
+            else if (key == "bind_play_btn") noteLegacyBinding(std::stoi(val) != 0);
+            else if (key == "bind_menu_btn") noteLegacyBinding(std::stoi(val) != 1);
             else if (key == "bind_recenter_btn") {
-                const int b = std::clamp(std::stoi(val), 0, kButtonCount - 1);
-                // Grip used to default to recenter; it now toggles the laser pointer,
-                // so a saved grip binding is migrated to the new default (Bumper).
-                bindRecenterBtn_ = (b == 8) ? 6 : b;
+                const int b = std::stoi(val);
+                noteLegacyBinding(b != 6 && b != 8);
             }
-            else if (key == "bind_quick_path_btn") bindQuickPathBtn_ = std::clamp(std::stoi(val), 0, kButtonCount - 1);
+            else if (key == "bind_quick_path_btn") noteLegacyBinding(std::stoi(val) != 7);
             else if (key == "download_dir") downloadDirIdx_ = std::clamp(std::stoi(val), 0, kDownloadDirCount - 1);
             else if (key == "rail_shortcuts") railShortcutMask_ = std::stoi(val) & ((1 << kRailShortcutCount) - 1);
             else if (key == "audio_lang") audioLangIdx_ = std::clamp(std::stoi(val), 0, kLangCount - 1);
@@ -836,10 +845,6 @@ void SettingsMenu::saveConfig() const {
             file << "draw_models=" << (drawModels_ ? 1 : 0) << "\n";
             file << "show_stats=" << (showStats_ ? 1 : 0) << "\n";
             file << "distance=" << screenDistance_ << "\n";
-            file << "bind_play_btn=" << bindPlayBtn_ << "\n";
-            file << "bind_menu_btn=" << bindMenuBtn_ << "\n";
-            file << "bind_recenter_btn=" << bindRecenterBtn_ << "\n";
-            file << "bind_quick_path_btn=" << bindQuickPathBtn_ << "\n";
             file << "download_dir=" << downloadDirIdx_ << "\n";
             file << "rail_shortcuts=" << railShortcutMask_ << "\n";
             file << "audio_lang=" << audioLangIdx_ << "\n";

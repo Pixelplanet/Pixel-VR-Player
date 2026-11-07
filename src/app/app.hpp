@@ -190,6 +190,23 @@ private:
     ThumbnailCache thumbnailCache_;
 #endif
 
+    // Controller actions (buttons are assigned in SteamVR, see XrContext).
+    void closeHub();                // hub, its menus, dialogs and the keyboard
+    void cycleHubTab(int dir);      // Previous / Next: the rail's main tabs, wrapping
+    void selectNextScreen(int dir); // Next / Previous Screen (multi-screen)
+    void musicPrevious(int slot);   // the music view's prev / next buttons
+    void musicNext(int slot);
+    void cycleAudioTrack();         // the dock's Audio button
+    void openFormatMenu();          // the dock's Format button (page 5)
+    void downloadFocusedEntry();    // network entry: download (a folder asks first)
+    void refreshControlsInfo();     // Settings > Controls > Buttons: live bindings
+    bool buttonsPageShown_ = false;
+    uint32_t bindingsGenSeen_ = 0;
+    bool controlsNoticePending_ = false;  // old in-app button choices were reset
+    // Playback D-pad hold-to-repeat: 1 up, 2 down, 3 left, 4 right, 0 none.
+    int dpadRepeatDir_ = 0;
+    std::chrono::steady_clock::time_point dpadNextRepeat_{};
+
     SettingsMenu settings_;
     PlaybackMemory playbackMemory_;  // resume position + format override per file
     std::chrono::steady_clock::time_point lastPlaybackRemember_{};
