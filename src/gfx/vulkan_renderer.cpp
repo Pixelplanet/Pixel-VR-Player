@@ -128,7 +128,7 @@ constexpr float kDockScreenRowExtra = 0.100f;
 inline bool is_screen_row_button(int b) {
     using Btn = VulkanRenderer::CtrlButton;
     const auto cb = static_cast<Btn>(b);
-    return cb == Btn::ScreenMute || cb == Btn::ScreenAudioFollow || cb == Btn::ScreenLock || cb == Btn::ScreenNumbers ||
+    return cb == Btn::ScreenAudioFollow || cb == Btn::ScreenLock || cb == Btn::ScreenNumbers ||
            cb == Btn::ScreenLayout || cb == Btn::ScreenClose;
 }
 
@@ -153,7 +153,6 @@ inline CtrlButtonRect get_ctrl_button_rect(int b) {
         case Btn::ScreenToggle: return { 0.62f, kBarY - 0.128f, 0.210f, 0.036f};
 
         // Multi-screen row (below the main controls, only while shown)
-        case Btn::ScreenMute:   return {-0.03f, kBarY - 0.250f, 0.046f, 0.046f};
         case Btn::ScreenAudioFollow: return { 0.10f, kBarY - 0.250f, 0.046f, 0.046f};
         case Btn::ScreenLock:   return { 0.23f, kBarY - 0.250f, 0.046f, 0.046f};
         case Btn::ScreenNumbers: return { 0.36f, kBarY - 0.250f, 0.046f, 0.046f};
@@ -161,6 +160,13 @@ inline CtrlButtonRect get_ctrl_button_rect(int b) {
         case Btn::ScreenClose:  return { 0.62f, kBarY - 0.250f, 0.046f, 0.046f};
         default: return {0.0f, 0.0f, 0.0f, 0.0f};
     }
+}
+
+// The level bar on the right half of the VOLUME pill (drawing and hit test).
+inline void volume_bar_span(float& x0, float& x1) {
+    const CtrlButtonRect r = get_ctrl_button_rect(static_cast<int>(VulkanRenderer::CtrlButton::Volume));
+    x0 = r.cx + 0.010f;
+    x1 = r.cx + r.hw - 0.030f;
 }
 
 // ---------------------------------------------------------------------------
@@ -3733,7 +3739,7 @@ void VulkanRenderer::recordScreenCopy(int slot, const ScreenLayer& L, uint32_t i
             if (g.width > 0.0f && g.height > 0.0f && glyphCursor < kMaxGlyphsPerView) {
                 const float scale = 0.34f / g.height;
                 GlyphInstance& gi = static_cast<GlyphInstance*>(glyphMapped_[3])[glyphCursor];
-                gi.rect[0] = -0.5f * g.width * scale * ax;
+                gi.rect[0] = -g.inkCenterX * scale * ax;  // centred on its ink, not its box
                 gi.rect[1] = -0.5f * g.height * scale;
                 gi.rect[2] = g.width * scale * ax;
                 gi.rect[3] = g.height * scale;
@@ -4916,7 +4922,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         if (g.height > 0.0f) {
                             const float sc = 0.34f / g.height;
                             const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-                            drawString(-0.5f * g.width * sc - g.bearingX * sc,
+                            drawString(-g.inkCenterX * sc - g.bearingX * sc,
                                        -0.5f * g.height * sc + (g.height - g.bearingY) * sc, sc, white,
                                        std::string(1, static_cast<char>('1' + slot)));
                         }
@@ -5004,7 +5010,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                           UiShape::RoundedBox, kGlassDivider, 1.0f);
             const float labelBg[4] = {themeAccentCol[0] * 0.22f, themeAccentCol[1] * 0.22f,
                                       themeAccentCol[2] * 0.28f, 0.92f};
-            drawUiElement(vpPanel, -0.24f, kBarY - 0.250f, 0.125f, 0.038f,
+            drawUiElement(vpPanel, -0.11f, kBarY - 0.250f, 0.125f, 0.038f,
                           UiShape::RoundedBox, labelBg, 1.0f, 0.08f, themeAccentCol);
         }
 
@@ -5084,7 +5090,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 if (cb == CtrlButton::Volume) {
                     iconShape = volumeMuted_ ? UiShape::SpeakerMuted : UiShape::Speaker;
                     // Level bar on the right half of the pill.
-                    const float x0 = r.cx + 0.010f, x1 = r.cx + r.hw - 0.030f;
+                    float x0 = 0.0f, x1 = 0.0f;
+                    volume_bar_span(x0, x1);
                     const float level = volumeMuted_ ? 0.0f : std::clamp(volumeDisplay_, 0.0f, 1.0f);
                     const float barBg[4] = {1.0f, 1.0f, 1.0f, 0.16f};
                     drawUiElement(vpPanel, 0.5f * (x0 + x1), r.cy, 0.5f * (x1 - x0), 0.0055f,
@@ -5093,6 +5100,12 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         const float xe = x0 + (x1 - x0) * level;
                         drawUiElement(vpPanel, 0.5f * (x0 + xe), r.cy, 0.5f * (xe - x0), 0.0055f,
                                       UiShape::RoundedBox, themeAccentCol, 1.0f);
+                    }
+                    if (hovered) {
+                        // A knob at the level: the bar can be clicked or dragged.
+                        const float xk = x0 + (x1 - x0) * level;
+                        const float knob[4] = {1.0f, 1.0f, 1.0f, 0.95f};
+                        drawUiElement(vpPanel, xk, r.cy, 0.011f, 0.011f, UiShape::RoundedBox, knob, 1.0f);
                     }
                 }
                 drawUiElement(vpPanel, r.cx - r.hw + 0.034f, r.cy, 0.017f, 0.017f,
@@ -5114,8 +5127,6 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 else if (cb == CtrlButton::SeekFwd) iconShape = UiShape::SeekFwd;
                 else if (cb == CtrlButton::Stop) iconShape = UiShape::Stop;
                 else if (cb == CtrlButton::HideHud) iconShape = UiShape::Close;
-                else if (cb == CtrlButton::ScreenMute)
-                    iconShape = screenControlsMuted_ ? UiShape::SpeakerMuted : UiShape::Speaker;
                 else if (cb == CtrlButton::ScreenAudioFollow) iconShape = UiShape::AudioFollow;
                 else if (cb == CtrlButton::ScreenLock)
                     iconShape = screensUnlocked_ ? UiShape::Unlocked : UiShape::Lock;
@@ -5256,8 +5267,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         float rowTipHw = 0.110f;  // the pill grows with its text (long tips were cut off)
         if (rowTip) {
             const auto cbT = static_cast<CtrlButton>(pointerButton_);
-            rowTipText = (cbT == CtrlButton::ScreenMute) ? (screenControlsMuted_ ? "Unmute" : "Mute")
-                       : (cbT == CtrlButton::ScreenAudioFollow)
+            rowTipText = (cbT == CtrlButton::ScreenAudioFollow)
                            ? (audioFollow_ ? "Audio follows selection: on" : "Audio follows selection: off")
                        : (cbT == CtrlButton::ScreenLock) ? (screensUnlocked_ ? "Lock screens" : "Unlock screens")
                        : (cbT == CtrlButton::ScreenNumbers) ? (screenNumbersOn_ ? "Hide screen numbers" : "Show screen numbers")
@@ -5380,7 +5390,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 char lbl[32];
                 std::snprintf(lbl, sizeof(lbl), "Screen %d", screenControlsNumber_);
                 withHeadingFont([&] {
-                    drawFitCentered(-0.24f, kBarY - 0.250f, 0.23f, pillSc * 1.05f, themeTextCol, lbl);
+                    drawFitCentered(-0.11f, kBarY - 0.250f, 0.23f, pillSc * 1.05f, themeTextCol, lbl);
                 });
             }
             // Tooltip text for button hover
@@ -9759,6 +9769,18 @@ void VulkanRenderer::updateVideoTexture(int width, int height, const uint8_t* y,
     v.videoLayoutInitialized = true;
     v.hasVideo = true;
     ++frameSerial_[slot];
+}
+
+float VulkanRenderer::volumeLevelAtPointer(bool drag) const {
+    if (!pointerActive_ || !pointerOnPanel_) return -1.0f;
+    float x0 = 0.0f, x1 = 0.0f;
+    volume_bar_span(x0, x1);
+    const float x = pointerPanel_[0];
+    if (!drag) {
+        if (pointerButton_ != static_cast<int>(CtrlButton::Volume)) return -1.0f;
+        if (x < x0 - 0.014f) return -1.0f;  // the speaker icon side: mute
+    }
+    return std::clamp((x - x0) / std::max(x1 - x0, 1e-4f), 0.0f, 1.0f);
 }
 
 } // namespace pixelvr

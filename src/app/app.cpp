@@ -2588,6 +2588,7 @@ int App::run() {
             // Apply controller input that renderFrame synced this frame.
             const auto nowT = std::chrono::steady_clock::now();
             XrInputState in = xr_.input();
+            if (!in.selectHeld) volumeDragging_ = false;  // a volume-bar drag ends with the trigger
 
             // In-app keyboard (text entry). It owns all controller input while open:
             // trigger / A press the key under the laser, stick left/right moves
@@ -4780,9 +4781,17 @@ int App::run() {
                         }
                     } else if (cb == VulkanRenderer::CtrlButton::HideHud) {
                         dismissHud(in, nowT);
-                    } else if (cb == VulkanRenderer::CtrlButton::ScreenMute ||
-                               cb == VulkanRenderer::CtrlButton::Volume) {
-                        cur().muted = !cur().muted;
+                    } else if (cb == VulkanRenderer::CtrlButton::Volume) {
+                        // On the bar: jump there and follow while the trigger is
+                        // held; on the speaker icon: mute / unmute.
+                        const float lv = renderer_.volumeLevelAtPointer(false);
+                        if (lv >= 0.0f) {
+                            cur().volume = lv;
+                            if (lv > 0.0f) cur().muted = false;
+                            volumeDragging_ = true;
+                        } else {
+                            cur().muted = !cur().muted;
+                        }
                     } else if (cb == VulkanRenderer::CtrlButton::ScreenAudioFollow) {
                         settings_.setAudioFollow(!settings_.audioFollow());
                         if (settings_.audioFollow()) {
@@ -4822,6 +4831,17 @@ int App::run() {
                 if (in.recenter && in.headValid) {
                     recenterView(in);
                     interacted = true;
+                }
+                // Dragging the volume bar (started by a click on it above).
+                if (volumeDragging_) {
+                    const float lv = in.selectHeld ? renderer_.volumeLevelAtPointer(true) : -1.0f;
+                    if (lv < 0.0f) {
+                        volumeDragging_ = false;
+                    } else {
+                        cur().volume = lv;
+                        if (lv > 0.0f) cur().muted = false;
+                        interacted = true;
+                    }
                 }
                 // Pointing at the VOLUME pill, the stick sets this screen's volume.
                 if (renderer_.pointerButton() == static_cast<int>(VulkanRenderer::CtrlButton::Volume) &&

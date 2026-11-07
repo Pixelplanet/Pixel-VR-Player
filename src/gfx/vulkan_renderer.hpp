@@ -567,13 +567,12 @@ public:
         ScreenToggle,
         Recenter,      // recenter screen/view from HUD
         HideHud,       // immediately hide player controls
-        ScreenMute,    // multi-screen row: mute / unmute the selected screen
         ScreenAudioFollow,  // multi-screen row: audio follows the selected screen
         ScreenLock,    // multi-screen row: unlock / lock all screens for grabbing
         ScreenNumbers, // multi-screen row: show / hide a number on each screen
         ScreenLayout,  // multi-screen row: arrange screens with a preset
         ScreenClose,   // multi-screen row: close the selected screen
-        Volume,        // left pill: this screen's volume (stick = adjust, click = mute)
+        Volume,        // left pill: this screen's volume (bar = click / drag / stick, icon = mute)
         Count
     };
     // Multi-screen row under the dock (shown while Multiple Screens is on and a
@@ -635,6 +634,9 @@ public:
 
     // The control-bar button currently under the pointer, or -1 if none.
     int pointerButton() const { return pointerButton_; }
+    // Volume pill: the level (0..1) under the laser on its bar, or -1 when the
+    // laser is not over the bar. `drag` keeps following past the bar's ends.
+    float volumeLevelAtPointer(bool drag) const;
     // True when the pointer is over the draggable timeline; pointerScrub() is
     // then the target position in [0,1].
     bool pointerOnTimeline() const { return pointerOnTimeline_; }

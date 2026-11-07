@@ -106,6 +106,19 @@ FontAtlas buildFontAtlas(const char* ttfPath, int pixelHeight) {
         gl.bearingX = static_cast<float>(g->bitmap_left);
         gl.bearingY = static_cast<float>(g->bitmap_top);
         gl.advance = g->advance.x / 64.0f;
+        {
+            // SDF: inside where the field is >= 128; coverage: weight by alpha.
+            double sum = 0.0, sumX = 0.0;
+            for (int y = 0; y < gh; ++y) {
+                const uint8_t* row = &atlas.pixels[static_cast<std::size_t>(cy + y) * atlas.width + cx];
+                for (int x = 0; x < gw; ++x) {
+                    const double wgt = atlas.sdf ? (row[x] >= 128 ? 1.0 : 0.0) : row[x] / 255.0;
+                    sum += wgt;
+                    sumX += wgt * (x + 0.5);
+                }
+            }
+            gl.inkCenterX = (sum > 0.0) ? static_cast<float>(sumX / sum) : 0.5f * static_cast<float>(gw);
+        }
     }
 
     FT_Done_Face(face);

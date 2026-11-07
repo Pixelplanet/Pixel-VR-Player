@@ -11,6 +11,9 @@ struct Glyph {
     float width = 0.0f, height = 0.0f;
     float bearingX = 0.0f, bearingY = 0.0f;
     float advance = 0.0f;
+    // Horizontal centre of the glyph's ink in bitmap pixels from its left
+    // edge (a "1" is drawn left of its stem, so its box centre looks off).
+    float inkCenterX = 0.0f;
 };
 
 // An R8 coverage atlas of ASCII 32..126 + Latin-1 Supplement (160..255, e.g. ß/ä/ö/ü)
