@@ -163,7 +163,38 @@ int runSteamVrPrelaunchHelper() {
         const vr::EVRApplicationError ae = apps->PerformApplicationPrelaunchCheck(appKey.c_str());
         PIXELVR_LOG_INFO("SteamVR prelaunch check for %s: %s", appKey.c_str(),
                          apps->GetApplicationsErrorNameFromEnum(ae));
-        if (ae != vr::VRApplicationError_None) rc = 6;
+        if (ae != vr::VRApplicationError_None) {
+            rc = 6;
+        } else {
+            // Hold the launching state until the dashboard has closed. Our
+            // OpenXR connection ends it ("ClearAppTransition: ProcessConnected"),
+            // and the dashboard re-reads the state when its event handler runs:
+            // connecting within ~25 ms made it miss "Starting" and stay on
+            // "Resume Game" most of the time. Steam's own games connect seconds
+            // later. Read-only queries; capped at 1.5 s.
+            auto* overlay = reinterpret_cast<vr::IVROverlay*>(get(vr::IVROverlay_Version, &err));
+            if (err != vr::VRInitError_None) overlay = nullptr;
+            const auto t0 = std::chrono::steady_clock::now();
+            auto elapsedMs = [&] {
+                return std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+            };
+            bool sawStarting = false, closed = false;
+            while (elapsedMs() < 1500.0) {
+                if (!sawStarting && apps->GetSceneApplicationState() == vr::EVRSceneApplicationState_Starting) {
+                    sawStarting = true;
+                }
+                // Without the overlay interface: just give the dashboard 1 s.
+                if (!overlay ? elapsedMs() >= 1000.0
+                             : (sawStarting && elapsedMs() >= 400.0 && !overlay->IsDashboardVisible())) {
+                    closed = overlay != nullptr;
+                    break;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            }
+            PIXELVR_LOG_INFO("SteamVR prelaunch: launching state %s, dashboard %s after %.0f ms",
+                             sawStarting ? "seen" : "not seen",
+                             closed ? "closed" : (overlay ? "still open" : "not queried"), elapsedMs());
+        }
     }
     shutdown();
     return rc;
