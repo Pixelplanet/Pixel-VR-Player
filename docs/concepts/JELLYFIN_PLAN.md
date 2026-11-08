@@ -57,6 +57,25 @@ from the user for an end-to-end test.
   `http://<host>:8096`), using the keyboard. Step 1: it works from the normal Browser screen with
   any Jellyfin URL.
 
+## Findings against TheVault (2026-11-08, API from the PC; test user from the user, kept out of the repo)
+- `POST /Users/AuthenticateByName` works; the library has 1245 movies / episodes: 1080p H.264
+  8-bit and 4K HEVC 10-bit mkv.
+- **`PlaybackInfo` with a DeviceProfile:** 37 of 40 movies get `SupportsDirectPlay`.
+  - The profile: Direct Play for mkv/mp4/m4v/mov/webm/ts with h264, hevc, vp9, av1. Audio: aac,
+    ac3, eac3, mp3, opus, flac, dts, dca, truehd, vorbis, pcm. Every subtitle format declared
+    `Method: Embed`.
+  - Refused:
+    - 1× `ContainerNotSupported, VideoCodecNotSupported`: a real transcode case.
+    - 2× `AudioCodecNotSupported, SubtitleCodecNotSupported`: DTS / DTS-HD MA with DVD subs.
+      Our FFmpeg plays those directly.
+- **Decision:** we decide Direct Play **ourselves** from `MediaStreams`: the video codec is in
+  h264 / hevc / vp9 / av1 and the container is one we demux. Then use
+  `/Videos/{id}/stream?static=true&MediaSourceId=…&api_key=…`, whatever Jellyfin's audio / subtitle
+  verdict. Only use `TranscodingUrl` when the video can't be decoded.
+  - The static stream answers `206 video/x-matroska` with byte ranges, also for a file Jellyfin
+    refused for Direct Play.
+- HEVC 10-bit (4K) needs our DRM-PRIME P010 path, which the release wrapper turns on.
+
 ## Progress
 - [x] Plan (this file).
 - [ ] Helper: detection, PlaybackInfo, URL, emit, timeline dispatch, return, redaction.
