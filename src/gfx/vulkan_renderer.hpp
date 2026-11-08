@@ -754,7 +754,8 @@ private:
     // In immersive projection the eye pass renders straight into the
     // swapchain image (renderPass1x_: 1x colour + 1x depth, no MSAA target,
     // no resolve) with 1x variants of every pipeline that pass can bind.
-    // Flat mode and the controller models layer keep renderPass_ (MSAA).
+    // Flat mode keeps renderPass_ (MSAA); the controller models layer uses
+    // renderPass1x_ and these pipelines too (supersampled instead).
     bool createSingleSamplePipelines();          // core set (startup)
     bool createYcbcrSingleSample(VideoSlot& v);  // a video slot's sphere / quad
     // Picks this frame's eye-pass variant (builds missing YCbCr 1x pipelines
@@ -865,18 +866,30 @@ private:
     // controllers' / cards' depth range, clamped to kModelLayerMinDist ..
     // kModelLayerMaxDist and smoothed), so it shows the same pixels and is
     // reprojected as world-locked content at about the right distance. One
-    // swapchain per eye at the eye-buffer size, rendered at its full pixel
-    // density (not the adaptive eye scale), drawn with renderPass_ (the eye
-    // pass's MSAA + depth targets, cleared transparent) and the same model
-    // pipeline. Used only while the models may be seen and a screen or the
-    // UI is a layer; otherwise they stay in the eye buffers.
+    // swapchain per eye, supersampled: kModelLayerSupersample x the eye
+    // buffer's linear size (capped at kModelLayerMaxSide, never below the eye
+    // size), rendered single-sampled (the compositor's downsampling is the
+    // anti-aliasing and sharpens the labels' small text) at that full density
+    // whatever the adaptive eye scale, with modelLayerPass_ (renderPass1x_, or
+    // renderPass_ on a device without MSAA), its own 1x depth target
+    // (modelDepth*_, swapchain-sized, shared by both eyes) cleared
+    // transparent, and the 1x pipeline variants (modelLayerSingle_). Used
+    // only while the models may be seen and a screen or the UI is a layer;
+    // otherwise they stay in the eye buffers.
     static constexpr float kModelLayerDist = 0.5f;  // start / fallback distance
     static constexpr float kModelLayerMinDist = 0.2f;
     static constexpr float kModelLayerMaxDist = 1.5f;
+    static constexpr float kModelLayerSupersample = 1.5f;
+    static constexpr int32_t kModelLayerMaxSide = 4096;
     float modelLayerDist_ = kModelLayerDist;           // smoothed quad distance (metres)
     std::chrono::steady_clock::time_point modelLayerDistT_{};
     ViewSwapchain modelSwapchains_[2];
     ViewTargets modelTargets_[2];
+    VkRenderPass modelLayerPass_ = VK_NULL_HANDLE;   // not owned (renderPass1x_ / renderPass_)
+    bool modelLayerSingle_ = false;                  // bind the 1x variants (eyePipeline)
+    VkImage modelDepthImage_ = VK_NULL_HANDLE;
+    VkDeviceMemory modelDepthMemory_ = VK_NULL_HANDLE;
+    VkImageView modelDepthView_ = VK_NULL_HANDLE;
     bool modelLayerReady_ = false;      // swapchains + framebuffers exist
     bool modelLayerThisFrame_ = false;  // decided by the first eye pass
     bool modelsInView_ = true;          // an active model may be seen (renderLayersBefore)
@@ -885,7 +898,7 @@ private:
     bool controllerModelsInView(const XrView* views, uint32_t viewCount) const;
     bool createModelLayerTargets(const ViewSwapchain& sc, ViewTargets& out);
     // Records the controller models for one view into commandBuffer_ (inside
-    // a renderPass_ pass, model pipeline bound).
+    // an eye or models-layer pass, model pipeline bound).
     void drawControllerModels(const XrView& view);
     // The part of a view the models layer has to cover: the tangent-space
     // bounds (x right, y up) of the controller models, button-label cards,
@@ -922,6 +935,13 @@ private:
     std::vector<ButtonLabelCard> buttonLabels_;
     bool buttonLabelsShown_ = false;
     float buttonLabelFade_[2] = {0.0f, 0.0f};
+    // 0..1: the cards go from kLabelCardCol's alpha to kLabelCardOpaqueA while
+    // the selected screen shows 3D (SBS / TB) or a 360/180 video is shown.
+    float labelCardOpaque_ = 0.0f;
+    // Render-target pixels per eye-buffer pixel while drawButtonLabels draws
+    // into the supersampled models layer (1 elsewhere): scales the text's stem
+    // thickening (kLabelTextStemPx, eye pixels) so its weight is unchanged.
+    float labelPxScale_ = 1.0f;
     std::chrono::steady_clock::time_point buttonLabelFadeT_{};
     std::vector<LabelCardDraw> labelDraws_;
     // Button positions in the model's space, by component key (labelComponentKey):
@@ -945,7 +965,7 @@ private:
     };
     LabelJson labelJson_[2];
     void layoutButtonLabels(const XrView* views, uint32_t viewCount);
-    // Records the laid-out labels for one view (inside a renderPass_ pass);
+    // Records the laid-out labels for one view (inside an eye or models-layer pass);
     // glyph instances are appended at `glyphCount` in `glyphs` / `glyphBuf`.
     void drawButtonLabels(const XrView& view, void* glyphs, VkBuffer glyphBuf, uint32_t& glyphCount);
     // `half` (optional): the part's bounding-box half size (a few mm for a

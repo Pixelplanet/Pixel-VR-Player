@@ -95,13 +95,22 @@ constexpr float kLabelPadY = 0.0035f;
 constexpr float kLabelCardCorner = 0.5f;  // corner radius, share of the shorter half side
 constexpr float kLabelRimW = 0.0006f;     // card rim width
 constexpr float kLabelCardCol[4] = {0.11f, 0.11f, 0.12f, 0.80f};  // dark translucent grey
+// Card alpha over 3D content (the selected screen in SBS / TB, or 360/180):
+// through a translucent card each eye sees a different picture at another
+// depth, which is tiring to look at; nearly opaque hides it. Eased in / out
+// over kLabelCardOpaqueFade seconds. Text, lines and rings are unchanged.
+constexpr float kLabelCardOpaqueA = 0.95f;
+constexpr float kLabelCardOpaqueFade = 0.3f;
 constexpr float kLabelRimCol[4] = {1.0f, 1.0f, 1.0f, 0.16f};      // faint light rim
 constexpr float kLabelTextCol[4] = {1.0f, 1.0f, 1.0f, 1.0f};
 // Label text edge (text.frag small-text mode): ramp width per sample in
-// screen pixels, four samples over the pixel (the atlas has no mips and is
-// minified ~3x at arm's length), so the edge is ~0.7 px wide in all; a
-// contrast exponent on the coverage against the linear-light blend; and a
-// little stem thickening so thin strokes keep their weight.
+// render-target pixels, four samples over the pixel (the atlas has no mips
+// and is minified ~3x at arm's length), so the edge is ~0.7 px wide in all
+// (in the supersampled models layer that is finer than an eye pixel, which
+// is the point: the compositor's downsampling anti-aliases it); a contrast
+// exponent on the coverage against the linear-light blend; and a little stem
+// thickening so thin strokes keep their weight, in eye-buffer pixels (scaled
+// by labelPxScale_ in the models layer so the weight stays the same).
 constexpr float kLabelTextEdgePx = 0.4f;
 constexpr float kLabelTextContrast = 1.25f;
 constexpr float kLabelTextStemPx = 0.2f;
@@ -965,6 +974,7 @@ VulkanRenderer::~VulkanRenderer() {
         destroyLayerTargets(cursorTargets_);
         destroyLayerTargets(beamTargets_);
         for (ViewTargets& t : modelTargets_) destroyLayerTargets(t);
+        destroyDepthTarget(modelDepthImage_, modelDepthMemory_, modelDepthView_);
         for (ScreenLayer& L : screenLayers_) destroyLayerTargets(L.targets);
         for (VkPipeline p : {uiPipelineLayer_, uiPipelineLayerAlpha_, uiPipelineLayerFade_, textPipelineLayer_,
                              thumbPipelineLayer_,
@@ -1837,15 +1847,8 @@ bool VulkanRenderer::recreateSwapchainTargets(
             }
         }
     }
-    // The models layer's framebuffers use the MSAA / depth targets rebuilt above.
-    if (modelSwapchains_[0].handle != XR_NULL_HANDLE && modelSwapchains_[1].handle != XR_NULL_HANDLE) {
-        modelLayerReady_ = createModelLayerTargets(modelSwapchains_[0], modelTargets_[0]) &&
-                           createModelLayerTargets(modelSwapchains_[1], modelTargets_[1]);
-        if (!modelLayerReady_) {
-            for (ViewTargets& t : modelTargets_) destroyLayerTargets(t);
-            PIXELVR_LOG_WARN("Controller models layer off: its targets no longer fit the eye buffers");
-        }
-    }
+    // (The models layer has its own depth target and framebuffers, see
+    // createLayerResources: nothing of it depends on the eye targets.)
     return true;
 }
 
@@ -1890,19 +1893,12 @@ bool VulkanRenderer::createLayerTargets(const ViewSwapchain& sc, ViewTargets& ou
     return true;
 }
 
-// Image views + renderPass_ framebuffers for a models-layer swapchain: the
-// image is the resolve target (MSAA) or the colour target, with the eye
-// pass's shared MSAA / depth images, which are at least as large.
+// Image views + modelLayerPass_ framebuffers for a models-layer swapchain:
+// the image is the (single-sampled) colour target, with the layer's own 1x
+// depth target (modelDepthView_, created at the swapchain size).
 bool VulkanRenderer::createModelLayerTargets(const ViewSwapchain& sc, ViewTargets& out) {
     destroyLayerTargets(out);
-    int32_t maxW = 0, maxH = 0;
-    for (const ViewTargets& vt : viewTargets_) {
-        maxW = std::max(maxW, vt.width);
-        maxH = std::max(maxH, vt.height);
-    }
-    const bool msaa = sampleCount_ != VK_SAMPLE_COUNT_1_BIT;
-    if (sc.handle == XR_NULL_HANDLE || sc.width > maxW || sc.height > maxH || depthView_ == VK_NULL_HANDLE ||
-        (msaa && msaaView_ == VK_NULL_HANDLE)) {
+    if (sc.handle == XR_NULL_HANDLE || modelLayerPass_ == VK_NULL_HANDLE || modelDepthView_ == VK_NULL_HANDLE) {
         return false;
     }
     out.width = sc.width;
@@ -1918,18 +1914,10 @@ bool VulkanRenderer::createModelLayerTargets(const ViewSwapchain& sc, ViewTarget
         ivInfo.subresourceRange.levelCount = 1;
         ivInfo.subresourceRange.layerCount = 1;
         PIXELVR_VK_CHECK(vkCreateImageView(device_, &ivInfo, nullptr, &out.imageViews[i]));
-        VkImageView fbAttachments[3];
-        if (msaa) {
-            fbAttachments[0] = msaaView_;
-            fbAttachments[1] = out.imageViews[i];
-            fbAttachments[2] = depthView_;
-        } else {
-            fbAttachments[0] = out.imageViews[i];
-            fbAttachments[1] = depthView_;
-        }
+        const VkImageView fbAttachments[2] = {out.imageViews[i], modelDepthView_};
         VkFramebufferCreateInfo fbInfo{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
-        fbInfo.renderPass = renderPass_;
-        fbInfo.attachmentCount = msaa ? 3u : 2u;
+        fbInfo.renderPass = modelLayerPass_;
+        fbInfo.attachmentCount = 2;
         fbInfo.pAttachments = fbAttachments;
         fbInfo.width = static_cast<uint32_t>(sc.width);
         fbInfo.height = static_cast<uint32_t>(sc.height);
@@ -2060,26 +2048,51 @@ bool VulkanRenderer::createLayerResources(XrContext& xr, int64_t colorFormat) {
         xr.destroyLayerSwapchain(beamSwapchain_);
         destroyLayerTargets(beamTargets_);
     }
-    // Controller models layers (see modelSwapchains_). Eye-buffer size: each
-    // quad is its eye's image plane, so its texels land exactly where the eye
-    // buffer's pixels do, and the eye buffers are already at the panel's
-    // native density (no supersampling): anything smaller would make the
-    // models visibly softer than in the eye buffers. The fragment work is the
-    // same as before (only model pixels); the extra cost is clearing,
-    // resolving and storing one more image per eye. Not larger than either
-    // eye buffer: the pass borrows their MSAA and depth targets.
-    // PIXELVR_MODELS_LAYER=0 keeps the models in the eye buffers.
+    // Controller models layers (see modelSwapchains_). Each quad is its eye's
+    // image plane; the image is kModelLayerSupersample x the eye buffer's
+    // linear size (the eye buffers are at the panel's native density), so the
+    // compositor downsamples it: that anti-aliases the single-sampled models
+    // and sharpens the labels' small text. Only the crop round the models is
+    // drawn (renderLayersAfter), so the cost is that crop's clear / store and
+    // fragments. Single-sampled pass with its own 1x depth target (the
+    // models' self-occlusion, the depth-tested label lines and rings), the
+    // 1x pipeline variants. PIXELVR_MODELS_LAYER=0 keeps the models in the
+    // eye buffers.
     modelLayerReady_ = false;
     for (int e = 0; e < 2; ++e) {
         destroyLayerTargets(modelTargets_[e]);
         xr.destroyLayerSwapchain(modelSwapchains_[e]);
     }
+    destroyDepthTarget(modelDepthImage_, modelDepthMemory_, modelDepthView_);
+    modelLayerPass_ = VK_NULL_HANDLE;
+    modelLayerSingle_ = false;
     const char* modelsEnv = std::getenv("PIXELVR_MODELS_LAYER");
     const bool modelsLayerOn = !(modelsEnv && modelsEnv[0] == '0');
-    if (modelsLayerOn && modelPipeline_ != VK_NULL_HANDLE && viewTargets_.size() == 2) {
-        const int32_t w = std::min(viewTargets_[0].width, viewTargets_[1].width);
-        const int32_t h = std::min(viewTargets_[0].height, viewTargets_[1].height);
-        bool ok = w > 0 && h > 0;
+    if (sampleCount_ == VK_SAMPLE_COUNT_1_BIT) {
+        modelLayerPass_ = renderPass_;  // single-sampled already: the regular pipelines
+    } else if (renderPass1x_ != VK_NULL_HANDLE && modelPipeline1x_ != VK_NULL_HANDLE &&
+               uiPipeline1x_ != VK_NULL_HANDLE &&
+               (uiPipelineDepth_ == VK_NULL_HANDLE || uiPipelineDepth1x_ != VK_NULL_HANDLE) &&
+               (textPipeline_ == VK_NULL_HANDLE || textPipeline1x_ != VK_NULL_HANDLE)) {
+        modelLayerPass_ = renderPass1x_;
+        modelLayerSingle_ = true;
+    }
+    if (modelsLayerOn && modelPipeline_ != VK_NULL_HANDLE && viewTargets_.size() == 2 &&
+        modelLayerPass_ != VK_NULL_HANDLE) {
+        const int32_t eyeW = std::min(viewTargets_[0].width, viewTargets_[1].width);
+        const int32_t eyeH = std::min(viewTargets_[0].height, viewTargets_[1].height);
+        VkPhysicalDeviceProperties pdp{};
+        vkGetPhysicalDeviceProperties(physicalDevice_, &pdp);
+        const int32_t devMax = static_cast<int32_t>(
+            std::min({pdp.limits.maxImageDimension2D, pdp.limits.maxFramebufferWidth, pdp.limits.maxFramebufferHeight}));
+        // 1.5x, at most kModelLayerMaxSide, but never below the eye size.
+        auto side = [&](int32_t eye) {
+            const int32_t ss = static_cast<int32_t>(std::lround(static_cast<float>(eye) * kModelLayerSupersample));
+            return std::min(std::max(eye, std::min(ss, kModelLayerMaxSide)), devMax);
+        };
+        const int32_t w = side(eyeW), h = side(eyeH);
+        bool ok = eyeW > 0 && eyeH > 0 && w > 0 && h > 0 &&
+                  createDepthTarget(w, h, VK_SAMPLE_COUNT_1_BIT, modelDepthImage_, modelDepthMemory_, modelDepthView_);
         for (int e = 0; e < 2 && ok; ++e) {
             ok = xr.createLayerSwapchain(colorFormat, static_cast<uint32_t>(w), static_cast<uint32_t>(h),
                                          modelSwapchains_[e]) &&
@@ -2090,9 +2103,22 @@ bool VulkanRenderer::createLayerResources(XrContext& xr, int64_t colorFormat) {
                 destroyLayerTargets(modelTargets_[e]);
                 xr.destroyLayerSwapchain(modelSwapchains_[e]);
             }
+            destroyDepthTarget(modelDepthImage_, modelDepthMemory_, modelDepthView_);
             PIXELVR_LOG_WARN("Controller models layer unavailable; the models stay in the eye buffers");
+        } else {
+            const double mb = static_cast<double>(w) * h * 4.0 / (1024.0 * 1024.0);
+            PIXELVR_LOG_INFO("Controller models layer: %dx%d per eye (%.2fx the %dx%d eye buffer), single-sampled, "
+                             "%zu+%zu images (%.0f MB) + 1x depth (%.0f MB)",
+                             w, h, static_cast<double>(w) / eyeW, eyeW, eyeH, modelSwapchains_[0].images.size(),
+                             modelSwapchains_[1].images.size(),
+                             mb * static_cast<double>(modelSwapchains_[0].images.size() +
+                                                      modelSwapchains_[1].images.size()),
+                             mb);
         }
         modelLayerReady_ = ok;
+    } else if (modelsLayerOn && modelPipeline_ != VK_NULL_HANDLE && modelLayerPass_ == VK_NULL_HANDLE) {
+        PIXELVR_LOG_WARN("Controller models layer unavailable (no single-sampled pipelines); the models stay in the "
+                         "eye buffers");
     }
     beamDrawn_ = false;
     uiLayerReady_ = true;
@@ -3538,7 +3564,7 @@ bool VulkanRenderer::initText() {
                        thumbPipeline_, true)) {
         PIXELVR_LOG_WARN("Failed to build thumb pipeline");
     }
-    // Single-sampled eye pass variants (360/180).
+    // Single-sampled variants (360/180 eye pass and the controller models layer).
     if (renderPass1x_ != VK_NULL_HANDLE) {
         if (!buildPipeline("text.vert.spv", "text.frag.spv", textPipelineLayout_, textPipeline1x_, true,
                            renderPass1x_, VK_SAMPLE_COUNT_1_BIT, &glyphInput)) {
@@ -3940,17 +3966,22 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
     // models, cards, lines and rings project to, and its quad covers exactly
     // that part of the frustum; an eye that sees none of it gets no layer at
     // all.
-    // Pixel density: the swapchain's full density whatever the adaptive eye
-    // scale (the crop is small, and the labels' small text needs every
-    // pixel). Only a large crop (controllers right in front of the face) is
-    // rendered at a lower density, keeping each eye's rect to about
-    // kModelLayerMaxShare of a full view, and never below the eye buffers'
-    // own density this frame. Both eyes use the same density.
+    // Pixel density: the swapchain's full density (kModelLayerSupersample x
+    // the eye buffer's) whatever the adaptive eye scale (the crop is small,
+    // and the labels' small text needs every pixel). Only a large crop
+    // (controllers right in front of the face) is rendered at a lower
+    // density, keeping each eye's rect to about kModelLayerMaxShare of a full
+    // (supersampled) view - 0.30 of 3240x3240 is ~3.1 Mpx per eye, single-
+    // sampled, against the 0.30 of 2160x2160 at 4x MSAA (~5.6 M samples)
+    // before - and never below the eye buffers' own density this frame. The
+    // rect always lies inside the swapchain (the scaled view is never larger).
+    // Both eyes use the same density.
     constexpr float kModelLayerMaxShare = 0.30f;
     struct ModelEye {
         bool pending = false;
         uint32_t image = 0;
         int32_t fullW = 0, fullH = 0;   // the whole view at this frame's density
+        float pxPerEyePx = 1.0f;        // layer pixels per eye-buffer pixel (labelPxScale_)
         VkRect2D rect{};                // rendered / submitted pixels
         TanRect tan;                    // the rect's frustum (tangents)
     };
@@ -3975,15 +4006,14 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
             share = std::max(share, (bounds[e].r - bounds[e].l) / (tr - tl) * ((bounds[e].u - bounds[e].d) / (tu - td)));
             nearD = std::min(nearD, n);
             farD = std::max(farD, f);
-            // The eye buffers' density this frame (the floor).
+            // The eye buffers' density this frame (the floor), as a share of
+            // the models swapchain's (which is up to 1.5x the eye swapchain).
             if (e < xr.swapchains().size()) {
                 const ViewSwapchain& es = xr.swapchains()[e];
-                if (es.width > 0 && es.renderWidth > 0) {
-                    eyeSx[e] = std::min(static_cast<float>(es.renderWidth) / static_cast<float>(es.width), 1.0f);
-                }
-                if (es.height > 0 && es.renderHeight > 0) {
-                    eyeSy[e] = std::min(static_cast<float>(es.renderHeight) / static_cast<float>(es.height), 1.0f);
-                }
+                const int32_t rw = es.renderWidth > 0 ? es.renderWidth : es.width;
+                const int32_t rh = es.renderHeight > 0 ? es.renderHeight : es.height;
+                if (rw > 0) eyeSx[e] = std::min(static_cast<float>(rw) / static_cast<float>(mt.width), 1.0f);
+                if (rh > 0) eyeSy[e] = std::min(static_cast<float>(rh) / static_cast<float>(mt.height), 1.0f);
             }
         }
         const float density = share > kModelLayerMaxShare ? std::sqrt(kModelLayerMaxShare / share) : 1.0f;
@@ -4018,6 +4048,7 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
             const float sx = std::max(density, eyeSx[e]), sy = std::max(density, eyeSy[e]);
             me.fullW = std::clamp(static_cast<int32_t>(std::lround(static_cast<float>(mt.width) * sx)), 1, mt.width);
             me.fullH = std::clamp(static_cast<int32_t>(std::lround(static_cast<float>(mt.height) * sy)), 1, mt.height);
+            me.pxPerEyePx = sx / std::max(eyeSx[e], 1e-3f);
             const XrFovf& f = views[e].fov;
             const float tl = std::tan(f.angleLeft), tr = std::tan(f.angleRight);
             const float tu = std::tan(f.angleUp), td = std::tan(f.angleDown);
@@ -4129,26 +4160,23 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
     }
     const int tsModel = modelPending ? gpuTimerBegin(commandBuffer_, kTsModels) : -1;
     if (modelPending) {
-        // Same pass, MSAA and depth targets as the eye buffers, cleared to
-        // transparent: model.frag writes alpha 1, so the (resolved) image is
-        // premultiplied, with anti-aliased edges, for the blended layer.
-        const bool msaa = sampleCount_ != VK_SAMPLE_COUNT_1_BIT;
+        // Single-sampled into the supersampled swapchain image with the
+        // layer's 1x depth target, cleared to transparent: model.frag writes
+        // alpha 1, so the image is premultiplied for the blended layer; the
+        // compositor's downsampling anti-aliases the edges. The 1x pipeline
+        // variants are bound through eyePipeline (eyeSingleSample_).
+        eyeSingleSample_ = modelLayerSingle_;
         for (uint32_t e = 0; e < 2; ++e) {
             const ModelEye& me = modelEye[e];
             if (!me.pending) continue;
             const ViewTargets& mt = modelTargets_[e];
-            VkClearValue clears[3]{};
+            VkClearValue clears[2]{};
             clears[0].color = {{0.0f, 0.0f, 0.0f, 0.0f}};
-            if (msaa) {
-                clears[1].color = clears[0].color;
-                clears[2].depthStencil = {1.0f, 0};
-            } else {
-                clears[1].depthStencil = {1.0f, 0};
-            }
+            clears[1].depthStencil = {1.0f, 0};
             VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-            rp.renderPass = renderPass_;
+            rp.renderPass = modelLayerPass_;
             rp.framebuffer = mt.framebuffers[me.image];
-            // Only the sub-rect is cleared, drawn, resolved and stored; the
+            // Only the sub-rect is cleared, drawn and stored; the
             // viewport still maps the whole view (at this frame's density),
             // so the projection is the eye's own.
             // One more pixel round the rect is cleared too: the compositor's
@@ -4159,19 +4187,22 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
             const int32_t ax1 = std::min(me.rect.offset.x + static_cast<int32_t>(me.rect.extent.width) + 1, mt.width);
             const int32_t ay1 = std::min(me.rect.offset.y + static_cast<int32_t>(me.rect.extent.height) + 1, mt.height);
             rp.renderArea = {{ax0, ay0}, {static_cast<uint32_t>(ax1 - ax0), static_cast<uint32_t>(ay1 - ay0)}};
-            rp.clearValueCount = msaa ? 3u : 2u;
+            rp.clearValueCount = 2;
             rp.pClearValues = clears;
             vkCmdBeginRenderPass(commandBuffer_, &rp, VK_SUBPASS_CONTENTS_INLINE);
             VkViewport vp{0.0f, 0.0f, static_cast<float>(me.fullW), static_cast<float>(me.fullH), 0.0f, 1.0f};
             vkCmdSetViewport(commandBuffer_, 0, 1, &vp);
             VkRect2D sc = rp.renderArea;
             vkCmdSetScissor(commandBuffer_, 0, 1, &sc);
-            vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, modelPipeline_);
+            vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, eyePipeline(modelPipeline_));
             drawControllerModels(views[e]);
             // The button labels over the models, in the same layer.
+            labelPxScale_ = me.pxPerEyePx;
             drawButtonLabels(views[e], glyphMapped_[3], glyphBuffer_[3], glyphCursor);
             vkCmdEndRenderPass(commandBuffer_);
         }
+        eyeSingleSample_ = false;
+        labelPxScale_ = 1.0f;
     }
     gpuTimerEnd(commandBuffer_, tsModel);
     const int tsCursor = (beamPending || cursorPending) ? gpuTimerBegin(commandBuffer_, kTsCursor) : -1;
@@ -8948,6 +8979,18 @@ void VulkanRenderer::layoutButtonLabels(const XrView* views, uint32_t viewCount)
         dt = std::clamp(std::chrono::duration<float>(now - buttonLabelFadeT_).count(), 0.0f, 0.1f);
     }
     buttonLabelFadeT_ = now;
+    {
+        // Nearly opaque cards over 3D: the selected screen's video in SBS / TB
+        // (not a browser page), or any 360/180 video.
+        const int sel = multiScreenActive_ ? std::clamp(selectedScreen_, 0, kMaxVideoSlots - 1) : 0;
+        const bool web = webSlots_[sel] && webTex_[sel].initialized;
+        const StereoMode st = (sel == 0) ? stereoMode_ : screenPlacements_[sel].stereo;
+        const bool stereo3d = !web && videoSlots_[sel].hasVideo && st != StereoMode::Mono;
+        const bool sphere = projectionMode_ != ProjectionMode::Flat && videoSlots_[0].hasVideo;
+        const float step = dt / kLabelCardOpaqueFade;
+        labelCardOpaque_ = (stereo3d || sphere) ? std::min(1.0f, labelCardOpaque_ + step)
+                                                : std::max(0.0f, labelCardOpaque_ - step);
+    }
     if (views == nullptr || viewCount == 0) return;
     Vec3 head{};
     for (uint32_t v = 0; v < viewCount; ++v) {
@@ -9431,6 +9474,8 @@ void VulkanRenderer::drawButtonLabels(const XrView& view, void* glyphs, VkBuffer
     for (const LabelCardDraw& d : labelDraws_) {
         float bg[4], rim[4];
         faded(kLabelCardCol, d.alpha, bg);
+        const float s = labelCardOpaque_ * labelCardOpaque_ * (3.0f - 2.0f * labelCardOpaque_);
+        bg[3] = (kLabelCardCol[3] + (kLabelCardOpaqueA - kLabelCardCol[3]) * s) * d.alpha;
         faded(kLabelRimCol, d.alpha, rim);
         const float shortHalf = std::max(std::min(d.hw, d.hh), 1e-4f);
         box(frame(d.centre, d.right, d.up, d.normal), d.hw, d.hh, bg, kLabelCardCorner, kLabelRimW / shortHalf, rim);
@@ -9481,7 +9526,7 @@ void VulkanRenderer::drawButtonLabels(const XrView& view, void* glyphs, VkBuffer
         std::memcpy(tp.mvp, mvp.m, sizeof(tp.mvp));
         tp.uv[0] = kLabelTextEdgePx;  // small-text mode (text.frag)
         tp.uv[1] = kLabelTextContrast;
-        tp.uv[2] = kLabelTextStemPx;
+        tp.uv[2] = kLabelTextStemPx * labelPxScale_;
         tp.uv[3] = 1.0f;              // four samples per pixel
         vkCmdPushConstants(commandBuffer_, textPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(TextPush), &tp);
@@ -10415,7 +10460,7 @@ bool VulkanRenderer::createModelPipeline() {
         modelPipeline_ = VK_NULL_HANDLE;
         return false;
     }
-    // Single-sampled eye pass variant (360/180; the models layer keeps MSAA).
+    // Single-sampled variant (360/180 eye pass and the controller models layer).
     if (renderPass1x_ != VK_NULL_HANDLE &&
         !buildModelPipeline(renderPass1x_, VK_SAMPLE_COUNT_1_BIT, modelPipeline1x_)) {
         modelPipeline1x_ = VK_NULL_HANDLE;
