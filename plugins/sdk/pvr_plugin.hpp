@@ -6,6 +6,7 @@
 
 #include "../../browser/mini_json.hpp"
 
+#include <array>
 #include <cerrno>
 #include <csignal>
 #include <cstdio>
@@ -105,11 +106,38 @@ public:
     void gauge(const std::string& label, double value) {
         send("{\"type\":\"ui.gauge\",\"id\":\"main\",\"label\":" + pvrjson::quote(label) + ",\"value\":" + num(value) + "}");
     }
+    // Requests answered by a {"type":"result","id":N,...} message; each returns N.
+    int readSidecar(int screen, const std::string& media, const std::string& name) {
+        const int id = ++lastId_;
+        send("{\"type\":\"files.read\",\"id\":" + std::to_string(id) + ",\"screen\":" + std::to_string(screen) +
+             ",\"media\":" + pvrjson::quote(media) + ",\"name\":" + pvrjson::quote(name) + "}");
+        return id;
+    }
+    // what: play | pause | seek (position in seconds).
+    int control(int screen, const std::string& media, const std::string& what, double position = 0.0) {
+        const int id = ++lastId_;
+        send("{\"type\":\"control\",\"id\":" + std::to_string(id) + ",\"screen\":" + std::to_string(screen) +
+             ",\"media\":" + pvrjson::quote(media) + ",\"do\":" + pvrjson::quote(what) + ",\"position\":" + num(position) + "}");
+        return id;
+    }
+    // Heat strip on the timeline: segments of [startMs, endMs, heat 0..1]; empty clears it.
+    void timeline(int screen, const std::string& media, const std::string& label,
+                  const std::vector<std::array<double, 3>>& segments) {
+        std::string s;
+        for (const auto& g : segments) {
+            s += (s.empty() ? "[" : ",[") + std::to_string(static_cast<long long>(g[0])) + "," +
+                 std::to_string(static_cast<long long>(g[1])) + "," + num(g[2]) + "]";
+        }
+        send("{\"type\":\"ui.timeline\",\"screen\":" + std::to_string(screen) + ",\"media\":" + pvrjson::quote(media) +
+             ",\"tracks\":" + (segments.empty() ? std::string("[]") : "[{\"id\":\"main\",\"label\":" + pvrjson::quote(label) +
+             ",\"segments\":[" + s + "]}]") + "}");
+    }
 
 private:
     std::string in_;
     std::deque<pvrjson::Value> queue_;
     bool eof_ = false;
+    int lastId_ = 0;
 };
 
 // What the player reported about one screen, with the media clock extrapolated.
@@ -117,6 +145,8 @@ struct MediaClock {
     std::string media;  // "" = nothing open
     bool isPrivate = false;
     std::string fileName, title, source, path;
+    std::vector<std::string> sidecars;  // files next to it this plugin may read (files.read)
+    int screen = -1;
     double duration = 0.0;
     bool playing = false;
     bool buffering = false;
@@ -154,8 +184,23 @@ public:
         const int screen = static_cast<int>(m.getNumber("screen", -1));
         if (screen < 0) return false;
         MediaClock& c = clocks_[screen];
+        auto names = [](const pvrjson::Value* arr) {
+            std::vector<std::string> out;
+            if (arr) {
+                for (const auto& e : arr->array) {
+                    if (e.type == pvrjson::Value::Type::String) out.push_back(e.str);
+                }
+            }
+            return out;
+        };
+        if (type == "media.sidecars") {
+            if (m.getString("media") == c.media) c.sidecars = names(m.get("sidecars"));
+            return true;
+        }
         if (type == "media.open") {
             c = MediaClock{};
+            c.screen = screen;
+            c.sidecars = names(m.get("sidecars"));
             c.media = m.getString("media");
             const pvrjson::Value* pv = m.get("private");
             c.isPrivate = pv && pv->boolean;

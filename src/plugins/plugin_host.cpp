@@ -1,6 +1,7 @@
 #include "plugins/plugin_host.hpp"
 
 #include "../../browser/mini_json.hpp"
+#include "plugins/plugin_files.hpp"
 #include "util/logging.hpp"
 
 #include <algorithm>
@@ -41,6 +42,7 @@ constexpr auto kHelloTimeout = std::chrono::seconds(5);
 constexpr auto kTickEvery = std::chrono::milliseconds(250);
 constexpr auto kNoticeGap = std::chrono::seconds(3);
 constexpr int kMaxCrashes = 3;
+constexpr size_t kMaxSidecarBytes = 16u << 20;
 const char* const kKnownPermissions[] = {"playback", "playback.path", "control", "files.sidecar", "ui", "network"};
 
 std::string home() {
@@ -168,7 +170,124 @@ bool PluginHost::Plugin::hasPermission(const std::string& perm) const {
     return std::find(permissions.begin(), permissions.end(), perm) != permissions.end();
 }
 
-PluginHost::~PluginHost() { shutdownAll(); }
+PluginHost::~PluginHost() {
+    shutdownAll();
+    stopWorker();
+}
+
+void PluginHost::queueJob(FileJob job) {
+    {
+        std::lock_guard<std::mutex> lk(jobMutex_);
+        if (!worker_.joinable()) {
+            workerStop_ = false;
+            worker_ = std::thread([this] { workerLoop(); });
+        }
+        jobs_.push_back(std::move(job));
+    }
+    jobCv_.notify_one();
+}
+
+void PluginHost::workerLoop() {
+    for (;;) {
+        FileJob job;
+        {
+            std::unique_lock<std::mutex> lk(jobMutex_);
+            jobCv_.wait(lk, [this] { return workerStop_ || !jobs_.empty(); });
+            if (workerStop_) return;
+            job = std::move(jobs_.front());
+            jobs_.pop_front();
+        }
+        FileResult r;
+        r.job = job;
+        r.ok = job.list ? pluginfiles::listFiles(job.uri, r.names, r.err)
+                        : pluginfiles::readFile(job.uri, kMaxSidecarBytes, r.data, r.err);
+        std::lock_guard<std::mutex> lk(jobMutex_);
+        results_.push_back(std::move(r));
+    }
+}
+
+void PluginHost::stopWorker() {
+    {
+        std::lock_guard<std::mutex> lk(jobMutex_);
+        workerStop_ = true;
+        jobs_.clear();
+    }
+    jobCv_.notify_all();
+    if (worker_.joinable()) worker_.join();
+}
+
+void PluginHost::reply(Plugin& p, const std::string& id, bool ok, const std::string& dataOrError) {
+    send(p, "{\"type\":\"result\",\"id\":" + id + ",\"ok\":" + (ok ? "true,\"data\":" + dataOrError
+                                                                    : "false,\"error\":" + pvrjson::quote(dataOrError)) + "}");
+}
+
+std::vector<std::string> PluginHost::sidecarsFor(const Plugin& p, int screen) const {
+    std::vector<std::string> out;
+    const ScreenTrack& t = tracks_[static_cast<size_t>(screen)];
+    if (!t.sidecarsKnown || !p.hasPermission("files.sidecar") || !canSee(p, screen)) return out;
+    for (const std::string& name : t.sidecars) {
+        for (const std::string& pat : p.sidecars) {
+            if (pluginfiles::sidecarMatch(pat, t.base, name)) {
+                out.push_back(name);
+                break;
+            }
+        }
+    }
+    return out;
+}
+
+void PluginHost::sendSidecars(Plugin& p, int screen) {
+    if (!p.helloDone || !p.hasPermission("playback") || !p.hasPermission("files.sidecar") || !canSee(p, screen)) return;
+    std::string list;
+    for (const std::string& n : sidecarsFor(p, screen)) list += (list.empty() ? "" : ",") + pvrjson::quote(n);
+    send(p, "{\"type\":\"media.sidecars\",\"screen\":" + std::to_string(screen) + ",\"media\":" +
+                pvrjson::quote(tracks_[static_cast<size_t>(screen)].mediaId) + ",\"sidecars\":[" + list + "]}");
+}
+
+void PluginHost::deliverFileResults() {
+    std::deque<FileResult> done;
+    {
+        std::lock_guard<std::mutex> lk(jobMutex_);
+        done.swap(results_);
+    }
+    for (FileResult& r : done) {
+        const FileJob& j = r.job;
+        if (j.screen < 0 || j.screen >= static_cast<int>(tracks_.size())) continue;
+        ScreenTrack& t = tracks_[static_cast<size_t>(j.screen)];
+        if (j.list) {
+            if (t.mediaId != j.media) continue;  // another file opened meanwhile
+            t.sidecarsKnown = true;
+            t.sidecars.clear();
+            for (const std::string& name : r.names) {
+                const bool wanted = std::any_of(plugins_.begin(), plugins_.end(), [&](const Plugin& p) {
+                    return std::any_of(p.sidecars.begin(), p.sidecars.end(),
+                                       [&](const std::string& pat) { return pluginfiles::sidecarMatch(pat, t.base, name); });
+                });
+                if (wanted) t.sidecars.push_back(name);
+            }
+            if (!r.ok) PIXELVR_LOG_INFO("Plugins: no sidecars for screen %d (%s)", j.screen + 1, r.err.c_str());
+            for (Plugin& p : plugins_) sendSidecars(p, j.screen);
+            continue;
+        }
+        for (Plugin& p : plugins_) {
+            if (p.id != j.pluginId || !p.helloDone) continue;
+            if (!r.ok) {
+                reply(p, j.reqId, false, r.err);
+            } else if (pluginfiles::isUtf8(r.data)) {
+                reply(p, j.reqId, true, "{\"name\":" + pvrjson::quote(j.name) + ",\"text\":" + pvrjson::quote(r.data) + "}");
+            } else {
+                reply(p, j.reqId, true, "{\"name\":" + pvrjson::quote(j.name) + ",\"base64\":\"" + pluginfiles::base64(r.data) + "\"}");
+            }
+        }
+    }
+}
+
+bool PluginHost::takeControl(ControlCommand& out) {
+    if (controls_.empty()) return false;
+    out = std::move(controls_.front());
+    controls_.pop_front();
+    return true;
+}
 
 std::string PluginHost::pluginsDir() { return home() + "/.local/share/pixelvr/plugins"; }
 
@@ -551,6 +670,40 @@ void PluginHost::handleLine(Plugin& p, const std::string& line) {
                            : -1.0f;
     } else if (type == "ui.settings" && ui) {
         p.settings = parseSettings(m.get("settings"));
+    } else if ((type == "files.read" || type == "control") && id && id->type == pvrjson::Value::Type::Number) {
+        const std::string rid = pvrjson::dump(*id);
+        const int screen = static_cast<int>(m.getNumber("screen", -1));
+        const bool open = screen >= 0 && screen < static_cast<int>(tracks_.size()) &&
+                          !tracks_[static_cast<size_t>(screen)].mediaId.empty() &&
+                          tracks_[static_cast<size_t>(screen)].mediaId == m.getString("media");
+        if (!p.hasPermission(type == "control" ? "control" : "files.sidecar")) {
+            reply(p, rid, false, "permission not granted");
+        } else if (!open || !canSee(p, screen)) {
+            reply(p, rid, false, "that media is not open");
+        } else if (type == "files.read") {
+            const std::string name = m.getString("name");
+            const auto allowed = sidecarsFor(p, screen);
+            if (std::find(allowed.begin(), allowed.end(), name) == allowed.end()) {
+                reply(p, rid, false, "not a sidecar of that media");
+            } else {
+                FileJob job;
+                job.screen = screen;
+                job.media = tracks_[static_cast<size_t>(screen)].mediaId;
+                job.uri = pluginfiles::join(pluginfiles::parentOf(tracks_[static_cast<size_t>(screen)].last.path), name);
+                job.pluginId = p.id;
+                job.reqId = rid;
+                job.name = name;
+                queueJob(std::move(job));
+            }
+        } else {
+            const std::string what = m.getString("do");
+            if (what != "play" && what != "pause" && what != "seek") {
+                reply(p, rid, false, "unsupported: " + what);
+            } else {
+                controls_.push_back({screen, what, std::max(0.0, m.getNumber("position"))});
+                reply(p, rid, true, "{}");
+            }
+        }
     } else if (id && id->type == pvrjson::Value::Type::Number) {
         // A request this host version does not offer (yet): answer, so the plugin does not wait.
         send(p, "{\"type\":\"result\",\"id\":" + pvrjson::dump(*id) + ",\"ok\":false,\"error\":" +
@@ -628,7 +781,13 @@ void PluginHost::sendOpen(Plugin& p, int screen) {
     const PluginScreenSnapshot& s = t.last;
     out += ",\"private\":false,\"fileName\":" + pvrjson::quote(s.fileName) + ",\"title\":" + pvrjson::quote(s.title) +
            ",\"source\":" + pvrjson::quote(s.source) + ",\"duration\":" + num(s.duration) + ",\"projection\":\"" +
-           projectionName(s.projection) + "\",\"stereo\":\"" + stereoName(s.stereo) + "\",\"sidecars\":[]";
+           projectionName(s.projection) + "\",\"stereo\":\"" + stereoName(s.stereo) + "\",\"sidecars\":[";
+    bool firstSidecar = true;
+    for (const std::string& n : sidecarsFor(p, screen)) {
+        out += (firstSidecar ? "" : ",") + pvrjson::quote(n);
+        firstSidecar = false;
+    }
+    out += "]";
     // Plex URLs carry the account token: never passed on, not even sanitised.
     if (p.hasPermission("playback.path") && s.source != "plex" && s.source != "http") {
         out += ",\"path\":" + pvrjson::quote(sanitizePath(s.path));
@@ -713,6 +872,21 @@ void PluginHost::update(const std::vector<PluginScreenSnapshot>& screens, const 
         if (t.mediaId.empty()) {
             t.mediaId = "m" + std::to_string(++mediaSerial_);
             t.last = s;
+            t.sidecarsKnown = false;
+            t.sidecars.clear();
+            t.base = pluginfiles::baseNameOf(s.path);
+            const bool listable = s.source == "local" || s.source == "smb" || s.source == "sftp" || s.source == "webdav";
+            const bool wanted = std::any_of(plugins_.begin(), plugins_.end(), [](const Plugin& p) {
+                return p.hasPermission("files.sidecar") && !p.sidecars.empty();
+            });
+            if (listable && wanted) {
+                FileJob job;
+                job.list = true;
+                job.screen = i;
+                job.media = t.mediaId;
+                job.uri = pluginfiles::parentOf(s.path);
+                queueJob(std::move(job));
+            }
             for (Plugin& p : plugins_) {
                 sendOpen(p, i);
                 sendState(p, i, "open");
@@ -751,6 +925,7 @@ void PluginHost::update(const std::vector<PluginScreenSnapshot>& screens, const 
         t.nextTick = now + kTickEvery;
     }
     broadcastScreens();
+    deliverFileResults();
 
     // Processes.
     for (Plugin& p : plugins_) {
@@ -776,6 +951,7 @@ void PluginHost::update(const std::vector<PluginScreenSnapshot>& screens, const 
 }
 
 void PluginHost::shutdownAll() {
+    stopWorker();
     bool any = false;
     for (Plugin& p : plugins_) {
         if (p.pid <= 0) continue;

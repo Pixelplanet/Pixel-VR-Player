@@ -101,6 +101,7 @@ int main(int argc, char** argv) {
     PluginAppSnapshot app;
     app.vaultUnlocked = true;
     std::vector<std::string> notices;
+    std::vector<PluginHost::ControlCommand> controls;
     bool sawGauge = false;
     const auto t0 = std::chrono::steady_clock::now();
     auto runUntil = [&](double sec, const std::function<void(double)>& step) {
@@ -111,6 +112,8 @@ int main(int argc, char** argv) {
             host.update(screens, app);
             std::string n;
             while (host.takeNotice(n)) notices.push_back(n);
+            PluginHost::ControlCommand c;
+            while (host.takeControl(c)) controls.push_back(c);
             if (host.plugins()[ex].gaugeValue >= 0.0f) sawGauge = true;
             std::this_thread::sleep_for(std::chrono::milliseconds(11));
         }
@@ -121,10 +124,11 @@ int main(int argc, char** argv) {
 
     PluginScreenSnapshot& v = screens[0];
     v.kind = PluginScreenSnapshot::Kind::Video;
-    v.path = "smb://user:secret@nas/share/Movies/Test Movie.mkv";
+    // Port 1 on localhost: the sidecar listing fails at once instead of waiting on the network.
+    v.path = "sftp://user:secret@127.0.0.1:1/share/Movies/Test Movie.mkv";
     v.fileName = "Test Movie.mkv";
     v.title = "Test Movie";
-    v.source = "smb";
+    v.source = "sftp";
     v.duration = 120.0;
     runUntil(1.2, nullptr);
     double playFrom = 0.0, playAt = 1.2;
@@ -148,7 +152,23 @@ int main(int argc, char** argv) {
     runUntil(4.6, nullptr);
     host.activateSetting(ex, 2);  // "Say hello"
     host.activateSetting(ex, 1);  // gauge: Seconds
+    runUntil(5.0, nullptr);
+    // A local file with a sidecar the example plugin asks for ("{base}.txt").
+    const fs::path media = fs::path(tmp) / "media";
+    writeFile(media / "Clip One.mp4", "not a real video");
+    writeFile(media / "Clip One.txt", "hello sidecar");
+    writeFile(media / "Clip One.funscript", "{}");
+    writeFile(media / "Other.txt", "unrelated");
+    screens[0].kind = PluginScreenSnapshot::Kind::Video;
+    screens[0].path = (media / "Clip One.mp4").string();
+    screens[0].fileName = "Clip One.mp4";
+    screens[0].source = "local";
+    screens[0].duration = 30.0;
+    runUntil(5.8, nullptr);
+    check(host.plugins()[ex].status == "Read Clip One.txt (13 bytes)", "sidecar listed and read through files.read");
+    host.activateSetting(ex, 3);  // "Pause the video"
     runUntil(7.0, nullptr);
+    check(controls.size() == 1 && controls[0].screen == 0 && controls[0].action == "pause", "control request reaches the app");
 
     const int crash = findPlugin(host, "test.crash");
     const int silent = findPlugin(host, "test.silent");
@@ -182,6 +202,10 @@ int main(int argc, char** argv) {
     check(log.find("\"gauge\":1") != std::string::npos, "settings change received");
     check(log.find("\"type\":\"action\"") != std::string::npos, "action received");
     check(log.find("\"type\":\"shutdown\"") != std::string::npos, "shutdown received");
+    check(log.find("\"sidecars\":[\"Clip One.txt\"]") != std::string::npos, "only matching sidecars are offered");
+    check(log.find("Other.txt") == std::string::npos && log.find("Clip One.funscript") == std::string::npos,
+          "files outside the plugin's patterns stay hidden");
+    check(log.find("\"text\":\"hello sidecar\"") != std::string::npos, "sidecar content delivered");
     const std::string cfg = readFile(fs::path(tmp) / ".config/pixelvr/plugins.json");
     check(cfg.find("\"gauge\":\"1\"") != std::string::npos, "setting saved to plugins.json");
 

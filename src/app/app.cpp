@@ -2018,6 +2018,16 @@ void App::updatePlugins() {
     app.worn = xr_.userPresent();
     app.vaultUnlocked = VaultManager::instance().isUnlocked();
     plugins_.update(snap, app);
+    PluginHost::ControlCommand cmd;
+    while (plugins_.takeControl(cmd)) {
+#ifdef PIXELVR_HAVE_MEDIA
+        if (cmd.screen < 0 || cmd.screen >= VulkanRenderer::kMaxVideoSlots || !screens_[cmd.screen].open) continue;
+        MediaEngine& e = screens_[cmd.screen].engine;
+        if (cmd.action == "play") e.setPaused(false);
+        else if (cmd.action == "pause") e.setPaused(true);
+        else if (cmd.action == "seek") e.seek(cmd.position);
+#endif
+    }
     const auto now = std::chrono::steady_clock::now();
     std::string n;
     while (plugins_.takeNotice(n)) {

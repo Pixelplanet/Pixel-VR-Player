@@ -5,10 +5,13 @@
 // emits events to the plugins allowed to see them and never blocks on them.
 
 #include <chrono>
+#include <condition_variable>
 #include <deque>
 #include <map>
+#include <mutex>
 #include <string>
 #include <sys/types.h>
+#include <thread>
 #include <vector>
 
 namespace pixelvr {
@@ -104,6 +107,14 @@ public:
     // Short messages for the in-VR notice line (rate-limited per plugin).
     bool takeNotice(std::string& out);
 
+    // Playback commands from plugins with the "control" permission; the app applies them.
+    struct ControlCommand {
+        int screen = 0;
+        std::string action;  // play | pause | seek
+        double position = 0.0;
+    };
+    bool takeControl(ControlCommand& out);
+
     static std::string pluginsDir();
     static std::string sanitizePath(const std::string& path);  // removes credentials / query
 
@@ -115,7 +126,29 @@ private:
         double sentPosition = 0.0;
         Clock::time_point sentAt{};
         Clock::time_point nextTick{};
+        bool sidecarsKnown = false;
+        std::string base;                     // media file name without extension
+        std::vector<std::string> sidecars;    // files next to it matching any plugin's patterns
     };
+    // Sidecar listing and reading run on a worker thread (network shares are slow).
+    struct FileJob {
+        bool list = false;
+        int screen = 0;
+        std::string media, uri, pluginId, reqId, name;
+    };
+    struct FileResult {
+        FileJob job;
+        bool ok = false;
+        std::string err, data;
+        std::vector<std::string> names;
+    };
+    void workerLoop();
+    void stopWorker();
+    void deliverFileResults();
+    void queueJob(FileJob job);
+    std::vector<std::string> sidecarsFor(const Plugin& p, int screen) const;
+    void sendSidecars(Plugin& p, int screen);
+    void reply(Plugin& p, const std::string& id, bool ok, const std::string& dataOrError);
 
     void loadConfig();
     void saveConfig() const;
@@ -145,7 +178,14 @@ private:
     unsigned mediaSerial_ = 0;
     std::deque<std::string> notices_;
     std::map<std::string, Clock::time_point> lastNotice_;
+    std::deque<ControlCommand> controls_;
     bool initialised_ = false;
+    std::thread worker_;
+    std::mutex jobMutex_;
+    std::condition_variable jobCv_;
+    std::deque<FileJob> jobs_;
+    std::deque<FileResult> results_;
+    bool workerStop_ = false;
 };
 
 }  // namespace pixelvr

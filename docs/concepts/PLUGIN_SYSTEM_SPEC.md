@@ -125,6 +125,7 @@ Status: **design for review**, nothing implemented yet. Background:
 | `screens` | `screens`: [{`screen`, `kind`: video/web/empty, `selected`, `audio`}] | after hello and on every change |
 | `media.open` | `screen`, `media` (opaque id), `fileName`, `title`, `source` (local/smb/sftp/webdav/plex/http), `duration` (s), `projection` (flat/180/360), `stereo` (mono/sbs/tb), `sidecars` [names found], `path` (only with `playback.path`) | file opened on a screen |
 | `media.state` | `screen`, `media`, `playing`, `buffering`, `position` (s), `rate`, `clock` (ms, CLOCK_MONOTONIC when `position` was sampled), `reason` (play/pause/seek/rate/buffer/tick) | **immediately** on every change, plus a `tick` every 250 ms while playing |
+| `media.sidecars` | `screen`, `media`, `sidecars` [names this plugin may read] | the folder listing finished (it runs on a worker thread, so `media.open` usually carries `[]`) |
 | `media.close` | `screen`, `media`, `reason` (stop/eof/replaced/error) | file closed |
 | `app.state` | `focused` (XR session focused), `worn` (headset on), `exiting` | on change |
 | `settings` | `settings` {key: value} | the user changed a value |
@@ -148,7 +149,7 @@ Remaining display latency is covered by the plugin's offset setting.
 | `ui.timeline` | `screen`, `media`, `tracks`: [{`id`, `label`, `segments`: [[startMs, endMs, heat 0..1], …]}] | `ui` | heat strip drawn on the timeline under the chapter marks (≤ 2000 segments per track); `[]` clears it |
 | `ui.gauge` | `id`, `label`, `value` 0..1 | `ui` | small live meter above the control panel, ≤ 30 updates/s. Also the **virtual device** for blind testing |
 | `ui.button` | `id`, `label`, `icon` (stop/play/link/…) | `ui` | one quick button per plugin in the control panel; presses arrive as `action` |
-| `control` | `screen`, `do` (play/pause/seek/rate/open), `position`, `rate`, `path` | `control` | `open` only for local paths or configured shares |
+| `control` | `id`, `screen`, `media`, `do` (play/pause/seek), `position` | `control` | v1: play, pause, seek. `rate` and `open` are answered "unsupported" (the engine has no rate; opening files from plugins needs a security review) |
 | `files.read` | `id`, `screen`, `media`, `name` | `files.sidecar` | returns `{text}` (UTF-8) or `{base64}`, max 16 MiB. Only files in the **same folder** as the open media whose names match the manifest's `sidecars` patterns. The host reads them through its own SMB/SFTP/WebDAV code, so plugins never need credentials. |
 | `log` | `level`, `text` | — | written to the plugin log (stderr works too) |
 
@@ -296,7 +297,16 @@ go to `~/pixelvr-src-plugins` (never `~/pixelvr-src`, which belongs to the other
     (`cp -r build/plugins/example ~/.local/share/pixelvr/plugins/`), run this build, enable it
     under Controls & Input > Plugins, play a video: a notice "Opened …", status "Watching …".
     The gauge is stored by the host but not drawn yet (phase 3).
-- [ ] Phase 2 settings / files / control.
+- [x] Phase 2 settings / files / control.
+  - `src/plugins/plugin_files.{hpp,cpp}`: list / read for local, SMB (own context per job like
+    MediaEngine; the global `smbc_init` only exists after the file browser browsed SMB),
+    SFTP and WebDAV. Runs on PluginHost's worker thread.
+  - Sidecar listing on open → `media.sidecars`; `files.read` (16 MiB cap, text or base64)
+    only for names matching the plugin's own patterns; `control` play / pause / seek, applied
+    in `App::updatePlugins`.
+  - Text settings via the in-app keyboard (`Action::EditPluginText`).
+  - Host test: all checks pass (sidecar filtering, content, control). **SMB sidecars not yet
+    tried against a real share.**
 - [ ] Phase 3 timeline heat, gauge, quick button.
 - [ ] Phase 4 DeoVR bridge plugin, funscript plugin + fake Intiface tests.
 - [ ] Phase 5 `.pvrplugin` install + release assets.
