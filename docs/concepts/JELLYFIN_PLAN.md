@@ -150,3 +150,28 @@ from the user for an end-to-end test.
     `/web/` added.
   - Drag and drop: not done (the settings grid has no pointer drag); the arrows are there instead.
 - **Crash / freeze fixes deployed** with the same build.
+
+## User report 2026-11-08 (third test)
+- Jellyfin **playback works**.
+- **Scrubbing** showed nothing until release. The timeline preview (picture in the bubble) was
+  switched off for Plex / Jellyfin streams (`!webSuspended`). Now on for http streams
+  (`scrub_preview.cpp` opens them with `rw_timeout` 10 s). The video itself still jumps on release,
+  as for local files.
+- **Downloads slow?** The file was 57.6 GB (4K remux). Measured on the headset:
+  - our download 52 MB/s; `curl` on `/Download` 56 MB/s; `/Videos/stream` 88 MB/s.
+  - Python with 4 MB ranges: 46 MB/s; with 32 MB ranges: 72 MB/s (Jellyfin pays a lookup per request).
+  - The http reader (`DavFile`, `remote_fs.cpp`) now doubles its range up to 32 MB while reading on,
+    and goes back to 4 MB after a jump. The new reader: 62.6 MB/s *while the old download still ran
+    in parallel*.
+  - Not a Jellyfin setting: no throttle; the link is WiFi 6E 160 MHz.
+- **Shortcut list redesigned (eb61c2d)** to the user's spec, one line per shortcut:
+  - grab handle (hold the trigger and drag; an accent bar shows where it lands; on release the list
+    = rail order changes)
+  - on / off switch (on the rail)
+  - name, address
+  - Edit (the shortcut's page: Name, Address, Show on the Rail, Opens as, Delete, Back)
+  - Delete (first press "Sure?" in red, a second within 4 s deletes)
+  - Then "Add shortcut" (max 10) and Back. Renderer: `kSettingsKindShortcut` lines in the compact
+    single-column layout (12 lines), `hub::shortcutZone`, `setSettingsDrag`. App: drag in the
+    settings block (`shortcutDragFrom_/To_`, `in.selectHeld`).
+  - **Built and deployed; not yet seen in the headset.**
