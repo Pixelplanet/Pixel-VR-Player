@@ -332,5 +332,10 @@ go to `~/pixelvr-src-plugins` (never `~/pixelvr-src`, which belongs to the other
   - Not done: multi-axis scripts (only the main `{base}.funscript` drives devices; axis files
     are offered but unused), The Handy's own API, TCode. **Never tried with real Intiface or
     hardware.**
-  - [ ] DeoVR-compatible sync bridge plugin.
+  - [x] `plugins/deovr-remote/` (org.pixelvr.deovr-remote): DeoVR remote protocol server on
+    TCP 23554 (all interfaces; 23555/23556 selectable), reports the heard screen's file name,
+    duration, time, state at 1 Hz + on change; accepts pause / play / seek (switchable);
+    private media → pings only; status shows the headset's LAN address.
+    `tools/deovr_plugin_test.py`: **11/11 pass on the headset**. Not yet tried with the real
+    MultiFunPlayer / FunFlixDroid.
 - [ ] Phase 5 `.pvrplugin` install + release assets.
