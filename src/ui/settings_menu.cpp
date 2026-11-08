@@ -328,38 +328,42 @@ void SettingsMenu::refresh() {
     } else if (section_ == 22) {
         title_ = "Settings > UI & Appearance > Shortcuts";
         hint(kShortcutsStatus);
-        // One small card per shortcut (name; rail mark + address), in rail order.
+        // One line per shortcut, in rail order: grab handle, on / off, name, address, Edit, Delete.
+        hint("Hold a shortcut's handle and drag it to reorder. The rail shows the first " +
+             std::to_string(kMaxRailShortcuts) + " that are on.");
+        const bool armed = deleteArmedIdx_ >= 0 && std::chrono::steady_clock::now() < deleteArmedUntil_;
         for (size_t i = 0; i < shortcuts_.size(); ++i) {
             const Shortcut& sc = shortcuts_[i];
             std::string where = sc.url;
             if (const size_t p = where.find("://"); p != std::string::npos) where = where.substr(p + 3);
             while (!where.empty() && where.back() == '/') where.pop_back();
-            Row r{sc.name, std::string(sc.onRail ? "On the rail  " : "") + (where.empty() ? "Address asked on first use" : where),
-                  Action::OpenShortcut};
+            Row r{sc.name, where, Action::OpenShortcut};
+            r.kind = Kind::Shortcut;
             r.data = static_cast<int>(i);
+            r.stepIdx = sc.onRail ? 1 : 0;
+            r.steps = (armed && deleteArmedIdx_ == static_cast<int>(i)) ? 1 : 0;
             rows_.push_back(r);
         }
-        rows_.push_back({"Add shortcut", "Name and address", Action::AddShortcut});
+        {
+            const bool full = shortcuts_.size() >= static_cast<size_t>(kMaxShortcuts);
+            Row add{"Add shortcut", full ? "The list is full" : "Name and address", Action::AddShortcut};
+            add.enabled = !full;
+            rows_.push_back(add);
+        }
         rows_.push_back({"Back to UI & Appearance", "", Action::BackToUI});
     } else if (section_ == 17) {
         if (shortcutIdx_ < 0 || shortcutIdx_ >= static_cast<int>(shortcuts_.size())) shortcutIdx_ = 0;
         const Shortcut& sc = shortcuts_.empty() ? Shortcut{} : shortcuts_[static_cast<size_t>(shortcutIdx_)];
         title_ = "Settings > UI & Appearance > Shortcuts > " + sc.name;
-        hint("The rail shows the first " + std::to_string(kMaxRailShortcuts) + " shortcuts that are on, in list order.");
+        hint("Name and address open the keyboard.");
         rows_.push_back({"Name", sc.name, Action::EditShortcutName});
         rows_.push_back({"Address", sc.url.empty() ? std::string("Asked on first use") : sc.url, Action::EditShortcutUrl});
         toggle("Show on the Rail", sc.onRail, Action::ToggleShortcutRail);
         segmented("Opens as", {"Page only", "Full browser"}, sc.kiosk ? 0 : 1, Action::CycleShortcutKiosk);
         {
-            Row up{"Move Up", shortcutIdx_ > 0 ? "Earlier on the rail" : "Already first", Action::MoveShortcutUp};
-            up.enabled = shortcutIdx_ > 0;
-            rows_.push_back(up);
-            Row down{"Move Down", shortcutIdx_ + 1 < static_cast<int>(shortcuts_.size()) ? "Later on the rail" : "Already last",
-                     Action::MoveShortcutDown};
-            down.enabled = shortcutIdx_ + 1 < static_cast<int>(shortcuts_.size());
-            rows_.push_back(down);
+            const bool armed = deleteArmedIdx_ == shortcutIdx_ && std::chrono::steady_clock::now() < deleteArmedUntil_;
+            rows_.push_back({"Delete Shortcut", armed ? "Press again to delete" : "Asks once more first", Action::RemoveShortcut});
         }
-        rows_.push_back({"Remove Shortcut", "Delete it from the list", Action::RemoveShortcut});
         rows_.push_back({"Back to Shortcuts", "", Action::BackToShortcuts});
     } else if (section_ == 21) {
         title_ = "Settings > UI & Appearance > List Columns";
@@ -431,6 +435,7 @@ SettingsMenu::Action SettingsMenu::activate() {
             refresh();
             break;
         case Action::AddShortcut:
+            if (shortcuts_.size() >= static_cast<size_t>(kMaxShortcuts)) break;
             shortcuts_.push_back({"New shortcut", "", false, true});
             shortcutIdx_ = static_cast<int>(shortcuts_.size()) - 1;
             saveConfig();
@@ -456,9 +461,12 @@ SettingsMenu::Action SettingsMenu::activate() {
                 ++shortcutIdx_;
             }
             if (act == Action::RemoveShortcut) {
-                shortcuts_.erase(shortcuts_.begin() + static_cast<long>(i));
-                section_ = 22;
-                selected_ = std::min(static_cast<int>(i), static_cast<int>(shortcuts_.size()));
+                if (shortcutDelete(shortcutIdx_)) {
+                    section_ = 22;
+                    selected_ = std::min(static_cast<int>(i), static_cast<int>(shortcuts_.size()));
+                }
+                refresh();
+                break;  // shortcutDelete() saved already
             }
             saveConfig();
             refresh();
@@ -838,6 +846,59 @@ void SettingsMenu::setShortcutUrl(int idx, const std::string& in) {
     sc.url = url;
     saveConfig();
     refresh();
+}
+
+void SettingsMenu::shortcutToggle(int idx) {
+    if (idx < 0 || idx >= static_cast<int>(shortcuts_.size())) return;
+    shortcuts_[static_cast<size_t>(idx)].onRail ^= true;
+    saveConfig();
+    refresh();
+}
+
+void SettingsMenu::shortcutMove(int from, int to) {
+    const int n = static_cast<int>(shortcuts_.size());
+    if (from < 0 || from >= n || to < 0 || to >= n || from == to) return;
+    const Shortcut moved = shortcuts_[static_cast<size_t>(from)];
+    shortcuts_.erase(shortcuts_.begin() + from);
+    shortcuts_.insert(shortcuts_.begin() + to, moved);
+    deleteArmedIdx_ = -1;
+    selected_ = to;
+    saveConfig();
+    refresh();
+}
+
+bool SettingsMenu::shortcutDelete(int idx) {
+    if (idx < 0 || idx >= static_cast<int>(shortcuts_.size())) return false;
+    const auto now = std::chrono::steady_clock::now();
+    if (deleteArmedIdx_ != idx || now >= deleteArmedUntil_) {  // first press: ask
+        deleteArmedIdx_ = idx;
+        deleteArmedUntil_ = now + std::chrono::seconds(4);
+        refresh();  // (refresh() resets the status line to the page hint)
+        status_ = "Press Delete again to remove \"" + shortcuts_[static_cast<size_t>(idx)].name + "\".";
+        return false;
+    }
+    status_ = "Removed \"" + shortcuts_[static_cast<size_t>(idx)].name + "\".";
+    shortcuts_.erase(shortcuts_.begin() + idx);
+    deleteArmedIdx_ = -1;
+    saveConfig();
+    refresh();
+    return true;
+}
+
+void SettingsMenu::shortcutEdit(int idx) {
+    if (idx < 0 || idx >= static_cast<int>(shortcuts_.size())) return;
+    shortcutIdx_ = idx;
+    deleteArmedIdx_ = -1;
+    section_ = 17;
+    selected_ = 0;
+    refresh();
+}
+
+void SettingsMenu::tickShortcuts() {
+    if (deleteArmedIdx_ >= 0 && std::chrono::steady_clock::now() >= deleteArmedUntil_) {
+        deleteArmedIdx_ = -1;
+        if (section_ == 22 || section_ == 17) refresh();
+    }
 }
 
 void SettingsMenu::openShortcutsPage(const std::string& hintText) {

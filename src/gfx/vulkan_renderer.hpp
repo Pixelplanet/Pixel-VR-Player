@@ -703,10 +703,16 @@ public:
         std::vector<std::string> options;
     };
     static constexpr int kSettingsKindSegmented = 6;
+    static constexpr int kSettingsKindShortcut = 7;  // a shortcut list line (stepIdx: on; steps: delete armed)
 
     // Settings overlay panel (re-uses panel & pointer interaction)
     // Dense cards (7 rows of 2) for long list pages such as the shortcut list.
     void setSettingsCompact(bool on) { settingsCompact_ = on; }
+    // Shortcut list: the line being dragged and where it would land (-1 = no drag).
+    void setSettingsDrag(int from, int to) {
+        settingsDragFrom_ = from;
+        settingsDragTo_ = to;
+    }
     void setSettings(bool visible, const std::string& title,
                      const std::vector<SettingsRowVis>& rows, int selected,
                      const std::string& status);
@@ -1239,6 +1245,8 @@ private:
     std::string settingsStatus_;
     std::vector<SettingsRowVis> settingsRows_;
     bool settingsCompact_ = false;
+    int settingsDragFrom_ = -1;
+    int settingsDragTo_ = -1;
     int settingsSelected_ = 0;
     int settingsHovered_ = -1;
     int settingsSegmentHovered_ = -1;

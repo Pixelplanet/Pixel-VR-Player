@@ -1,5 +1,6 @@
 #pragma once
 
+#include <chrono>
 #include <algorithm>
 #include <string>
 #include <utility>
@@ -81,7 +82,9 @@ public:
     // ordered choices, a switch for toggles, swatches for colours, a key chip
     // for bindings, a chevron for rows that open a sub-page, and one pill per
     // option for small unordered choices (Segmented).
-    enum class Kind { Choice, Toggle, Action, Binding, Color, Option, Segmented };
+    // Shortcut: a line of the shortcut list (stepIdx = on the rail; steps = 1 while Delete waits
+    // for its confirming second press; data = the shortcut index).
+    enum class Kind { Choice, Toggle, Action, Binding, Color, Option, Segmented, Shortcut };
 
     struct Row {
         std::string label;
@@ -170,6 +173,13 @@ public:
     void setShortcutName(int idx, const std::string& name);
     void setShortcutUrl(int idx, const std::string& url);  // normalised (scheme added, Jellyfin /web trimmed)
     void openShortcutsPage(const std::string& hint);  // UI & Appearance > Shortcuts
+    // The shortcut list's line controls (the app routes clicks on them here).
+    static constexpr int kMaxShortcuts = 10;  // what the list page has room for
+    void shortcutToggle(int idx);
+    void shortcutMove(int from, int to);  // drag and drop; the list order is the rail order
+    bool shortcutDelete(int idx);         // first press asks ("Sure?"), a second one within 4 s deletes
+    void shortcutEdit(int idx);           // the shortcut's own page (name, address, ...)
+    void tickShortcuts();                 // per frame: an unconfirmed Delete times out
     bool compactPage() const { return section_ == 22; }  // dense cards: the shortcut list
     float screenDistance() const { return screenDistance_; }
     void setScreenDistance(float d) { screenDistance_ = d; refresh(); }
@@ -305,6 +315,8 @@ private:
     bool screenNumbers_ = false;
     std::vector<Shortcut> shortcuts_;  // `shortcut=` lines in settings.conf; defaults when absent
     int shortcutIdx_ = 0;
+    int deleteArmedIdx_ = -1;
+    std::chrono::steady_clock::time_point deleteArmedUntil_{};
     void ensureShortcuts();  // defaults / migration from rail_shortcuts + jellyfin_url
     std::string legacyJellyfinUrl_;
     bool audioFollow_ = false;

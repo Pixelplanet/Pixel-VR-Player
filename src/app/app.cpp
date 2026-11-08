@@ -5056,6 +5056,40 @@ int App::run() {
                     renderer_.setSettingsSelected(hovered);
                     settings_.setSelected(hovered);
                 }
+                // Shortcut list: a held trigger on a line's handle drags it; the drop point
+                // follows the laser and the list (= rail) order changes on release.
+                settings_.tickShortcuts();
+                const auto& setRows = settings_.rows();
+                auto shortcutRowAt = [&](int r) {
+                    return settings_.compactPage() && r >= 0 && r < static_cast<int>(setRows.size()) &&
+                           setRows[static_cast<size_t>(r)].kind == SettingsMenu::Kind::Shortcut;
+                };
+                if (shortcutDragFrom_ >= 0) {
+                    if (!settings_.compactPage()) {
+                        shortcutDragFrom_ = shortcutDragTo_ = -1;
+                    } else if (in.selectHeld) {
+                        if (shortcutRowAt(hovered)) shortcutDragTo_ = hovered;
+                    } else {
+                        const int from = setRows[static_cast<size_t>(shortcutDragFrom_)].data;
+                        const int to = shortcutRowAt(shortcutDragTo_) ? setRows[static_cast<size_t>(shortcutDragTo_)].data : from;
+                        PIXELVR_LOG_INFO("Shortcuts: moved %d -> %d", from, to);
+                        settings_.shortcutMove(from, to);
+                        shortcutDragFrom_ = shortcutDragTo_ = -1;
+                    }
+                    in.select = in.togglePlay = false;  // the drag owns the trigger
+                }
+                renderer_.setSettingsDrag(shortcutDragFrom_, shortcutDragTo_);
+                if (in.select && shortcutRowAt(hovered)) {
+                    const int idx = setRows[static_cast<size_t>(hovered)].data;
+                    switch (renderer_.settingsSegmentHovered()) {
+                        case 0: shortcutDragFrom_ = shortcutDragTo_ = hovered; break;  // the grab handle
+                        case 1: settings_.shortcutToggle(idx); break;
+                        case 3: settings_.shortcutDelete(idx); break;
+                        default: settings_.shortcutEdit(idx); break;  // Edit, or the name / address
+                    }
+                    xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.02f, 0.0f, 0.4f);
+                    in.select = in.togglePlay = false;
+                }
                 // Trigger activates the selection made by the laser or the stick;
                 // Play / OK activates the selected row, pointed at or not.
                 if ((in.select && (hovered >= 0 || std::fabs(in.thumbstickY) > 0.25f)) || in.togglePlay) {

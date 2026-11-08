@@ -497,18 +497,34 @@ inline SettingsCard settingsCard(int i, int total, bool compact = false) {
         L.ctrlY = L.cy - 0.020f;
         L.ctrlHalfH = 0.023f;
         L.textScale = 0.90f;
-    } else {  // dense list pages (the shortcut list): 7 rows of 2
-        L.cy = 0.30f - r * 0.106f;
-        L.halfH = 0.048f;
-        L.labelY = L.cy + 0.020f;
-        L.ctrlY = L.cy - 0.016f;
-        L.ctrlHalfH = 0.018f;
-        L.textScale = 0.80f;
+    } else {  // list pages (the shortcut list): one full-width line per row, 12 lines
+        L.cx = 0.20f;
+        L.halfW = 0.65f;
+        L.ctrlHalfW = 0.60f;
+        L.cy = 0.345f - static_cast<float>(i) * 0.062f;
+        L.halfH = 0.027f;
+        L.labelY = L.cy;
+        L.ctrlY = L.cy;
+        L.ctrlHalfH = 0.020f;
+        L.textScale = 0.82f;
     }
     return L;
 }
-inline int settingsMaxVisible(int total, bool compact = false) { return compact ? 14 : (total > 8 ? 10 : 8); }
+inline int settingsMaxVisible(int total, bool compact = false) { return compact ? 12 : (total > 8 ? 10 : 8); }
 // Segment `s` of `n` inside a settings control well (segmented choices).
+// A shortcut line (list pages): 0 = grab handle (drag to reorder), 1 = on / off switch,
+// 2 = Edit, 3 = Delete. Name and address sit between the switch and Edit.
+inline UiRect shortcutZone(const SettingsCard& L, int z) {
+    const float left = L.cx - L.halfW, right = L.cx + L.halfW;
+    switch (z) {
+        case 0: return {left + 0.030f, L.cy, 0.026f, L.halfH};
+        case 1: return {left + 0.098f, L.cy, 0.034f, L.halfH};
+        case 2: return {right - 0.165f, L.cy, 0.056f, L.halfH - 0.005f};
+        default: return {right - 0.056f, L.cy, 0.048f, L.halfH - 0.005f};
+    }
+}
+constexpr float kShortcutNameX = 0.150f;  // from the line's left edge
+constexpr float kShortcutUrlX = 0.470f;
 inline UiRect settingsSegment(const SettingsCard& L, int s, int n) {
     const float left = L.cx - L.ctrlHalfW + 0.006f;
     const float right = L.cx + L.ctrlHalfW - 0.006f;
@@ -3088,6 +3104,11 @@ void VulkanRenderer::updatePointer() {
                         settingsRow_ = i;
                         settingsHovered_ = i;
                         const SettingsRowVis& row = settingsRows_[static_cast<std::size_t>(i)];
+                        if (row.kind == kSettingsKindShortcut) {
+                            for (int z = 0; z < 4; ++z) {
+                                if (hub::shortcutZone(L, z).contains(hx, hyy, 0.002f)) settingsSegmentHovered_ = z;
+                            }
+                        }
                         if (row.kind == kSettingsKindSegmented && !row.options.empty()) {
                             const int n = static_cast<int>(row.options.size());
                             for (int s = 0; s < n; ++s) {
@@ -7089,6 +7110,48 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const float cardR = 0.016f / L.halfH;
                 const float cardBw = 0.0015f / L.halfH;
 
+                if (settingsCompact_) {
+                    // List line: a shortcut (grab handle, switch, name, address, Edit, Delete) or a
+                    // plain line (Add shortcut, Back).
+                    const hub::SettingsCard hc = hub::settingsCard(i, layoutN, settingsCompact_);
+                    const bool dragged = (i == settingsDragFrom_);
+                    const float* lineBg = (hov || dragged) ? glassCardHoverT.data() : glassCardT.data();
+                    const float* lineBord = dragged ? selBord : (hov ? tabActiveBord : kGlassRimFaint);
+                    drawUiElement(vpPanel, hc.cx, hc.cy, hc.halfW, hc.halfH, UiShape::RoundedBox, lineBg, 1.0f,
+                                  0.012f / hc.halfH, lineBord);
+                    if (settingsDragFrom_ >= 0 && i == settingsDragTo_ && settingsDragTo_ != settingsDragFrom_) {
+                        // Where the dragged shortcut lands: an accent bar on the side it moves to.
+                        const float y = settingsDragTo_ < settingsDragFrom_ ? hc.cy + hc.halfH + 0.004f
+                                                                            : hc.cy - hc.halfH - 0.004f;
+                        drawUiElement(vpPanel, hc.cx, y, hc.halfW, 0.0035f, UiShape::RoundedBox, themeAccentCol, 1.0f);
+                    }
+                    if (row.kind == kSettingsKindShortcut) {
+                        const int seg = hov ? settingsSegmentHovered_ : -1;
+                        const UiRect g = hub::shortcutZone(hc, 0);
+                        const float* gripCol = (seg == 0 || dragged) ? themeAccentCol : switchOffKnob;
+                        for (int b = -1; b <= 1; ++b) {
+                            drawUiElement(vpPanel, g.cx, g.cy + 0.008f * static_cast<float>(b), 0.012f, 0.0018f,
+                                          UiShape::RoundedBox, gripCol, 1.0f);
+                        }
+                        const UiRect t = hub::shortcutZone(hc, 1);
+                        const bool on = row.stepIdx != 0;
+                        if (seg == 1) drawGlow(vpPanel, t.cx, t.cy, 0.030f, 0.014f, 0.008f, hovGlow);
+                        drawUiElement(vpPanel, t.cx, t.cy, 0.030f, 0.014f, UiShape::RoundedBox,
+                                      on ? switchOnTrack : switchOffTrack, 1.0f);
+                        drawUiElement(vpPanel, t.cx + (on ? 0.016f : -0.016f), t.cy, 0.011f, 0.011f, UiShape::RoundedBox,
+                                      on ? knobOn : switchOffKnob, 1.0f);
+                        const float delArmed[4] = {0.70f, 0.18f, 0.18f, 0.95f};
+                        for (int z = 2; z <= 3; ++z) {
+                            const UiRect bz = hub::shortcutZone(hc, z);
+                            const bool armed = (z == 3 && row.steps != 0);
+                            const float* bBg = armed ? delArmed : (seg == z ? glassCardHoverT.data() : glassCardT.data());
+                            drawUiElement(vpPanel, bz.cx, bz.cy, bz.hw, bz.hh, UiShape::RoundedBox, bBg, 1.0f,
+                                          0.010f / bz.hh, seg == z ? tabActiveBord : kGlassRimFaint);
+                        }
+                    }
+                    continue;
+                }
+
                 if (hov) {
                     drawGlow(vpPanel, L.cx, L.cy, kSetCardHalfW, L.halfH, 0.016f, hovGlow, cardR * 0.6f);
                 }
@@ -7236,6 +7299,29 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                                      row.value == "Right controller off" || row.value == "Controllers off";
                 const float* valueCol = (en && !unbound) ? themeTextCol : dimCol;
                 const float ctrlLeft = L.cx - kSetCtrlHalfW;
+
+                if (settingsCompact_) {
+                    const hub::SettingsCard hc = hub::settingsCard(i, layoutN, settingsCompact_);
+                    const float left = hc.cx - hc.halfW;
+                    if (row.kind == kSettingsKindShortcut) {
+                        withHeadingFont([&] {
+                            drawFit(left + hub::kShortcutNameX, hc.cy, 0.30f, L.textSc, labelCol, row.label);
+                        });
+                        drawFit(left + hub::kShortcutUrlX, hc.cy, 0.53f, L.textSc * 0.90f, row.value.empty() ? dimCol : slateCol,
+                                row.value.empty() ? std::string("Address asked on first use") : row.value);
+                        const UiRect e = hub::shortcutZone(hc, 2);
+                        drawFitCentered(e.cx, e.cy, e.hw * 2.0f - 0.01f, L.textSc * 0.85f, themeTextCol, "Edit");
+                        const UiRect d = hub::shortcutZone(hc, 3);
+                        drawFitCentered(d.cx, d.cy, d.hw * 2.0f - 0.01f, L.textSc * 0.85f, themeTextCol,
+                                        row.steps != 0 ? "Sure?" : "Delete");
+                    } else {
+                        drawFit(left + 0.040f, hc.cy, 0.60f, L.textSc, labelCol, row.label);
+                        if (!row.value.empty()) {
+                            drawFit(left + hub::kShortcutUrlX, hc.cy, 0.53f, L.textSc * 0.90f, slateCol, row.value);
+                        }
+                    }
+                    continue;
+                }
 
                 if (row.kind == kOption) {
                     drawFit(ctrlLeft, L.cy, 0.50f, L.textSc,
