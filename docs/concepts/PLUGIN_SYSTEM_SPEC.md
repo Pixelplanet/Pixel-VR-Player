@@ -273,7 +273,18 @@ Branch `feature/plugin-system`, worktree `C:\Projects\PixelVRPlayer-plugins` (ba
 `research/steam-cloud-workshop-haptics`, which is `origin/main` + research docs). Headset builds
 go to `~/pixelvr-src-plugins` (never `~/pixelvr-src`, which belongs to the other agent).
 - [x] Spec v1 written and decisions recorded.
-- [ ] Phase 1 host core (`src/plugins/plugin_host.*`, app hook, Plugins page, example plugin, SDK).
+- [~] Phase 1 host core.
+  - [x] `src/plugins/plugin_host.{hpp,cpp}`: discovery, manifests, config, spawn (own process
+    group, env scrubbed, stderr → log), restart backoff, hello timeout, shutdown → SIGTERM →
+    SIGKILL, snapshot diffing (open / play / pause / seek / rate / buffer / tick / close), vault
+    rule, credential stripping, notices, gauge storage, `ui.settings`, settings values.
+  - [x] SDK `plugins/sdk/pvr_plugin.hpp` (Io, MediaClock, Screens) + `plugins/example/`.
+  - [x] `tools/plugin_host_test.cpp`: 30 checks, **all pass on the headset** (quick g++ build in
+    `~/pixelvr-src-plugins/qb`):
+    `g++ -std=c++20 -Isrc tools/plugin_host_test.cpp src/plugins/plugin_host.cpp src/util/logging.cpp`.
+  - [ ] App hook (snapshot builder + `update` per frame + `shutdownAll`), notices → notice line.
+  - [ ] Settings → Controls & Input → Plugins page (list, detail, enable, settings, vault grant).
+  - [ ] Full CMake build of the app on the headset in `~/pixelvr-src-plugins`.
 - [ ] Phase 2 settings / files / control.
 - [ ] Phase 3 timeline heat, gauge, quick button.
 - [ ] Phase 4 DeoVR bridge plugin, funscript plugin + fake Intiface tests.

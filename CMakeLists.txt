@@ -142,6 +142,7 @@ add_library(pixelvr_core STATIC
     src/app/vault_manager.cpp
     src/app/playback_memory.cpp
     src/app/browser_host.cpp
+    src/plugins/plugin_host.cpp
     src/app/chromium_installer.cpp
     src/app/app.cpp)
 
@@ -329,6 +330,22 @@ option(PIXELVR_BUILD_TOOLS "Build development tools (tools/remote_fs_test)" OFF)
 if(PIXELVR_BUILD_TOOLS)
     add_executable(remote_fs_test tools/remote_fs_test.cpp)
     target_link_libraries(remote_fs_test PRIVATE pixelvr_core)
+    add_executable(plugin_host_test tools/plugin_host_test.cpp)
+    target_link_libraries(plugin_host_test PRIVATE pixelvr_core)
+endif()
+
+# First-party plugins (docs/concepts/PLUGIN_SYSTEM_SPEC.md). Each lands in
+# build/plugins/<name>/ next to its plugin.json; they are released as separate
+# .pvrplugin downloads, never inside the player package.
+option(PIXELVR_BUILD_PLUGINS "Build the first-party plugins (plugins/)" ON)
+if(PIXELVR_BUILD_PLUGINS AND UNIX)
+    foreach(plugin example)
+        add_executable(pvr-plugin-${plugin} plugins/${plugin}/main.cpp)
+        set_target_properties(pvr-plugin-${plugin} PROPERTIES
+            OUTPUT_NAME ${plugin}
+            RUNTIME_OUTPUT_DIRECTORY "${CMAKE_BINARY_DIR}/plugins/${plugin}")
+        configure_file(plugins/${plugin}/plugin.json "${CMAKE_BINARY_DIR}/plugins/${plugin}/plugin.json" COPYONLY)
+    endforeach()
 endif()
 
 # ---------------------------------------------------------------------------

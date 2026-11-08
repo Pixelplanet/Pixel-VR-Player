@@ -1,0 +1,17 @@
+{
+  "id": "org.pixelvr.example",
+  "name": "Example plugin",
+  "version": "0.1.0",
+  "api": 1,
+  "description": "Shows what plugins can see and do: a progress gauge for the screen you hear, a notice when a file opens, and a log of every event.",
+  "author": "Pixel VR Player",
+  "homepage": "https://github.com/Pixelplanet/Pixel-VR-Player",
+  "license": "MIT",
+  "exec": ["example"],
+  "permissions": ["playback", "ui"],
+  "settings": [
+    { "key": "verbose", "type": "toggle", "label": "Log every event", "default": false },
+    { "key": "gauge", "type": "segmented", "label": "Gauge shows", "options": ["Progress", "Seconds"], "default": 0 },
+    { "key": "hello", "type": "action", "label": "Say hello" }
+  ]
+}
