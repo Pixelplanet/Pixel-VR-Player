@@ -53,14 +53,17 @@ std::once_flag g_env_once;
 
 // Plex media URLs carry the account token; never write it out.
 std::string redact_token(std::string_view in) {
-    static constexpr std::string_view kTok = "X-Plex-Token=";
+    // Plex and Jellyfin / Emby account tokens in URLs and auth headers.
     std::string s(in);
-    for (std::size_t p = 0; (p = s.find(kTok, p)) != std::string::npos;) {
-        p += kTok.size();
-        std::size_t e = p;
-        while (e < s.size() && s[e] != '&' && s[e] != '"' && s[e] != ' ' && s[e] != '\n') ++e;
-        s.replace(p, e - p, "***");
-        p += 3;
+    for (const std::string_view kTok : {std::string_view("X-Plex-Token="), std::string_view("api_key="),
+                                        std::string_view("ApiKey="), std::string_view("Token=\"")}) {
+        for (std::size_t p = 0; (p = s.find(kTok, p)) != std::string::npos;) {
+            p += kTok.size();
+            std::size_t e = p;
+            while (e < s.size() && s[e] != '&' && s[e] != '"' && s[e] != ' ' && s[e] != '\n' && s[e] != '\\') ++e;
+            s.replace(p, e - p, "***");
+            p += 3;
+        }
     }
     return s;
 }

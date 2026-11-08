@@ -1142,7 +1142,9 @@ void App::startPlexPlay(int slot, const BrowserHost::PlexPlay& play) {
     const auto now = std::chrono::steady_clock::now();
     hudDismissed_ = false;  // the dock shows, with the hint above it
     lastControllerActivity_ = now;
-    renderer_.setDockHint("Press Stop or Close to return to Plex", 8.0f);
+    renderer_.setDockHint(play.service == "jellyfin" ? "Press Stop or Close to return to Jellyfin"
+                                                     : "Press Stop or Close to return to Plex",
+                          8.0f);
     sc.plexReportAt = now + std::chrono::seconds(10);
     webHosts_[slot].plexTimeline("playing", static_cast<int64_t>(play.offset * 1000.0));
     PIXELVR_LOG_INFO("Plex: playing \"%s\" on screen %d", play.title.c_str(), slot + 1);

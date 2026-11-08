@@ -75,13 +75,16 @@ namespace {
 using Clock = std::chrono::steady_clock;
 
 std::string redactToken(std::string s) {
-    static const std::string kTok = "X-Plex-Token=";
-    for (size_t p = 0; (p = s.find(kTok, p)) != std::string::npos;) {
-        p += kTok.size();
-        size_t e = p;
-        while (e < s.size() && s[e] != '&' && s[e] != '"' && s[e] != ' ' && s[e] != '\n') ++e;
-        s.replace(p, e - p, "***");
-        p += 3;
+    // Plex and Jellyfin / Emby account tokens in URLs and auth headers.
+    for (const char* kTok : {"X-Plex-Token=", "api_key=", "ApiKey=", "Token=\""}) {
+        const std::string tok = kTok;
+        for (size_t p = 0; (p = s.find(tok, p)) != std::string::npos;) {
+            p += tok.size();
+            size_t e = p;
+            while (e < s.size() && s[e] != '&' && s[e] != '"' && s[e] != ' ' && s[e] != '\n' && s[e] != '\\') ++e;
+            s.replace(p, e - p, "***");
+            p += 3;
+        }
     }
     return s;
 }
@@ -1082,8 +1085,30 @@ int runScreen(const ScreenOptions& opt) {
         Clock::time_point closeAt{};
         Clock::time_point returnCheckAt{};
         long long stoppedMs = 0;
+        // Jellyfin (Jellyfin Web in the page): same hand-off, its own API (docs/concepts/JELLYFIN_PLAN.md).
+        std::string service = "plex";  // plex | jellyfin
+        std::string jfItem, jfMediaSource, jfPlaySession, jfAuth, jfMethod;
+        bool jfStarted = false;
+        Clock::time_point anyPressAt{};  // the user's last press anywhere in a page
     } plex;
     auto plexTimeline = [&](const std::string& state, long long ms) {
+        if (plex.service == "jellyfin") {
+            // /Sessions/Playing once, then .../Progress; .../Stopped at the end (ticks: 100 ns).
+            const std::string path = state == "stopped" ? "/Sessions/Playing/Stopped"
+                                     : plex.jfStarted   ? "/Sessions/Playing/Progress"
+                                                        : "/Sessions/Playing";
+            if (state != "stopped") plex.jfStarted = true;
+            const std::string body = "{\"ItemId\":" + pvrjson::quote(plex.jfItem) + ",\"MediaSourceId\":" +
+                                     pvrjson::quote(plex.jfMediaSource) + ",\"PlaySessionId\":" +
+                                     pvrjson::quote(plex.jfPlaySession) + ",\"PositionTicks\":" +
+                                     std::to_string(ms * 10000LL) + ",\"IsPaused\":" +
+                                     (state == "paused" ? "true" : "false") + ",\"CanSeek\":true,\"PlayMethod\":" +
+                                     pvrjson::quote(plex.jfMethod) + "}";
+            evalIn(plex.session, "fetch(" + pvrjson::quote(plex.base + path) + ",{method:'POST',headers:{'Authorization':" +
+                                     pvrjson::quote(plex.jfAuth) + ",'Content-Type':'application/json'},body:" +
+                                     pvrjson::quote(body) + "}).catch(()=>0)&&0");
+            return;
+        }
         evalIn(plex.session,
                "fetch(" + pvrjson::quote(plex.base + "/:/timeline?ratingKey=" + plex.ratingKey + "&key=" +
                                          urlEncode(plex.key) + "&state=" + state + "&time=" + std::to_string(ms) +
@@ -1541,6 +1566,120 @@ int runScreen(const ScreenOptions& opt) {
             const pvrjson::Value* req = params->get("request");
             if (ti < 0 || !req) return;
             const std::string url = req->getString("url");
+            // Jellyfin Web: pressing play POSTs /Items/{id}/PlaybackInfo with IsPlayback=true.
+            const size_t itemsAt = url.find("/Items/");
+            const size_t infoAt = url.find("/PlaybackInfo");
+            if (itemsAt != std::string::npos && infoAt != std::string::npos && infoAt > itemsAt &&
+                req->getString("method") == "POST") {
+                const std::string body = req->getString("postData");
+                std::string isPlayback = queryParam(url, "IsPlayback");
+                if (isPlayback.empty()) isPlayback = queryParam(url, "isPlayback");
+                const bool playback = isPlayback == "true" || body.find("\"IsPlayback\":true") != std::string::npos;
+                const auto nowT = Clock::now();
+                if (!playback || plex.anyPressAt == Clock::time_point{} || nowT - plex.anyPressAt > std::chrono::seconds(4)) {
+                    return;
+                }
+                std::string token = queryParam(url, "api_key");
+                if (token.empty()) token = queryParam(url, "ApiKey");
+                if (const pvrjson::Value* h = req->get("headers"); h && token.empty()) {
+                    for (const auto& kv : h->object) {
+                        std::string k = kv.first;
+                        for (char& c : k) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                        const std::string& v = kv.second.str;
+                        if (k == "x-emby-token" || k == "x-mediabrowser-token") token = v;
+                        if ((k == "authorization" || k == "x-emby-authorization") && v.find("Token=\"") != std::string::npos) {
+                            const size_t s = v.find("Token=\"") + 7;
+                            token = v.substr(s, v.find('"', s) - s);
+                        }
+                    }
+                }
+                const std::string itemId = url.substr(itemsAt + 7, infoAt - itemsAt - 7);
+                if (token.empty() || itemId.empty() || itemId.find('/') != std::string::npos) return;
+                std::string user = queryParam(url, "UserId");
+                if (user.empty()) user = queryParam(url, "userId");
+                long long startTicks = std::atoll(queryParam(url, "StartTimeTicks").c_str());
+                if (const size_t st = body.find("\"StartTimeTicks\":"); st != std::string::npos) {
+                    startTicks = std::atoll(body.c_str() + st + 17);
+                }
+                plex.service = "jellyfin";
+                plex.intercepted = true;
+                plex.restoring = false;
+                plex.session = session;
+                plex.base = url.substr(0, itemsAt);
+                plex.token = token;
+                plex.url = tabs[ti].url;
+                plex.jfItem = itemId;
+                plex.jfStarted = false;
+                plex.jfAuth = "MediaBrowser Client=\"Pixel VR Player\", Device=\"Steam Frame\", DeviceId=\"pixelvr-" +
+                              std::to_string(getpid()) + "\", Version=\"1\", Token=\"" + token + "\"";
+                plex.pauseUntil = Clock::now() + std::chrono::seconds(15);
+                // Our own PlaybackInfo, with a profile matching our decoders; Direct Play is decided
+                // below from the streams (our FFmpeg plays DTS / DVD subtitles Jellyfin would transcode).
+                static const char* kProfile =
+                    "{\"DeviceProfile\":{\"Name\":\"Pixel VR Player\",\"MaxStreamingBitrate\":400000000,"
+                    "\"MaxStaticBitrate\":400000000,\"DirectPlayProfiles\":[{\"Type\":\"Video\","
+                    "\"Container\":\"mkv,mp4,m4v,mov,webm,ts\",\"VideoCodec\":\"h264,hevc,vp9,av1\","
+                    "\"AudioCodec\":\"aac,ac3,eac3,mp3,opus,flac,dts,dca,truehd,vorbis,pcm_s16le,pcm_s24le\"}],"
+                    "\"TranscodingProfiles\":[{\"Type\":\"Video\",\"Container\":\"ts\",\"Protocol\":\"hls\","
+                    "\"VideoCodec\":\"hevc,h264\",\"AudioCodec\":\"aac\",\"Context\":\"Streaming\","
+                    "\"MaxAudioChannels\":\"6\",\"BreakOnNonKeyFrames\":true}],"
+                    "\"SubtitleProfiles\":[{\"Format\":\"srt\",\"Method\":\"Embed\"},{\"Format\":\"subrip\",\"Method\":\"Embed\"},"
+                    "{\"Format\":\"ass\",\"Method\":\"Embed\"},{\"Format\":\"ssa\",\"Method\":\"Embed\"},"
+                    "{\"Format\":\"pgssub\",\"Method\":\"Embed\"},{\"Format\":\"dvdsub\",\"Method\":\"Embed\"},"
+                    "{\"Format\":\"vtt\",\"Method\":\"Embed\"}]}}";
+                const std::string js =
+                    "(async()=>{const b=" + pvrjson::quote(plex.base) + ",h={'Authorization':" + pvrjson::quote(plex.jfAuth) +
+                    ",'Content-Type':'application/json'},id=" + pvrjson::quote(itemId) + ";"
+                    "let u=" + pvrjson::quote(user) + ";if(!u)u=(await (await fetch(b+'/Users/Me',{headers:h})).json()).Id;"
+                    "const it=await (await fetch(b+'/Items/'+id+'?userId='+u,{headers:h})).json();"
+                    "const pi=await (await fetch(b+'/Items/'+id+'/PlaybackInfo?UserId='+u+'&IsPlayback=true&AutoOpenLiveStream=true',"
+                    "{method:'POST',headers:h,body:" + pvrjson::quote(kProfile) + "})).json();"
+                    "const m=pi.MediaSources[0],v=(m.MediaStreams||[]).find(s=>s.Type==='Video')||{};"
+                    "return JSON.stringify({title:it.SeriesName?it.SeriesName+' - '+it.Name:it.Name,"
+                    "ticks:it.RunTimeTicks||m.RunTimeTicks||0,msid:m.Id,session:pi.PlaySessionId||'',"
+                    "container:(m.Container||'').toLowerCase(),vcodec:(v.Codec||'').toLowerCase(),turl:m.TranscodingUrl||''})})()";
+                evalIn(session, js, [&, session, startTicks](const pvrjson::Value* v) {
+                    pvrjson::Value info;
+                    if (!v || v->type != pvrjson::Value::Type::String || !pvrjson::parse(v->str, info) ||
+                        info.getString("msid").empty()) {
+                        std::fprintf(stderr, "jellyfin: PlaybackInfo failed\n");
+                        plex.intercepted = false;
+                        plex.pauseUntil = {};
+                        evalIn(session, "(()=>{for(const m of document.querySelectorAll('video,audio'))m.play()})()");
+                        return;
+                    }
+                    const std::string vc = info.getString("vcodec");
+                    const std::string ct = info.getString("container");
+                    const bool videoOk = vc == "h264" || vc == "hevc" || vc == "h265" || vc == "vp9" || vc == "av1";
+                    bool containerOk = false;
+                    for (const char* c : {"mkv", "matroska", "mp4", "m4v", "mov", "webm", "mpegts", "ts"}) {
+                        containerOk = containerOk || ct.find(c) != std::string::npos;
+                    }
+                    plex.jfMediaSource = info.getString("msid");
+                    plex.jfPlaySession = info.getString("session");
+                    std::string playUrl;
+                    if ((videoOk && containerOk) || info.getString("turl").empty()) {
+                        plex.jfMethod = "DirectPlay";
+                        playUrl = plex.base + "/Videos/" + plex.jfItem + "/stream?static=true&MediaSourceId=" +
+                                  plex.jfMediaSource + "&api_key=" + plex.token;
+                    } else {
+                        plex.jfMethod = "Transcode";
+                        playUrl = plex.base + info.getString("turl");
+                        if (playUrl.find("api_key=") == std::string::npos && playUrl.find("ApiKey=") == std::string::npos) {
+                            playUrl += (playUrl.find('?') == std::string::npos ? "?api_key=" : "&api_key=") + plex.token;
+                        }
+                    }
+                    plex.durationMs = static_cast<long long>(info.getNumber("ticks") / 10000.0);
+                    char nums[96];
+                    std::snprintf(nums, sizeof(nums), "%.3f,\"duration\":%.3f,\"service\":\"jellyfin\"}",
+                                  static_cast<double>(startTicks) / 1e7, plex.durationMs / 1000.0);
+                    std::fprintf(stderr, "jellyfin: %s %s/%s\n", plex.jfMethod.c_str(), ct.c_str(), vc.c_str());
+                    emitLine("plex {\"url\":" + pvrjson::quote(playUrl) + ",\"title\":" +
+                             pvrjson::quote(info.getString("title")) + ",\"offset\":" + nums);
+                }, true);
+                return;
+            }
+            plex.service = "plex";
             if (url.find("/video/:/transcode/universal/decision") == std::string::npos &&
                 url.find("/video/:/transcode/universal/start") == std::string::npos) {
                 return;
@@ -1849,6 +1988,7 @@ int runScreen(const ScreenOptions& opt) {
         auto notePlayIntent = [&](const std::string& session, const std::string& target) {
             if (!plex.enabled || session.empty() || session == toolbar) return;
             const auto pressedAt = Clock::now();
+            plex.anyPressAt = pressedAt;  // Jellyfin Web never starts playback by itself: any recent press counts
             const std::string js =
                 "(()=>{const re=/(^|[^A-Za-z])([Pp]lay(?!er)|[Rr]esume)/;"
                 "let e=" + target + ";for(let i=0;e&&i<7;i++,e=e.parentElement){"
@@ -2155,8 +2295,9 @@ int runScreen(const ScreenOptions& opt) {
         }
         if (plex.closeAt != Clock::time_point{} && now >= plex.closeAt) {
             plex.closeAt = {};
+            // Jellyfin Web's player leaves on Escape (sent already) / history.back() (returnCheckAt).
             // Plex ignores synthetic clicks: press its "Close Player" button with real input.
-            evalIn(plex.session,
+            if (plex.service != "jellyfin") evalIn(plex.session,
                    "(()=>{const b=document.querySelector('[data-testid=closeButton]');if(!b)return null;"
                    "const r=b.getBoundingClientRect();return [r.x+r.width/2,r.y+r.height/2]})()",
                    [&, session = plex.session](const pvrjson::Value* v) {

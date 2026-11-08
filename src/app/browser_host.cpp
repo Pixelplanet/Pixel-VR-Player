@@ -440,6 +440,7 @@ void BrowserHost::handleLine(const std::string& line) {
             p.title = v.getString("title");
             p.offset = v.getNumber("offset");
             p.duration = v.getNumber("duration");
+            if (!v.getString("service").empty()) p.service = v.getString("service");
             plexPlays_.push_back(std::move(p));
         }
     } else if (cmd == "savefile") {

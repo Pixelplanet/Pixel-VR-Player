@@ -78,8 +78,8 @@ from the user for an end-to-end test.
 
 ## Progress
 - [x] Plan (this file).
-- [ ] Helper: detection, PlaybackInfo, URL, emit, timeline dispatch, return, redaction.
-- [ ] App: dock hint text by service; no other app change expected.
+- [x] Helper: detection (IsPlayback + press within 4 s), own PlaybackInfo, Direct Play decision, emit, /Sessions/Playing* timeline, return, token redaction (helper + app log). Written, not yet built.
+- [x] App: `PlexPlay.service`, dock hint "return to Jellyfin".
 - [ ] Build on the headset (separate dir `~/pixelvr-src-jellyfin`), standalone helper test
       against TheVault (needs a Jellyfin login).
 - [ ] Rail shortcut + address setting.

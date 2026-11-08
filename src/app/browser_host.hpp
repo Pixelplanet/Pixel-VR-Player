@@ -119,6 +119,7 @@ public:
         std::string title;
         double offset = 0.0;
         double duration = 0.0;
+        std::string service = "plex";  // plex | jellyfin (same hand-off, docs/concepts/JELLYFIN_PLAN.md)
     };
     void setPlexNative(bool on);
     bool takePlexPlay(PlexPlay& out);
