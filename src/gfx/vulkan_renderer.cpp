@@ -89,14 +89,22 @@ constexpr uint32_t kMaxGlyphsPerView = 16384;
 // Button labels (layoutButtonLabels / drawButtonLabels): their whole look in
 // one place. Sizes in metres; colours are straight RGBA, their alpha is
 // further multiplied by the fade in / out.
-constexpr float kLabelTextH = 0.009f;   // text ascent
-constexpr float kLabelPadX = 0.006f;    // card padding around the text
-constexpr float kLabelPadY = 0.0038f;
+constexpr float kLabelTextH = 0.010f;   // text ascent (SemiBold, the heading atlas)
+constexpr float kLabelPadX = 0.0055f;   // card padding around the text
+constexpr float kLabelPadY = 0.0035f;
 constexpr float kLabelCardCorner = 0.5f;  // corner radius, share of the shorter half side
 constexpr float kLabelRimW = 0.0006f;     // card rim width
 constexpr float kLabelCardCol[4] = {0.11f, 0.11f, 0.12f, 0.80f};  // dark translucent grey
 constexpr float kLabelRimCol[4] = {1.0f, 1.0f, 1.0f, 0.16f};      // faint light rim
-constexpr float kLabelTextCol[4] = {0.96f, 0.96f, 0.96f, 1.0f};
+constexpr float kLabelTextCol[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+// Label text edge (text.frag small-text mode): ramp width per sample in
+// screen pixels, four samples over the pixel (the atlas has no mips and is
+// minified ~3x at arm's length), so the edge is ~0.7 px wide in all; a
+// contrast exponent on the coverage against the linear-light blend; and a
+// little stem thickening so thin strokes keep their weight.
+constexpr float kLabelTextEdgePx = 0.4f;
+constexpr float kLabelTextContrast = 1.25f;
+constexpr float kLabelTextStemPx = 0.2f;
 constexpr float kLabelLineW = 0.001f;     // leader line width
 constexpr float kLabelLineCol[4] = {0.85f, 0.85f, 0.85f, 0.60f};
 // The line stops at the button instead of covering its print: round parts
@@ -3015,7 +3023,9 @@ void VulkanRenderer::updatePointer() {
 bool VulkanRenderer::uploadFontAtlas(const FontAtlas& atlas, VkImage& image,
                                      VkDeviceMemory& memory, VkImageView& view) {
     // R8 SDF atlas. Signed-distance text is scale-independent (the shader does
-    // screen-space AA), so one level stays crisp without any mip blur.
+    // screen-space AA), so one level stays crisp without any mip blur; small
+    // text that minifies it several times (the button labels) takes four
+    // samples per pixel in text.frag instead of a mip level.
     const uint32_t mipLevels = 1;
     VkImageCreateInfo img{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     img.imageType = VK_IMAGE_TYPE_2D;
@@ -3695,9 +3705,16 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
     // them out of the eye buffers), rendered with exactly these views: their
     // quads below are placed from the same poses and FOVs.
     // Each eye renders and submits only the sub-rect of its image that the
-    // models, cards, lines and rings project to (at the eye buffers' current
-    // pixel density), and its quad covers exactly that part of the frustum;
-    // an eye that sees none of it gets no layer at all.
+    // models, cards, lines and rings project to, and its quad covers exactly
+    // that part of the frustum; an eye that sees none of it gets no layer at
+    // all.
+    // Pixel density: the swapchain's full density whatever the adaptive eye
+    // scale (the crop is small, and the labels' small text needs every
+    // pixel). Only a large crop (controllers right in front of the face) is
+    // rendered at a lower density, keeping each eye's rect to about
+    // kModelLayerMaxShare of a full view, and never below the eye buffers'
+    // own density this frame. Both eyes use the same density.
+    constexpr float kModelLayerMaxShare = 0.30f;
     struct ModelEye {
         bool pending = false;
         uint32_t image = 0;
@@ -3707,31 +3724,71 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
     };
     ModelEye modelEye[2];
     bool modelPending = false;
+    float modelQuadDist = modelLayerDist_;
     if (modelLayerThisFrame_ && modelLayerReady_ && viewCount == 2) {
+        TanRect bounds[2];
+        bool seen[2] = {false, false};
+        float share = 0.0f;               // largest crop, as a share of its view
+        float nearD = 1e9f, farD = 0.0f;  // content depth range, both eyes
+        float eyeSx[2] = {1.0f, 1.0f}, eyeSy[2] = {1.0f, 1.0f};
         for (uint32_t e = 0; e < 2; ++e) {
-            ModelEye& me = modelEye[e];
             const ViewTargets& mt = modelTargets_[e];
-            TanRect b;
-            if (mt.width <= 0 || mt.height <= 0 || !modelLayerBounds(views[e], b)) continue;
-            // Same pixel density as the eye buffers this frame.
-            float sx = 1.0f, sy = 1.0f;
+            float n = 0.0f, f = 0.0f;
+            if (mt.width <= 0 || mt.height <= 0 || !modelLayerBounds(views[e], bounds[e], &n, &f)) continue;
+            const XrFovf& fov = views[e].fov;
+            const float tl = std::tan(fov.angleLeft), tr = std::tan(fov.angleRight);
+            const float tu = std::tan(fov.angleUp), td = std::tan(fov.angleDown);
+            if (tr - tl <= 1e-6f || tu - td <= 1e-6f) continue;
+            seen[e] = true;
+            share = std::max(share, (bounds[e].r - bounds[e].l) / (tr - tl) * ((bounds[e].u - bounds[e].d) / (tu - td)));
+            nearD = std::min(nearD, n);
+            farD = std::max(farD, f);
+            // The eye buffers' density this frame (the floor).
             if (e < xr.swapchains().size()) {
                 const ViewSwapchain& es = xr.swapchains()[e];
                 if (es.width > 0 && es.renderWidth > 0) {
-                    sx = static_cast<float>(es.renderWidth) / static_cast<float>(es.width);
+                    eyeSx[e] = std::min(static_cast<float>(es.renderWidth) / static_cast<float>(es.width), 1.0f);
                 }
                 if (es.height > 0 && es.renderHeight > 0) {
-                    sy = static_cast<float>(es.renderHeight) / static_cast<float>(es.height);
+                    eyeSy[e] = std::min(static_cast<float>(es.renderHeight) / static_cast<float>(es.height), 1.0f);
                 }
             }
-            me.fullW = std::clamp(static_cast<int32_t>(std::lround(static_cast<float>(mt.width) * std::min(sx, 1.0f))),
-                                  1, mt.width);
-            me.fullH = std::clamp(static_cast<int32_t>(std::lround(static_cast<float>(mt.height) * std::min(sy, 1.0f))),
-                                  1, mt.height);
+        }
+        const float density = share > kModelLayerMaxShare ? std::sqrt(kModelLayerMaxShare / share) : 1.0f;
+
+        // Quad distance: the content's depth, so the compositor's positional
+        // reprojection of the quad matches the models and cards. Of the depth
+        // range, the point halfway in diopters (equal worst-case error at the
+        // near and the far end), clamped and lightly smoothed in diopters
+        // (snapped after a gap).
+        if (seen[0] || seen[1]) {
+            const auto now = std::chrono::steady_clock::now();
+            const float target = std::clamp(2.0f / (1.0f / std::max(nearD, 0.05f) + 1.0f / std::max(farD, 0.05f)),
+                                            kModelLayerMinDist, kModelLayerMaxDist);
+            const float gap = modelLayerDistT_.time_since_epoch().count() != 0
+                                  ? std::chrono::duration<float>(now - modelLayerDistT_).count()
+                                  : 1.0f;
+            if (gap > 0.25f) {
+                modelLayerDist_ = target;
+            } else {
+                const float k = 1.0f - std::exp(-std::max(gap, 0.0f) / 0.06f);
+                modelLayerDist_ = 1.0f / (1.0f / modelLayerDist_ + (1.0f / target - 1.0f / modelLayerDist_) * k);
+            }
+            modelLayerDistT_ = now;
+            modelQuadDist = modelLayerDist_;
+        }
+
+        for (uint32_t e = 0; e < 2; ++e) {
+            if (!seen[e]) continue;
+            ModelEye& me = modelEye[e];
+            const ViewTargets& mt = modelTargets_[e];
+            const TanRect& b = bounds[e];
+            const float sx = std::max(density, eyeSx[e]), sy = std::max(density, eyeSy[e]);
+            me.fullW = std::clamp(static_cast<int32_t>(std::lround(static_cast<float>(mt.width) * sx)), 1, mt.width);
+            me.fullH = std::clamp(static_cast<int32_t>(std::lround(static_cast<float>(mt.height) * sy)), 1, mt.height);
             const XrFovf& f = views[e].fov;
             const float tl = std::tan(f.angleLeft), tr = std::tan(f.angleRight);
             const float tu = std::tan(f.angleUp), td = std::tan(f.angleDown);
-            if (tr - tl <= 1e-6f || tu - td <= 1e-6f) continue;
             const float fw = static_cast<float>(me.fullW), fh = static_cast<float>(me.fullH);
             // Image rows run top (tan up) to bottom; a few pixels of margin
             // for anti-aliasing.
@@ -3971,18 +4028,20 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
         }
         if (submitted) {
             // After the screens and the UI, under the beams and the cursor:
-            // per eye, a quad on that view's image plane at kModelLayerDist
-            // (perpendicular to its view axis, covering exactly the frustum of
-            // the rendered sub-rect), so it shows the rendered pixels 1:1 and the compositor
-            // reprojects it as world-locked content. 0.5 m: about where the
-            // hands are (least reprojection error for the models) and nearer
-            // than any screen (2 m at the closest) or the UI panel, so a
-            // compositor that orders layers by depth still puts it in front.
+            // per eye, a quad on that view's image plane at the content's
+            // depth (modelQuadDist, perpendicular to its view axis, covering
+            // exactly the frustum of the rendered sub-rect), so it shows the
+            // rendered pixels 1:1 and the compositor reprojects it as
+            // world-locked content at about the models' and cards' distance
+            // (least positional reprojection error). The image is the same at
+            // any distance; only the reprojection changes. Layers composite
+            // in submission order; at 1.5 m at most it is still nearer than
+            // any screen (2 m at the closest).
             for (uint32_t e = 0; e < 2; ++e) {
                 const ModelEye& me = modelEye[e];
                 if (!me.pending) continue;
                 const XrView& v = views[e];
-                const float d = kModelLayerDist;
+                const float d = modelQuadDist;
                 const float tl = me.tan.l, tr = me.tan.r;
                 const float tu = me.tan.u, td = me.tan.d;
                 const Quat q{v.pose.orientation.x, v.pose.orientation.y, v.pose.orientation.z,
@@ -8218,7 +8277,7 @@ bool VulkanRenderer::controllerModelsInView(const XrView* views, uint32_t viewCo
     return false;
 }
 
-bool VulkanRenderer::modelLayerBounds(const XrView& view, TanRect& out) const {
+bool VulkanRenderer::modelLayerBounds(const XrView& view, TanRect& out, float* nearD, float* farD) const {
     using namespace math;
     const XrFovf& f = view.fov;
     const float tl = std::tan(f.angleLeft), tr = std::tan(f.angleRight);
@@ -8227,36 +8286,57 @@ bool VulkanRenderer::modelLayerBounds(const XrView& view, TanRect& out) const {
                    view.pose.orientation.w};
     const Vec3 eye{view.pose.position.x, view.pose.position.y, view.pose.position.z};
     float minX = 1e9f, maxX = -1e9f, minY = 1e9f, maxY = -1e9f;
+    float minD = 1e9f, maxD = 0.0f;
     bool any = false;
-    auto put = [&](float x, float y) {
+    auto put = [&](float x, float y, float d) {
         minX = std::min(minX, x);
         maxX = std::max(maxX, x);
         minY = std::min(minY, y);
         maxY = std::max(maxY, y);
+        minD = std::min(minD, d);
+        maxD = std::max(maxD, d);
         any = true;
     };
     // Everything drawn is convex pieces given by their corners. Each piece is
     // clipped against the projection's near plane (as drawControllerModels /
     // drawButtonLabels draw it): its corners in front of the plane plus the
     // points where the segments between corners cross it bound what is drawn.
-    // A piece wholly behind the plane adds nothing.
+    // A piece wholly behind the plane adds nothing, and so does a piece whose
+    // bounds miss the view: an unseen hand (hanging at the side, near the
+    // face) must neither widen the crop nor pull the quad distance in.
     constexpr float kNear = 0.05f;
     auto piece = [&](const Vec3* w, int n) {
         Vec3 p[8];
         n = std::min(n, 8);
         for (int i = 0; i < n; ++i) p[i] = rotate(inv, w[i] - eye);  // view space: -Z forward
+        float pl = 1e9f, pr = -1e9f, pd = 1e9f, pu = -1e9f, pn = 1e9f, pf = 0.0f;
+        bool pAny = false;
+        auto acc = [&](float x, float y, float d) {
+            pl = std::min(pl, x);
+            pr = std::max(pr, x);
+            pd = std::min(pd, y);
+            pu = std::max(pu, y);
+            pn = std::min(pn, d);
+            pf = std::max(pf, d);
+            pAny = true;
+        };
         for (int i = 0; i < n; ++i) {
             const float d = -p[i].z;
-            if (d >= kNear) put(p[i].x / d, p[i].y / d);
+            if (d >= kNear) acc(p[i].x / d, p[i].y / d, d);
         }
         for (int i = 0; i < n; ++i) {
             for (int j = i + 1; j < n; ++j) {
                 const float di = -p[i].z, dj = -p[j].z;
                 if ((di >= kNear) == (dj >= kNear)) continue;
                 const Vec3 c = p[i] + (p[j] - p[i]) * ((kNear - di) / (dj - di));
-                put(c.x / kNear, c.y / kNear);
+                acc(c.x / kNear, c.y / kNear, kNear);
             }
         }
+        // The clipped piece lies within the hull of these points, so a rect
+        // that misses the view means nothing of it is seen.
+        if (!pAny || pr < tl || pl > tr || pu < td || pd > tu) return;
+        put(pl, pd, pn);
+        put(pr, pu, pf);
     };
     for (int h = 0; h < 2; ++h) {
         const ControllerVis& c = controllers_[h];
@@ -8308,6 +8388,8 @@ bool VulkanRenderer::modelLayerBounds(const XrView& view, TanRect& out) const {
     }
     // Near-plane points can project far outside; the FOV clamp bounds them.
     if (!any) return false;
+    if (nearD != nullptr) *nearD = minD;
+    if (farD != nullptr) *farD = maxD;
     out.l = std::max(minX, tl);
     out.r = std::min(maxX, tr);
     out.d = std::max(minY, td);
@@ -9112,6 +9194,10 @@ void VulkanRenderer::drawButtonLabels(const XrView& view, void* glyphs, VkBuffer
         TextPush tp{};
         const Mat4 mvp = multiply(vpWorld, frame(d.centre, d.right, d.up, d.normal));
         std::memcpy(tp.mvp, mvp.m, sizeof(tp.mvp));
+        tp.uv[0] = kLabelTextEdgePx;  // small-text mode (text.frag)
+        tp.uv[1] = kLabelTextContrast;
+        tp.uv[2] = kLabelTextStemPx;
+        tp.uv[3] = 1.0f;              // four samples per pixel
         vkCmdPushConstants(commandBuffer_, textPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(TextPush), &tp);
         vkCmdDraw(commandBuffer_, 6, glyphCount - start, 0, start);

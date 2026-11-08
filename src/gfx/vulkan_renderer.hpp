@@ -807,13 +807,20 @@ private:
     // SteamVR composites a further projection layer under the quad layers
     // too. Each eye's image is rendered exactly like that eye's view (its
     // pose and asymmetric FOV), and its quad is that view's image plane at
-    // kModelLayerDist (renderLayersAfter), so it shows the same pixels and
-    // is reprojected as world-locked content. One swapchain per eye at the
-    // eye-buffer size, drawn with renderPass_ (the eye pass's MSAA + depth
-    // targets, cleared transparent) and the same model pipeline. Used only
-    // while the models may be seen and a screen or the UI is a layer;
-    // otherwise they stay in the eye buffers.
-    static constexpr float kModelLayerDist = 0.5f;
+    // the content's depth (renderLayersAfter: modelLayerDist_, from the
+    // controllers' / cards' depth range, clamped to kModelLayerMinDist ..
+    // kModelLayerMaxDist and smoothed), so it shows the same pixels and is
+    // reprojected as world-locked content at about the right distance. One
+    // swapchain per eye at the eye-buffer size, rendered at its full pixel
+    // density (not the adaptive eye scale), drawn with renderPass_ (the eye
+    // pass's MSAA + depth targets, cleared transparent) and the same model
+    // pipeline. Used only while the models may be seen and a screen or the
+    // UI is a layer; otherwise they stay in the eye buffers.
+    static constexpr float kModelLayerDist = 0.5f;  // start / fallback distance
+    static constexpr float kModelLayerMinDist = 0.2f;
+    static constexpr float kModelLayerMaxDist = 1.5f;
+    float modelLayerDist_ = kModelLayerDist;           // smoothed quad distance (metres)
+    std::chrono::steady_clock::time_point modelLayerDistT_{};
     ViewSwapchain modelSwapchains_[2];
     ViewTargets modelTargets_[2];
     bool modelLayerReady_ = false;      // swapchains + framebuffers exist
@@ -830,11 +837,12 @@ private:
     // bounds (x right, y up) of the controller models, button-label cards,
     // leader lines and rings as this view sees them, clipped to its FOV.
     // False when none of it is in the view. Pieces reaching past the near
-    // plane are clipped to it.
+    // plane are clipped to it. nearD / farD (optional): the depth range of
+    // that content along the view axis (metres, near-plane clipped).
     struct TanRect {
         float l = 0.0f, r = 0.0f, d = 0.0f, u = 0.0f;
     };
-    bool modelLayerBounds(const XrView& view, TanRect& out) const;
+    bool modelLayerBounds(const XrView& view, TanRect& out, float* nearD = nullptr, float* farD = nullptr) const;
 
     // Button labels (setButtonLabels). Laid out once per frame in world space
     // (renderLayersBefore), then drawn per view after the models, in the same
