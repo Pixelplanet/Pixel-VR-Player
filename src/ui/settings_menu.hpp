@@ -61,8 +61,6 @@ public:
         CycleLaserSmoothing,
         CycleRoom,
         EnterButtons,       // Controls & Input > Buttons (read-only binding pages)
-        NextButtonsPage,
-        BackToControls,
     };
 
     // How a row's value is presented: the renderer draws a stepped slider for
@@ -115,9 +113,19 @@ public:
     bool showStats() const { return showStats_; }
     // Buttons are assigned in SteamVR only. The app hands over each action's
     // label and its live bound buttons; the Buttons pages show them read-only.
-    void setControlsInfo(std::vector<std::pair<std::string, std::string>> info);
+    // `notice` (e.g. essential actions unbound) replaces the pages' hint line.
+    void setControlsInfo(std::vector<std::pair<std::string, std::string>> info,
+                         std::string notice = std::string());
     void openButtons();               // first Buttons page (Show Controls)
     bool showingButtons() const { return section_ >= kButtonsSection && section_ < kButtonsSection + buttonsPages(); }
+    // Buttons pages: the shown page (0-based, -1 elsewhere) and the page count.
+    int buttonsPage() const { return showingButtons() ? section_ - kButtonsSection : -1; }
+    int buttonsPages() const {
+        return std::max(1, (static_cast<int>(controlsInfo_.size()) + kButtonsPerPage - 1) / kButtonsPerPage);
+    }
+    // Turns the Buttons page by `delta`; wrap = past the last page to the first.
+    // Returns false (nothing changed) at an end without wrap, or off the pages.
+    bool turnButtonsPage(int delta, bool wrap);
     // settings.conf still had the old press-to-bind keys (no longer written);
     // custom = one of them was not its default.
     bool legacyBindingsSeen() const { return legacyBindingsSeen_; }
@@ -231,16 +239,15 @@ private:
     int projectionMode_ = 0;
     int stereoMode_ = 0;
     bool swapEyes_ = false;
-    bool drawModels_ = false;  // off: SteamVR draws the real controllers; laser stays
+    bool drawModels_ = true;   // our models (off: SteamVR draws its own controllers); laser stays
     bool showStats_ = false;
     float screenDistance_ = 4.0f;  // room for several screens without crowding
 
     static constexpr int kButtonsSection = 23;  // 23.. one section per Buttons page
-    static constexpr int kButtonsPerPage = 9;   // + one navigation row (10 fit)
-    int buttonsPages() const {
-        return std::max(1, (static_cast<int>(controlsInfo_.size()) + kButtonsPerPage - 1) / kButtonsPerPage);
-    }
+    static constexpr int kButtonsPerPage = 10;  // all bindings; the header pager turns pages
     std::vector<std::pair<std::string, std::string>> controlsInfo_;  // (action label, bound buttons)
+    std::string controlsNotice_;  // Buttons pages: replaces the hint (unbound essentials)
+    std::string pageHint_;        // the page's own hint in status_ (reset on page change)
     bool legacyBindingsSeen_ = false;
     bool legacyBindingsCustom_ = false;
     int downloadDirIdx_ = 0;   // index into the download-destination presets

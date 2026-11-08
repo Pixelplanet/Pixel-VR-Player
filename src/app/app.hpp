@@ -67,6 +67,12 @@ private:
     std::chrono::steady_clock::time_point navNextRepeatX_{};
     bool scrubbing_ = false;     // dragging the timeline / stick-scrubbing
     double scrubTarget_ = 0.0;   // pending scrub position (seconds)
+    // Web screens only: after a scrub commits, the bar keeps showing the target
+    // until the page reports a time near it (its time trails the seek). Any other
+    // seek clears it (curSeek / curSeekRelative). -1 = no hold.
+    double scrubHoldPos_ = -1.0;
+    int scrubHoldScreen_ = -1;
+    std::chrono::steady_clock::time_point scrubHoldUntil_{};
     std::chrono::steady_clock::time_point perfLastLog_{};
     int perfFrames_ = 0;
     uint64_t perfLastDecoded_ = 0;
@@ -202,6 +208,8 @@ private:
     void refreshControlsInfo();     // Settings > Controls > Buttons: live bindings
     bool buttonsPageShown_ = false;
     uint32_t bindingsGenSeen_ = 0;
+    std::chrono::steady_clock::time_point lastControlsReadT_{};  // Buttons pages: ~1 Hz re-read
+    bool controlsWarn_ = false;  // an essential action is unbound (warning hint)
     bool controlsNoticePending_ = false;  // old in-app button choices were reset
     // Playback D-pad hold-to-repeat: 1 up, 2 down, 3 left, 4 right, 0 none.
     int dpadRepeatDir_ = 0;

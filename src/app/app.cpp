@@ -1333,12 +1333,37 @@ void App::downloadFocusedEntry() {
 }
 
 void App::refreshControlsInfo() {
+    if (xr_.bindingsGeneration() != bindingsGenSeen_ || !buttonsPageShown_) {
+        PIXELVR_LOG_INFO("Controls page: re-reading bindings (gen %u)", xr_.bindingsGeneration());
+    }
     std::vector<std::pair<std::string, std::string>> info;
+    // The actions nothing works without: when SteamVR's active binding lacks one,
+    // the page says how to get the default back.
+    constexpr InputAction kEssential[] = {InputAction::Select, InputAction::PlayOk, InputAction::Back,
+                                          InputAction::MainMenu};
+    std::string missing;
+    int missingCount = 0;
     for (int i = 0; i < static_cast<int>(InputAction::Count); ++i) {
         const InputAction a = static_cast<InputAction>(i);
-        info.emplace_back(XrContext::actionLabel(a), xr_.describeBinding(a));
+        std::string bound = xr_.describeBinding(a);
+        if (bound == "Not bound" && std::find(std::begin(kEssential), std::end(kEssential), a) != std::end(kEssential)) {
+            missing += (missing.empty() ? "" : ", ") + std::string(XrContext::actionLabel(a));
+            ++missingCount;
+        }
+        info.emplace_back(XrContext::actionLabel(a), std::move(bound));
     }
-    settings_.setControlsInfo(std::move(info));
+    std::string notice;
+    if (!missing.empty()) {
+        if (missingCount > 2) missing = "Main buttons";
+        notice = missing + " not bound: choose the default binding in SteamVR > Controllers > "
+                           "Manage Controller Bindings";
+    } else if (const bool l = xr_.handActive(0), r = xr_.handActive(1); !l || !r) {
+        notice = (!l && !r) ? std::string("Both controllers are off: turn them on to see their buttons")
+                            : std::string(!l ? "Left" : "Right") +
+                                  " controller is off: turn it on to see its buttons";
+    }
+    controlsWarn_ = !missing.empty();
+    settings_.setControlsInfo(std::move(info), std::move(notice));
     bindingsGenSeen_ = xr_.bindingsGeneration();
 }
 
@@ -1734,6 +1759,7 @@ bool App::webSeekBlocked() const {
 }
 
 void App::curSeek(double t) {
+    scrubHoldPos_ = -1.0;  // a newer seek replaces any scrub display hold
     if (cur().web) {
         if (!webSeekBlocked()) webHosts_[selectedScreen_].mediaSeek(t);
         return;
@@ -1744,6 +1770,7 @@ void App::curSeek(double t) {
 }
 
 void App::curSeekRelative(double d) {
+    scrubHoldPos_ = -1.0;  // a newer seek replaces any scrub display hold
     if (cur().web) {
         if (!webSeekBlocked()) webHosts_[selectedScreen_].mediaSeekRelative(d);
         return;
@@ -3613,10 +3640,12 @@ int App::run() {
                 }
             }
             // Previous / Next in the hub: the rail tabs (Files, Downloads,
-            // Settings, then the web shortcuts), wrapping.
+            // Settings, then the web shortcuts), wrapping. On the Buttons pages
+            // they turn the page first, then move on past the first / last one.
             if ((in.previous || in.next) && (browser_.isOpen() || settings_.isOpen() || downloadsWindow_) &&
                 pendingDl_.empty() && !actionMenu_.visible) {
-                cycleHubTab(in.next ? 1 : -1);
+                const int dir = in.next ? 1 : -1;
+                if (!(settings_.isOpen() && settings_.turnButtonsPage(dir, false))) cycleHubTab(dir);
                 in.previous = in.next = false;
             }
             // Downloads run on their own thread and keep going while the browser
@@ -4015,14 +4044,20 @@ int App::run() {
             renderer_.setActionMenu(actionMenu_);
 #endif
 
-            // Buttons pages: re-read the live bindings when they open and after
-            // focus returns (they are edited in the SteamVR dashboard).
+            // Buttons pages: re-read the live bindings when they open, after focus
+            // returns or the profile changes, and about once a second while shown
+            // (SteamVR can switch bindings without telling the app).
             {
                 const bool shown = settings_.isOpen() && settings_.showingButtons();
-                if (shown && (!buttonsPageShown_ || xr_.bindingsGeneration() != bindingsGenSeen_)) {
+                if (shown && (!buttonsPageShown_ || xr_.bindingsGeneration() != bindingsGenSeen_ ||
+                              (xr_.sessionFocused() && nowT - lastControlsReadT_ > std::chrono::seconds(1)))) {
                     refreshControlsInfo();
+                    lastControlsReadT_ = nowT;
                 }
                 buttonsPageShown_ = shown;
+                renderer_.setSettingsPager(shown ? settings_.buttonsPage() : -1,
+                                           shown ? settings_.buttonsPages() : 0);
+                renderer_.setSettingsStatusWarn(shown && controlsWarn_);
             }
             // Settings panel overlay
             if (settings_.isOpen()) {
@@ -4137,11 +4172,13 @@ int App::run() {
             static int lastPageBtnHov = -1;
             static int lastSidebarHov = -1;
             static int lastSettingsHov = -1;
+            static int lastSettingsPagerHov = -1;
             static int lastCtrlBtnHov = -1;
             const int curBrowserHov = renderer_.browserHovered();
             const int curPageBtnHov = renderer_.browserPageBtnHovered();
             const int curSidebarHov = renderer_.browserSidebarHovered();
             const int curSettingsHov = renderer_.settingsHovered();
+            const int curSettingsPagerHov = renderer_.settingsPagerHovered();
             const int curCtrlBtnHov = renderer_.pointerButton();
             const int pH = renderer_.pointerHand();
             const int activeH = (pH >= 0 && pH <= 1) ? pH : 1;
@@ -4151,6 +4188,7 @@ int App::run() {
                  (curPageBtnHov != lastPageBtnHov && curPageBtnHov >= 0) ||
                  (curSidebarHov != lastSidebarHov && curSidebarHov >= 0) ||
                  (curSettingsHov != lastSettingsHov && curSettingsHov >= 0) ||
+                 (curSettingsPagerHov != lastSettingsPagerHov && curSettingsPagerHov >= 0) ||
                  (curCtrlBtnHov != lastCtrlBtnHov && curCtrlBtnHov >= 0))) {
                 xr_.triggerHaptic(activeH, 0.008f, 0.0f, settings_.hoverHapticsStrength());
             }
@@ -4158,6 +4196,7 @@ int App::run() {
             lastPageBtnHov = curPageBtnHov;
             lastSidebarHov = curSidebarHov;
             lastSettingsHov = curSettingsHov;
+            lastSettingsPagerHov = curSettingsPagerHov;
             lastCtrlBtnHov = curCtrlBtnHov;
 
 #ifdef PIXELVR_HAVE_FREETYPE
@@ -4822,7 +4861,15 @@ int App::run() {
                     settings_.move(d * 2);
                 }
                 if (const int dx = navStepX(in.thumbstickX, nowT)) {
-                    settings_.move(dx);
+                    // The Buttons pages are read-only: left / right turns the page.
+                    if (!settings_.turnButtonsPage(dx, true)) settings_.move(dx);
+                }
+                // Header pager (< n / m >) on the Buttons pages.
+                if (const int pg = renderer_.settingsPagerHovered(); pg >= 0 && (in.select || in.togglePlay)) {
+                    if (settings_.turnButtonsPage(pg == 0 ? -1 : 1, true)) {
+                        xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.025f, 0.0f, 0.5f);
+                    }
+                    in.select = in.togglePlay = false;
                 }
 
                 const int hovered = renderer_.settingsHovered();
@@ -5143,6 +5190,20 @@ int App::run() {
                     openFormatMenu();
                     interacted = true;
                 }
+                // After a scrub commits on a web screen, the bar keeps showing the
+                // target until the page reports a position near it (its time trails
+                // the seek) or a moment has passed, so it never flicks back first.
+                // Local files need no hold: the engine reports the target itself.
+                const auto shownPosition = [&]() {
+                    const double p = curPosition();
+                    if (scrubHoldPos_ < 0.0 || !cur().web) return p;
+                    if (scrubHoldScreen_ != selectedScreen_ || nowT >= scrubHoldUntil_ ||
+                        std::fabs(p - scrubHoldPos_) < 0.5) {
+                        scrubHoldPos_ = -1.0;  // caught up (or gave up): follow the player
+                        return p;
+                    }
+                    return scrubHoldPos_;
+                };
                 if (cur().open) {
                     // Left stick left/right steps -/+30s (flat only; in 360/180 the
                     // left stick zooms instead).
@@ -5173,7 +5234,7 @@ int App::run() {
                                curDuration() > 0.0) {
                         // Right stick X scrubs, so one (right) controller can scrub;
                         // the left stick X steps 30 s.
-                        if (!scrubbing_) scrubTarget_ = curPosition();
+                        if (!scrubbing_) scrubTarget_ = shownPosition();
                         const float ax = in.thumbstickRX;
                         const float t = (std::fabs(ax) - 0.15f) / 0.85f;
                         const double rate =
@@ -5187,6 +5248,11 @@ int App::run() {
                     } else if (scrubbing_) {
                         curSeek(scrubTarget_);  // commit the scrub with one seek
                         scrubbing_ = false;
+                        if (cur().web && !webSeekBlocked()) {  // only when the seek was sent
+                            scrubHoldPos_ = scrubTarget_;
+                            scrubHoldScreen_ = selectedScreen_;
+                            scrubHoldUntil_ = nowT + std::chrono::milliseconds(1500);
+                        }
                     }
                 }
                 if (interacted) {
@@ -5203,7 +5269,7 @@ int App::run() {
                     // Livestreams: the rewind window, live edge on the right.
                     const double start = curTimelineStart();
                     total = std::max(curDuration() - start, 0.001);
-                    elapsed = scrubbing_ ? scrubTarget_ : curPosition();
+                    elapsed = scrubbing_ ? scrubTarget_ : shownPosition();
                     progress = static_cast<float>(std::clamp((elapsed - start) / total, 0.0, 1.0));
                 }
                 renderer_.setTransportLive(cur().open ? curLive() : 0);

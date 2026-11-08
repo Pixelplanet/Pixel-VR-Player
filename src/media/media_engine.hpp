@@ -112,10 +112,14 @@ public:
     const ChapterList& chapters() const;
     const AudioTags& audioTags() const;  // title / artist / album (audio files)
 
-    // Seeking (thread-safe; applied on the decode thread).
+    // Seeking (thread-safe; applied on the decode thread). Seeks are frame
+    // accurate: the decoder runs from the keyframe before the target and drops
+    // the video and audio before it, so playback resumes at the target itself.
     void seek(double seconds);        // absolute, clamped to [0, duration]
-    void seekRelative(double delta);  // relative to the current position
-    double position() const;          // current playback time in seconds
+    void seekRelative(double delta);  // relative to position() (a pending target counts)
+    // Current playback time in seconds. From seek() until the first frame at the
+    // target is shown this is the target, so it never flicks back meanwhile.
+    double position() const;
 
     // Seek/close release handshake: before flushing, the decode thread asks the
     // renderer to free held dma-buf frames so the V4L2 decoder can reclaim its

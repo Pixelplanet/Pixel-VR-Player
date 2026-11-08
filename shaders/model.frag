@@ -29,6 +29,7 @@ void main() {
     // printed button labels still read.
     float diff = max(dot(N, L), 0.0);
     float amb = 0.015 + 0.02 * (N.y * 0.5 + 0.5);
-    outColor = vec4(tex.rgb * (amb + 0.22 * diff) * pc.color.rgb,
-                    tex.a * pc.color.a);
+    // Opaque: alpha 1 (the eye pass ignores it; in the models' own layer,
+    // cleared to transparent, it makes the resolved image premultiplied).
+    outColor = vec4(tex.rgb * (amb + 0.22 * diff) * pc.color.rgb, 1.0);
 }

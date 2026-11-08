@@ -781,6 +781,7 @@ VulkanRenderer::~VulkanRenderer() {
         destroyLayerTargets(uiLayerTargets_);
         destroyLayerTargets(cursorTargets_);
         destroyLayerTargets(beamTargets_);
+        for (ViewTargets& t : modelTargets_) destroyLayerTargets(t);
         for (ScreenLayer& L : screenLayers_) destroyLayerTargets(L.targets);
         for (VkPipeline p : {uiPipelineLayer_, uiPipelineLayerAlpha_, uiPipelineLayerFade_, textPipelineLayer_,
                              thumbPipelineLayer_,
@@ -1516,6 +1517,15 @@ bool VulkanRenderer::recreateSwapchainTargets(
                 vkCreateFramebuffer(device_, &fbInfo, nullptr, &vt.framebuffers[i]));
         }
     }
+    // The models layer's framebuffers use the MSAA / depth targets rebuilt above.
+    if (modelSwapchains_[0].handle != XR_NULL_HANDLE && modelSwapchains_[1].handle != XR_NULL_HANDLE) {
+        modelLayerReady_ = createModelLayerTargets(modelSwapchains_[0], modelTargets_[0]) &&
+                           createModelLayerTargets(modelSwapchains_[1], modelTargets_[1]);
+        if (!modelLayerReady_) {
+            for (ViewTargets& t : modelTargets_) destroyLayerTargets(t);
+            PIXELVR_LOG_WARN("Controller models layer off: its targets no longer fit the eye buffers");
+        }
+    }
     return true;
 }
 
@@ -1549,6 +1559,55 @@ bool VulkanRenderer::createLayerTargets(const ViewSwapchain& sc, ViewTargets& ou
         fbInfo.renderPass = uiLayerPass_;
         fbInfo.attachmentCount = 1;
         fbInfo.pAttachments = &out.imageViews[i];
+        fbInfo.width = static_cast<uint32_t>(sc.width);
+        fbInfo.height = static_cast<uint32_t>(sc.height);
+        fbInfo.layers = 1;
+        PIXELVR_VK_CHECK(vkCreateFramebuffer(device_, &fbInfo, nullptr, &out.framebuffers[i]));
+    }
+    return true;
+}
+
+// Image views + renderPass_ framebuffers for a models-layer swapchain: the
+// image is the resolve target (MSAA) or the colour target, with the eye
+// pass's shared MSAA / depth images, which are at least as large.
+bool VulkanRenderer::createModelLayerTargets(const ViewSwapchain& sc, ViewTargets& out) {
+    destroyLayerTargets(out);
+    int32_t maxW = 0, maxH = 0;
+    for (const ViewTargets& vt : viewTargets_) {
+        maxW = std::max(maxW, vt.width);
+        maxH = std::max(maxH, vt.height);
+    }
+    const bool msaa = sampleCount_ != VK_SAMPLE_COUNT_1_BIT;
+    if (sc.handle == XR_NULL_HANDLE || sc.width > maxW || sc.height > maxH || depthView_ == VK_NULL_HANDLE ||
+        (msaa && msaaView_ == VK_NULL_HANDLE)) {
+        return false;
+    }
+    out.width = sc.width;
+    out.height = sc.height;
+    out.imageViews.resize(sc.images.size());
+    out.framebuffers.resize(sc.images.size());
+    for (std::size_t i = 0; i < sc.images.size(); ++i) {
+        VkImageViewCreateInfo ivInfo{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+        ivInfo.image = sc.images[i].image;
+        ivInfo.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        ivInfo.format = colorFormat_;
+        ivInfo.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        ivInfo.subresourceRange.levelCount = 1;
+        ivInfo.subresourceRange.layerCount = 1;
+        PIXELVR_VK_CHECK(vkCreateImageView(device_, &ivInfo, nullptr, &out.imageViews[i]));
+        VkImageView fbAttachments[3];
+        if (msaa) {
+            fbAttachments[0] = msaaView_;
+            fbAttachments[1] = out.imageViews[i];
+            fbAttachments[2] = depthView_;
+        } else {
+            fbAttachments[0] = out.imageViews[i];
+            fbAttachments[1] = depthView_;
+        }
+        VkFramebufferCreateInfo fbInfo{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
+        fbInfo.renderPass = renderPass_;
+        fbInfo.attachmentCount = msaa ? 3u : 2u;
+        fbInfo.pAttachments = fbAttachments;
         fbInfo.width = static_cast<uint32_t>(sc.width);
         fbInfo.height = static_cast<uint32_t>(sc.height);
         fbInfo.layers = 1;
@@ -1677,6 +1736,39 @@ bool VulkanRenderer::createLayerResources(XrContext& xr, int64_t colorFormat) {
         !createLayerTargets(beamSwapchain_, beamTargets_)) {
         xr.destroyLayerSwapchain(beamSwapchain_);
         destroyLayerTargets(beamTargets_);
+    }
+    // Controller models layer (see modelSwapchains_). Eye-buffer size: the
+    // eye buffers are already at the panel's native density (no
+    // supersampling), so anything smaller would make the models visibly
+    // softer than they were in the eye buffers; the fragment work is the
+    // same as before (only model pixels), the extra cost is clearing,
+    // resolving and storing one more image per eye. Both eyes share one size
+    // (the projection views share one image rect). PIXELVR_MODELS_LAYER=0
+    // keeps the models in the eye buffers.
+    modelLayerReady_ = false;
+    for (int e = 0; e < 2; ++e) {
+        destroyLayerTargets(modelTargets_[e]);
+        xr.destroyLayerSwapchain(modelSwapchains_[e]);
+    }
+    const char* modelsEnv = std::getenv("PIXELVR_MODELS_LAYER");
+    const bool modelsLayerOn = !(modelsEnv && modelsEnv[0] == '0');
+    if (modelsLayerOn && modelPipeline_ != VK_NULL_HANDLE && viewTargets_.size() == 2) {
+        const int32_t w = std::min(viewTargets_[0].width, viewTargets_[1].width);
+        const int32_t h = std::min(viewTargets_[0].height, viewTargets_[1].height);
+        bool ok = w > 0 && h > 0;
+        for (int e = 0; e < 2 && ok; ++e) {
+            ok = xr.createLayerSwapchain(colorFormat, static_cast<uint32_t>(w), static_cast<uint32_t>(h),
+                                         modelSwapchains_[e]) &&
+                 createModelLayerTargets(modelSwapchains_[e], modelTargets_[e]);
+        }
+        if (!ok) {
+            for (int e = 0; e < 2; ++e) {
+                destroyLayerTargets(modelTargets_[e]);
+                xr.destroyLayerSwapchain(modelSwapchains_[e]);
+            }
+            PIXELVR_LOG_WARN("Controller models layer unavailable; the models stay in the eye buffers");
+        }
+        modelLayerReady_ = ok;
     }
     beamDrawn_ = false;
     uiLayerReady_ = true;
@@ -2262,6 +2354,7 @@ void VulkanRenderer::updatePointer() {
     browserHovered_ = -1;
     browserSidebarHovered_ = -1;
     browserPageBtnHovered_ = -1;
+    settingsPagerHovered_ = -1;
     settingsHovered_ = -1;
     settingsRow_ = -1;
     settingsSegmentHovered_ = -1;
@@ -2583,10 +2676,20 @@ void VulkanRenderer::updatePointer() {
                     }
                 }
             } else if (settingsVisible_) {
+                if (settingsPages_ > 1) {  // header pager (same spots as the file browser's)
+                    for (int id : {0, 1}) {
+                        if (hub::headerButton(id).contains(hx, hyy, hub::kHitPad)) {
+                            settingsPagerHovered_ = id;
+                            break;
+                        }
+                    }
+                    if (settingsPagerHovered_ >= 0) break;
+                }
                 const int total = static_cast<int>(settingsRows_.size());
-                const int maxVis = hub::settingsMaxVisible(total);
+                const int layoutN = settingsLayoutRows();
+                const int maxVis = hub::settingsMaxVisible(layoutN);
                 for (int i = 0; i < total && i < maxVis; ++i) {
-                    const hub::SettingsCard L = hub::settingsCard(i, total);
+                    const hub::SettingsCard L = hub::settingsCard(i, layoutN);
                     if (UiRect{L.cx, L.cy, L.halfW, L.halfH}.contains(hx, hyy)) {
                         settingsRow_ = i;
                         settingsHovered_ = i;
@@ -3107,6 +3210,8 @@ void VulkanRenderer::renderLayersBefore(XrContext& xr, const XrView* views, uint
                                         std::vector<CompositionLayer>& out) {
     (void)out;  // the UI layer is submitted by renderLayersAfter, over the screens
     uiLayerPending_ = false;
+    modelLayerAllowed_ = xr.extraProjectionLayersOk();
+    modelsInView_ = controllerModelsInView(views, viewCount);
     if (!uiLayerLive() || viewCount == 0) {
         return;
     }
@@ -3438,6 +3543,21 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
 
     submitUiLayer();
 
+    // Controller models over the screens and the UI (the first eye pass left
+    // them out of the eye buffers).
+    bool modelPending = false;
+    uint32_t modelImage[2] = {0, 0};
+    if (modelLayerThisFrame_ && modelLayerReady_ && viewCount == 2) {
+        const bool got0 = xr.acquireLayerImage(modelSwapchains_[0], modelImage[0]);
+        const bool got1 = got0 && xr.acquireLayerImage(modelSwapchains_[1], modelImage[1]);
+        modelPending = got1 && modelImage[0] < modelTargets_[0].framebuffers.size() &&
+                       modelImage[1] < modelTargets_[1].framebuffers.size();
+        if (!modelPending) {
+            if (got0) xr.releaseLayerImage(modelSwapchains_[0]);
+            if (got1) xr.releaseLayerImage(modelSwapchains_[1]);
+        }
+    }
+
     // Pointer cursor over a layer screen: the dot in the eye buffers would be
     // composited behind the layer, so it becomes a small billboard layer.
     const bool cursorOnLayer = pointerActive_ && !pointerOnPanel_ && pointerScreen_ >= 0 &&
@@ -3476,7 +3596,7 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
         beamPending = true;
     }
 
-    if (copies.empty() && !cursorPending && !beamPending) {
+    if (copies.empty() && !cursorPending && !beamPending && !modelPending) {
         if (!beams.empty()) {
             // (texture already drawn) fall through to submit the beam quads
         } else {
@@ -3499,11 +3619,46 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
         for (const Pending& p : copies) xr.releaseLayerImage(screenLayers_[p.slot].sc);
         if (cursorPending) xr.releaseLayerImage(cursorSwapchain_);
         if (beamPending) xr.releaseLayerImage(beamSwapchain_);
+        if (modelPending) {
+            xr.releaseLayerImage(modelSwapchains_[0]);
+            xr.releaseLayerImage(modelSwapchains_[1]);
+        }
         return;
     }
     uint32_t glyphCursor = 0;
     for (const Pending& p : copies) {
         recordScreenCopy(p.slot, screenLayers_[p.slot], p.imageIndex, p.badge, glyphCursor);
+    }
+    if (modelPending) {
+        // Same pass, MSAA and depth targets as the eye buffers, cleared to
+        // transparent: model.frag writes alpha 1, so the (resolved) image is
+        // premultiplied, with anti-aliased edges, for the blended layer.
+        const bool msaa = sampleCount_ != VK_SAMPLE_COUNT_1_BIT;
+        for (uint32_t e = 0; e < 2; ++e) {
+            const ViewTargets& mt = modelTargets_[e];
+            VkClearValue clears[3]{};
+            clears[0].color = {{0.0f, 0.0f, 0.0f, 0.0f}};
+            if (msaa) {
+                clears[1].color = clears[0].color;
+                clears[2].depthStencil = {1.0f, 0};
+            } else {
+                clears[1].depthStencil = {1.0f, 0};
+            }
+            VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
+            rp.renderPass = renderPass_;
+            rp.framebuffer = mt.framebuffers[modelImage[e]];
+            rp.renderArea = {{0, 0}, {static_cast<uint32_t>(mt.width), static_cast<uint32_t>(mt.height)}};
+            rp.clearValueCount = msaa ? 3u : 2u;
+            rp.pClearValues = clears;
+            vkCmdBeginRenderPass(commandBuffer_, &rp, VK_SUBPASS_CONTENTS_INLINE);
+            VkViewport vp{0.0f, 0.0f, static_cast<float>(mt.width), static_cast<float>(mt.height), 0.0f, 1.0f};
+            vkCmdSetViewport(commandBuffer_, 0, 1, &vp);
+            VkRect2D sc = rp.renderArea;
+            vkCmdSetScissor(commandBuffer_, 0, 1, &sc);
+            vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, modelPipeline_);
+            drawControllerModels(views[e]);
+            vkCmdEndRenderPass(commandBuffer_);
+        }
     }
     if (beamPending) {
         // Soft accent capsule, full height, fading at the sides.
@@ -3587,11 +3742,27 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
     submit.pCommandBuffers = &commandBuffer_;
-    if (vkQueueSubmit(queue_, 1, &submit, viewFences_[slotCb]) == VK_SUCCESS) {
+    const bool submitted = vkQueueSubmit(queue_, 1, &submit, viewFences_[slotCb]) == VK_SUCCESS;
+    if (submitted) {
         viewFenceInFlight_[slotCb] = true;
     }
     for (const Pending& p : copies) xr.releaseLayerImage(screenLayers_[p.slot].sc);
     if (beamPending) xr.releaseLayerImage(beamSwapchain_);
+    if (modelPending) {
+        xr.releaseLayerImage(modelSwapchains_[0]);
+        xr.releaseLayerImage(modelSwapchains_[1]);
+        if (submitted) {
+            // After the screens and the UI, under the beams and the cursor.
+            CompositionLayer cl;
+            cl.projection = true;
+            cl.blend = true;
+            cl.swapchain = modelSwapchains_[0].handle;
+            cl.projSwapchain[0] = modelSwapchains_[0].handle;
+            cl.projSwapchain[1] = modelSwapchains_[1].handle;
+            cl.imageRect = {{0, 0}, {modelTargets_[0].width, modelTargets_[0].height}};
+            out.push_back(cl);
+        }
+    }
     for (const Beam& bm : beams) {
         // Billboard strip: +Y along the beam, +Z toward the head.
         const Vec3 mid = (bm.a + bm.b) * 0.5f;
@@ -6275,7 +6446,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         // ---------------------------------------------------------------------
         else if (settingsVisible_) {
             const int total = static_cast<int>(settingsRows_.size());
-            const int maxVis = hub::settingsMaxVisible(total);
+            const int layoutN = settingsLayoutRows();  // card size: the same on every page
+            const int maxVis = hub::settingsMaxVisible(layoutN);
+            const bool pager = settingsPages_ > 1;
             constexpr float kSetCardHalfW = 0.315f;
             constexpr float kSetCtrlHalfW = 0.275f;
             enum : int { kChoice = 0, kToggle = 1, kAction = 2, kBinding = 3, kColor = 4, kOption = 5,
@@ -6287,7 +6460,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 float cx, cy, halfH, labelY, ctrlY, ctrlHalfH, textSc;
             };
             auto setCard = [&](int i) -> SetCard {
-                const hub::SettingsCard c = hub::settingsCard(i, total);
+                const hub::SettingsCard c = hub::settingsCard(i, layoutN);
                 return {c.cx, c.cy, c.halfH, c.labelY, c.ctrlY, c.ctrlHalfH, scSub * c.textScale};
             };
             auto isListening = [](const std::string& v) {
@@ -6299,9 +6472,21 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 return row.kind == kAction && row.value.empty();
             };
 
-            // Version pill in top-right header
-            drawUiElement(vpPanel, 0.64f, 0.455f, 0.22f, 0.028f,
-                          UiShape::RoundedBox, kGlassVeil, 1.0f, 0.05f, kGlassRimFaint);
+            if (pager) {
+                // Header pager like the file browser's: < n / m > (page text in the text pass).
+                for (int pb = 0; pb < 2; ++pb) {
+                    const UiRect r = hub::headerButton(pb);
+                    const bool h = (settingsPagerHovered_ == pb);
+                    drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox,
+                                  h ? tabHovBg : tabNormBg, 1.0f, 0.06f, h ? tabHovBord : tabNormBord);
+                    drawUiElement(vpPanel, r.cx, r.cy, pb == 0 ? -0.011f : 0.011f, 0.011f, UiShape::Chevron,
+                                  h ? themeAccentCol : themeTextCol);
+                }
+            } else {
+                // Version pill in top-right header
+                drawUiElement(vpPanel, 0.64f, 0.455f, 0.22f, 0.028f,
+                              UiShape::RoundedBox, kGlassVeil, 1.0f, 0.05f, kGlassRimFaint);
+            }
 
             const float switchOffTrack[4] = {0.20f, 0.23f, 0.29f, 0.95f};
             const float switchOffKnob[4] = {0.62f, 0.67f, 0.75f, 0.98f};
@@ -6360,7 +6545,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                               UiShape::RoundedBox, glassWellT.data(), 1.0f, 0.06f, kGlassRimFaint);
 
                 if (row.kind == kSegmented && !row.options.empty()) {
-                    const hub::SettingsCard hc = hub::settingsCard(i, total);
+                    const hub::SettingsCard hc = hub::settingsCard(i, layoutN);
                     const int n = static_cast<int>(row.options.size());
                     for (int sg = 0; sg < n; ++sg) {
                         const UiRect r = hub::settingsSegment(hc, sg, n);
@@ -6460,15 +6645,23 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
 
             drawCrumbText(setCrumbs, 0.455f, scHeader * 0.90f, 0.40f);
-            drawFitCentered(0.64f, 0.455f, 0.41f, scDetail, slateCol,
-                            std::string("PixelVR ") + PIXELVR_VERSION_STRING + " \xB7 Steam Frame");
+            if (pager) {
+                drawFitCentered(0.63f, 0.455f, 0.14f, scSub, themeTextCol,
+                                std::to_string(settingsPage_ + 1) + " / " + std::to_string(settingsPages_));
+            } else {
+                drawFitCentered(0.64f, 0.455f, 0.41f, scDetail, slateCol,
+                                std::string("PixelVR ") + PIXELVR_VERSION_STRING + " \xB7 Steam Frame");
+            }
 
             for (int i = 0; i < total && i < maxVis; ++i) {
                 const SettingsRowVis& row = settingsRows_[static_cast<std::size_t>(i)];
                 const SetCard L = setCard(i);
                 const bool en = row.enabled;
                 const float* labelCol = en ? themeTextCol : dimCol;
-                const float* valueCol = en ? themeTextCol : dimCol;
+                // Unbound (or controller off) values recede so bound rows stand out.
+                const bool unbound = row.value == "Not bound" || row.value == "Left controller off" ||
+                                     row.value == "Right controller off" || row.value == "Controllers off";
+                const float* valueCol = (en && !unbound) ? themeTextCol : dimCol;
                 const float ctrlLeft = L.cx - kSetCtrlHalfW;
 
                 if (row.kind == kOption) {
@@ -6484,7 +6677,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 withHeadingFont([&] { drawFit(ctrlLeft, L.labelY, 0.55f, L.textSc, labelCol, row.label); });
                 const float valSc = L.textSc * 0.92f;
                 if (row.kind == kSegmented && !row.options.empty()) {
-                    const hub::SettingsCard hc = hub::settingsCard(i, total);
+                    const hub::SettingsCard hc = hub::settingsCard(i, layoutN);
                     const int n = static_cast<int>(row.options.size());
                     for (int sg = 0; sg < n; ++sg) {
                         const UiRect r = hub::settingsSegment(hc, sg, n);
@@ -6512,7 +6705,12 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
 
             if (!settingsStatus_.empty()) {
-                drawFit(-0.45f, -0.490f, 1.30f, scDetail, slateCol, settingsStatus_);
+                const float warnCol[4] = {1.0f, 0.72f, 0.36f, 1.0f};
+                // Shrink a long line (down to 75 %) before truncating: its end is the advice.
+                const float w = measureString(scDetail, settingsStatus_);
+                const float stSc = (w > 1.30f) ? std::max(scDetail * 0.75f, scDetail * 1.30f / w) : scDetail;
+                drawFit(-0.45f, -0.490f, 1.30f, stSc, settingsStatusWarn_ ? warnCol : slateCol,
+                        settingsStatus_);
             }
         }
     }
@@ -7541,115 +7739,22 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
     }
 
     // Tracked controller 3D models (lit capsule), drawn before the laser/cursor.
-    if (drawWorld && drawModels_ &&
-        (controllers_[0].active || controllers_[1].active) &&
+    // While a screen or the UI is a composition layer they get their own
+    // projection layer instead (renderLayersAfter), composited over those
+    // layers: in the eye buffers every layer screen would cover them.
+    const bool anyHand = controllers_[0].active || controllers_[1].active;
+    if (drawWorld && viewIndex == 0) {
+        bool anyLayer = uiLayerPending_;
+        for (bool l : screenLayerLive_) anyLayer = anyLayer || l;
+        // Hands out of both views (e.g. in the lap): no models layer, whose
+        // clears, resolves and full-view blend would cost every frame for nothing.
+        modelLayerThisFrame_ = anyLayer && anyHand && modelsInView_ && drawModels_ && modelLayerReady_ &&
+                               modelLayerAllowed_ && uiLayerLive() && modelPipeline_ != VK_NULL_HANDLE;
+    }
+    if (drawWorld && drawModels_ && anyHand && !modelLayerThisFrame_ &&
         modelPipeline_ != VK_NULL_HANDLE) {
         bindPipe(modelPipeline_);
-        const Mat4 vpWorld = multiply(proj, viewMat);
-        for (int h = 0; h < 2; ++h) {
-            if (!controllers_[h].active) continue;
-
-            const HandModel& hm = handModels_[h];
-            const bool haveGltf = hm.ready && hm.vertexBuffer != VK_NULL_HANDLE;
-
-            VkDeviceSize off = 0;
-            if (haveGltf) {
-                vkCmdBindVertexBuffers(commandBuffer_, 0, 1, &hm.vertexBuffer, &off);
-                vkCmdBindIndexBuffer(commandBuffer_, hm.indexBuffer, 0, hm.indexType);
-            } else if (capsuleVertexBuffer_ != VK_NULL_HANDLE) {
-                vkCmdBindVertexBuffers(commandBuffer_, 0, 1, &capsuleVertexBuffer_, &off);
-                vkCmdBindIndexBuffer(commandBuffer_, capsuleIndexBuffer_, 0, VK_INDEX_TYPE_UINT16);
-            } else {
-                continue;
-            }
-
-            // The render model is authored around the grip (controller body), so
-            // place it there; fall back to the aim pose if grip is unavailable.
-            const bool useGrip = controllers_[h].gripActive;
-            const float* qp = useGrip ? controllers_[h].gripOrientation
-                                      : controllers_[h].orientation;
-            const float* op = useGrip ? controllers_[h].gripPosition
-                                      : controllers_[h].position;
-            const Quat q{qp[0], qp[1], qp[2], qp[3]};
-            const Vec3 o{op[0], op[1], op[2]};
-            const float eyeX = view.pose.position.x;
-            const float eyeY = view.pose.position.y;
-            const float eyeZ = view.pose.position.z;
-            // Draw one part: `np`/`nq` are the node's animated transform in model
-            // space (button press, trigger pull, stick tilt), composed after the
-            // controller's placement pose.
-            const auto drawPart = [&](VkDescriptorSet set, const float col[4],
-                                      uint32_t first, uint32_t count,
-                                      const float np[3], const float nq[4]) {
-                const float wqx = q.w * nq[0] + q.x * nq[3] + q.y * nq[2] - q.z * nq[1];
-                const float wqy = q.w * nq[1] - q.x * nq[2] + q.y * nq[3] + q.z * nq[0];
-                const float wqz = q.w * nq[2] + q.x * nq[1] - q.y * nq[0] + q.z * nq[3];
-                const float wqw = q.w * nq[3] - q.x * nq[0] - q.y * nq[1] - q.z * nq[2];
-                const Quat wq{wqx, wqy, wqz, wqw};
-                const Vec3 wp =
-                    o + rotate(q, Vec3{np[0], np[1], np[2]});
-                const Mat4 mvp =
-                    multiply(vpWorld, multiply(translation(wp), fromQuat(wq)));
-                float push[32];
-                std::memcpy(push, mvp.m, sizeof(float) * 16);
-                push[16] = wq.x; push[17] = wq.y; push[18] = wq.z; push[19] = wq.w;
-                push[20] = col[0]; push[21] = col[1];
-                push[22] = col[2]; push[23] = col[3];
-                push[24] = eyeX; push[25] = eyeY; push[26] = eyeZ; push[27] = 0.0f;
-                push[28] = wp.x; push[29] = wp.y; push[30] = wp.z; push[31] = 0.0f;
-                vkCmdBindDescriptorSets(commandBuffer_,
-                                        VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                        modelLayout_, 0, 1, &set, 0, nullptr);
-                vkCmdPushConstants(commandBuffer_, modelLayout_,
-                                   VK_SHADER_STAGE_VERTEX_BIT |
-                                       VK_SHADER_STAGE_FRAGMENT_BIT,
-                                   0, sizeof(float) * 32, push);
-                vkCmdDrawIndexed(commandBuffer_, count, 1, first, 0, 0);
-            };
-            const float identityPos[3] = {0.0f, 0.0f, 0.0f};
-            const float identityQuat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
-            if (!haveGltf || hm.submeshes.empty()) {
-                const float capsuleColor[4] = {0.13f, 0.13f, 0.16f, 1.0f};
-                drawPart(modelWhite_.set, capsuleColor, 0, capsuleIndexCount_,
-                         identityPos, identityQuat);
-            } else {
-                // Node states may carry names (from asset properties) or be bare.
-                // If named, match by name; otherwise fall back to the submesh
-                // ordinal, which lines up for the runtime's flat node list.
-                const bool haveNames =
-                    !hm.nodeStates.empty() && !hm.nodeStates[0].name.empty();
-                for (std::size_t si = 0; si < hm.submeshes.size(); ++si) {
-                    const ModelSubmesh& sm = hm.submeshes[si];
-                    // The 'status' display node maps the whole atlas to a tiny
-                    // quad (the runtime normally textures it); skip it so it does
-                    // not render as a tiny sheet of labels on the body.
-                    if (sm.nodeName == "status") continue;
-                    const float* np = identityPos;
-                    const float* nq = identityQuat;
-                    if (haveNames) {
-                        for (const NodeStateVis& ns : hm.nodeStates) {
-                            if (ns.name == sm.nodeName) {
-                                np = ns.pos;
-                                nq = ns.quat;
-                                break;
-                            }
-                        }
-                    } else if (si < hm.nodeStates.size()) {
-                        np = hm.nodeStates[si].pos;
-                        nq = hm.nodeStates[si].quat;
-                    }
-                    // Guard against an unpopulated/degenerate pose (a zero
-                    // quaternion would collapse the part and hide the model).
-                    const float qlen2 = nq[0] * nq[0] + nq[1] * nq[1] +
-                                        nq[2] * nq[2] + nq[3] * nq[3];
-                    if (qlen2 < 0.5f) {
-                        np = identityPos;
-                        nq = identityQuat;
-                    }
-                    drawPart(sm.set, sm.color, sm.firstIndex, sm.indexCount, np, nq);
-                }
-            }
-        }
+        drawControllerModels(view);
     }
 
     // Pointer cursor on the UI panel: part of the layer while it is live (the
@@ -7873,6 +7978,154 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             vkWaitForFences(device_, 1, &viewFences_[i], VK_TRUE, UINT64_MAX);
             vkResetFences(device_, 1, &viewFences_[i]);
             viewFenceInFlight_[i] = false;
+        }
+    }
+}
+
+bool VulkanRenderer::controllerModelsInView(const XrView* views, uint32_t viewCount) const {
+    using namespace math;
+    if (views == nullptr || viewCount == 0) return true;  // unknown: assume seen
+    // Generous radius around the grip: the model reaches ~12 cm from it, and a
+    // model missed here would be drawn into the eye buffers, under the layers.
+    constexpr float kRadius = 0.25f;
+    for (int h = 0; h < 2; ++h) {
+        const ControllerVis& c = controllers_[h];
+        if (!c.active) continue;
+        const float* op = c.gripActive ? c.gripPosition : c.position;
+        for (uint32_t v = 0; v < viewCount; ++v) {
+            const XrPosef& pose = views[v].pose;
+            const Quat inv{-pose.orientation.x, -pose.orientation.y, -pose.orientation.z, pose.orientation.w};
+            // View space: -Z forward, +X right, +Y up.
+            const Vec3 p = rotate(inv, Vec3{op[0] - pose.position.x, op[1] - pose.position.y,
+                                            op[2] - pose.position.z});
+            const float d = -p.z;  // depth in front of the eye
+            if (d < -kRadius) continue;  // wholly behind
+            const XrFovf& f = views[v].fov;
+            const float tl = std::tan(f.angleLeft), tr = std::tan(f.angleRight);
+            const float tu = std::tan(f.angleUp), td = std::tan(f.angleDown);
+            // Signed distance outside each side plane (x = d*tan, y = d*tan).
+            if ((p.x - tr * d) > kRadius * std::sqrt(1.0f + tr * tr)) continue;
+            if ((tl * d - p.x) > kRadius * std::sqrt(1.0f + tl * tl)) continue;
+            if ((p.y - tu * d) > kRadius * std::sqrt(1.0f + tu * tu)) continue;
+            if ((td * d - p.y) > kRadius * std::sqrt(1.0f + td * td)) continue;
+            return true;
+        }
+    }
+    return false;
+}
+
+void VulkanRenderer::drawControllerModels(const XrView& view) {
+    using namespace math;
+    const Mat4 viewMat = rigidInverse(rigidTransform(
+        Quat{view.pose.orientation.x, view.pose.orientation.y,
+             view.pose.orientation.z, view.pose.orientation.w},
+        Vec3{view.pose.position.x, view.pose.position.y, view.pose.position.z}));
+    const Mat4 proj = perspectiveVulkan(
+        std::tan(view.fov.angleLeft), std::tan(view.fov.angleRight),
+        std::tan(view.fov.angleUp), std::tan(view.fov.angleDown), 0.05f, 100.0f);
+    const Mat4 vpWorld = multiply(proj, viewMat);
+    for (int h = 0; h < 2; ++h) {
+        if (!controllers_[h].active) continue;
+
+        const HandModel& hm = handModels_[h];
+        const bool haveGltf = hm.ready && hm.vertexBuffer != VK_NULL_HANDLE;
+
+        VkDeviceSize off = 0;
+        if (haveGltf) {
+            vkCmdBindVertexBuffers(commandBuffer_, 0, 1, &hm.vertexBuffer, &off);
+            vkCmdBindIndexBuffer(commandBuffer_, hm.indexBuffer, 0, hm.indexType);
+        } else if (capsuleVertexBuffer_ != VK_NULL_HANDLE) {
+            vkCmdBindVertexBuffers(commandBuffer_, 0, 1, &capsuleVertexBuffer_, &off);
+            vkCmdBindIndexBuffer(commandBuffer_, capsuleIndexBuffer_, 0, VK_INDEX_TYPE_UINT16);
+        } else {
+            continue;
+        }
+
+        // The render model is authored around the grip (controller body), so
+        // place it there; fall back to the aim pose if grip is unavailable.
+        const bool useGrip = controllers_[h].gripActive;
+        const float* qp = useGrip ? controllers_[h].gripOrientation
+                                  : controllers_[h].orientation;
+        const float* op = useGrip ? controllers_[h].gripPosition
+                                  : controllers_[h].position;
+        const Quat q{qp[0], qp[1], qp[2], qp[3]};
+        const Vec3 o{op[0], op[1], op[2]};
+        const float eyeX = view.pose.position.x;
+        const float eyeY = view.pose.position.y;
+        const float eyeZ = view.pose.position.z;
+        // Draw one part: `np`/`nq` are the node's animated transform in model
+        // space (button press, trigger pull, stick tilt), composed after the
+        // controller's placement pose.
+        const auto drawPart = [&](VkDescriptorSet set, const float col[4],
+                                  uint32_t first, uint32_t count,
+                                  const float np[3], const float nq[4]) {
+            const float wqx = q.w * nq[0] + q.x * nq[3] + q.y * nq[2] - q.z * nq[1];
+            const float wqy = q.w * nq[1] - q.x * nq[2] + q.y * nq[3] + q.z * nq[0];
+            const float wqz = q.w * nq[2] + q.x * nq[1] - q.y * nq[0] + q.z * nq[3];
+            const float wqw = q.w * nq[3] - q.x * nq[0] - q.y * nq[1] - q.z * nq[2];
+            const Quat wq{wqx, wqy, wqz, wqw};
+            const Vec3 wp =
+                o + rotate(q, Vec3{np[0], np[1], np[2]});
+            const Mat4 mvp =
+                multiply(vpWorld, multiply(translation(wp), fromQuat(wq)));
+            float push[32];
+            std::memcpy(push, mvp.m, sizeof(float) * 16);
+            push[16] = wq.x; push[17] = wq.y; push[18] = wq.z; push[19] = wq.w;
+            push[20] = col[0]; push[21] = col[1];
+            push[22] = col[2]; push[23] = col[3];
+            push[24] = eyeX; push[25] = eyeY; push[26] = eyeZ; push[27] = 0.0f;
+            push[28] = wp.x; push[29] = wp.y; push[30] = wp.z; push[31] = 0.0f;
+            vkCmdBindDescriptorSets(commandBuffer_,
+                                    VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                    modelLayout_, 0, 1, &set, 0, nullptr);
+            vkCmdPushConstants(commandBuffer_, modelLayout_,
+                               VK_SHADER_STAGE_VERTEX_BIT |
+                                   VK_SHADER_STAGE_FRAGMENT_BIT,
+                               0, sizeof(float) * 32, push);
+            vkCmdDrawIndexed(commandBuffer_, count, 1, first, 0, 0);
+        };
+        const float identityPos[3] = {0.0f, 0.0f, 0.0f};
+        const float identityQuat[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        if (!haveGltf || hm.submeshes.empty()) {
+            const float capsuleColor[4] = {0.13f, 0.13f, 0.16f, 1.0f};
+            drawPart(modelWhite_.set, capsuleColor, 0, capsuleIndexCount_,
+                     identityPos, identityQuat);
+        } else {
+            // Node states may carry names (from asset properties) or be bare.
+            // If named, match by name; otherwise fall back to the submesh
+            // ordinal, which lines up for the runtime's flat node list.
+            const bool haveNames =
+                !hm.nodeStates.empty() && !hm.nodeStates[0].name.empty();
+            for (std::size_t si = 0; si < hm.submeshes.size(); ++si) {
+                const ModelSubmesh& sm = hm.submeshes[si];
+                // The 'status' display node maps the whole atlas to a tiny
+                // quad (the runtime normally textures it); skip it so it does
+                // not render as a tiny sheet of labels on the body.
+                if (sm.nodeName == "status") continue;
+                const float* np = identityPos;
+                const float* nq = identityQuat;
+                if (haveNames) {
+                    for (const NodeStateVis& ns : hm.nodeStates) {
+                        if (ns.name == sm.nodeName) {
+                            np = ns.pos;
+                            nq = ns.quat;
+                            break;
+                        }
+                    }
+                } else if (si < hm.nodeStates.size()) {
+                    np = hm.nodeStates[si].pos;
+                    nq = hm.nodeStates[si].quat;
+                }
+                // Guard against an unpopulated/degenerate pose (a zero
+                // quaternion would collapse the part and hide the model).
+                const float qlen2 = nq[0] * nq[0] + nq[1] * nq[1] +
+                                    nq[2] * nq[2] + nq[3] * nq[3];
+                if (qlen2 < 0.5f) {
+                    np = identityPos;
+                    nq = identityQuat;
+                }
+                drawPart(sm.set, sm.color, sm.firstIndex, sm.indexCount, np, nq);
+            }
         }
     }
 }

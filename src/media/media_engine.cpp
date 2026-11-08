@@ -388,6 +388,10 @@ struct MediaEngine::Impl {
     std::mutex audioMutex;
     std::condition_variable audioCv;
     std::deque<AudioChunk> audioQueue;
+    // Audio files: set by a seek (with the queue cleared) so the first chunk
+    // queued afterwards re-anchors the clock and settles the display, even when
+    // the target is near where the clock restarted. Guarded by audioMutex.
+    bool audioReanchor = false;
     std::thread audioThread;
 #endif
 
@@ -397,6 +401,15 @@ struct MediaEngine::Impl {
     std::atomic<bool> paused{false};
     std::atomic<bool> muted{false};  // audio keeps its clock but plays silence
     std::atomic<double> seekTarget{-1.0};  // >= 0 requests a seek (seconds)
+    // What position() reports from seek() until the first frame decoded at the
+    // new position is shown (-1 = report masterClock), so the time never flicks
+    // back to the old position while the seek is throttled, the decoder reopens
+    // or the frames before the target are decoded and dropped. Written under
+    // `mutex`, together with the two serials that tell whether the frame being
+    // shown comes from the newest requested seek.
+    std::atomic<double> displayPos{-1.0};
+    uint64_t seekSerial = 0;     // guarded by mutex; seek() requests so far
+    uint64_t appliedSerial = 0;  // guarded by mutex; requests the decode thread applied
     std::atomic<bool> releaseReq{false};   // ask the consumer to free held frames
     std::condition_variable releaseCv;     // consumer signals release complete
     std::condition_variable queueCv;       // a queue slot freed / seek / stop
@@ -435,6 +448,7 @@ struct MediaEngine::Impl {
         {
             std::lock_guard<std::mutex> lk(audioMutex);
             audioQueue.clear();
+            audioReanchor = false;
         }
         audioCv.notify_all();
         if (audioThread.joinable()) {
@@ -483,6 +497,12 @@ struct MediaEngine::Impl {
         drmQueue.clear();
         swQueue.clear();
         primed = false;
+    }
+
+    // The newest requested seek has produced its first shown frame (or sound):
+    // position() follows the playback clock again. The caller holds `mutex`.
+    void settleDisplayLocked() {
+        if (appliedSerial == seekSerial) displayPos.store(-1.0);
     }
 
     // Playback position in seconds for consumer-side frame selection, in the
@@ -583,6 +603,17 @@ void MediaEngine::Impl::decodeLoop() {
     bool eofFlushed = false;
     bool wasPaused = false;
     auto lastSeekWall = clock::now() - std::chrono::seconds(1);
+    // Frame-accurate seeking: the demuxer lands on the keyframe at or before
+    // the target, so video frames and audio before the target are decoded and
+    // dropped (-1 = not discarding). The caps bound the frozen wait on a very
+    // long GOP at 8K, where the hardware decoder is only about real time.
+    double videoDiscardUntil = -1.0;
+    [[maybe_unused]] double audioDiscardUntil = -1.0;  // read by process_audio (Pulse builds)
+    int discardCount = 0;
+    constexpr int kMaxDiscardFrames = 600;
+    constexpr double kMaxDiscardSec = 3.0;
+    // A frame within half a frame of the target counts as the target (rounding).
+    const double halfFrame = (frameRate > 0.0) ? 0.5 / frameRate : 0.02;
 
     int resolvedColorspace = -1;
     int resolvedFullRange = -1;
@@ -633,6 +664,23 @@ void MediaEngine::Impl::decodeLoop() {
             ts = frame->pts;
         }
         const double pts = (ts == AV_NOPTS_VALUE) ? 0.0 : ts * av_q2d(timeBase);
+
+        // After a seek, drop the frames before the target. This runs before the
+        // dma-buf dup, the frame hold, the copy / repack, the pacing and the
+        // queue push, so a dropped frame costs only its decode (the decoder's
+        // buffer is recycled on the next receive). Past the caps the frame
+        // reached so far is shown instead.
+        if (videoDiscardUntil >= 0.0) {
+            const bool early = ts != AV_NOPTS_VALUE && pts < videoDiscardUntil - halfFrame;
+            if (early && discardCount < kMaxDiscardFrames &&
+                std::chrono::duration<double>(clock::now() - lastSeekWall).count() < kMaxDiscardSec) {
+                ++discardCount;
+                return;
+            }
+            PIXELVR_LOG_INFO("MediaEngine: seek target %.3f, first frame %.3f after %d dropped%s",
+                             videoDiscardUntil, pts, discardCount, early ? " (cap reached)" : "");
+            videoDiscardUntil = -1.0;
+        }
 
         const bool isDrm =
             srcFmt == AV_PIX_FMT_DRM_PRIME && frame->data[0] != nullptr;
@@ -765,10 +813,10 @@ void MediaEngine::Impl::decodeLoop() {
         }
         const std::size_t bytes = static_cast<std::size_t>(got) * kOutChannels * 2;
         pcm.resize(bytes);
-        // Mute while actively scrubbing so audio writes don't block video previews
-        // and the sound doesn't stutter across seek positions. (Not for audio
-        // files: nothing paces their decoding, so this would skip far ahead.)
-        if (!audioOnly && std::chrono::duration<double>(clock::now() - lastSeekWall).count() < 0.25) {
+        // A newer seek is pending: this sound is about to be flushed, so don't
+        // queue it (repeated seeks then don't blip audio from each position).
+        // Sound before the current target is dropped by the trim below.
+        if (seekTarget.load() >= 0.0) {
             return;
         }
         if (!pa) {
@@ -779,8 +827,27 @@ void MediaEngine::Impl::decodeLoop() {
         if (ts == AV_NOPTS_VALUE) {
             ts = frame->pts;
         }
-        const double pts = (ts != AV_NOPTS_VALUE) ? (ts * av_q2d(audioTimeBase)) : -1.0;
-        const double dur = static_cast<double>(got) / static_cast<double>(kOutSampleRate);
+        double pts = (ts != AV_NOPTS_VALUE) ? (ts * av_q2d(audioTimeBase)) : -1.0;
+        double dur = static_cast<double>(got) / static_cast<double>(kOutSampleRate);
+
+        // After a seek, drop the sound before the target and trim the chunk
+        // that straddles it, so audio starts exactly where the video does.
+        if (audioDiscardUntil >= 0.0 && pts >= 0.0) {
+            if (pts + dur <= audioDiscardUntil) {
+                return;  // wholly before the target
+            }
+            if (pts < audioDiscardUntil) {
+                const auto skipSamples =
+                    static_cast<std::size_t>((audioDiscardUntil - pts) * kOutSampleRate);
+                const std::size_t skip = skipSamples * kOutChannels * 2;
+                if (skip > 0 && skip < pcm.size()) {
+                    pcm.erase(pcm.begin(), pcm.begin() + static_cast<std::ptrdiff_t>(skip));
+                    pts += static_cast<double>(skipSamples) / kOutSampleRate;
+                    dur = static_cast<double>(pcm.size() / (kOutChannels * 2)) / kOutSampleRate;
+                }
+            }
+            audioDiscardUntil = -1.0;
+        }
 
         if (audioOnly) {
             // No video to pace the loop: hold decoding ~1.5 s ahead of playback.
@@ -822,26 +889,23 @@ void MediaEngine::Impl::decodeLoop() {
     };
 
     while (running.load()) {
-        double seekTo = seekTarget.exchange(-1.0);
         // Throttle seek handling to ~8/s. Rapid scrubbing otherwise flushes the
         // hardware decoder faster than it can emit a frame, wedging it so the
-        // picture freezes; deferred seeks are re-stored so the latest still wins.
-        if (seekTo >= 0.0) {
-            const double since =
-                std::chrono::duration<double>(clock::now() - lastSeekWall).count();
-            if (since < 0.12) {
-                double expected = -1.0;
-                seekTarget.compare_exchange_strong(expected, seekTo);
-                seekTo = -1.0;
-            }
-        }
-        if (seekTo >= 0.0) {
+        // picture freezes; a deferred seek stays in seekTarget, so the latest
+        // still wins.
+        double seekTo = -1.0;
+        if (seekTarget.load() >= 0.0 &&
+            std::chrono::duration<double>(clock::now() - lastSeekWall).count() >= 0.12) {
             lastSeekWall = clock::now();
             // Release every held dma-buf (queued frames + the renderer's live
             // frame) before flushing; the V4L2 decoder cannot reclaim its capture
             // buffers otherwise and wedges ("can't request capture buffers").
             {
                 std::unique_lock<std::mutex> lock(mutex);
+                // Taken under the lock with the request's serial, so a frame shown
+                // later is known to belong to this seek (see settleDisplayLocked).
+                seekTo = seekTarget.exchange(-1.0);
+                appliedSerial = seekSerial;
                 clearQueues();  // drop stale pre-seek frames
                 releaseReq.store(true);
                 releaseCv.wait_for(lock, std::chrono::milliseconds(150), [&] {
@@ -849,7 +913,11 @@ void MediaEngine::Impl::decodeLoop() {
                 });
             }
             const int64_t ts = static_cast<int64_t>(seekTo * AV_TIME_BASE);
-            avformat_seek_file(format, -1, INT64_MIN, ts, INT64_MAX, 0);
+            // Never land on a keyframe after the target (demuxers with their own
+            // seek2); fall back to the open bound when nothing lies before it.
+            if (avformat_seek_file(format, -1, INT64_MIN, ts, ts, 0) < 0) {
+                avformat_seek_file(format, -1, INT64_MIN, ts, INT64_MAX, 0);
+            }
             const bool reopened = audioOnly || reopenDecoder();  // fresh decoder avoids HW wedge
             if (!reopened) {
                 PIXELVR_LOG_ERROR("MediaEngine: video decoder reopen failed on seek");
@@ -863,6 +931,7 @@ void MediaEngine::Impl::decodeLoop() {
             {
                 std::lock_guard<std::mutex> lk(audioMutex);
                 audioQueue.clear();
+                audioReanchor = true;  // the next queued chunk is post-seek
             }
             if (pa) {
                 int pErr = 0;
@@ -873,6 +942,9 @@ void MediaEngine::Impl::decodeLoop() {
             haveClock = false;
             masterClock.store(seekTo);
             playClock.reset();  // the next presented frame re-anchors the clock
+            videoDiscardUntil = audioOnly ? -1.0 : seekTo;
+            audioDiscardUntil = seekTo;
+            discardCount = 0;
             eofFlushed = false;
             readRetries = 0;
             eof.store(false);
@@ -916,6 +988,9 @@ void MediaEngine::Impl::decodeLoop() {
         }
         if (readResult < 0) {
             if (!eofFlushed) {
+                // A seek at the very end: show the last frames rather than none.
+                videoDiscardUntil = -1.0;
+                audioDiscardUntil = -1.0;
                 if (codec != nullptr) {
                     avcodec_send_packet(codec, nullptr);  // flush video
                     drain(codec, true);
@@ -972,10 +1047,24 @@ void MediaEngine::Impl::audioThreadLoop() {
         if (audioOnly && !paused.load()) {
             // No video frame anchors the clock: the first queued sound does
             // (again after a seek, when the clock restarts from zero).
-            std::lock_guard<std::mutex> lk(audioMutex);
-            if (!audioQueue.empty() && audioQueue.front().pts >= 0.0) {
-                const double first = audioQueue.front().pts;
-                if (!playClock.running.load() || std::abs(playClock.now() - first) > 0.5) playClock.start(first);
+            double anchored = -1.0;
+            {
+                std::lock_guard<std::mutex> lk(audioMutex);
+                if (!audioQueue.empty() && audioQueue.front().pts >= 0.0) {
+                    const double first = audioQueue.front().pts;
+                    if (audioReanchor || !playClock.running.load() ||
+                        std::abs(playClock.now() - first) > 0.5) {
+                        playClock.start(first);
+                        anchored = first;
+                        audioReanchor = false;
+                    }
+                }
+            }
+            if (anchored >= 0.0) {
+                // The sound after the seek is due: report its time from now on.
+                masterClock.store(anchored, std::memory_order_relaxed);
+                std::lock_guard<std::mutex> lk(mutex);
+                settleDisplayLocked();
             }
         }
         if (paused.load() || !playClock.running.load(std::memory_order_relaxed)) {
@@ -1468,6 +1557,12 @@ bool MediaEngine::open(const std::string& path) {
     impl_->lastError.clear();
     impl_->eof.store(false);
     impl_->paused.store(false);
+    // A fresh file starts at its beginning, with no seek carried over.
+    impl_->seekTarget.store(-1.0);
+    impl_->displayPos.store(-1.0);
+    impl_->masterClock.store(0.0);
+    impl_->seekSerial = 0;
+    impl_->appliedSerial = 0;
     impl_->running.store(true);
     impl_->thread = std::thread([this] { impl_->decodeLoop(); });
 #ifdef PIXELVR_HAVE_PULSE
@@ -1564,16 +1659,20 @@ void MediaEngine::seek(double seconds) {
     {
         std::lock_guard<std::mutex> lock(impl_->mutex);
         impl_->seekTarget.store(seconds);
+        impl_->displayPos.store(seconds);  // report the target until it is shown
+        ++impl_->seekSerial;
     }
     impl_->queueCv.notify_all();  // wake a back-pressured decoder to handle the seek
 }
 
 void MediaEngine::seekRelative(double delta) {
-    seek(position() + delta);
+    seek(position() + delta);  // a pending target, so quick repeats add up
 }
 
 double MediaEngine::position() const {
-    return impl_ ? impl_->masterClock.load() : 0.0;
+    if (!impl_) return 0.0;
+    const double pending = impl_->displayPos.load();
+    return pending >= 0.0 ? pending : impl_->masterClock.load();
 }
 
 std::vector<MediaEngine::StreamInfo> MediaEngine::videoStreams() const {
@@ -1682,6 +1781,7 @@ bool MediaEngine::latestFrame(VideoFrame& out) {
     impl_->masterClock.store(out.pts, std::memory_order_relaxed);
     if (firstFrame) {
         impl_->playClock.start(out.pts);  // anchor to the first frame
+        impl_->settleDisplayLocked();     // the seek's frame is up: report its time
 #ifdef PIXELVR_HAVE_PULSE
         impl_->audioCv.notify_all();
 #endif
@@ -1737,6 +1837,7 @@ bool MediaEngine::latestDrmFrame(DrmVideoFrame& out) {
     impl_->masterClock.store(out.pts, std::memory_order_relaxed);
     if (firstFrame) {
         impl_->playClock.start(out.pts);  // anchor to the first frame
+        impl_->settleDisplayLocked();     // the seek's frame is up: report its time
 #ifdef PIXELVR_HAVE_PULSE
         impl_->audioCv.notify_all();
 #endif

@@ -386,8 +386,11 @@ void XrContext::releaseLayerImage(const ViewSwapchain& sc) {
 namespace {
 
 struct ActionDef {
-    const char* name;   // /actions/gameplay/in/<name>; kept names keep saved SteamVR bindings
-    const char* label;  // what SteamVR shows: true in every context, <= 3 words
+    // /actions/gameplay/in/<name>. SteamOS shows this raw name in its binding
+    // callouts (SteamVR drops localizedActionName), so it must read well on its
+    // own: lowercase a-z, 0-9, '-', '_', '.'. Renaming resets saved SteamVR bindings.
+    const char* name;
+    const char* label;  // our own Buttons page: true in every context, <= 3 words
     XrActionType type;
 };
 
@@ -396,33 +399,33 @@ struct ActionDef {
 constexpr XrActionType kBool = XR_ACTION_TYPE_BOOLEAN_INPUT;
 const ActionDef kActionDefs[] = {
     {"select", "Select", kBool},
-    {"toggle_play", "Play / OK", kBool},
+    {"play-ok", "Play / OK", kBool},
     {"back", "Back", kBool},
-    {"main_menu", "Main Menu", kBool},
+    {"main-menu", "Main Menu", kBool},
     {"options", "Options", kBool},
     {"recenter", "Recenter", kBool},
-    {"toggle_ui", "Show / Hide UI", kBool},
+    {"show-hide-ui", "Show / Hide UI", kBool},
     {"previous", "Previous", kBool},
     {"next", "Next", kBool},
-    {"dpad_up", "Up / Vol +", kBool},
-    {"dpad_down", "Down / Vol \xE2\x80\x93", kBool},           // en dash: our font has it
-    {"dpad_left", "Left / \xE2\x80\x93" "10 s", kBool},
-    {"dpad_right", "Right / +10 s", kBool},
-    {"stick_right", "Scrub / Distance", XR_ACTION_TYPE_VECTOR2F_INPUT},
-    {"stick_left", "Skip / Distance", XR_ACTION_TYPE_VECTOR2F_INPUT},
-    {"show_controls", "Show Controls", kBool},
-    {"grip_full_press", "Laser Hand", kBool},  // per hand (subaction paths)
+    {"up-volume-up", "Up / Vol +", kBool},
+    {"down-volume-down", "Down / Vol \xE2\x80\x93", kBool},           // en dash: our font has it
+    {"left-back-10s", "Left / \xE2\x80\x93" "10 s", kBool},
+    {"right-forward-10s", "Right / +10 s", kBool},
+    {"scrub-distance", "Scrub / Distance", XR_ACTION_TYPE_VECTOR2F_INPUT},  // right stick
+    {"skip-distance", "Skip / Distance", XR_ACTION_TYPE_VECTOR2F_INPUT},    // left stick
+    {"show-controls", "Show Controls", kBool},
+    {"laser-hand", "Laser Hand", kBool},  // per hand (subaction paths)
     // No default binding: for SteamVR chords / long presses.
     {"mute", "Mute", kBool},
     {"stop", "Stop", kBool},
     {"bookmarks", "Bookmarks", kBool},
-    {"next_screen", "Next Screen", kBool},
-    {"previous_screen", "Previous Screen", kBool},
-    {"skip_back", "Back 30 s", kBool},
-    {"skip_forward", "Forward 30 s", kBool},
-    {"lock_screens", "Lock Screens", kBool},
-    {"audio_track", "Audio Track", kBool},
-    {"format_3d", "3D Format", kBool},
+    {"next-screen", "Next Screen", kBool},
+    {"previous-screen", "Previous Screen", kBool},
+    {"back-30s", "Back 30 s", kBool},
+    {"forward-30s", "Forward 30 s", kBool},
+    {"lock-screens", "Lock Screens", kBool},
+    {"audio-track", "Audio Track", kBool},
+    {"format-3d", "3D Format", kBool},
 };
 static_assert(sizeof(kActionDefs) / sizeof(kActionDefs[0]) == static_cast<std::size_t>(InputAction::Count),
               "one ActionDef per InputAction");
@@ -488,7 +491,7 @@ bool XrContext::createActions() {
     }
     // Pointer and model poses, haptics and the analog full-grip fallback: per
     // hand. Poses and outputs never show as SteamVR callouts.
-    make_action("squeeze_val", "Laser Hand (Analog)", XR_ACTION_TYPE_FLOAT_INPUT, true,
+    make_action("laser-hand-analog", "Laser Hand (Analog)", XR_ACTION_TYPE_FLOAT_INPUT, true,
                 squeezeValueAction_);
     make_action("aim_pose", "Pointer Pose", XR_ACTION_TYPE_POSE_INPUT, true, aimPoseAction_);
     make_action("grip_pose", "Grip Pose", XR_ACTION_TYPE_POSE_INPUT, true, gripPoseAction_);
@@ -592,6 +595,12 @@ bool XrContext::createActions() {
             s.countSuggestedBindings = 1;
             if (XR_SUCCEEDED(xrSuggestInteractionProfileBindings(instance_, &s))) {
                 frameBinds.push_back(one);
+                // Remember the hand of each default, so the Buttons page can say
+                // "Left controller off" instead of "Not bound".
+                const int hand = (std::strncmp(p, "/user/hand/left/", 16) == 0) ? 0 : 1;
+                for (int i = 0; i < static_cast<int>(InputAction::Count); ++i) {
+                    if (actions_[i] == a) frameSuggestHands_[i] |= (1u << hand);
+                }
             } else {
                 ++rejected;
                 PIXELVR_LOG_ERROR("Steam Frame binding REJECTED: %s", p);
@@ -713,6 +722,18 @@ void XrContext::syncActions() {
     if (bindingsDirty_) {  // bindings can be queried now that a focused sync ran
         bindingsDirty_ = false;
         ++bindingsGeneration_;
+    }
+    // A controller waking up (or going to sleep) changes what can be listed;
+    // the profile-changed event normally says so, this is the backstop (~1 Hz).
+    if (++handCheckFrames_ >= 90) {
+        handCheckFrames_ = 0;
+        for (int h = 0; h < 2; ++h) {
+            const bool on = handActive(h);
+            if (on != lastHandActive_[h]) {
+                lastHandActive_[h] = on;
+                bindingsDirty_ = true;
+            }
+        }
     }
 
     // One-shot: log which interaction profile the runtime actually bound, so we
@@ -859,6 +880,7 @@ std::string XrContext::describeBinding(InputAction a) {
     std::vector<XrAction> acts{actions_[i]};
     if (a == InputAction::LaserHand) acts.push_back(squeezeValueAction_);  // its analog fallback
     std::vector<std::string> names;
+    std::vector<std::string> raw;  // "<path> -> <runtime name>", logged when the result changes
     bool failed = false;
     for (XrAction x : acts) {
         if (x == XR_NULL_HANDLE) continue;
@@ -891,28 +913,48 @@ std::string XrContext::describeBinding(InputAction a) {
                 continue;
             }
             s.resize(std::strlen(s.c_str()));
-            if (!bindingLogged_[i]) {  // the raw runtime strings, once per action
-                char pb[XR_MAX_PATH_LENGTH] = {};
-                uint32_t pl = 0;
-                if (XR_FAILED(xrPathToString(instance_, p, sizeof(pb), &pl, pb))) pb[0] = '\0';
-                PIXELVR_LOG_INFO("Binding [%s]: %s -> \"%s\"", kActionDefs[i].name, pb, s.c_str());
-            }
+            char pb[XR_MAX_PATH_LENGTH] = {};
+            uint32_t pl = 0;
+            if (XR_FAILED(xrPathToString(instance_, p, sizeof(pb), &pl, pb))) pb[0] = '\0';
+            raw.push_back(std::string(pb) + " -> \"" + s + "\"");
             const std::string shortName = shortenSourceName(s);
             if (!shortName.empty() && std::find(names.begin(), names.end(), shortName) == names.end()) {
                 names.push_back(shortName);
             }
         }
     }
-    if (!bindingLogged_[i]) {
-        if (names.empty()) {
-            PIXELVR_LOG_INFO("Binding [%s]: %s", kActionDefs[i].name, failed ? "query failed" : "not bound");
-        }
-        bindingLogged_[i] = true;
-    }
-    if (names.empty()) return failed ? "See SteamVR bindings" : "Not bound";
     std::string out;
-    for (const std::string& nm : names) out += (out.empty() ? "" : ", ") + nm;
+    if (!names.empty()) {
+        for (const std::string& nm : names) out += (out.empty() ? "" : ", ") + nm;
+    } else if (failed) {
+        out = "See SteamVR bindings";
+    } else {
+        // SteamVR lists sources of active controllers only: when every hand our
+        // default puts this action on is off, say so instead of "Not bound".
+        const unsigned hands = frameSuggestHands_[i];
+        const bool leftOff = (hands & 1u) && !handActive(0);
+        const bool rightOff = (hands & 2u) && !handActive(1);
+        const bool anyOn = ((hands & 1u) && !leftOff) || ((hands & 2u) && !rightOff);
+        if (hands != 0 && !anyOn) {
+            out = (leftOff && rightOff) ? "Controllers off" : (leftOff ? "Left controller off" : "Right controller off");
+        } else {
+            out = "Not bound";
+        }
+    }
+    // Logged whenever the result changes (SteamVR can swap bindings at any time).
+    if (out != lastBinding_[i]) {
+        for (const std::string& r : raw) PIXELVR_LOG_INFO("Binding [%s]: %s", kActionDefs[i].name, r.c_str());
+        PIXELVR_LOG_INFO("Binding [%s] = \"%s\"", kActionDefs[i].name, out.c_str());
+        lastBinding_[i] = out;
+    }
     return out;
+}
+
+bool XrContext::handActive(int hand) const {
+    if (session_ == XR_NULL_HANDLE || !actionsReady_ || hand < 0 || hand > 1) return false;
+    XrInteractionProfileState ips{XR_TYPE_INTERACTION_PROFILE_STATE};
+    return XR_SUCCEEDED(xrGetCurrentInteractionProfile(session_, handPaths_[hand], &ips)) &&
+           ips.interactionProfile != XR_NULL_PATH;
 }
 
 void XrContext::triggerHaptic(int hand, float durationSec, float frequencyHz, float amplitude) {
@@ -1232,12 +1274,66 @@ bool XrContext::renderFrame(const RenderViewFn& renderView, const RenderLayersFn
     // Build the OpenXR structs (stable addresses: reserved up front).
     std::vector<XrCompositionLayerQuad> quads;
     std::vector<XrCompositionLayerCylinderKHR> cylinders;
+    std::vector<XrCompositionLayerProjection> projections;
+    std::vector<XrCompositionLayerProjectionView> projViews;
     quads.reserve(extra.size());
     cylinders.reserve(extra.size());
+    projections.reserve(extra.size());
+    projViews.reserve(extra.size() * views_.size());
     std::vector<XrCompositionLayerBaseHeader*> layers;
     layers.reserve(extra.size() + 1);
     layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader*>(&layer));
+    if (maxLayerCount_ == 0) {
+        XrSystemProperties props{XR_TYPE_SYSTEM_PROPERTIES};
+        if (XR_SUCCEEDED(xrGetSystemProperties(instance_, systemId_, &props)) &&
+            props.graphicsProperties.maxLayerCount > 0) {
+            maxLayerCount_ = props.graphicsProperties.maxLayerCount;
+        } else {
+            maxLayerCount_ = XR_MIN_COMPOSITION_LAYERS_SUPPORTED;
+        }
+        PIXELVR_LOG_INFO("Runtime composites up to %u layers", maxLayerCount_);
+    }
+    // Further projection layers take one slot each; leave them out (their
+    // content is then missing for the frame) rather than fail the frame.
+    std::size_t extraSlots = 0;
     for (const CompositionLayer& cl : extra) {
+        if (!cl.projection && cl.swapchain != XR_NULL_HANDLE) ++extraSlots;
+    }
+    for (const CompositionLayer& cl : extra) {
+        if (cl.projection) {
+            if (!extraProjectionOk_ || views_.empty() || views_.size() > 2) continue;
+            bool haveAll = true;
+            for (std::size_t i = 0; i < views_.size(); ++i) {
+                haveAll = haveAll && cl.projSwapchain[i] != XR_NULL_HANDLE;
+            }
+            if (!haveAll) continue;
+            if (1 + extraSlots + projections.size() + 1 > maxLayerCount_) {
+                if (!layerLimitLogged_) {
+                    PIXELVR_LOG_WARN("Layer limit (%u) reached: a projection layer is left out", maxLayerCount_);
+                    layerLimitLogged_ = true;
+                }
+                continue;
+            }
+            XrCompositionLayerProjectionView* first = projViews.data() + projViews.size();
+            for (std::size_t i = 0; i < views_.size(); ++i) {
+                XrCompositionLayerProjectionView& pv = projViews.emplace_back();
+                pv = XrCompositionLayerProjectionView{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
+                pv.pose = views_[i].pose;
+                pv.fov = views_[i].fov;
+                pv.subImage.swapchain = cl.projSwapchain[i];
+                pv.subImage.imageRect = cl.imageRect;
+                pv.subImage.imageArrayIndex = 0;
+            }
+            XrCompositionLayerProjection& p = projections.emplace_back();
+            p = XrCompositionLayerProjection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
+            // Premultiplied alpha over everything submitted before it.
+            p.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
+            p.space = appSpace_;
+            p.viewCount = static_cast<uint32_t>(views_.size());
+            p.views = first;
+            layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader*>(&p));
+            continue;
+        }
         if (cl.swapchain == XR_NULL_HANDLE) continue;
         // Blended layers are rendered with premultiplied alpha (straight-alpha
         // blending onto a cleared transparent target).
@@ -1282,7 +1378,37 @@ bool XrContext::renderFrame(const RenderViewFn& renderView, const RenderLayersFn
         ++viewFallbackStats_.zeroLayerFrames;
     }
 
-    PIXELVR_XR_CHECK(instance_, xrEndFrame(session_, &endInfo));
+    XrResult endRes = xrEndFrame(session_, &endInfo);
+    if (XR_FAILED(endRes) && viewsValid && !projections.empty()) {
+        // OpenXR allows several projection layers, but a runtime may still
+        // refuse them: retry this frame without, and if that works keep them
+        // off from now on (the renderer draws that content into the eye
+        // buffers again).
+        char buf[XR_MAX_RESULT_STRING_SIZE];
+        PIXELVR_LOG_WARN("xrEndFrame with %zu extra projection layer(s) failed: %s; retrying without",
+                         projections.size(), xr_result_string(instance_, endRes, buf));
+        std::vector<XrCompositionLayerBaseHeader*> kept;
+        kept.reserve(layers.size());
+        for (XrCompositionLayerBaseHeader* l : layers) {
+            if (l->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION ||
+                l == reinterpret_cast<XrCompositionLayerBaseHeader*>(&layer)) {
+                kept.push_back(l);
+            }
+        }
+        endInfo.layerCount = static_cast<uint32_t>(kept.size());
+        endInfo.layers = kept.data();
+        endRes = xrEndFrame(session_, &endInfo);
+        if (XR_SUCCEEDED(endRes)) {
+            extraProjectionOk_ = false;
+            PIXELVR_LOG_WARN("Runtime rejects a second projection layer: controller models go back "
+                             "into the eye buffers");
+        }
+    }
+    if (XR_FAILED(endRes)) {
+        char buf[XR_MAX_RESULT_STRING_SIZE];
+        PIXELVR_LOG_ERROR("xrEndFrame failed: %s", xr_result_string(instance_, endRes, buf));
+        return false;
+    }
     return true;
 }
 

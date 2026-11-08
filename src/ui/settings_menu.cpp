@@ -21,6 +21,8 @@ const char* const kShortcutsStatus = "Shortcuts appear as tabs on the hub's rail
 // Buttons are assigned in SteamVR only (OpenXR can't open that page for us).
 const char* const kButtonsStatus =
     "Change buttons in SteamOS: SteamVR Settings > Controllers > Manage Controller Bindings";
+const char* const kButtonsPagesStatus =
+    "< > or Bumpers: Page  |  Change buttons: SteamVR > Controllers > Manage Controller Bindings";
 const char* kDownloadDirs[] = {"~/media", "~/Downloads", "~/Videos"};
 constexpr int kDownloadDirCount = 3;
 
@@ -143,7 +145,12 @@ void SettingsMenu::refresh() {
     rows_.clear();
     if (section_ >= kButtonsSection && !showingButtons()) section_ = kButtonsSection;
     // Page hints belong to their page; transient messages stay.
-    if (status_ == kShortcutsStatus || status_ == kButtonsStatus) status_ = kDefaultStatus;
+    if (!pageHint_.empty() && status_ == pageHint_) status_ = kDefaultStatus;
+    pageHint_.clear();
+    auto hint = [&](const std::string& s) {
+        status_ = s;
+        pageHint_ = s;
+    };
 
     auto choice = [&](const std::string& label, const std::string& value, int steps,
                       int idx, Action act, bool enabled = true) {
@@ -269,7 +276,7 @@ void SettingsMenu::refresh() {
                          Action::EnterLangList});
     } else if (section_ == 3) {
         title_ = "Settings > Controls & Input";
-        status_ = kButtonsStatus;
+        hint(kButtonsStatus);
         rows_.push_back({"Controller Buttons", "Assigned in SteamOS", Action::EnterButtons});
         segmented("Keyboard Layout", {"US", "Deutsch", "UK", "Français", "Nordic"}, keyboardLayout_ % 5,
                   Action::CycleKeyboardLayout);
@@ -300,11 +307,10 @@ void SettingsMenu::refresh() {
         binding("Unlock Combo Sequence", comboLabel, Action::RecordVaultCombo);
     } else if (showingButtons()) {
         // Read-only: one row per action with the buttons SteamVR binds to it.
+        // Every card is a binding; the header pager (< n / m >) turns pages.
         const int page = section_ - kButtonsSection;
-        const int pages = buttonsPages();
         title_ = "Settings > Controls & Input > Buttons";
-        if (pages > 1) title_ += " (" + std::to_string(page + 1) + "/" + std::to_string(pages) + ")";
-        status_ = kButtonsStatus;
+        hint(controlsNotice_.empty() ? std::string(kButtonsPagesStatus) : controlsNotice_);
         const int n = static_cast<int>(controlsInfo_.size());
         for (int i = page * kButtonsPerPage; i < std::min(n, (page + 1) * kButtonsPerPage); ++i) {
             Row r{controlsInfo_[static_cast<std::size_t>(i)].first,
@@ -312,16 +318,9 @@ void SettingsMenu::refresh() {
             r.kind = Kind::Choice;  // plain value text, no control
             rows_.push_back(r);
         }
-        if (page + 1 < pages) {
-            rows_.push_back({"More Buttons",
-                             "Page " + std::to_string(page + 2) + " of " + std::to_string(pages),
-                             Action::NextButtonsPage});
-        } else {
-            rows_.push_back({"Back to Controls & Input", "", Action::BackToControls});
-        }
     } else if (section_ == 22) {
         title_ = "Settings > UI & Appearance > Shortcuts";
-        status_ = kShortcutsStatus;
+        hint(kShortcutsStatus);
         for (int i = 0; i < kRailShortcutCount; ++i) {
             const bool on = (railShortcutMask_ >> i) & 1;
             toggle(kRailShortcuts[i].name, on,
@@ -374,16 +373,6 @@ SettingsMenu::Action SettingsMenu::activate() {
             break;
         case Action::EnterButtons:
             section_ = kButtonsSection;
-            selected_ = 0;
-            refresh();
-            break;
-        case Action::NextButtonsPage:
-            ++section_;
-            selected_ = 0;
-            refresh();
-            break;
-        case Action::BackToControls:
-            section_ = 3;
             selected_ = 0;
             refresh();
             break;
@@ -671,9 +660,33 @@ std::string SettingsMenu::audioLanguage() const {
     return kLangCodes[audioLangIdx_ % kLangCount];
 }
 
-void SettingsMenu::setControlsInfo(std::vector<std::pair<std::string, std::string>> info) {
+void SettingsMenu::setControlsInfo(std::vector<std::pair<std::string, std::string>> info,
+                                   std::string notice) {
+    // Re-read about once a second: rebuild the rows only when something changed.
+    if (info == controlsInfo_ && notice == controlsNotice_) return;
     controlsInfo_ = std::move(info);
-    if (open_ && showingButtons()) refresh();
+    controlsNotice_ = std::move(notice);
+    if (open_ && showingButtons()) {
+        const int sel = selected_;
+        refresh();
+        setSelected(sel);
+    }
+}
+
+bool SettingsMenu::turnButtonsPage(int delta, bool wrap) {
+    if (!showingButtons() || delta == 0) return false;
+    const int n = buttonsPages();
+    int page = section_ - kButtonsSection + delta;
+    if (wrap) {
+        page = ((page % n) + n) % n;
+    } else if (page < 0 || page >= n) {
+        return false;
+    }
+    if (page == section_ - kButtonsSection) return false;
+    section_ = kButtonsSection + page;
+    selected_ = 0;
+    refresh();
+    return true;
 }
 
 void SettingsMenu::close() {

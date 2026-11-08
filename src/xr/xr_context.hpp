@@ -34,6 +34,12 @@ struct CompositionLayer {
     float centralAngle = 1.0f;
     float aspectRatio = 1.0f;
     XrRect2Di imageRect{{0, 0}, {0, 0}};
+    // A further stereo projection layer (the controller models over the
+    // screens): `projSwapchain` holds one swapchain per eye, each showing
+    // `imageRect`, rendered with this frame's located views. The pose / size
+    // fields above are unused. Always premultiplied-alpha blended.
+    bool projection = false;
+    XrSwapchain projSwapchain[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
 };
 
 // The player's OpenXR actions that SteamVR shows and binds (one set, "Player
@@ -165,6 +171,10 @@ public:
     bool acquireLayerImage(const ViewSwapchain& sc, uint32_t& imageIndex);
     void releaseLayerImage(const ViewSwapchain& sc);
     bool cylinderLayerSupported() const { return cylinderLayerEnabled_; }
+    // False once the runtime rejected a frame with a second projection layer
+    // (CompositionLayer::projection); the renderer then keeps that content in
+    // the main projection layer.
+    bool extraProjectionLayersOk() const { return extraProjectionOk_; }
 
     // Controller input (OpenXR actions). Call createActions after createSession.
     bool createActions();
@@ -172,8 +182,12 @@ public:
     // The label SteamVR shows for an action ("Play / OK").
     static const char* actionLabel(InputAction a);
     // The buttons SteamVR currently binds to an action, e.g. "Right A", joined
-    // with ", "; "Not bound", or "See SteamVR bindings" when the runtime can't say.
+    // with ", "; "Not bound", "Left controller off" / "Right controller off" when
+    // the hand(s) of its default are inactive (SteamVR lists active sources only),
+    // or "See SteamVR bindings" when the runtime can't say. Logs each change.
     std::string describeBinding(InputAction a);
+    // The runtime has an interaction profile bound for this hand (0 left, 1 right).
+    bool handActive(int hand) const;
     // Bumped after a focused sync once focus or the interaction profile changed
     // (bindings may have been edited in the dashboard meanwhile).
     uint32_t bindingsGeneration() const { return bindingsGeneration_; }
@@ -253,6 +267,9 @@ private:
     bool profileLoggedHand_[2] = {false, false};  // each hand logged once
 
     bool cylinderLayerEnabled_ = false;   // XR_KHR_composition_layer_cylinder
+    bool extraProjectionOk_ = true;       // runtime takes a second projection layer
+    uint32_t maxLayerCount_ = 0;          // XrSystemGraphicsProperties (0 = not queried yet)
+    bool layerLimitLogged_ = false;
 
     std::vector<XrViewConfigurationView> configViews_;
     std::vector<ViewSwapchain> swapchains_;
@@ -277,7 +294,10 @@ private:
     bool prevFull_[2] = {false, false};  // squeeze-value full-press hysteresis
     bool bindingsDirty_ = false;
     uint32_t bindingsGeneration_ = 0;
-    bool bindingLogged_[static_cast<int>(InputAction::Count)] = {};
+    std::string lastBinding_[static_cast<int>(InputAction::Count)];   // last result, logged on change
+    unsigned frameSuggestHands_[static_cast<int>(InputAction::Count)] = {};  // Steam Frame defaults: bit 0 left, 1 right
+    bool lastHandActive_[2] = {false, false};
+    int handCheckFrames_ = 0;
     XrInputState input_;
 
     // XR_KHR_vulkan_enable2 entry points (resolved at runtime).

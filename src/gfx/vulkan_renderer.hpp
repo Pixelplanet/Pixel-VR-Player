@@ -684,6 +684,15 @@ public:
     // Segment of a segmented settings row under the pointer, or -1.
     int settingsSegmentHovered() const { return settingsSegmentHovered_; }
     void setSettingsSelected(int index) { settingsSelected_ = index; }
+    // Header pager (< n / m >) for paged settings (the Buttons pages); pages <= 1 hides it.
+    void setSettingsPager(int page, int pages) {
+        settingsPage_ = page;
+        settingsPages_ = pages;
+    }
+    // Pager arrow under the pointer: 0 = previous page, 1 = next page, -1 none.
+    int settingsPagerHovered() const { return settingsPagerHovered_; }
+    // The status line is a warning (drawn in the warning colour).
+    void setSettingsStatusWarn(bool warn) { settingsStatusWarn_ = warn; }
 
     VkDevice device() const { return device_; }
 
@@ -779,6 +788,26 @@ private:
     ViewSwapchain beamSwapchain_;
     ViewTargets beamTargets_;
     bool beamDrawn_ = false;
+    // The controller models as a second projection layer, submitted after the
+    // screen and UI layers (under the beam and cursor): in the eye buffers
+    // they are composited first, so every layer screen covered them. One
+    // swapchain per eye at the eye-buffer size, drawn with renderPass_ (the
+    // eye pass's MSAA + depth targets, cleared transparent) and the same model
+    // pipeline. Used only while the models are drawn and a screen or the UI
+    // is a layer; otherwise they stay in the eye buffers.
+    ViewSwapchain modelSwapchains_[2];
+    ViewTargets modelTargets_[2];
+    bool modelLayerReady_ = false;      // swapchains + framebuffers exist
+    bool modelLayerAllowed_ = true;     // runtime takes it (XrContext), cached per frame
+    bool modelLayerThisFrame_ = false;  // decided by the first eye pass
+    bool modelsInView_ = true;          // an active model may be seen (renderLayersBefore)
+    // True when a bounding sphere around an active controller's model reaches
+    // into either view's frustum (cheap: no layer when the hands are out of view).
+    bool controllerModelsInView(const XrView* views, uint32_t viewCount) const;
+    bool createModelLayerTargets(const ViewSwapchain& sc, ViewTargets& out);
+    // Records the controller models for one view into commandBuffer_ (inside
+    // a renderPass_ pass, model pipeline bound).
+    void drawControllerModels(const XrView& view);
     // badge: 0 = none, else the screen number (+10 when it is the selected one);
     // glyphCursor: next free glyph instance in pass slot 3 (shared by the copies).
     void recordScreenCopy(int slot, const ScreenLayer& L, uint32_t imageIndex, int badge, uint32_t& glyphCursor);
@@ -1042,6 +1071,16 @@ private:
     int settingsHovered_ = -1;
     int settingsSegmentHovered_ = -1;
     int settingsRow_ = -1;
+    int settingsPage_ = -1;
+    int settingsPages_ = 0;
+    int settingsPagerHovered_ = -1;
+    bool settingsStatusWarn_ = false;
+    // Row count the card layout is sized for: paged settings keep the dense
+    // layout on a short last page, so cards don't change size when paging.
+    int settingsLayoutRows() const {
+        const int n = static_cast<int>(settingsRows_.size());
+        return (settingsPages_ > 1 && n < 9) ? 9 : n;
+    }
 
     // Tracked controllers + pointer (raycast against UI panels).
     ControllerVis controllers_[2];
