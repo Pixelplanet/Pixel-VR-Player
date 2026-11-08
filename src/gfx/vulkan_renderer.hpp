@@ -263,6 +263,14 @@ public:
     // Chapters of the selected screen's video: marks on the timeline, the
     // current chapter's title above it, the hovered one's in the scrub bubble.
     void setTransportChapters(const ChapterList& chapters) { transportChapters_ = chapters; }
+    // Plugins: a heat strip above the timeline (equal-width bins across the
+    // whole duration, heat 0..1, < 0 = no data; empty hides it) and one live
+    // gauge pill above the dock (value < 0 hides it).
+    void setTransportHeat(std::vector<float> bins) { transportHeat_ = std::move(bins); }
+    void setPluginGauge(const std::string& label, float value) {
+        pluginGaugeLabel_ = label;
+        pluginGaugeValue_ = value;
+    }
     // True when the pointer is over the clickable total/remaining time readout.
     bool pointerOnTimeToggle() const { return pointerOnTimeToggle_; }
     void toggleTimeDisplay() { timeShowRemaining_ = !timeShowRemaining_; }
@@ -1188,6 +1196,10 @@ private:
     // the first eye when the UI is drawn in-scene).
     float hubOpenAnim_ = 0.0f;                    // hub / modal scale-in
     float dockOpenAnim_ = 0.0f;                   // dock slide-in from below
+    std::vector<float> transportHeat_;            // plugin heat bins over the timeline
+    std::string pluginGaugeLabel_;
+    float pluginGaugeValue_ = -1.0f;
+    float pluginGaugeAlpha_ = 0.0f;               // fade 0..1
     std::string dockHintText_;
     float dockHintLeft_ = 0.0f;                   // seconds of dock time still to show it
     float dockHintAlpha_ = 0.0f;                  // fade 0..1

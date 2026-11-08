@@ -307,6 +307,13 @@ go to `~/pixelvr-src-plugins` (never `~/pixelvr-src`, which belongs to the other
   - Text settings via the in-app keyboard (`Action::EditPluginText`).
   - Host test: all checks pass (sidecar filtering, content, control). **SMB sidecars not yet
     tried against a real share.**
-- [ ] Phase 3 timeline heat, gauge, quick button.
+- [x] Phase 3 timeline heat + gauge (quick button deferred; plugins use an `action` setting).
+  - Renderer: `setTransportHeat(bins)` draws a strip just above the timeline track
+    (blue → yellow → red, similar bins merged); `setPluginGauge(label, value)` draws a glass
+    pill above the dock (one row higher while the dock hint shows). The dock layer's top edge
+    grows only while they show, like the hint (`vulkan_renderer.cpp`, dock pass bounds).
+  - Both show only while the dock is visible (keep the dock open to watch sync).
+  - Host: `heatBins(screen, 160)` (cached per media/version), `gauge()`. Host test checks both.
+  - **Not yet seen in the headset.**
 - [ ] Phase 4 DeoVR bridge plugin, funscript plugin + fake Intiface tests.
 - [ ] Phase 5 `.pvrplugin` install + release assets.

@@ -66,6 +66,12 @@ int main() {
                     } else {
                         io.status("Watching " + m.getString("fileName"));
                         io.notice("Opened " + m.getString("fileName"));
+                        // A demo heat strip: calm first half, intense second half.
+                        const double ms = m.getNumber("duration") * 1000.0;
+                        if (ms > 0) {
+                            io.timeline(static_cast<int>(m.getNumber("screen")), m.getString("media"), "Example",
+                                        {{0.0, ms / 2, 0.2}, {ms / 2, ms, 0.9}});
+                        }
                     }
                 } else if (type == "media.close" && !screens.focus()) {
                     io.status("Waiting for a video");

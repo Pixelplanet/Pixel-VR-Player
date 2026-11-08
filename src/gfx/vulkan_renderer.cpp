@@ -3796,7 +3796,10 @@ void VulkanRenderer::renderLayersBefore(XrContext& xr, const XrView* views, uint
         const float bottom = kBarY - kDockHalfH - rowExtra - kMargin;
         // The return-hint pill (top edge kBarY + kDockHalfH + 0.066) widens the window only while it shows.
         const bool hintOn = !dockHintText_.empty() && (dockHintLeft_ > 0.0f || dockHintAlpha_ > 0.0f);
-        const float top = kBarY + (pointerOnTimeline_ ? 0.40f : (hintOn ? kDockHalfH + 0.070f : kDockHalfH)) + kMargin;
+        // A plugin gauge pill sits in the same row (or one row higher while the hint shows).
+        const bool gaugeOn = pluginGaugeValue_ >= 0.0f || pluginGaugeAlpha_ > 0.0f;
+        const float above = (hintOn ? 0.070f : 0.0f) + (gaugeOn ? (hintOn ? 0.062f : 0.070f) : 0.0f);
+        const float top = kBarY + (pointerOnTimeline_ ? 0.40f : kDockHalfH + above) + kMargin;
         pass.cx = 0.0f;
         pass.cy = 0.5f * (bottom + top);
         pass.hw = kDockHalfW + kMargin;
@@ -5504,6 +5507,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         if (dockShown && dockHintLeft_ > 0.0f) dockHintLeft_ = std::max(0.0f, dockHintLeft_ - dt);
         ease(dockHintAlpha_, (dockShown && dockHintLeft_ > 0.0f && !pointerOnTimeline_ && !dockHintText_.empty()) ? 1.0f : 0.0f,
              20.0f);
+        ease(pluginGaugeAlpha_, (dockShown && pluginGaugeValue_ >= 0.0f && !pointerOnTimeline_) ? 1.0f : 0.0f, 20.0f);
         for (int b = 0; b < kBtnCount && b < 32; ++b) {
             ease(dockHoverAnim_[b], (dockShown && pointerButton_ == b) ? 1.0f : 0.0f, 16.0f);
         }
@@ -6235,6 +6239,29 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 drawUiElement(vpPanel, cx, trackY, 0.0022f, trackHalfH * 1.5f, UiShape::RoundedBox, gapCol, 0.0f);
             }
         }
+        // Plugin heat strip (e.g. funscript intensity) just above the track:
+        // blue = calm, yellow = busy, red = intense; runs of similar bins merge.
+        if (!transportHeat_.empty() && transportLive_ == 0) {
+            const int n = static_cast<int>(transportHeat_.size());
+            const float binW = 2.0f * trackHalfW / static_cast<float>(n);
+            for (int i = 0; i < n;) {
+                const float h = transportHeat_[static_cast<size_t>(i)];
+                int j = i + 1;
+                while (j < n && std::fabs(transportHeat_[static_cast<size_t>(j)] - h) < 0.04f) ++j;
+                if (h >= 0.0f) {
+                    const float t = std::clamp(h, 0.0f, 1.0f);
+                    const float lo = std::min(t * 2.0f, 1.0f);
+                    const float hi = std::max(t * 2.0f - 1.0f, 0.0f);
+                    const float col[4] = {0.15f + 0.83f * lo - 0.03f * hi, 0.45f + 0.40f * lo - 0.65f * hi,
+                                          0.95f - 0.75f * lo - 0.05f * hi, 0.92f};
+                    const float x0 = -trackHalfW + binW * static_cast<float>(i);
+                    const float x1 = -trackHalfW + binW * static_cast<float>(j);
+                    drawUiElement(vpPanel, 0.5f * (x0 + x1), trackY + 0.019f, 0.5f * (x1 - x0), 0.0035f,
+                                  UiShape::RoundedBox, col, 0.0f);
+                }
+                i = j;
+            }
+        }
         // The scrub bubble grows a second line for the hovered chapter's title.
         const float tipSc = (0.029f * tScale) / fontAtlas_.lineHeight * 1.05f;
         std::string hoverChapter;
@@ -6345,6 +6372,25 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             const float hintRim[4] = {kGlassRim[0], kGlassRim[1], kGlassRim[2], kGlassRim[3] * dockHintAlpha_};
             drawUiElement(vpPanel, 0.0f, hintY, hintHw, hintHh, UiShape::RoundedBox, hintBg.data(), 1.0f, 0.06f, hintRim);
         }
+        // Plugin gauge: label on the left, a bar on the right (one row higher while the hint shows).
+        const float gaugeHw = 0.21f;
+        const float gaugeY = hintY + ((dockHintAlpha_ > 0.005f && hintHw > 0.0f) ? 0.062f : 0.0f);
+        if (pluginGaugeAlpha_ > 0.005f) {
+            const auto gBg = tinted(glassControlT.data(), pluginGaugeAlpha_);
+            const float gRim[4] = {kGlassRim[0], kGlassRim[1], kGlassRim[2], kGlassRim[3] * pluginGaugeAlpha_};
+            drawUiElement(vpPanel, 0.0f, gaugeY, gaugeHw, hintHh, UiShape::RoundedBox, gBg.data(), 1.0f, 0.06f, gRim);
+            const float barL = -gaugeHw + 0.125f;
+            const float barR = gaugeHw - 0.024f;
+            const float barTrack[4] = {0.16f, 0.19f, 0.25f, 0.95f * pluginGaugeAlpha_};
+            drawUiElement(vpPanel, 0.5f * (barL + barR), gaugeY, 0.5f * (barR - barL), 0.007f, UiShape::RoundedBox,
+                          barTrack, 1.0f);
+            const float v = std::clamp(pluginGaugeValue_, 0.0f, 1.0f);
+            if (v > 0.002f) {
+                const float fill[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], pluginGaugeAlpha_};
+                const float fw = 0.5f * (barR - barL) * v;
+                drawUiElement(vpPanel, barL + fw, gaugeY, fw, 0.007f, UiShape::RoundedBox, fill, 1.0f);
+            }
+        }
 
         if (textReady_) {
             bindPipe(textPipeline_);
@@ -6400,6 +6446,10 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             if (dockHintAlpha_ > 0.005f && hintHw > 0.0f) {
                 const float hintCol[4] = {themeTextCol[0], themeTextCol[1], themeTextCol[2], dockHintAlpha_};
                 drawFitCentered(0.0f, hintY, 2.0f * hintHw - 0.03f, tipSc, hintCol, dockHintText_);
+            }
+            if (pluginGaugeAlpha_ > 0.005f && !pluginGaugeLabel_.empty()) {
+                const float gCol[4] = {themeTextCol[0], themeTextCol[1], themeTextCol[2], pluginGaugeAlpha_};
+                drawFitCentered(-gaugeHw + 0.064f, gaugeY, 0.10f, tipSc * 0.9f, gCol, pluginGaugeLabel_);
             }
 
             // Left flank pills: HUB and RECENTER

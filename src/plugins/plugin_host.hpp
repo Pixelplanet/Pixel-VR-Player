@@ -4,6 +4,7 @@
 // hands the host one snapshot of its screens per frame; the host diffs it,
 // emits events to the plugins allowed to see them and never blocks on them.
 
+#include <array>
 #include <chrono>
 #include <condition_variable>
 #include <deque>
@@ -77,6 +78,11 @@ public:
         std::string statusLevel = "ok";  // ok | warn | error
         std::string gaugeLabel;
         float gaugeValue = -1.0f;  // < 0: no gauge
+        struct Heat {
+            std::string media;
+            std::vector<std::array<float, 3>> segments;  // startMs, endMs, heat 0..1
+        };
+        std::map<int, Heat> heat;  // ui.timeline per screen
         bool hasPermission(const std::string& p) const;
     };
 
@@ -114,6 +120,12 @@ public:
         double position = 0.0;
     };
     bool takeControl(ControlCommand& out);
+
+    // For the renderer: the first running plugin's heat track for what `screen`
+    // shows, as `bins` equal-width bins (heat 0..1, -1 = none; empty = no track),
+    // and the first visible gauge (false = none). Cached; cheap per frame.
+    const std::vector<float>& heatBins(int screen, int bins);
+    bool gauge(std::string& label, float& value) const;
 
     static std::string pluginsDir();
     static std::string sanitizePath(const std::string& path);  // removes credentials / query
@@ -179,6 +191,9 @@ private:
     std::deque<std::string> notices_;
     std::map<std::string, Clock::time_point> lastNotice_;
     std::deque<ControlCommand> controls_;
+    unsigned heatVersion_ = 0;  // bumped on every ui.timeline
+    std::vector<float> heatCache_;
+    std::string heatCacheKey_;
     bool initialised_ = false;
     std::thread worker_;
     std::mutex jobMutex_;

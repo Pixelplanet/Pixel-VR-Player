@@ -166,6 +166,14 @@ int main(int argc, char** argv) {
     screens[0].duration = 30.0;
     runUntil(5.8, nullptr);
     check(host.plugins()[ex].status == "Read Clip One.txt (13 bytes)", "sidecar listed and read through files.read");
+    {
+        const std::vector<float>& bins = host.heatBins(0, 10);
+        check(bins.size() == 10 && std::abs(bins[0] - 0.2f) < 0.01f && std::abs(bins[9] - 0.9f) < 0.01f,
+              "timeline heat track binned over the duration");
+        std::string label;
+        float value = -1.0f;
+        check(host.gauge(label, value) && value >= 0.0f, "gauge available to the renderer");
+    }
     host.activateSetting(ex, 3);  // "Pause the video"
     runUntil(7.0, nullptr);
     check(controls.size() == 1 && controls[0].screen == 0 && controls[0].action == "pause", "control request reaches the app");

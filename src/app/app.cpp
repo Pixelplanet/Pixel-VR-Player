@@ -2018,6 +2018,13 @@ void App::updatePlugins() {
     app.worn = xr_.userPresent();
     app.vaultUnlocked = VaultManager::instance().isUnlocked();
     plugins_.update(snap, app);
+    renderer_.setTransportHeat(plugins_.heatBins(selectedScreen_, 160));
+    {
+        std::string label;
+        float value = -1.0f;
+        plugins_.gauge(label, value);
+        renderer_.setPluginGauge(label, value);
+    }
     PluginHost::ControlCommand cmd;
     while (plugins_.takeControl(cmd)) {
 #ifdef PIXELVR_HAVE_MEDIA

@@ -282,6 +282,49 @@ void PluginHost::deliverFileResults() {
     }
 }
 
+const std::vector<float>& PluginHost::heatBins(int screen, int bins) {
+    static const std::vector<float> none;
+    if (screen < 0 || screen >= static_cast<int>(tracks_.size()) || bins <= 0) return none;
+    const ScreenTrack& t = tracks_[static_cast<size_t>(screen)];
+    const Plugin::Heat* heat = nullptr;
+    std::string owner;
+    for (const Plugin& p : plugins_) {
+        if (p.pid <= 0 || !p.helloDone) continue;
+        const auto it = p.heat.find(screen);
+        if (it != p.heat.end() && !t.mediaId.empty() && it->second.media == t.mediaId) {
+            heat = &it->second;
+            owner = p.id;
+            break;
+        }
+    }
+    if (!heat || t.last.duration <= 0.0) return none;
+    const std::string key = owner + "|" + t.mediaId + "|" + std::to_string(heatVersion_) + "|" + std::to_string(bins) +
+                            "|" + std::to_string(static_cast<long long>(t.last.duration * 10.0));
+    if (key == heatCacheKey_) return heatCache_;
+    heatCacheKey_ = key;
+    heatCache_.assign(static_cast<size_t>(bins), -1.0f);
+    const double binMs = t.last.duration * 1000.0 / bins;
+    for (const auto& s : heat->segments) {
+        const int b0 = std::clamp(static_cast<int>(s[0] / binMs), 0, bins - 1);
+        const int b1 = std::clamp(static_cast<int>(std::max(s[0], s[1] - 1.0f) / binMs), 0, bins - 1);
+        for (int b = b0; b <= b1; ++b) heatCache_[static_cast<size_t>(b)] = std::max(heatCache_[static_cast<size_t>(b)], s[2]);
+    }
+    return heatCache_;
+}
+
+bool PluginHost::gauge(std::string& label, float& value) const {
+    for (const Plugin& p : plugins_) {
+        if (p.pid > 0 && p.helloDone && p.gaugeValue >= 0.0f) {
+            label = p.gaugeLabel;
+            value = p.gaugeValue;
+            return true;
+        }
+    }
+    label.clear();
+    value = -1.0f;
+    return false;
+}
+
 bool PluginHost::takeControl(ControlCommand& out) {
     if (controls_.empty()) return false;
     out = std::move(controls_.front());
@@ -670,6 +713,23 @@ void PluginHost::handleLine(Plugin& p, const std::string& line) {
                            : -1.0f;
     } else if (type == "ui.settings" && ui) {
         p.settings = parseSettings(m.get("settings"));
+    } else if (type == "ui.timeline" && ui) {
+        const int screen = static_cast<int>(m.getNumber("screen", -1));
+        if (screen < 0 || screen >= static_cast<int>(tracks_.size())) return;
+        Plugin::Heat h;
+        h.media = m.getString("media");
+        if (const pvrjson::Value* tracks = m.get("tracks"); tracks && !tracks->array.empty()) {
+            if (const pvrjson::Value* segs = tracks->array.front().get("segments")) {
+                for (const auto& s : segs->array) {
+                    if (s.array.size() < 3 || h.segments.size() >= 4000) continue;
+                    h.segments.push_back({static_cast<float>(s.array[0].number), static_cast<float>(s.array[1].number),
+                                          static_cast<float>(std::clamp(s.array[2].number, 0.0, 1.0))});
+                }
+            }
+        }
+        if (h.segments.empty()) p.heat.erase(screen);
+        else p.heat[screen] = std::move(h);
+        ++heatVersion_;
     } else if ((type == "files.read" || type == "control") && id && id->type == pvrjson::Value::Type::Number) {
         const std::string rid = pvrjson::dump(*id);
         const int screen = static_cast<int>(m.getNumber("screen", -1));
