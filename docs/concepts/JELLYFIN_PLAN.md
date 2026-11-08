@@ -136,3 +136,17 @@ from the user for an end-to-end test.
   order in the list (the `shortcut=` lines are saved in list order). First version: "Move up" /
   "Move down" on a shortcut's edit page (works with the stick and the laser). Drag and drop needs
   pointer-drag support in the settings card grid, which doesn't exist yet: a follow-up.
+- **Shortcut rework, built + deployed 2026-11-08 (afa730f), not yet seen in the headset:**
+  - Model: `SettingsMenu::Shortcut {name, url, kiosk, onRail}` in list order, saved as
+    `shortcut=onRail|kiosk|name|url` lines in settings.conf. The first start migrates the built-in
+    list with the old `rail_shortcuts` bits and `jellyfin_url` (+ `/web/`).
+  - The rail shows the first 5 shortcuts that are on (`kMaxRailShortcuts`), in list order.
+  - Settings > UI & Appearance > Shortcuts (section 22): dense cards (7 rows of 2, `setSettingsCompact`),
+    one per shortcut (name; "On the rail" + address), then "Add shortcut".
+  - A shortcut's page (section 17): Name, Address (keyboard), Show on the Rail, Opens as Page only /
+    Full browser, Move Up / Move Down (the list order is the rail order), Remove Shortcut, Back.
+  - Add creates "New shortcut" (on the rail, full browser) and opens the name keyboard at once.
+  - Any shortcut without an address asks for it on first use, then opens it. A Jellyfin address gets
+    `/web/` added.
+  - Drag and drop: not done (the settings grid has no pointer drag); the arrows are there instead.
+- **Crash / freeze fixes deployed** with the same build.
