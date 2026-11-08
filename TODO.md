@@ -270,6 +270,11 @@ branches are local (not pushed) unless noted.
 - [ ] **D1 research (see D1 above):** how Moonlight XR does 2D→3D, and which depth model runs fast
   enough on the Frame. Branch `research/2d-to-3d`, worktree `C:\Projects\PixelVRPlayer-2d3d`,
   `docs/concepts/2D_TO_3D_RESEARCH.md` (findings and headset benchmark numbers).
+  - First result (2026-11-08, ncnn, inference only): **ZipDepth** (MIT, Moonlight XR's default)
+    takes ~14 ms at 512x288 on the GPU and about the same on 4 CPU threads (9 ms at 256²).
+    MiDaS small takes 22 ms GPU. Depth Anything V2 Small is unusable (279 ms CPU).
+  - Still open: real-weight output check, measurements under playback load / sustained, the warp
+    pipeline. Benchmark files are in `~/depth-bench` on the headset.
 
 ### W. Browser engine (needed by Y2)
 - [x] **W1. DECIDED/DONE: headless system Chromium driven over CDP** (`browser/pvr_browser.cpp`, helper compiled into `pixelvr`; Widevine DRM works: Prime/Netflix/Disney+). Original options were: **WPE WebKit** (fdo backend exports dma-buf frames → zero-copy
