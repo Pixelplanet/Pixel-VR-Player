@@ -297,7 +297,11 @@ branches are local (not pushed) unless noted.
   - Auto-Cloud on a dedicated sync folder (never passwords, vault or browser profile).
   - Workshop: "content packs" first (rooms, arrangements, lens profiles, keyboard layouts,
     themes, LUTs …).
-- [ ] **J1. Jellyfin like Plex (decided: approach A):** Jellyfin Web in a browser screen, play
+- [x] **J1. Jellyfin like Plex:** DONE, released in **v1.15.0** (user-verified 2026-11-08).
+  - Covers: playback hand-off, audio track, progress, downloads, the shortcut with its address, the
+    next / previous episode, and the episode title on the screen.
+  - Implementation and every test: `docs/concepts/JELLYFIN_PLAN.md`.
+  - Original note (decided: approach A): Jellyfin Web in a browser screen, play
   is handed to our player (Direct Play URL from our own `PlaybackInfo` + DeviceProfile), progress
   through `/Sessions/Playing*`.
   - Reuses the Plex intercept in `browser/pvr_browser.cpp` / `App::startPlexPlay`.
@@ -335,7 +339,7 @@ branches are local (not pushed) unless noted.
     (type intro / credits, startTimeOffset / endTimeOffset in ms) when the server has analysed them.
   - Jellyfin: Media Segments (`GET /MediaSegments/{itemId}`, Intro / Outro / Recap…, 10.10+), filled by
     plugins such as Intro Skipper.
-- [ ] **TV1. Series controls (asked for 2026-11-08):** rework the player UI / controls for TV series
+- [~] **TV1. Series controls (asked for 2026-11-08):** PARTLY DONE in v1.15.0 (previous / next arrows on the screen, episode title on the screen); the rest is still open. rework the player UI / controls for TV series
   (Plex, Jellyfin): previous / next episode from the player.
   - Idea: an arrow at the left and right edge of the screen while the laser aims at the screen.
   - Also possible: dock buttons, or a stick gesture.
