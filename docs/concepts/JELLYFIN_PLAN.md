@@ -90,5 +90,9 @@ from the user for an end-to-end test.
     page is back on the details page.
   - No token in the helper's stdout (outside the hand-off line) or stderr.
   - The test's resume point was reset to 0 afterwards. The test script lived in a temp folder and isn't kept.
-- [ ] Rail shortcut + address setting.
+- [ ] Rail shortcut "Jellyfin" + "Jellyfin address" setting (asked for 2026-11-08). The shortcut opens
+      `<address>/web/`; an empty address sends the user to the setting.
+- [ ] **Downloads (asked for 2026-11-08):** like Plex, Jellyfin Web's "Download" (`…/Items/{id}/Download?api_key=…`)
+      must be cancelled in Chromium and handed to our download manager (`savefile` event; the name comes from
+      Content-Disposition / suggestedFilename) in `Browser.downloadWillBegin` of `browser/pvr_browser.cpp`.
 - [ ] In-headset test by the user.
