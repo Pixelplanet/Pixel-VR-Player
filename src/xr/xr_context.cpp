@@ -6,7 +6,9 @@
 
 #include <algorithm>
 #include <array>
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
 #include <cstring>
 
 namespace pixelvr {
@@ -320,6 +322,8 @@ bool XrContext::createSwapchains(int64_t colorFormat, float scaleFactor) {
                 sc.handle, imageCount, &imageCount,
                 reinterpret_cast<XrSwapchainImageBaseHeader*>(sc.images.data())));
 
+        sc.renderWidth = sc.width;
+        sc.renderHeight = sc.height;
         swapchains_.push_back(std::move(sc));
     }
 
@@ -327,6 +331,36 @@ bool XrContext::createSwapchains(int64_t colorFormat, float scaleFactor) {
                      swapchains_.empty() ? 0 : swapchains_[0].width,
                      swapchains_.empty() ? 0 : swapchains_[0].height,
                      scaleFactor);
+
+    // Adaptive resolution between the swapchain size and the panel's native
+    // 2160x2160 (or the runtime's recommendation, if smaller); both eyes
+    // render the same size, so it works from the smallest eye swapchain.
+    if (!swapchains_.empty()) {
+        int32_t maxW = swapchains_[0].width, maxH = swapchains_[0].height;
+        uint32_t recW = configViews_[0].recommendedImageRectWidth;
+        uint32_t recH = configViews_[0].recommendedImageRectHeight;
+        for (std::size_t i = 0; i < swapchains_.size(); ++i) {
+            maxW = std::min(maxW, swapchains_[i].width);
+            maxH = std::min(maxH, swapchains_[i].height);
+            if (i < configViews_.size()) {
+                recW = std::min(recW, configViews_[i].recommendedImageRectWidth);
+                recH = std::min(recH, configViews_[i].recommendedImageRectHeight);
+            }
+        }
+        const int minW = static_cast<int>(std::min(recW > 0 ? recW : 2160u, 2160u));
+        const int minH = static_cast<int>(std::min(recH > 0 ? recH : 2160u, 2160u));
+        const char* fixedEnv = std::getenv("PIXELVR_FIXED_RES");
+        const bool fixed = fixedEnv != nullptr && fixedEnv[0] == '1';
+        renderScale_.configure(maxW, maxH, minW, minH, fixed);
+        for (ViewSwapchain& s : swapchains_) {
+            s.renderWidth = std::min(renderScale_.width(), s.width);
+            s.renderHeight = std::min(renderScale_.height(), s.height);
+        }
+        lastPredictedDisplayTime_ = 0;
+        PIXELVR_LOG_INFO("Render scale: %s (%dx%d down to %dx%d)",
+                         fixed ? "fixed (PIXELVR_FIXED_RES=1)" : "adaptive", maxW, maxH,
+                         std::min(minW, maxW), std::min(minH, maxH));
+    }
     return true;
 }
 
@@ -1141,6 +1175,39 @@ bool XrContext::renderFrame(const RenderViewFn& renderView, const RenderLayersFn
     XrFrameWaitInfo waitInfo{XR_TYPE_FRAME_WAIT_INFO};
     XrFrameState frameState{XR_TYPE_FRAME_STATE};
     PIXELVR_XR_CHECK(instance_, xrWaitFrame(session_, &waitInfo, &frameState));
+    // The app's share of the frame starts here (see render_scale.hpp).
+    const auto workT0 = std::chrono::steady_clock::now();
+    const double nowSec = std::chrono::duration<double>(workT0.time_since_epoch()).count();
+
+    // Native display period: the shortest seen over the last 10-20 s, so a
+    // runtime throttling the app to half rate (which reports the longer
+    // period) still counts as late.
+    if (frameState.predictedDisplayPeriod > 0) {
+        if (periodWindowStart_ < 0.0 || nowSec - periodWindowStart_ >= 10.0) {
+            periodMinPrev_ = periodMinCur_;
+            periodMinCur_ = 0;
+            periodWindowStart_ = nowSec;
+        }
+        if (periodMinCur_ == 0 || frameState.predictedDisplayPeriod < periodMinCur_) {
+            periodMinCur_ = frameState.predictedDisplayPeriod;
+        }
+    }
+    XrDuration basePeriod = periodMinCur_;
+    if (periodMinPrev_ > 0 && (basePeriod == 0 || periodMinPrev_ < basePeriod)) basePeriod = periodMinPrev_;
+    // Display slots skipped since the last frame (a gap longer than a pause
+    // of the frame loop counts as none).
+    int missedSlots = 0;
+    if (frameState.shouldRender == XR_TRUE && lastPredictedDisplayTime_ != 0 && basePeriod > 0) {
+        const double slots = static_cast<double>(frameState.predictedDisplayTime - lastPredictedDisplayTime_) /
+                             static_cast<double>(basePeriod);
+        if (slots > 1.5 && slots < 10.0) missedSlots = static_cast<int>(std::lround(slots)) - 1;
+    }
+    lastPredictedDisplayTime_ = frameState.shouldRender == XR_TRUE ? frameState.predictedDisplayTime : 0;
+    // This frame's eye render size (both eyes the same).
+    for (ViewSwapchain& s : swapchains_) {
+        s.renderWidth = std::clamp(renderScale_.width(), 1, s.width);
+        s.renderHeight = std::clamp(renderScale_.height(), 1, s.height);
+    }
 
     XrFrameBeginInfo beginInfo{XR_TYPE_FRAME_BEGIN_INFO};
     PIXELVR_XR_CHECK(instance_, xrBeginFrame(session_, &beginInfo));
@@ -1287,7 +1354,7 @@ bool XrContext::renderFrame(const RenderViewFn& renderView, const RenderLayersFn
             projectionViews[i].fov = views_[i].fov;
             projectionViews[i].subImage.swapchain = sc.handle;
             projectionViews[i].subImage.imageRect.offset = {0, 0};
-            projectionViews[i].subImage.imageRect.extent = {sc.width, sc.height};
+            projectionViews[i].subImage.imageRect.extent = {sc.renderWidth, sc.renderHeight};
             projectionViews[i].subImage.imageArrayIndex = 0;
         }
 
@@ -1298,6 +1365,20 @@ bool XrContext::renderFrame(const RenderViewFn& renderView, const RenderLayersFn
 
     if (viewsValid && afterViews) {
         afterViews(*this, views_.data(), static_cast<uint32_t>(views_.size()), extra);
+    }
+    // Adaptive resolution: this frame's timing picks the next frame's size.
+    if (viewsValid && basePeriod > 0) {
+        const double workMs =
+            std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - workT0).count();
+        if (renderScale_.update(nowSec, workMs, static_cast<double>(basePeriod) / 1.0e6, missedSlots)) {
+            renderScaleLogPending_ = true;
+        }
+    }
+    if (renderScaleLogPending_ && nowSec - renderScaleLastLog_ >= 1.0) {
+        renderScaleLogPending_ = false;
+        renderScaleLastLog_ = nowSec;
+        PIXELVR_LOG_INFO("Render scale: %dx%d (%s)", renderScale_.width(), renderScale_.height(),
+                         renderScale_.reason());
     }
     // Build the OpenXR structs (stable addresses: reserved up front).
     std::vector<XrCompositionLayerQuad> quads;

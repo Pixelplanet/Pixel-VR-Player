@@ -473,6 +473,13 @@ bool loadSteamVrControllerComponents(int hand, std::vector<SteamVrComponent>& ou
             c.name = kv.first;
             if (!readVec3(local->get("origin"), c.origin)) continue;
             readVec3(local->get("rotate_xyz"), c.rotateXyz);
+            if (const Json* motion = kv.second.get("motion"); motion != nullptr) {
+                float centre[3];
+                if (readVec3(motion->get("center"), centre)) {
+                    for (int k = 0; k < 3; ++k) c.motionCentre[k] = centre[k];
+                    c.haveMotionCentre = true;
+                }
+            }
             out.push_back(std::move(c));
         }
         if (!out.empty()) {

@@ -60,6 +60,10 @@ struct SteamVrComponent {
     std::string name;
     float origin[3] = {0.0f, 0.0f, 0.0f};
     float rotateXyz[3] = {0.0f, 0.0f, 0.0f};  // degrees
+    // The joystick / D-pad pivot ("motion": {"center"}), when the json has one:
+    // with the origin it gives the stick's axis.
+    float motionCentre[3] = {0.0f, 0.0f, 0.0f};
+    bool haveMotionCentre = false;
 };
 // Reads the Steam Frame controller json for `hand` from the SteamVR install
 // (read-only, at runtime). False when it is not there or cannot be parsed.

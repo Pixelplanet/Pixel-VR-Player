@@ -826,6 +826,15 @@ private:
     // Records the controller models for one view into commandBuffer_ (inside
     // a renderPass_ pass, model pipeline bound).
     void drawControllerModels(const XrView& view);
+    // The part of a view the models layer has to cover: the tangent-space
+    // bounds (x right, y up) of the controller models, button-label cards,
+    // leader lines and rings as this view sees them, clipped to its FOV.
+    // False when none of it is in the view. Pieces reaching past the near
+    // plane are clipped to it.
+    struct TanRect {
+        float l = 0.0f, r = 0.0f, d = 0.0f, u = 0.0f;
+    };
+    bool modelLayerBounds(const XrView& view, TanRect& out) const;
 
     // Button labels (setButtonLabels). Laid out once per frame in world space
     // (renderLayersBefore), then drawn per view after the models, in the same
@@ -1354,6 +1363,10 @@ private:
     VkFence uploadFence_ = VK_NULL_HANDLE;
 
     std::vector<ViewTargets> viewTargets_;
+    // This frame's eye render size (adaptive resolution: the sub-rect of the
+    // eye images from their top-left; XrContext submits the same rect).
+    int32_t eyeRenderW_ = 0;
+    int32_t eyeRenderH_ = 0;
 
     // Shared multisampled color target, resolved into each eye's swapchain image.
     VkImage msaaImage_ = VK_NULL_HANDLE;
@@ -1417,6 +1430,10 @@ private:
         std::vector<ModelTexture> textures;
         std::vector<ModelSubmesh> submeshes;
         std::vector<NodeStateVis> nodeStates;
+        // Model-space bounding box of all its vertices (models-layer bounds).
+        math::Vec3 boundsLo{0.0f, 0.0f, 0.0f};
+        math::Vec3 boundsHi{0.0f, 0.0f, 0.0f};
+        bool boundsValid = false;
         bool ready = false;
     };
     HandModel handModels_[2];  // 0 = left, 1 = right

@@ -751,8 +751,16 @@ void App::updateStats() {
                   fps > 0.0 ? 1000.0 / fps : 0.0);
     statsLines_.emplace_back(buf);
     if (!xr_.swapchains().empty()) {
-        std::snprintf(buf, sizeof(buf), "Render %dx%d",
-                      xr_.swapchains()[0].width, xr_.swapchains()[0].height);
+        // Adaptive resolution: the size rendered this frame, of the swapchain's.
+        const ViewSwapchain& esc = xr_.swapchains()[0];
+        if (esc.renderWidth > 0 && (esc.renderWidth != esc.width || esc.renderHeight != esc.height)) {
+            std::snprintf(buf, sizeof(buf), "Render %dx%d of %dx%d (%d%%)", esc.renderWidth, esc.renderHeight,
+                          esc.width, esc.height,
+                          static_cast<int>(std::lround(100.0 * esc.renderWidth / std::max(esc.width, 1))));
+        } else {
+            std::snprintf(buf, sizeof(buf), "Render %dx%d%s", esc.width, esc.height,
+                          xr_.renderScale().fixed() ? " (fixed)" : "");
+        }
         statsLines_.emplace_back(buf);
     }
     if (cur().web) {
@@ -5490,11 +5498,13 @@ int App::run() {
                         const uint64_t waits = cur().engine.clockWaits();
                         PIXELVR_LOG_INFO(
                             "PERF: render %.1f fps, decode %.1f/%.2f fps | per frame: feed %.1f ms, frame %.1f ms, "
-                            "gpu wait %.1f ms, draw %.1f ms | gpu %ld MHz | late %llu, clock waits %llu",
+                            "gpu wait %.1f ms, draw %.1f ms | gpu %ld MHz | late %llu, clock waits %llu | eye %dx%d",
                             perfFrames_ / since, decFps, cur().engine.frameRate(), perfFeedMs_ / n,
                             perfFrameMs_ / n, gpuWaitMs / n, perfViewCpuMs_ / n, gpuMhz,
                             static_cast<unsigned long long>(late - perfLastLate_),
-                            static_cast<unsigned long long>(waits - perfLastWaits_));
+                            static_cast<unsigned long long>(waits - perfLastWaits_),
+                            xr_.swapchains().empty() ? 0 : xr_.swapchains()[0].renderWidth,
+                            xr_.swapchains().empty() ? 0 : xr_.swapchains()[0].renderHeight);
                         perfLastLate_ = late;
                         perfLastWaits_ = waits;
                         perfFeedMs_ = perfFrameMs_ = perfViewCpuMs_ = 0.0;

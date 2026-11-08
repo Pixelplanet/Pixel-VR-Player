@@ -1,6 +1,7 @@
 #pragma once
 
 #include "xr/openxr_headers.hpp"
+#include "xr/render_scale.hpp"
 
 #include <cstdint>
 #include <functional>
@@ -14,6 +15,11 @@ struct ViewSwapchain {
     XrSwapchain handle = XR_NULL_HANDLE;
     int32_t width = 0;
     int32_t height = 0;
+    // Eye swapchains: the sub-rect (from the image's top-left) rendered and
+    // submitted this frame (adaptive resolution); equal in both eyes. Layer
+    // swapchains leave these at 0.
+    int32_t renderWidth = 0;
+    int32_t renderHeight = 0;
     int64_t format = 0;
     std::vector<XrSwapchainImageVulkan2KHR> images;
 };
@@ -225,6 +231,9 @@ public:
     uint32_t viewCount() const { return static_cast<uint32_t>(configViews_.size()); }
     const std::vector<XrViewConfigurationView>& configViews() const { return configViews_; }
     const std::vector<ViewSwapchain>& swapchains() const { return swapchains_; }
+    // Adaptive eye resolution (see render_scale.hpp); PIXELVR_FIXED_RES=1 keeps
+    // the full swapchain size.
+    const RenderScaleController& renderScale() const { return renderScale_; }
 
     struct ViewFallbackStats {
         uint64_t zeroLayerFrames = 0;
@@ -271,6 +280,15 @@ private:
     std::vector<XrView> lastValidViews_;
     XrTime lastValidViewsTime_ = 0;
     ViewFallbackStats viewFallbackStats_;
+
+    // Adaptive eye resolution: frame timing fed to the controller.
+    RenderScaleController renderScale_;
+    XrTime lastPredictedDisplayTime_ = 0;
+    XrDuration periodMinCur_ = 0;    // shortest display period this 10 s window
+    XrDuration periodMinPrev_ = 0;   // ... and the last one (the native rate, not a throttled one)
+    double periodWindowStart_ = -1.0;
+    bool renderScaleLogPending_ = false;
+    double renderScaleLastLog_ = -1e9;
 
     // Controller input.
     XrActionSet actionSet_ = XR_NULL_HANDLE;

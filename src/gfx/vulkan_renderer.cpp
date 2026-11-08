@@ -108,6 +108,10 @@ constexpr float kLabelLineCol[4] = {0.85f, 0.85f, 0.85f, 0.60f};
 constexpr float kLabelRingW = 0.0007f;     // ring stroke
 constexpr float kLabelRingGap = 0.0018f;   // ring radius past the part's half width
 constexpr float kLabelRingLift = 0.004f;   // ring plane above the part's centre, along the face normal
+// The flat menu / view pill sits lower than the face buttons: at the common
+// lift its capsule floated ~3.2 mm above the face around it (the face
+// buttons' rings ~1.5 mm); this brings it to ~1.7 mm, still clear of it.
+constexpr float kLabelPillRingLift = 0.0025f;
 // Near the eyes (the controller held close and turned) the cards, lines and
 // rings fade out instead of sliding through the near plane: full at
 // kLabelNearFull from the nearest eye, gone at kLabelNearGone.
@@ -3344,7 +3348,9 @@ bool VulkanRenderer::initText() {
 
 void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
                                 const XrView& view, const ViewSwapchain& swapchain) {
-    (void)swapchain;
+    // Adaptive resolution: draw only the sub-rect XrContext submits this frame.
+    eyeRenderW_ = swapchain.renderWidth > 0 ? swapchain.renderWidth : swapchain.width;
+    eyeRenderH_ = swapchain.renderHeight > 0 ? swapchain.renderHeight : swapchain.height;
     recordView(viewIndex, imageIndex, view, nullptr);
 }
 
@@ -3688,16 +3694,71 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
     // Controller models over the screens and the UI (the first eye pass left
     // them out of the eye buffers), rendered with exactly these views: their
     // quads below are placed from the same poses and FOVs.
+    // Each eye renders and submits only the sub-rect of its image that the
+    // models, cards, lines and rings project to (at the eye buffers' current
+    // pixel density), and its quad covers exactly that part of the frustum;
+    // an eye that sees none of it gets no layer at all.
+    struct ModelEye {
+        bool pending = false;
+        uint32_t image = 0;
+        int32_t fullW = 0, fullH = 0;   // the whole view at this frame's density
+        VkRect2D rect{};                // rendered / submitted pixels
+        TanRect tan;                    // the rect's frustum (tangents)
+    };
+    ModelEye modelEye[2];
     bool modelPending = false;
-    uint32_t modelImage[2] = {0, 0};
     if (modelLayerThisFrame_ && modelLayerReady_ && viewCount == 2) {
-        const bool got0 = xr.acquireLayerImage(modelSwapchains_[0], modelImage[0]);
-        const bool got1 = got0 && xr.acquireLayerImage(modelSwapchains_[1], modelImage[1]);
-        modelPending = got1 && modelImage[0] < modelTargets_[0].framebuffers.size() &&
-                       modelImage[1] < modelTargets_[1].framebuffers.size();
-        if (!modelPending) {
-            if (got0) xr.releaseLayerImage(modelSwapchains_[0]);
-            if (got1) xr.releaseLayerImage(modelSwapchains_[1]);
+        for (uint32_t e = 0; e < 2; ++e) {
+            ModelEye& me = modelEye[e];
+            const ViewTargets& mt = modelTargets_[e];
+            TanRect b;
+            if (mt.width <= 0 || mt.height <= 0 || !modelLayerBounds(views[e], b)) continue;
+            // Same pixel density as the eye buffers this frame.
+            float sx = 1.0f, sy = 1.0f;
+            if (e < xr.swapchains().size()) {
+                const ViewSwapchain& es = xr.swapchains()[e];
+                if (es.width > 0 && es.renderWidth > 0) {
+                    sx = static_cast<float>(es.renderWidth) / static_cast<float>(es.width);
+                }
+                if (es.height > 0 && es.renderHeight > 0) {
+                    sy = static_cast<float>(es.renderHeight) / static_cast<float>(es.height);
+                }
+            }
+            me.fullW = std::clamp(static_cast<int32_t>(std::lround(static_cast<float>(mt.width) * std::min(sx, 1.0f))),
+                                  1, mt.width);
+            me.fullH = std::clamp(static_cast<int32_t>(std::lround(static_cast<float>(mt.height) * std::min(sy, 1.0f))),
+                                  1, mt.height);
+            const XrFovf& f = views[e].fov;
+            const float tl = std::tan(f.angleLeft), tr = std::tan(f.angleRight);
+            const float tu = std::tan(f.angleUp), td = std::tan(f.angleDown);
+            if (tr - tl <= 1e-6f || tu - td <= 1e-6f) continue;
+            const float fw = static_cast<float>(me.fullW), fh = static_cast<float>(me.fullH);
+            // Image rows run top (tan up) to bottom; a few pixels of margin
+            // for anti-aliasing.
+            constexpr int32_t kMarginPx = 6;
+            int32_t x0 = static_cast<int32_t>(std::floor((b.l - tl) / (tr - tl) * fw)) - kMarginPx;
+            int32_t x1 = static_cast<int32_t>(std::ceil((b.r - tl) / (tr - tl) * fw)) + kMarginPx;
+            int32_t y0 = static_cast<int32_t>(std::floor((tu - b.u) / (tu - td) * fh)) - kMarginPx;
+            int32_t y1 = static_cast<int32_t>(std::ceil((tu - b.d) / (tu - td) * fh)) + kMarginPx;
+            x0 = std::clamp(x0, 0, me.fullW);
+            x1 = std::clamp(x1, 0, me.fullW);
+            y0 = std::clamp(y0, 0, me.fullH);
+            y1 = std::clamp(y1, 0, me.fullH);
+            if (x1 - x0 < 1 || y1 - y0 < 1) continue;
+            me.rect = {{x0, y0}, {static_cast<uint32_t>(x1 - x0), static_cast<uint32_t>(y1 - y0)}};
+            // The frustum of exactly those whole pixels.
+            me.tan.l = tl + (tr - tl) * (static_cast<float>(x0) / fw);
+            me.tan.r = tl + (tr - tl) * (static_cast<float>(x1) / fw);
+            me.tan.u = tu - (tu - td) * (static_cast<float>(y0) / fh);
+            me.tan.d = tu - (tu - td) * (static_cast<float>(y1) / fh);
+            if (xr.acquireLayerImage(modelSwapchains_[e], me.image)) {
+                if (me.image < mt.framebuffers.size()) {
+                    me.pending = true;
+                    modelPending = true;
+                } else {
+                    xr.releaseLayerImage(modelSwapchains_[e]);
+                }
+            }
         }
     }
 
@@ -3762,9 +3823,8 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
         for (const Pending& p : copies) xr.releaseLayerImage(screenLayers_[p.slot].sc);
         if (cursorPending) xr.releaseLayerImage(cursorSwapchain_);
         if (beamPending) xr.releaseLayerImage(beamSwapchain_);
-        if (modelPending) {
-            xr.releaseLayerImage(modelSwapchains_[0]);
-            xr.releaseLayerImage(modelSwapchains_[1]);
+        for (uint32_t e = 0; e < 2; ++e) {
+            if (modelEye[e].pending) xr.releaseLayerImage(modelSwapchains_[e]);
         }
         return;
     }
@@ -3778,6 +3838,8 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
         // premultiplied, with anti-aliased edges, for the blended layer.
         const bool msaa = sampleCount_ != VK_SAMPLE_COUNT_1_BIT;
         for (uint32_t e = 0; e < 2; ++e) {
+            const ModelEye& me = modelEye[e];
+            if (!me.pending) continue;
             const ViewTargets& mt = modelTargets_[e];
             VkClearValue clears[3]{};
             clears[0].color = {{0.0f, 0.0f, 0.0f, 0.0f}};
@@ -3789,12 +3851,22 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
             }
             VkRenderPassBeginInfo rp{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
             rp.renderPass = renderPass_;
-            rp.framebuffer = mt.framebuffers[modelImage[e]];
-            rp.renderArea = {{0, 0}, {static_cast<uint32_t>(mt.width), static_cast<uint32_t>(mt.height)}};
+            rp.framebuffer = mt.framebuffers[me.image];
+            // Only the sub-rect is cleared, drawn, resolved and stored; the
+            // viewport still maps the whole view (at this frame's density),
+            // so the projection is the eye's own.
+            // One more pixel round the rect is cleared too: the compositor's
+            // bilinear sample at the quad's edge reads half of it, and it
+            // would otherwise hold undefined data or an older frame.
+            const int32_t ax0 = std::max(me.rect.offset.x - 1, 0);
+            const int32_t ay0 = std::max(me.rect.offset.y - 1, 0);
+            const int32_t ax1 = std::min(me.rect.offset.x + static_cast<int32_t>(me.rect.extent.width) + 1, mt.width);
+            const int32_t ay1 = std::min(me.rect.offset.y + static_cast<int32_t>(me.rect.extent.height) + 1, mt.height);
+            rp.renderArea = {{ax0, ay0}, {static_cast<uint32_t>(ax1 - ax0), static_cast<uint32_t>(ay1 - ay0)}};
             rp.clearValueCount = msaa ? 3u : 2u;
             rp.pClearValues = clears;
             vkCmdBeginRenderPass(commandBuffer_, &rp, VK_SUBPASS_CONTENTS_INLINE);
-            VkViewport vp{0.0f, 0.0f, static_cast<float>(mt.width), static_cast<float>(mt.height), 0.0f, 1.0f};
+            VkViewport vp{0.0f, 0.0f, static_cast<float>(me.fullW), static_cast<float>(me.fullH), 0.0f, 1.0f};
             vkCmdSetViewport(commandBuffer_, 0, 1, &vp);
             VkRect2D sc = rp.renderArea;
             vkCmdSetScissor(commandBuffer_, 0, 1, &sc);
@@ -3894,22 +3966,25 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
     for (const Pending& p : copies) xr.releaseLayerImage(screenLayers_[p.slot].sc);
     if (beamPending) xr.releaseLayerImage(beamSwapchain_);
     if (modelPending) {
-        xr.releaseLayerImage(modelSwapchains_[0]);
-        xr.releaseLayerImage(modelSwapchains_[1]);
+        for (uint32_t e = 0; e < 2; ++e) {
+            if (modelEye[e].pending) xr.releaseLayerImage(modelSwapchains_[e]);
+        }
         if (submitted) {
             // After the screens and the UI, under the beams and the cursor:
             // per eye, a quad on that view's image plane at kModelLayerDist
-            // (perpendicular to its view axis, covering exactly its asymmetric
-            // frustum), so it shows the rendered pixels 1:1 and the compositor
+            // (perpendicular to its view axis, covering exactly the frustum of
+            // the rendered sub-rect), so it shows the rendered pixels 1:1 and the compositor
             // reprojects it as world-locked content. 0.5 m: about where the
             // hands are (least reprojection error for the models) and nearer
             // than any screen (2 m at the closest) or the UI panel, so a
             // compositor that orders layers by depth still puts it in front.
             for (uint32_t e = 0; e < 2; ++e) {
+                const ModelEye& me = modelEye[e];
+                if (!me.pending) continue;
                 const XrView& v = views[e];
                 const float d = kModelLayerDist;
-                const float tl = std::tan(v.fov.angleLeft), tr = std::tan(v.fov.angleRight);
-                const float tu = std::tan(v.fov.angleUp), td = std::tan(v.fov.angleDown);
+                const float tl = me.tan.l, tr = me.tan.r;
+                const float tu = me.tan.u, td = me.tan.d;
                 const Quat q{v.pose.orientation.x, v.pose.orientation.y, v.pose.orientation.z,
                              v.pose.orientation.w};
                 const Vec3 offset{d * 0.5f * (tr + tl), d * 0.5f * (tu + td), -d};  // eye space
@@ -3922,7 +3997,9 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
                 cl.pose.position = {c.x, c.y, c.z};
                 cl.width = d * (tr - tl);
                 cl.height = d * (tu - td);
-                cl.imageRect = {{0, 0}, {modelTargets_[e].width, modelTargets_[e].height}};
+                cl.imageRect = {{me.rect.offset.x, me.rect.offset.y},
+                                {static_cast<int32_t>(me.rect.extent.width),
+                                 static_cast<int32_t>(me.rect.extent.height)}};
                 out.push_back(cl);
             }
         }
@@ -4189,16 +4266,31 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         clears[1].depthStencil = {1.0f, 0};
     }
 
-    // The layer pass draws only the window sub-rect the layer will show.
+    // The layer pass draws only the window sub-rect the layer will show; an
+    // eye pass the adaptive-resolution sub-rect from the image's top-left
+    // (the viewport maps the whole FOV onto it, so the projection is
+    // unchanged and the clear, MSAA resolve and store cover only that rect).
+    const int32_t eyeW = std::clamp(eyeRenderW_ > 0 ? eyeRenderW_ : vt.width, 1, std::max(vt.width, 1));
+    const int32_t eyeH = std::clamp(eyeRenderH_ > 0 ? eyeRenderH_ : vt.height, 1, std::max(vt.height, 1));
     VkRect2D area{};
     area.offset = {layerPass ? layer->px : 0, layerPass ? layer->py : 0};
-    area.extent = {static_cast<uint32_t>(layerPass ? layer->pw : vt.width),
-                   static_cast<uint32_t>(layerPass ? layer->ph : vt.height)};
+    area.extent = {static_cast<uint32_t>(layerPass ? layer->pw : eyeW),
+                   static_cast<uint32_t>(layerPass ? layer->ph : eyeH)};
+
+    // An eye pass clears one more column / row past the submitted rect (when
+    // the image has it): the compositor's bilinear sample at the rect's edge
+    // reads half of it, and it would otherwise hold undefined data or an
+    // older frame. The viewport stays on the rect, so nothing draws there.
+    VkRect2D clearArea = area;
+    if (!layerPass) {
+        clearArea.extent = {static_cast<uint32_t>(std::min(eyeW + 1, std::max(vt.width, 1))),
+                            static_cast<uint32_t>(std::min(eyeH + 1, std::max(vt.height, 1)))};
+    }
 
     VkRenderPassBeginInfo rpBegin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     rpBegin.renderPass = layerPass ? uiLayerPass_ : renderPass_;
     rpBegin.framebuffer = vt.framebuffers[imageIndex];
-    rpBegin.renderArea = area;
+    rpBegin.renderArea = clearArea;
     rpBegin.clearValueCount = layerPass ? 1u : (msaa ? 3u : 2u);
     rpBegin.pClearValues = clears;
     vkCmdBeginRenderPass(commandBuffer_, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
@@ -8126,6 +8218,103 @@ bool VulkanRenderer::controllerModelsInView(const XrView* views, uint32_t viewCo
     return false;
 }
 
+bool VulkanRenderer::modelLayerBounds(const XrView& view, TanRect& out) const {
+    using namespace math;
+    const XrFovf& f = view.fov;
+    const float tl = std::tan(f.angleLeft), tr = std::tan(f.angleRight);
+    const float tu = std::tan(f.angleUp), td = std::tan(f.angleDown);
+    const Quat inv{-view.pose.orientation.x, -view.pose.orientation.y, -view.pose.orientation.z,
+                   view.pose.orientation.w};
+    const Vec3 eye{view.pose.position.x, view.pose.position.y, view.pose.position.z};
+    float minX = 1e9f, maxX = -1e9f, minY = 1e9f, maxY = -1e9f;
+    bool any = false;
+    auto put = [&](float x, float y) {
+        minX = std::min(minX, x);
+        maxX = std::max(maxX, x);
+        minY = std::min(minY, y);
+        maxY = std::max(maxY, y);
+        any = true;
+    };
+    // Everything drawn is convex pieces given by their corners. Each piece is
+    // clipped against the projection's near plane (as drawControllerModels /
+    // drawButtonLabels draw it): its corners in front of the plane plus the
+    // points where the segments between corners cross it bound what is drawn.
+    // A piece wholly behind the plane adds nothing.
+    constexpr float kNear = 0.05f;
+    auto piece = [&](const Vec3* w, int n) {
+        Vec3 p[8];
+        n = std::min(n, 8);
+        for (int i = 0; i < n; ++i) p[i] = rotate(inv, w[i] - eye);  // view space: -Z forward
+        for (int i = 0; i < n; ++i) {
+            const float d = -p[i].z;
+            if (d >= kNear) put(p[i].x / d, p[i].y / d);
+        }
+        for (int i = 0; i < n; ++i) {
+            for (int j = i + 1; j < n; ++j) {
+                const float di = -p[i].z, dj = -p[j].z;
+                if ((di >= kNear) == (dj >= kNear)) continue;
+                const Vec3 c = p[i] + (p[j] - p[i]) * ((kNear - di) / (dj - di));
+                put(c.x / kNear, c.y / kNear);
+            }
+        }
+    };
+    for (int h = 0; h < 2; ++h) {
+        const ControllerVis& c = controllers_[h];
+        if (!c.active) continue;
+        const HandModel& hm = handModels_[h];
+        const bool gltf = hm.ready && hm.vertexBuffer != VK_NULL_HANDLE && !hm.submeshes.empty();
+        if (!gltf && capsuleVertexBuffer_ == VK_NULL_HANDLE) continue;
+        // Whole-model box plus room for the animated parts (trigger pull,
+        // stick tilt, button travel); the fallback capsule's box otherwise.
+        constexpr float kAnimMargin = 0.012f;
+        Vec3 lo{-0.03f, -0.03f, -0.09f}, hi{0.03f, 0.03f, 0.09f};
+        if (gltf && hm.boundsValid) {
+            lo = hm.boundsLo - Vec3{kAnimMargin, kAnimMargin, kAnimMargin};
+            hi = hm.boundsHi + Vec3{kAnimMargin, kAnimMargin, kAnimMargin};
+        } else if (gltf) {
+            lo = Vec3{-0.15f, -0.15f, -0.15f};
+            hi = Vec3{0.15f, 0.15f, 0.15f};
+        }
+        const float* qp = c.gripActive ? c.gripOrientation : c.orientation;
+        const float* op = c.gripActive ? c.gripPosition : c.position;
+        const Quat q{qp[0], qp[1], qp[2], qp[3]};
+        const Vec3 o{op[0], op[1], op[2]};
+        Vec3 box[8];
+        for (int k = 0; k < 8; ++k) {
+            box[k] = o + rotate(q, Vec3{(k & 1) ? hi.x : lo.x, (k & 2) ? hi.y : lo.y, (k & 4) ? hi.z : lo.z});
+        }
+        piece(box, 8);
+    }
+    // Button labels (drawButtonLabels): cards with their rim, leader lines,
+    // and the rings / capsules round the buttons.
+    constexpr float kEdge = 0.004f;
+    for (const LabelCardDraw& d : labelDraws_) {
+        const float hw = d.hw + kEdge, hh = d.hh + kEdge;
+        const Vec3 card[4] = {d.centre + d.right * hw + d.up * hh, d.centre + d.right * hw - d.up * hh,
+                              d.centre - d.right * hw + d.up * hh, d.centre - d.right * hw - d.up * hh};
+        piece(card, 4);
+        if (d.leader) {
+            const Vec3 line[2] = {d.edge, d.tip};
+            piece(line, 2);
+        }
+        if (d.ring && d.ringHW > 0.0f && d.ringHH > 0.0f) {
+            const Vec3 a = d.ringAxis;
+            const Vec3 b = cross(d.ringNormal, a);
+            const float rw = d.ringHW + kEdge, rh = d.ringHH + kEdge;
+            const Vec3 ring[4] = {d.ringCentre + a * rw + b * rh, d.ringCentre + a * rw - b * rh,
+                                  d.ringCentre - a * rw + b * rh, d.ringCentre - a * rw - b * rh};
+            piece(ring, 4);
+        }
+    }
+    // Near-plane points can project far outside; the FOV clamp bounds them.
+    if (!any) return false;
+    out.l = std::max(minX, tl);
+    out.r = std::min(maxX, tr);
+    out.d = std::max(minY, td);
+    out.u = std::min(maxY, tu);
+    return out.l < out.r && out.d < out.u;
+}
+
 void VulkanRenderer::drawControllerModels(const XrView& view) {
     using namespace math;
     const Mat4 viewMat = rigidInverse(rigidTransform(
@@ -8674,8 +8863,28 @@ void VulkanRenderer::layoutButtonLabels(const XrView* views, uint32_t viewCount)
                 // The part's half width across the face (its box's X: across
                 // the face on these controllers), clamped for odd parts.
                 const float rr = std::clamp(it.aHalf.x, 0.003f, 0.016f) + kLabelRingGap;
+                const bool pill = cmp == "button_menu" || cmp == "button_view";
                 // At rest: a press or a stick tilt must not sink the ring into the face.
-                const Vec3 c = it.bRest + fN * kLabelRingLift;
+                Vec3 c = it.bRest + fN * (pill ? kLabelPillRingLift : kLabelRingLift);
+                if (cmp == "thumbstick" && handModels_[h].ready) {
+                    // The stick is tilted in model space and wider at its
+                    // base, so its box centre sits ~1.1 mm off its axis, toward
+                    // the face centre and the grip: centre the ring on the axis
+                    // itself (the json's pivot -> origin line, in the glTF's
+                    // space) where it crosses the ring plane.
+                    for (const SteamVrComponent& sc : labelJson_[h].components) {
+                        if (sc.name != cmp || !sc.haveMotionCentre) continue;
+                        const Vec3 p0{sc.motionCentre[0], sc.motionCentre[1], sc.motionCentre[2]};
+                        Vec3 ax = Vec3{sc.origin[0], sc.origin[1], sc.origin[2]} - p0;
+                        if (length(ax) < 1e-3f) break;
+                        ax = normalize(ax);
+                        const float den = dot(ax, fN);
+                        if (std::fabs(den) < 0.8f) break;  // not roughly along the face normal: some other model
+                        const Vec3 onAxis = p0 + ax * (dot(c - p0, fN) / den);
+                        if (length(onAxis - c) < 0.004f) c = onAxis;  // a few mm at most, else keep the box centre
+                        break;
+                    }
+                }
                 if (!it.card->direction.empty()) {
                     dr.tip = world(c + it.armDir * rr);
                 } else {
@@ -8688,7 +8897,7 @@ void VulkanRenderer::layoutButtonLabels(const XrView* views, uint32_t viewCount)
                     // the D-pad lines passing by.
                     Vec3 ax = fR;
                     float hw = rr, hh = rr;
-                    if (cmp == "button_menu" || cmp == "button_view") {
+                    if (pill) {
                         const Vec3 mx = Vec3{1.0f, 0.0f, 0.0f} - fN * fN.x;
                         if (length(mx) > 1e-3f) {
                             ax = normalize(mx);
@@ -10053,6 +10262,7 @@ void VulkanRenderer::destroyHandModel(HandModel& hm) {
     hm.submeshes.clear();
     hm.nodeStates.clear();
     hm.indexCount = 0;
+    hm.boundsValid = false;
     hm.ready = false;
 }
 
@@ -10176,6 +10386,18 @@ bool VulkanRenderer::uploadHandMesh(int hand, const GltfMesh& mesh, bool mirrore
                      : modelWhite_.set;
         for (int k = 0; k < 4; ++k) ms.color[k] = s.baseColor[k];
         hm.submeshes.push_back(ms);
+    }
+    {
+        // Whole-model bounding box (vertex positions, node transforms baked).
+        math::Vec3 lo{1e9f, 1e9f, 1e9f}, hi{-1e9f, -1e9f, -1e9f};
+        for (std::size_t v = 0; v + 7 < mesh.vertices.size(); v += 8) {
+            const float* pv = &mesh.vertices[v];
+            lo = {std::min(lo.x, pv[0]), std::min(lo.y, pv[1]), std::min(lo.z, pv[2])};
+            hi = {std::max(hi.x, pv[0]), std::max(hi.y, pv[1]), std::max(hi.z, pv[2])};
+        }
+        hm.boundsValid = lo.x <= hi.x && lo.y <= hi.y && lo.z <= hi.z;
+        hm.boundsLo = lo;
+        hm.boundsHi = hi;
     }
     hm.ready = true;
 
