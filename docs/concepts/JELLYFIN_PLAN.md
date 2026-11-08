@@ -200,3 +200,21 @@ from the user for an end-to-end test.
   should be faster now) and WebDAV file and folder downloads (growing ranges; seeking in WebDAV playback
   starts small again). SMB and SFTP use other readers (unchanged). Ordinary website downloads are
   Chromium's own (unchanged).
+
+## User report 2026-11-08 (fourth test): episode ends, audio tracks, TODO additions
+- The new shortcut list looks good.
+- **Episode end (Plex and Jellyfin): back to the page only after ~15-20 s, no next episode.**
+  Cause in the log: at the real end of a stream FFmpeg's `reconnect_at_eof=1` reconnects twice
+  (0+1+3 s), then the engine's own network retry runs 6 more times (300 ms × n), because the error is
+  -5 (EIO), not AVERROR_EOF. Plan:
+  - `reconnect_at_eof` off (mid-file drops are still covered by `reconnect` while off < filesize).
+  - No engine retries once the I/O position has reached the file size.
+  - **Next episode:** at the end of an episode the app sends `plexnext <ms>`. The helper reports
+    "stopped" for the current one, finds the next and emits a new `plex` hand-off on the same screen,
+    or "plexnext none", and then the app returns to the page.
+    - Jellyfin: `/Shows/{SeriesId}/Episodes?startItemId=…&limit=2`.
+    - Plex: `/library/metadata/{grandparentRatingKey}/allLeaves`.
+- **Audio track like the page chose:** Jellyfin `AudioStreamIndex` from the PlaybackInfo request; Plex:
+  the part's selected audio stream (`Stream.selected`, `index` = container index). Passed as `audio` in
+  the hand-off, applied with `setPreferredAudioStream`.
+- TODO: PX1 (skip intro / credits), ST1 (subtitle picker) added.

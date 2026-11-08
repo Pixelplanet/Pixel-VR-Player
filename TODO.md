@@ -328,6 +328,18 @@ branches are local (not pushed) unless noted.
     MiDaS small takes 22 ms GPU. Depth Anything V2 Small is unusable (279 ms CPU).
   - Still open: real-weight output check, measurements under playback load / sustained, the warp
     pipeline. Benchmark files are in `~/depth-bench` on the headset.
+- [ ] **PX1. Skip intro / skip credits in our player (Plex, later Jellyfin) (asked for 2026-11-08):**
+  investigate taking Plex's intro and credits markers into the native player and showing "Skip intro"
+  / "Skip credits" (and starting the next episode at the credits).
+  - Plex: `GET /library/metadata/{id}?includeMarkers=1` lists `Marker` entries
+    (type intro / credits, startTimeOffset / endTimeOffset in ms) when the server has analysed them.
+  - Jellyfin: Media Segments (`GET /MediaSegments/{itemId}`, Intro / Outro / Recap…, 10.10+), filled by
+    plugins such as Intro Skipper.
+- [ ] **ST1. Subtitle picker (asked for 2026-11-08):** we lack one for Plex and Jellyfin, and in general.
+  - Pick embedded subtitle tracks in the player, plus "off".
+  - Take the subtitle chosen on the Plex / Jellyfin page into our player (Plex: the part's selected
+    stream; Jellyfin: `SubtitleStreamIndex` in the PlaybackInfo request).
+  - Plex / Jellyfin external subtitles come as separate URLs.
 - [ ] **SD1. SD cards and a free download target (asked for 2026-11-08):** users of the 256 GB Steam
   Frame need the SD card's space.
   - Check that the player works with SD cards: file browser, playback, thumbnails, the vault, removing
