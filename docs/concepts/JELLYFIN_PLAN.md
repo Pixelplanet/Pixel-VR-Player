@@ -90,9 +90,17 @@ from the user for an end-to-end test.
     page is back on the details page.
   - No token in the helper's stdout (outside the hand-off line) or stderr.
   - The test's resume point was reset to 0 afterwards. The test script lived in a temp folder and isn't kept.
-- [ ] Rail shortcut "Jellyfin" + "Jellyfin address" setting (asked for 2026-11-08). The shortcut opens
-      `<address>/web/`; an empty address sends the user to the setting.
-- [ ] **Downloads (asked for 2026-11-08):** like Plex, Jellyfin Web's "Download" (`…/Items/{id}/Download?api_key=…`)
-      must be cancelled in Chromium and handed to our download manager (`savefile` event; the name comes from
-      Content-Disposition / suggestedFilename) in `Browser.downloadWillBegin` of `browser/pvr_browser.cpp`.
+- [x] Rail shortcut "Jellyfin" (8th shortcut, `rail_shortcuts` bit 7) + "Jellyfin address" row in
+      Settings > UI & Appearance > Shortcuts (keyboard; `jellyfin_url` in settings.conf). It is normalised:
+      `192.168.1.10:8096` / `…/web/#/home` become `http://host:port`. The shortcut opens `<address>/web/`
+      as a kiosk page; with no address it opens the Shortcuts page with a hint. Built; not tried in the headset.
+- [x] **Downloads:** `Browser.downloadWillBegin` for `…/Items/{id}/Download?api_key|ApiKey=…` cancels Chromium's
+      download and emits `savefile` to our download manager.
+  - The name is the server file's own name (Jellyfin Web's `ApiClient.getItem` → `Path`).
+  - **Jellyfin 12 answers `/Download?api_key=` with 401** (Chromium saved that error as "Download.txt").
+    `ApiKey=` and the login header work, so the hand-off rewrites to `ApiKey=`. Playback URLs use
+    `ApiKey=` too (both work for `/Videos/…/stream`).
+  - **Tested against TheVault:** name `8 Mile (2002) - 2002 - 1080p - x264 - DTS.mkv`; the handed-over URL
+    answers 206 with the same Content-Disposition name; no file left in ~/Downloads; no token in the log.
+    The app side (`savefile` → `startDownload`) is the generic path Plex already uses.
 - [ ] In-headset test by the user.

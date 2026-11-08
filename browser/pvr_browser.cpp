@@ -1660,13 +1660,14 @@ int runScreen(const ScreenOptions& opt) {
                     std::string playUrl;
                     if ((videoOk && containerOk) || info.getString("turl").empty()) {
                         plex.jfMethod = "DirectPlay";
+                        // ApiKey=: Jellyfin 12 refuses the legacy api_key= on some endpoints (/Download).
                         playUrl = plex.base + "/Videos/" + plex.jfItem + "/stream?static=true&MediaSourceId=" +
-                                  plex.jfMediaSource + "&api_key=" + plex.token;
+                                  plex.jfMediaSource + "&ApiKey=" + plex.token;
                     } else {
                         plex.jfMethod = "Transcode";
                         playUrl = plex.base + info.getString("turl");
                         if (playUrl.find("api_key=") == std::string::npos && playUrl.find("ApiKey=") == std::string::npos) {
-                            playUrl += (playUrl.find('?') == std::string::npos ? "?api_key=" : "&api_key=") + plex.token;
+                            playUrl += (playUrl.find('?') == std::string::npos ? "?ApiKey=" : "&ApiKey=") + plex.token;
                         }
                     }
                     plex.durationMs = static_cast<long long>(info.getNumber("ticks") / 10000.0);
@@ -1851,7 +1852,10 @@ int runScreen(const ScreenOptions& opt) {
                         ")).json();it=(j.Items||[])[0]}"
                         "if(!it)return '';const p=(it.Path||'').split(/[\\\\/]/).pop();"
                         "return p||(it.Name?it.Name+(it.Container?'.'+it.Container.split(',')[0]:''):'')}catch(e){return ''}})()";
-                    evalIn(tabs[dti].session, js, [&, dlUrl, itemId](const pvrjson::Value* v) {
+                    // Jellyfin 12 answers /Download?api_key= with 401 but takes ApiKey= (checked on TheVault).
+                    std::string fetchUrl = dlUrl;
+                    if (const size_t k = fetchUrl.find("api_key="); k != std::string::npos) fetchUrl.replace(k, 8, "ApiKey=");
+                    evalIn(tabs[dti].session, js, [&, dlUrl = fetchUrl, itemId](const pvrjson::Value* v) {
                         std::string name = (v && v->type == pvrjson::Value::Type::String) ? v->str : std::string();
                         if (name.empty()) name = "Jellyfin " + itemId;
                         std::string clean;
