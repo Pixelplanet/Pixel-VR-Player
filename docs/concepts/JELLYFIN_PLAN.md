@@ -180,3 +180,23 @@ from the user for an end-to-end test.
   `/Videos/{id}/stream?static=true`**, with the same size and first / last 4 MB identical (8.25 GB file).
   The old 52 MB/s was mostly our 4 MB ranges. Downloads are now handed over as the static stream
   (the name still comes from the server path).
+- **Shortcut list polish (efa2afb, after the user's screenshot):** the borders were ~8x the card
+  border (wrong `drawUiElement` radius / border arguments), now 0.0012 like the cards. Lines are taller
+  (pitch 0.066) and the text is larger (scale 1.0).
+  - Dragging: the grabbed line lifts (shadow + glow) and follows the laser smoothly; the lines in
+    between glide aside to open the gap (`advanceListAnim`, per-line eased offsets); on release it
+    slides from where it was held into its slot.
+  - Built + deployed, not yet seen.
+- **Still to test in the headset:**
+  - TV episodes (series > season > episode) and what happens at the end of an episode.
+  - Resume vs. start from the beginning.
+  - "2 Fast 2 Furious" with Resume again (the earlier crash).
+  - The one film Jellyfin must convert (transcode path).
+  - Watched state / resume point in Jellyfin after stopping.
+  - Sign-in kept after restarting the player.
+- **Known gap:** audio language / subtitles picked in Jellyfin's page are not passed on; our player uses
+  its own default / preferred tracks.
+- **Other download paths the reader change touches:** Plex "Download" / "Save File" (same http reader:
+  should be faster now) and WebDAV file and folder downloads (growing ranges; seeking in WebDAV playback
+  starts small again). SMB and SFTP use other readers (unchanged). Ordinary website downloads are
+  Chromium's own (unchanged).
