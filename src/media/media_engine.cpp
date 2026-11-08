@@ -373,6 +373,10 @@ struct MediaEngine::Impl {
     int audioStream = -1;
     AVCodecContext* audioCodec = nullptr;
     SwrContext* swr = nullptr;
+    // What swr was set up for; decoded frames can differ (DTS-HD / TrueHD after a seek).
+    AVChannelLayout swrInLayout{};
+    int swrInFormat = -1;
+    int swrInRate = 0;
     AVRational audioTimeBase{1, 1};
     bool audioEnabled = false;
     static constexpr int kOutSampleRate = 48000;
@@ -462,6 +466,7 @@ struct MediaEngine::Impl {
         if (swr) {
             swr_free(&swr);
         }
+        av_channel_layout_uninit(&swrInLayout);
         if (audioCodec) {
             avcodec_free_context(&audioCodec);
         }
@@ -798,6 +803,32 @@ void MediaEngine::Impl::decodeLoop() {
 
 #ifdef PIXELVR_HAVE_PULSE
     auto process_audio = [&]() {
+        // The decoder's real output can differ from the stream header swr was set up from
+        // (DTS-HD / TrueHD core vs. full layout after a seek, mid-stream changes). Feeding
+        // swr frames with fewer planes than it expects reads past them (crash), so follow
+        // the frame instead.
+        if (frame->format != swrInFormat || frame->sample_rate != swrInRate ||
+            av_channel_layout_compare(&frame->ch_layout, &swrInLayout) != 0) {
+            AVChannelLayout outLayout;
+            av_channel_layout_default(&outLayout, kOutChannels);
+            SwrContext* fresh = nullptr;
+            if (frame->sample_rate <= 0 || frame->ch_layout.nb_channels <= 0 ||
+                swr_alloc_set_opts2(&fresh, &outLayout, AV_SAMPLE_FMT_S16, kOutSampleRate, &frame->ch_layout,
+                                    static_cast<AVSampleFormat>(frame->format), frame->sample_rate, 0, nullptr) != 0 ||
+                swr_init(fresh) < 0) {
+                swr_free(&fresh);
+                return;  // drop this frame rather than convert it wrongly
+            }
+            PIXELVR_LOG_INFO("MediaEngine: audio input changed to %d ch, %d Hz, %s; resampler rebuilt",
+                             frame->ch_layout.nb_channels, frame->sample_rate,
+                             av_get_sample_fmt_name(static_cast<AVSampleFormat>(frame->format)));
+            swr_free(&swr);
+            swr = fresh;
+            av_channel_layout_uninit(&swrInLayout);
+            av_channel_layout_copy(&swrInLayout, &frame->ch_layout);
+            swrInFormat = frame->format;
+            swrInRate = frame->sample_rate;
+        }
         const int maxOut = swr_get_out_samples(swr, frame->nb_samples);
         if (maxOut <= 0) {
             return;
@@ -1519,6 +1550,9 @@ bool MediaEngine::open(const std::string& path) {
                                     impl_->audioCodec->sample_fmt,
                                     impl_->audioCodec->sample_rate, 0, nullptr) == 0 &&
                 swr_init(impl_->swr) >= 0) {
+                av_channel_layout_copy(&impl_->swrInLayout, &impl_->audioCodec->ch_layout);
+                impl_->swrInFormat = impl_->audioCodec->sample_fmt;
+                impl_->swrInRate = impl_->audioCodec->sample_rate;
                 pa_sample_spec spec;
                 spec.format = PA_SAMPLE_S16LE;
                 spec.rate = MediaEngine::Impl::kOutSampleRate;

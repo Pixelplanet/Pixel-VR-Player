@@ -1120,6 +1120,33 @@ void App::closeMedia(int slot) {
     leaveArrangement(slot);
 }
 
+void App::beginWebPlay(int slot, const BrowserHost::PlexPlay& play) {
+    // Wake the server on a worker (first bytes of the stream), then startPlexPlay() opens it on
+    // the main thread quickly. Without this the open blocked the frame loop while the server's
+    // disk spun up (user report 2026-11-08: Jellyfin froze the headset ~15 s).
+    for (size_t p = 0; p < pendingWebPlays_.size(); ++p) {
+        if (pendingWebPlays_[p].slot == slot) pendingWebPlays_.erase(pendingWebPlays_.begin() + static_cast<long>(p--));
+    }
+    PendingWebPlay pw;
+    pw.slot = slot;
+    pw.play = play;
+    pw.since = std::chrono::steady_clock::now();
+    pw.state = std::make_shared<std::atomic<int>>(0);
+    std::thread([url = play.url, state = pw.state] {
+        std::string err;
+        bool ok = false;
+        if (std::unique_ptr<RemoteFile> f = remoteOpen(url, err)) {
+            std::vector<uint8_t> buf(64 * 1024);
+            ok = f->read(buf.data(), static_cast<int>(buf.size())) > 0;
+        }
+        state->store(ok ? 1 : 2);
+    }).detach();
+    pendingWebPlays_.push_back(std::move(pw));
+    notice_ = play.service == "jellyfin" ? "Waiting for Jellyfin to start the video..." : "Waiting for Plex to start the video...";
+    noticeUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(90);
+    PIXELVR_LOG_INFO("Web play: waiting for the server (\"%s\")", play.title.c_str());
+}
+
 void App::startPlexPlay(int slot, const BrowserHost::PlexPlay& play) {
 #ifdef PIXELVR_HAVE_MEDIA
     ScreenState& sc = screens_[slot];
@@ -3176,7 +3203,35 @@ int App::run() {
                         playing = playing || (o != slot && screens_[o].webSuspended && op.substr(0, op.find('?')) == item);
                     }
                     if (playing) host.plexRelease();
-                    else startPlexPlay(slot, plexPlay);
+                    else beginWebPlay(slot, plexPlay);
+                }
+                // Hand-offs waiting for the server (a sleeping disk can take 15 s+): start them
+                // once the first bytes arrived; the frame loop never waits on the network.
+                for (size_t p = 0; p < pendingWebPlays_.size();) {
+                    PendingWebPlay& pw = pendingWebPlays_[p];
+                    if (pw.slot != slot) {
+                        ++p;
+                        continue;
+                    }
+                    const int st = pw.state->load();
+                    const bool timedOut = std::chrono::steady_clock::now() - pw.since > std::chrono::seconds(90);
+                    if (!screens_[slot].web) {
+                        pendingWebPlays_.erase(pendingWebPlays_.begin() + static_cast<long>(p));  // page closed meanwhile
+                    } else if (st != 0 || timedOut) {
+                        const BrowserHost::PlexPlay play = pw.play;
+                        pendingWebPlays_.erase(pendingWebPlays_.begin() + static_cast<long>(p));
+                        notice_.clear();
+                        if (st == 1) {
+                            startPlexPlay(slot, play);
+                        } else {
+                            PIXELVR_LOG_WARN("Web play: the server did not send \"%s\"", play.title.c_str());
+                            notice_ = "The server did not start the video. Try again.";
+                            noticeUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(6);
+                            host.plexRelease();
+                        }
+                    } else {
+                        ++p;
+                    }
                 }
                 BrowserHost::SaveFile saveFile;
                 while (host.takeSaveFile(saveFile)) {

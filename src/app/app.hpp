@@ -24,6 +24,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <memory>
 #include <functional>
 #include <string>
 #include <thread>
@@ -125,6 +126,15 @@ private:
     // Plex Web hand-off: the page's play request plays the original file on
     // the same slot; stopping, closing or finishing it brings the page back.
     void startPlexPlay(int slot, const BrowserHost::PlexPlay& play);
+    // Plex / Jellyfin hand-off: first wait (off the frame loop) until the server sends bytes.
+    void beginWebPlay(int slot, const BrowserHost::PlexPlay& play);
+    struct PendingWebPlay {
+        int slot = 0;
+        BrowserHost::PlexPlay play;
+        std::shared_ptr<std::atomic<int>> state;  // 0 waiting, 1 the server answered, 2 it failed
+        std::chrono::steady_clock::time_point since;
+    };
+    std::vector<PendingWebPlay> pendingWebPlays_;
     bool returnFromPlex(int slot);  // false when the slot is not playing a Plex hand-off
     bool updatePlexPlayback(int slot);  // true once it ended and the page is back
     bool plexLoading_ = false;

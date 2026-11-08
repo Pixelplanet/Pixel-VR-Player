@@ -1612,7 +1612,7 @@ int runScreen(const ScreenOptions& opt) {
                 plex.jfStarted = false;
                 plex.jfAuth = "MediaBrowser Client=\"Pixel VR Player\", Device=\"Steam Frame\", DeviceId=\"pixelvr-" +
                               std::to_string(getpid()) + "\", Version=\"1\", Token=\"" + token + "\"";
-                plex.pauseUntil = Clock::now() + std::chrono::seconds(15);
+                plex.pauseUntil = Clock::now() + std::chrono::seconds(90);  // as long as the app waits for the server
                 // Our own PlaybackInfo, with a profile matching our decoders; Direct Play is decided
                 // below from the streams (our FFmpeg plays DTS / DVD subtitles Jellyfin would transcode).
                 static const char* kProfile =
@@ -1709,7 +1709,7 @@ int runScreen(const ScreenOptions& opt) {
             plex.url = tabs[ti].url;
             const std::string offsetParam = queryParam(url, "offset");
             const int mediaIndex = std::max(0, std::atoi(queryParam(url, "mediaIndex").c_str()));
-            plex.pauseUntil = Clock::now() + std::chrono::seconds(15);
+            plex.pauseUntil = Clock::now() + std::chrono::seconds(90);  // as long as the app waits for the server
             const std::string js =
                 "fetch(" + pvrjson::quote(plex.base + path + "?X-Plex-Token=" + token) +
                 ",{headers:{Accept:'application/json'}}).then(r=>r.json()).then(j=>{const m=j.MediaContainer.Metadata[0],"
