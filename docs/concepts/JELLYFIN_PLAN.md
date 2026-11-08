@@ -111,3 +111,23 @@ from the user for an end-to-end test.
       and its shaders. `--ffmpeg-info`: bundled libavcodec 62.11.100, zero-copy yes.
   - Backup of v1.14.0: `~/pixelvr-backup-v1.14.0/` (pixelvr + shaders). To revert, copy both back.
 - [ ] In-headset test by the user.
+
+## User report 2026-11-08 (second test): freeze + crash on Jellyfin play, shortcut rework request
+- **Freeze:** `loadMedia` opened the HTTP stream on the main thread; the server took ~15 s
+  (17:46:24 → 17:46:39, its disk spinning up), so the frame loop stalled (watchdog `stalled=1`).
+  - **Fix (5a505d4):** `App::beginWebPlay` wakes the server on a worker (first 64 KB via `remoteOpen`)
+    with a "Waiting for Jellyfin / Plex to start the video..." notice. `startPlexPlay` runs once bytes
+    arrived (90 s limit, then `plexRelease` and a notice).
+  - The helper keeps the page's own player paused for 90 s (was 15 s).
+- **Crash:** SIGSEGV in `swr_convert` (libswresample.so.6) on the decode thread, ~0.3 s after `seek 3243.76s
+  reopen=1` (resume) of "2 Fast 2 Furious" (DTS-HD MA + DTS:X 7.1, s32p).
+  - Not reproduced standalone: same URL, same swr setup, same seek and flush, 600 frames, stable 8 ch
+    s32p, no crash (a test program against the bundled FFmpeg on the headset). The core dump is
+    root-only (inaccessible).
+  - **Hardening (5a505d4, 278d92b):** swr follows the decoded frame's layout / format / rate (rebuilt and
+    logged as "audio input changed" when they differ), and frames with missing planes are dropped. If
+    it crashes again, the log shows whether a format change happened.
+  - **Not yet deployed** (the player was running).
+- **Shortcut rework (requested):** compact rows; each shortcut = name + URL (+ on the rail or not); an
+  "Add shortcut" button; the user can pre-fill Jellyfin. Planned storage: `~/.config/pixelvr/shortcuts.json`,
+  migrated from `rail_shortcuts` + `jellyfin_url`.
