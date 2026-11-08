@@ -1829,6 +1829,29 @@ int runScreen(const ScreenOptions& opt) {
             }
             if (dti < 0) return;  // another screen's
             {
+                // Jellyfin Web "Download": /Items/{id}/Download?api_key=… Hand it to the app's download
+                // manager like Plex's; the server names the file (Content-Disposition).
+                const std::string dlUrl = params->getString("url");
+                const size_t itemsAt = dlUrl.find("/Items/");
+                const size_t q = dlUrl.find('?');
+                const std::string pathOnly = dlUrl.substr(0, q);
+                if (itemsAt != std::string::npos && pathOnly.size() > 9 &&
+                    pathOnly.compare(pathOnly.size() - 9, 9, "/Download") == 0 &&
+                    (!queryParam(dlUrl, "api_key").empty() || !queryParam(dlUrl, "ApiKey").empty())) {
+                    send("Browser.cancelDownload", "{\"guid\":" + pvrjson::quote(params->getString("guid")) + ctxParam + "}", "");
+                    std::string name = params->getString("suggestedFilename");
+                    if (name.empty() || name == "download" || name == "Download") {
+                        name = "Jellyfin " + pathOnly.substr(itemsAt + 7, pathOnly.size() - 9 - itemsAt - 7);
+                    }
+                    std::string clean;
+                    for (const char c : name) {
+                        if (c != '/' && c != '\\' && static_cast<unsigned char>(c) >= 0x20) clean += c;
+                    }
+                    emitLine("savefile {\"url\":" + pvrjson::quote(dlUrl) + ",\"name\":" + pvrjson::quote(clean) + "}");
+                    return;
+                }
+            }
+            {
                 // Plex Web "Download": Chromium would save it headless, without progress or a real
                 // name. Cancel it and hand the part URL to the app's download manager instead.
                 const std::string dlUrl = params->getString("url");
