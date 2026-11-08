@@ -1,7 +1,9 @@
 #pragma once
 
 #include "gfx/text_atlas.hpp"
+#include "ui/button_labels.hpp"
 #include "util/chapter.hpp"
+#include "util/math.hpp"
 #include "xr/openxr_headers.hpp"
 #include "xr/xr_context.hpp"
 
@@ -492,8 +494,16 @@ public:
         bool gripActive = false;
         float gripPosition[3] = {0.0f, 0.0f, 0.0f};
         float gripOrientation[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        // The grip pose above is the runtime's render-model space (corrected),
+        // not the raw grip: SteamVR's json component frames apply as they are.
+        bool modelSpace = false;
     };
     void setControllers(const ControllerVis& left, const ControllerVis& right);
+
+    // Floating button labels: `cards` say what each button does right now (see
+    // ui/button_labels); they are drawn next to the buttons of the controller
+    // models while `shown`, fading in / out. Call once per frame.
+    void setButtonLabels(bool shown, std::vector<ButtonLabelCard> cards);
 
     // Replaces the procedural controller geometry with the runtime-provided glTF
     // render model (parsed from the GLB bytes) for hand (0 = left, 1 = right).
@@ -808,6 +818,50 @@ private:
     // Records the controller models for one view into commandBuffer_ (inside
     // a renderPass_ pass, model pipeline bound).
     void drawControllerModels(const XrView& view);
+
+    // Button labels (setButtonLabels). Laid out once per frame in world space
+    // (renderLayersBefore), then drawn per view after the models, in the same
+    // pass: the models layer, else the eye buffers. Cards billboard toward the
+    // head and follow the (smoothed) model pose.
+    struct LabelCardDraw {
+        int hand = 1;
+        math::Vec3 centre, right, up, normal;  // billboard frame (shared per hand)
+        float hw = 0.0f, hh = 0.0f;            // half-size, metres
+        math::Vec3 edge, anchor;               // leader line: card edge -> button
+        bool leader = false;
+        float alpha = 1.0f;
+        std::vector<std::string> lines;
+    };
+    std::vector<ButtonLabelCard> buttonLabels_;
+    bool buttonLabelsShown_ = false;
+    float buttonLabelFade_[2] = {0.0f, 0.0f};
+    std::chrono::steady_clock::time_point buttonLabelFadeT_{};
+    std::vector<LabelCardDraw> labelDraws_;
+    // Button positions in the model's space, by component key (labelComponentKey):
+    // bounding-box centres of the glTF nodes, else SteamVR's json frames.
+    struct LabelAnchor {
+        std::string key;
+        math::Vec3 centre;
+        int submesh = -1;  // first submesh of the node (its animated pose)
+        std::string nodeName;
+    };
+    std::vector<LabelAnchor> modelAnchors_[2];
+    struct LabelJson {
+        bool tried = false;
+        bool compared = false;  // glTF vs json logged for the current mesh
+        std::vector<SteamVrComponent> components;
+        bool haveGrip = false;
+        SteamVrComponent grip;  // openxr_grip, for a model drawn at the raw grip pose
+        bool haveAim = false;
+        SteamVrComponent aim;   // openxr_aim, for a model drawn at the aim pose (grip inactive)
+    };
+    LabelJson labelJson_[2];
+    void layoutButtonLabels(const XrView* views, uint32_t viewCount);
+    // Records the laid-out labels for one view (inside a renderPass_ pass);
+    // glyph instances are appended at `glyphCount` in `glyphs` / `glyphBuf`.
+    void drawButtonLabels(const XrView& view, void* glyphs, VkBuffer glyphBuf, uint32_t& glyphCount);
+    bool labelAnchor(int hand, const std::string& component, math::Vec3& out);
+    float labelTextWidth(const FontAtlas& font, float scale, const std::string& s) const;
     // badge: 0 = none, else the screen number (+10 when it is the selected one);
     // glyphCursor: next free glyph instance in pass slot 3 (shared by the copies).
     void recordScreenCopy(int slot, const ScreenLayer& L, uint32_t imageIndex, int badge, uint32_t& glyphCursor);
@@ -1349,7 +1403,7 @@ private:
     ModelTexture modelWhite_;  // 1x1 white fallback for untextured submeshes
 
     void destroyHandModel(HandModel& hm);
-    bool uploadHandMesh(int hand, const GltfMesh& mesh);
+    bool uploadHandMesh(int hand, const GltfMesh& mesh, bool mirrored = false);
     bool createModelTexture(const uint8_t* rgba, int width, int height,
                             ModelTexture& out);
 };

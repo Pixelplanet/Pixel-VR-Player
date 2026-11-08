@@ -86,6 +86,75 @@ struct GlyphInstance {
 };
 constexpr uint32_t kMaxGlyphsPerView = 16384;
 
+// Button-label cards (layoutButtonLabels / drawButtonLabels), metres.
+constexpr float kLabelTextH = 0.010f;  // text ascent
+constexpr float kLabelPadX = 0.0065f;
+constexpr float kLabelPadY = 0.0042f;
+
+// UTF-8 -> glyph slot of our atlases (ASCII, Latin-1, the few typographic
+// extras mapped to 127..136), advancing idx; '?' for anything else.
+unsigned char nextGlyphIndexUtf8(const std::string& s, std::size_t& idx) {
+    const std::size_t len = s.size();
+    if (idx >= len) return '?';
+    const unsigned char b0 = static_cast<unsigned char>(s[idx]);
+    if (b0 < 0x80) {
+        ++idx;
+        if (b0 < 32 || b0 == 127) return '?';
+        return b0;
+    }
+    // Legacy standalone 0xB7 middle-dot separator used in UI strings
+    if (b0 == 0xB7) {
+        ++idx;
+        return 127;
+    }
+    uint32_t cp = 0;
+    if ((b0 & 0xE0) == 0xC0 && idx + 1 < len) {
+        const unsigned char b1 = static_cast<unsigned char>(s[idx + 1]);
+        if ((b1 & 0xC0) == 0x80) {
+            cp = ((static_cast<uint32_t>(b0 & 0x1F) << 6) |
+                  static_cast<uint32_t>(b1 & 0x3F));
+            idx += 2;
+        }
+    } else if ((b0 & 0xF0) == 0xE0 && idx + 2 < len) {
+        const unsigned char b1 = static_cast<unsigned char>(s[idx + 1]);
+        const unsigned char b2 = static_cast<unsigned char>(s[idx + 2]);
+        if ((b1 & 0xC0) == 0x80 && (b2 & 0xC0) == 0x80) {
+            cp = ((static_cast<uint32_t>(b0 & 0x0F) << 12) |
+                  (static_cast<uint32_t>(b1 & 0x3F) << 6) |
+                  static_cast<uint32_t>(b2 & 0x3F));
+            idx += 3;
+        }
+    } else if ((b0 & 0xF8) == 0xF0 && idx + 3 < len) {
+        const unsigned char b1 = static_cast<unsigned char>(s[idx + 1]);
+        const unsigned char b2 = static_cast<unsigned char>(s[idx + 2]);
+        const unsigned char b3 = static_cast<unsigned char>(s[idx + 3]);
+        if ((b1 & 0xC0) == 0x80 && (b2 & 0xC0) == 0x80 && (b3 & 0xC0) == 0x80) {
+            cp = ((static_cast<uint32_t>(b0 & 0x07) << 18) |
+                  (static_cast<uint32_t>(b1 & 0x3F) << 12) |
+                  (static_cast<uint32_t>(b2 & 0x3F) << 6) |
+                  static_cast<uint32_t>(b3 & 0x3F));
+            idx += 4;
+        }
+    }
+    if (cp == 0) {
+        ++idx;
+        if (b0 >= 160) return b0;
+        return '?';
+    }
+    if (cp == 0x00B7 || cp == 0x2022) return 127;
+    if (cp >= 160 && cp <= 255) return static_cast<unsigned char>(cp);
+    if (cp == 0x20AC) return 128; // €
+    if (cp == 0x2013) return 129; // –
+    if (cp == 0x2014) return 130; // —
+    if (cp == 0x2018) return 131; // ‘
+    if (cp == 0x2019) return 132; // ’
+    if (cp == 0x201C) return 133; // “
+    if (cp == 0x201D) return 134; // ”
+    if (cp == 0x2026) return 135; // …
+    if (cp == 0x2122) return 136; // ™
+    return '?';
+}
+
 // Shared Unified Spatial Hub layout (panel-local metres), used by both render
 // and pointer raycast so the cursor and highlight line up exactly.
 constexpr float kPanelW = 0.90f;      // Total width 1.80m (-0.90 to +0.90)
@@ -3212,6 +3281,7 @@ void VulkanRenderer::renderLayersBefore(XrContext& xr, const XrView* views, uint
     uiLayerPending_ = false;
     modelLayerAllowed_ = xr.extraProjectionLayersOk();
     modelsInView_ = controllerModelsInView(views, viewCount);
+    layoutButtonLabels(views, viewCount);
     if (!uiLayerLive() || viewCount == 0) {
         return;
     }
@@ -3657,6 +3727,8 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
             vkCmdSetScissor(commandBuffer_, 0, 1, &sc);
             vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, modelPipeline_);
             drawControllerModels(views[e]);
+            // The button labels over the models, in the same layer.
+            drawButtonLabels(views[e], glyphMapped_[3], glyphBuffer_[3], glyphCursor);
             vkCmdEndRenderPass(commandBuffer_);
         }
     }
@@ -4162,65 +4234,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
     // Standardized typography helpers (never shrink font dynamically across buttons;
     // truncate cleanly with ellipsis if text exceeds maxW).
     auto nextGlyphIndex = [](const std::string& s, std::size_t& idx) -> unsigned char {
-        const std::size_t len = s.size();
-        if (idx >= len) return '?';
-        const unsigned char b0 = static_cast<unsigned char>(s[idx]);
-        if (b0 < 0x80) {
-            ++idx;
-            if (b0 < 32 || b0 == 127) return '?';
-            return b0;
-        }
-        // Legacy standalone 0xB7 middle-dot separator used in UI strings
-        if (b0 == 0xB7) {
-            ++idx;
-            return 127;
-        }
-        uint32_t cp = 0;
-        if ((b0 & 0xE0) == 0xC0 && idx + 1 < len) {
-            const unsigned char b1 = static_cast<unsigned char>(s[idx + 1]);
-            if ((b1 & 0xC0) == 0x80) {
-                cp = ((static_cast<uint32_t>(b0 & 0x1F) << 6) |
-                      static_cast<uint32_t>(b1 & 0x3F));
-                idx += 2;
-            }
-        } else if ((b0 & 0xF0) == 0xE0 && idx + 2 < len) {
-            const unsigned char b1 = static_cast<unsigned char>(s[idx + 1]);
-            const unsigned char b2 = static_cast<unsigned char>(s[idx + 2]);
-            if ((b1 & 0xC0) == 0x80 && (b2 & 0xC0) == 0x80) {
-                cp = ((static_cast<uint32_t>(b0 & 0x0F) << 12) |
-                      (static_cast<uint32_t>(b1 & 0x3F) << 6) |
-                      static_cast<uint32_t>(b2 & 0x3F));
-                idx += 3;
-            }
-        } else if ((b0 & 0xF8) == 0xF0 && idx + 3 < len) {
-            const unsigned char b1 = static_cast<unsigned char>(s[idx + 1]);
-            const unsigned char b2 = static_cast<unsigned char>(s[idx + 2]);
-            const unsigned char b3 = static_cast<unsigned char>(s[idx + 3]);
-            if ((b1 & 0xC0) == 0x80 && (b2 & 0xC0) == 0x80 && (b3 & 0xC0) == 0x80) {
-                cp = ((static_cast<uint32_t>(b0 & 0x07) << 18) |
-                      (static_cast<uint32_t>(b1 & 0x3F) << 12) |
-                      (static_cast<uint32_t>(b2 & 0x3F) << 6) |
-                      static_cast<uint32_t>(b3 & 0x3F));
-                idx += 4;
-            }
-        }
-        if (cp == 0) {
-            ++idx;
-            if (b0 >= 160) return b0;
-            return '?';
-        }
-        if (cp == 0x00B7 || cp == 0x2022) return 127;
-        if (cp >= 160 && cp <= 255) return static_cast<unsigned char>(cp);
-        if (cp == 0x20AC) return 128; // €
-        if (cp == 0x2013) return 129; // –
-        if (cp == 0x2014) return 130; // —
-        if (cp == 0x2018) return 131; // ‘
-        if (cp == 0x2019) return 132; // ’
-        if (cp == 0x201C) return 133; // “
-        if (cp == 0x201D) return 134; // ”
-        if (cp == 0x2026) return 135; // …
-        if (cp == 0x2122) return 136; // ™
-        return '?';
+        return nextGlyphIndexUtf8(s, idx);
     };
     // Batched text: drawString appends glyph instances to this eye's buffer and
     // a run is drawn with one instanced call when the pipeline changes (see
@@ -7755,6 +7769,10 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         modelPipeline_ != VK_NULL_HANDLE) {
         bindPipe(modelPipeline_);
         drawControllerModels(view);
+        // Button labels after the models (models layer off / unused this frame).
+        flushText();
+        drawButtonLabels(view, glyphOut, glyphBuf, glyphCount);
+        glyphBatchStart = glyphCount;
     }
 
     // Pointer cursor on the UI panel: part of the layer while it is live (the
@@ -7987,7 +8005,9 @@ bool VulkanRenderer::controllerModelsInView(const XrView* views, uint32_t viewCo
     if (views == nullptr || viewCount == 0) return true;  // unknown: assume seen
     // Generous radius around the grip: the model reaches ~12 cm from it, and a
     // model missed here would be drawn into the eye buffers, under the layers.
-    constexpr float kRadius = 0.25f;
+    // The button labels reach further (cards up to ~30 cm out).
+    const bool labels = buttonLabelFade_[0] > 0.0f || buttonLabelFade_[1] > 0.0f;
+    const float kRadius = labels ? 0.40f : 0.25f;
     for (int h = 0; h < 2; ++h) {
         const ControllerVis& c = controllers_[h];
         if (!c.active) continue;
@@ -8127,6 +8147,490 @@ void VulkanRenderer::drawControllerModels(const XrView& view) {
                 drawPart(sm.set, sm.color, sm.firstIndex, sm.indexCount, np, nq);
             }
         }
+    }
+}
+
+void VulkanRenderer::setButtonLabels(bool shown, std::vector<ButtonLabelCard> cards) {
+    buttonLabelsShown_ = shown;
+    buttonLabels_ = std::move(cards);
+}
+
+float VulkanRenderer::labelTextWidth(const FontAtlas& font, float scale, const std::string& s) const {
+    float w = 0.0f;
+    std::size_t idx = 0;
+    while (idx < s.size()) w += font.glyphs[nextGlyphIndexUtf8(s, idx)].advance * scale;
+    return w;
+}
+
+bool VulkanRenderer::labelAnchor(int hand, const std::string& component, math::Vec3& out) {
+    using namespace math;
+    if (hand < 0 || hand > 1) return false;
+    // SteamVR's controller json, read once per hand (also logged against the
+    // glTF nodes, so the space assumption below can be checked in the log).
+    LabelJson& json = labelJson_[hand];
+    if (!json.tried) {
+        json.tried = true;
+        std::string path;
+        if (loadSteamVrControllerComponents(hand, json.components, path)) {
+            std::string list;
+            for (const SteamVrComponent& c : json.components) {
+                if (c.name == "openxr_grip") {
+                    json.grip = c;
+                    json.haveGrip = true;
+                } else if (c.name == "openxr_aim") {
+                    json.aim = c;
+                    json.haveAim = true;
+                }
+                char buf[160];
+                std::snprintf(buf, sizeof(buf), "%s%s (%.4f, %.4f, %.4f)", list.empty() ? "" : ", ", c.name.c_str(),
+                              c.origin[0], c.origin[1], c.origin[2]);
+                list += buf;
+            }
+            PIXELVR_LOG_INFO("Button labels: SteamVR %s controller components (%s): %s", hand == 0 ? "left" : "right",
+                             path.c_str(), list.c_str());
+            if (json.haveGrip && (std::fabs(json.grip.rotateXyz[1]) > 0.01f || std::fabs(json.grip.rotateXyz[2]) > 0.01f)) {
+                PIXELVR_LOG_WARN("Button labels: openxr_grip turns about Y/Z too; only its X turn is applied");
+            }
+            if (json.haveAim && (std::fabs(json.aim.rotateXyz[1]) > 0.01f || std::fabs(json.aim.rotateXyz[2]) > 0.01f)) {
+                PIXELVR_LOG_WARN("Button labels: openxr_aim turns about Y/Z too; only its X turn is applied");
+            }
+        } else {
+            PIXELVR_LOG_INFO("Button labels: no SteamVR controller json for the %s hand", hand == 0 ? "left" : "right");
+        }
+    }
+    const HandModel& hm = handModels_[hand];
+    // Once per loaded mesh: how far each glTF node centre is from the json
+    // origin of the same name (a few mm to ~2 cm = same space, origins are
+    // not always the part's centre; far more = the fallback is off).
+    if (hm.ready && !json.compared && !json.components.empty()) {
+        json.compared = true;
+        std::string compare;
+        for (const SteamVrComponent& c : json.components) {
+            for (const LabelAnchor& a : modelAnchors_[hand]) {
+                if (a.nodeName != c.name) continue;
+                char buf[96];
+                const Vec3 dlt = a.centre - Vec3{c.origin[0], c.origin[1], c.origin[2]};
+                std::snprintf(buf, sizeof(buf), "%s%s %.1f mm", compare.empty() ? "" : ", ", c.name.c_str(),
+                              1000.0f * length(dlt));
+                compare += buf;
+            }
+        }
+        PIXELVR_LOG_INFO("Button labels: %s glTF node centre vs json origin: %s", hand == 0 ? "left" : "right",
+                         compare.empty() ? "(no common names)" : compare.c_str());
+    }
+    // 1) The loaded glTF: the node's bounding-box centre, moved with the
+    // node's animated pose exactly like drawControllerModels moves the part.
+    if (hm.ready) {
+        const std::string key = labelComponentKey(component);
+        const LabelAnchor* found = nullptr;
+        for (const LabelAnchor& a : modelAnchors_[hand]) {
+            if (a.nodeName == component) {
+                found = &a;
+                break;
+            }
+        }
+        if (found == nullptr) {
+            for (const LabelAnchor& a : modelAnchors_[hand]) {
+                if (a.key == key) {
+                    found = &a;
+                    break;
+                }
+            }
+        }
+        if (found != nullptr) {
+            Vec3 c = found->centre;
+            const float* np = nullptr;
+            const float* nq = nullptr;
+            const bool haveNames = !hm.nodeStates.empty() && !hm.nodeStates[0].name.empty();
+            if (haveNames) {
+                for (const NodeStateVis& ns : hm.nodeStates) {
+                    if (ns.name == found->nodeName) {
+                        np = ns.pos;
+                        nq = ns.quat;
+                        break;
+                    }
+                }
+            } else if (found->submesh >= 0 && static_cast<std::size_t>(found->submesh) < hm.nodeStates.size()) {
+                np = hm.nodeStates[static_cast<std::size_t>(found->submesh)].pos;
+                nq = hm.nodeStates[static_cast<std::size_t>(found->submesh)].quat;
+            }
+            if (np != nullptr && nq != nullptr &&
+                nq[0] * nq[0] + nq[1] * nq[1] + nq[2] * nq[2] + nq[3] * nq[3] >= 0.5f) {
+                c = Vec3{np[0], np[1], np[2]} + rotate(Quat{nq[0], nq[1], nq[2], nq[3]}, c);
+            }
+            out = c;
+            return true;
+        }
+    }
+    // 2) SteamVR's controller json: the component's frame origin.
+    const LabelJson& js = labelJson_[hand];
+    // Taken as the render-model space the glTF is in (the model is drawn
+    // there, or its mesh at least is); only with no mesh, drawn at a raw
+    // OpenXR pose, does it take the inverse of the json frame of that pose:
+    // openxr_grip at the grip pose, openxr_aim when the grip is inactive and
+    // the model falls back to the aim pose (as drawControllerModels does).
+    const ControllerVis& cv = controllers_[hand];
+    const SteamVrComponent* frame = nullptr;
+    if (!hm.ready && !cv.modelSpace) {
+        if (cv.gripActive && js.haveGrip) frame = &js.grip;
+        else if (!cv.gripActive && js.haveAim) frame = &js.aim;
+    }
+    for (const SteamVrComponent& c : js.components) {
+        if (c.name != component) continue;
+        Vec3 p{c.origin[0], c.origin[1], c.origin[2]};
+        if (frame != nullptr) {
+            p = p - Vec3{frame->origin[0], frame->origin[1], frame->origin[2]};
+            const float a = -frame->rotateXyz[0] * 3.14159265f / 180.0f;
+            const float ca = std::cos(a), sa = std::sin(a);
+            p = Vec3{p.x, ca * p.y - sa * p.z, sa * p.y + ca * p.z};
+        }
+        out = p;
+        return true;
+    }
+    return false;
+}
+
+void VulkanRenderer::layoutButtonLabels(const XrView* views, uint32_t viewCount) {
+    using namespace math;
+    labelDraws_.clear();
+    const auto now = std::chrono::steady_clock::now();
+    float dt = 0.0f;
+    if (buttonLabelFadeT_.time_since_epoch().count() != 0) {
+        dt = std::clamp(std::chrono::duration<float>(now - buttonLabelFadeT_).count(), 0.0f, 0.1f);
+    }
+    buttonLabelFadeT_ = now;
+    if (views == nullptr || viewCount == 0) return;
+    Vec3 head{};
+    for (uint32_t v = 0; v < viewCount; ++v) {
+        head = head + Vec3{views[v].pose.position.x, views[v].pose.position.y, views[v].pose.position.z};
+    }
+    head = head * (1.0f / static_cast<float>(viewCount));
+
+    const FontAtlas& font = fontAtlasBold_.ok ? fontAtlasBold_ : fontAtlas_;
+    const bool textOk = textReady_ && font.ok && font.ascent > 0.0f;
+    constexpr float kFade = 0.15f;         // seconds in / out
+    constexpr float kMaxW = 0.16f;         // card width limit
+    constexpr float kFaceOffset = 0.06f;   // face-button column, out from the buttons
+    constexpr float kColumnPitch = 0.035f; // at least this between card centres
+    const float scale = textOk ? kLabelTextH / font.ascent : 0.0f;
+    const float lineH = textOk ? (font.lineHeight > 0.0f ? font.lineHeight * scale : kLabelTextH * 1.3f) : 0.0f;
+
+    for (int h = 0; h < 2; ++h) {
+        const ControllerVis& c = controllers_[h];
+        bool any = false;
+        for (const ButtonLabelCard& card : buttonLabels_) any = any || (card.hand == h && !card.lines.empty());
+        const bool on = buttonLabelsShown_ && drawModels_ && c.active && any && textOk;
+        float& fade = buttonLabelFade_[h];
+        fade = on ? std::min(1.0f, fade + dt / kFade) : std::max(0.0f, fade - dt / kFade);
+        // Hidden with the model (inactive hand, models off) at once; else fading.
+        if (!c.active || !drawModels_ || !textOk || fade <= 0.001f) {
+            if (!c.active || !drawModels_) fade = 0.0f;
+            continue;
+        }
+        // The pose the model is drawn with (render-model space, smoothed).
+        const float* qp = c.gripActive ? c.gripOrientation : c.orientation;
+        const float* op = c.gripActive ? c.gripPosition : c.position;
+        const Quat q{qp[0], qp[1], qp[2], qp[3]};
+        const Vec3 o{op[0], op[1], op[2]};
+        auto world = [&](const Vec3& local) { return o + rotate(q, local); };
+        // One billboard frame per hand, facing the head, kept upright.
+        Vec3 n = head - o;
+        if (length(n) < 1e-3f) continue;
+        n = normalize(n);
+        const Vec3 worldUp{0.0f, 1.0f, 0.0f};
+        Vec3 u = worldUp - n * dot(worldUp, n);
+        if (length(u) < 0.05f) {  // looking straight down / up at it
+            const Vec3 fwd = rotate(q, Vec3{0.0f, 0.0f, -1.0f});
+            u = fwd - n * dot(fwd, n);
+            if (length(u) < 1e-3f) continue;
+        }
+        u = normalize(u);
+        const Vec3 r = cross(u, n);
+        auto px = [&](const Vec3& p) { return dot(p - o, r); };
+        auto py = [&](const Vec3& p) { return dot(p - o, u); };
+        auto pd = [&](const Vec3& p) { return dot(p - o, n); };
+
+        struct Item {
+            const ButtonLabelCard* card = nullptr;
+            Vec3 aLocal, aWorld;
+            int cat = 0;  // 0 face / menu column, 1 stick (above), 2 trigger / grip / bumper (below)
+            bool column = false;
+            float hw = 0.0f, hh = 0.0f, x = 0.0f, y = 0.0f, d = 0.0f;
+            std::vector<std::string> lines;
+        };
+        std::vector<Item> items;
+        for (const ButtonLabelCard& card : buttonLabels_) {
+            if (card.hand != h || card.lines.empty()) continue;
+            Item it;
+            it.card = &card;
+            if (!labelAnchor(h, card.component, it.aLocal)) continue;
+            it.aWorld = world(it.aLocal);
+            if (card.component == "thumbstick" || card.component == "trackpad") it.cat = 1;
+            else if (card.component == "trigger" || card.component == "bumper" || card.component == "button_grip")
+                it.cat = 2;
+            float w = 0.0f;
+            for (const std::string& line : card.lines) {
+                std::string l = line;
+                if (labelTextWidth(font, scale, l) > kMaxW - 2.0f * kLabelPadX) {
+                    while (!l.empty() && labelTextWidth(font, scale, l + "...") > kMaxW - 2.0f * kLabelPadX) {
+                        // drop one whole UTF-8 character
+                        while (!l.empty() && (static_cast<unsigned char>(l.back()) & 0xC0) == 0x80) l.pop_back();
+                        if (!l.empty()) l.pop_back();
+                    }
+                    l += "...";
+                }
+                w = std::max(w, labelTextWidth(font, scale, l));
+                it.lines.push_back(std::move(l));
+            }
+            it.hw = 0.5f * (w + 2.0f * kLabelPadX);
+            it.hh = 0.5f * (static_cast<float>(it.lines.size()) * lineH + 2.0f * kLabelPadY);
+            items.push_back(std::move(it));
+        }
+        if (items.empty()) continue;
+
+        // Model space: +Y up, -Z forward, +X right. The face is tilted toward
+        // the player: faceUp runs along it away from them, faceN out of it.
+        const Vec3 faceUp = normalize(Vec3{0.0f, 0.78f, -0.62f});
+        const Vec3 faceN = normalize(Vec3{0.0f, 0.62f, 0.78f});
+        const float side = (h == 1) ? 1.0f : -1.0f;  // outer side of this hand
+
+        // Face buttons and menu: one column ~6 cm out from them, ordered by
+        // how high each button sits on the face, at least 3.5 cm apart.
+        std::vector<Item*> face;
+        Vec3 mean{};
+        for (Item& it : items) {
+            if (it.cat != 0) continue;
+            face.push_back(&it);
+            mean = mean + it.aLocal;
+        }
+        if (!face.empty()) {
+            mean = mean * (1.0f / static_cast<float>(face.size()));
+            const Vec3 base = world(Vec3{mean.x + side * kFaceOffset, mean.y, mean.z} + faceN * 0.01f);
+            const float bx = px(base), by = py(base), bd = pd(base);
+            const float ext = (std::fabs(bx) < 0.01f) ? side : (bx >= 0.0f ? 1.0f : -1.0f);
+            std::stable_sort(face.begin(), face.end(), [&](const Item* a, const Item* b) {
+                return dot(a->aLocal, faceUp) > dot(b->aLocal, faceUp);
+            });
+            float y = 0.0f;
+            for (std::size_t i = 0; i < face.size(); ++i) {
+                if (i > 0) y -= std::max(kColumnPitch, face[i - 1]->hh + face[i]->hh + 0.006f);
+                face[i]->y = y;
+            }
+            const float top = face.front()->y + face.front()->hh;
+            const float bottom = face.back()->y - face.back()->hh;
+            const float shift = by - 0.5f * (top + bottom);
+            for (Item* it : face) {
+                it->y += shift;
+                it->x = bx + ext * it->hw;  // inner edge on the column line
+                it->d = bd;
+                it->column = true;
+            }
+        }
+        // Stick: above it. Trigger / bumper / grip: ~13 cm below / forward.
+        for (Item& it : items) {
+            if (it.cat == 1) {
+                it.x = px(it.aWorld);
+                it.y = py(it.aWorld) + 0.03f + it.hh;
+                it.d = pd(it.aWorld);
+            } else if (it.cat == 2) {
+                Vec3 dir{0.0f, -0.8f, -0.6f};  // trigger: down and forward
+                float dist = 0.13f;
+                if (it.card->component == "bumper") {
+                    dir = Vec3{0.0f, -0.2f, -1.0f};  // forward, past the tip
+                } else if (it.card->component == "button_grip") {
+                    dir = Vec3{side * 0.5f, -1.0f, 0.25f};  // down, a little out
+                    dist = 0.12f;
+                }
+                const Vec3 t = world(it.aLocal + normalize(dir) * dist);
+                it.x = px(t);
+                it.y = py(t);
+                it.d = pd(t);
+            }
+        }
+        // No overlap: push apart along the shorter overlap (the column stays put).
+        constexpr float kMargin = 0.005f;
+        for (int iter = 0; iter < 8; ++iter) {
+            bool moved = false;
+            for (std::size_t i = 0; i < items.size(); ++i) {
+                for (std::size_t j = i + 1; j < items.size(); ++j) {
+                    Item& a = items[i];
+                    Item& b = items[j];
+                    if (a.column && b.column) continue;
+                    const float ox = a.hw + b.hw + kMargin - std::fabs(a.x - b.x);
+                    const float oy = a.hh + b.hh + kMargin - std::fabs(a.y - b.y);
+                    if (ox <= 0.0f || oy <= 0.0f) continue;
+                    const bool alongX = ox < oy;
+                    const float sx = (b.x >= a.x) ? 1.0f : -1.0f;
+                    const float sy = (b.y >= a.y) ? 1.0f : -1.0f;
+                    const float wa = a.column ? 0.0f : (b.column ? 1.0f : 0.5f);
+                    const float wb = 1.0f - wa;
+                    if (alongX) {
+                        a.x -= sx * ox * wa;
+                        b.x += sx * ox * wb;
+                    } else {
+                        a.y -= sy * oy * wa;
+                        b.y += sy * oy * wb;
+                    }
+                    moved = true;
+                }
+            }
+            if (!moved) break;
+        }
+        for (Item& it : items) {
+            LabelCardDraw dr;
+            dr.hand = h;
+            dr.right = r;
+            dr.up = u;
+            dr.normal = n;
+            dr.hw = it.hw;
+            dr.hh = it.hh;
+            // Never behind the controller (the labels are drawn over it).
+            dr.centre = o + r * it.x + u * it.y + n * std::max(it.d, 0.0f);
+            dr.anchor = it.aWorld;
+            // Leader line from the card edge nearest the button.
+            const float lx = px(it.aWorld) - it.x;
+            const float ly = py(it.aWorld) - it.y;
+            float ex = std::clamp(lx, -it.hw, it.hw);
+            float ey = std::clamp(ly, -it.hh, it.hh);
+            const bool inside = std::fabs(lx) < it.hw && std::fabs(ly) < it.hh;
+            if (inside) {
+                if (it.hw - std::fabs(lx) < it.hh - std::fabs(ly)) ex = std::copysign(it.hw, lx);
+                else ey = std::copysign(it.hh, ly);
+            }
+            dr.edge = dr.centre + r * ex + u * ey;
+            dr.leader = !inside && length(dr.anchor - dr.edge) > 0.006f;
+            dr.alpha = fade;
+            dr.lines = std::move(it.lines);
+            labelDraws_.push_back(std::move(dr));
+        }
+    }
+}
+
+void VulkanRenderer::drawButtonLabels(const XrView& view, void* glyphs, VkBuffer glyphBuf, uint32_t& glyphCount) {
+    using namespace math;
+    if (labelDraws_.empty() || uiPipeline_ == VK_NULL_HANDLE || textPipeline_ == VK_NULL_HANDLE || !textReady_ ||
+        glyphs == nullptr || glyphBuf == VK_NULL_HANDLE) {
+        return;
+    }
+    const Mat4 viewMat = rigidInverse(rigidTransform(
+        Quat{view.pose.orientation.x, view.pose.orientation.y, view.pose.orientation.z, view.pose.orientation.w},
+        Vec3{view.pose.position.x, view.pose.position.y, view.pose.position.z}));
+    const Mat4 proj = perspectiveVulkan(std::tan(view.fov.angleLeft), std::tan(view.fov.angleRight),
+                                        std::tan(view.fov.angleUp), std::tan(view.fov.angleDown), 0.05f, 100.0f);
+    const Mat4 vpWorld = multiply(proj, viewMat);
+    const Vec3 eye{view.pose.position.x, view.pose.position.y, view.pose.position.z};
+    static const float kAccents[5][3] = {{0.25f, 0.78f, 1.00f}, {0.18f, 0.85f, 0.52f}, {1.00f, 0.68f, 0.20f},
+                                         {0.68f, 0.42f, 1.00f}, {0.96f, 0.28f, 0.36f}};
+    const float* ac = kAccents[std::clamp(uiAccentColorIdx_, 0, 4)];
+    auto frame = [](const Vec3& c, const Vec3& r, const Vec3& u, const Vec3& n) {
+        Mat4 m;
+        m.m[0] = r.x; m.m[1] = r.y; m.m[2] = r.z;
+        m.m[4] = u.x; m.m[5] = u.y; m.m[6] = u.z;
+        m.m[8] = n.x; m.m[9] = n.y; m.m[10] = n.z;
+        m.m[12] = c.x; m.m[13] = c.y; m.m[14] = c.z;
+        return m;
+    };
+    auto box = [&](const Mat4& model, float hw, float hh, const float col[4], float radius, float border,
+                   const float* borderCol) {
+        UiPush push{};
+        const Mat4 mvp = multiply(vpWorld, model);
+        std::memcpy(push.mvp, mvp.m, sizeof(push.mvp));
+        std::memcpy(push.color, col, sizeof(push.color));
+        push.params[0] = static_cast<float>(UiShape::RoundedBox);
+        push.params[1] = radius;
+        push.params[2] = border;
+        push.params[3] = 0.0f;
+        if (borderCol != nullptr) std::memcpy(push.borderColor, borderCol, sizeof(push.borderColor));
+        push.rect[2] = hw;
+        push.rect[3] = hh;
+        vkCmdPushConstants(commandBuffer_, uiPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(UiPush), &push);
+        vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
+    };
+    // A small disc facing this eye.
+    auto disc = [&](const Vec3& p, float radius, const float col[4]) {
+        const Vec3 n = normalize(eye - p);
+        Vec3 r = cross(Vec3{0.0f, 1.0f, 0.0f}, n);
+        if (length(r) < 1e-4f) r = Vec3{1.0f, 0.0f, 0.0f};
+        r = normalize(r);
+        const Vec3 u = cross(n, r);
+        box(frame(p, r, u, n), radius, radius, col, 1.0f, 0.0f, nullptr);
+    };
+
+    vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipeline_);
+    // Leader lines (2 mm, light, a little transparent) ending in a dot on the
+    // button; drawn first so the cards cover any that cross them.
+    for (const LabelCardDraw& d : labelDraws_) {
+        if (!d.leader) continue;
+        const Vec3 axis = d.anchor - d.edge;
+        const float len = length(axis);
+        const Vec3 up = axis * (1.0f / len);
+        const Vec3 mid = (d.anchor + d.edge) * 0.5f;
+        Vec3 toEye = eye - mid;
+        toEye = toEye - up * dot(toEye, up);
+        if (length(toEye) < 1e-4f) continue;
+        toEye = normalize(toEye);
+        const Vec3 across = normalize(cross(up, toEye));
+        const float lineCol[4] = {0.90f, 0.93f, 0.98f, 0.62f * d.alpha};
+        box(frame(mid, across, up, toEye), 0.001f, 0.5f * len, lineCol, 1.0f, 0.0f, nullptr);
+        const float ring[4] = {0.95f, 0.97f, 1.0f, 0.85f * d.alpha};
+        const float dot4[4] = {ac[0], ac[1], ac[2], d.alpha};
+        disc(d.anchor, 0.0032f, ring);
+        disc(d.anchor, 0.0021f, dot4);
+    }
+    // Cards: dark glass, light rim.
+    for (const LabelCardDraw& d : labelDraws_) {
+        const float bg[4] = {0.06f, 0.07f, 0.09f, 0.93f * d.alpha};
+        const float rim[4] = {0.92f, 0.95f, 1.0f, 0.45f * d.alpha};
+        const float shortHalf = std::max(std::min(d.hw, d.hh), 1e-4f);
+        box(frame(d.centre, d.right, d.up, d.normal), d.hw, d.hh, bg, 0.5f, 0.0009f / shortHalf, rim);
+    }
+    // Text: one instanced draw per card (each has its own transform).
+    const bool bold = fontAtlasBold_.ok;
+    const FontAtlas& font = bold ? fontAtlasBold_ : fontAtlas_;
+    const VkDescriptorSet fontSet = bold ? textSetBold_ : textSet_;
+    if (!font.ok || font.ascent <= 0.0f || fontSet == VK_NULL_HANDLE) return;
+    const float scale = kLabelTextH / font.ascent;  // as layoutButtonLabels
+    const float lineH = font.lineHeight > 0.0f ? font.lineHeight * scale : kLabelTextH * 1.3f;
+    vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline_);
+    vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipelineLayout_, 0, 1, &fontSet, 0,
+                            nullptr);
+    const VkDeviceSize off = 0;
+    vkCmdBindVertexBuffers(commandBuffer_, 0, 1, &glyphBuf, &off);
+    GlyphInstance* const out = static_cast<GlyphInstance*>(glyphs);
+    for (const LabelCardDraw& d : labelDraws_) {
+        const uint32_t start = glyphCount;
+        const float col[4] = {0.97f, 0.98f, 1.0f, d.alpha};
+        for (std::size_t li = 0; li < d.lines.size(); ++li) {
+            const float centreY = d.hh - kLabelPadY - lineH * (static_cast<float>(li) + 0.5f);
+            const float baseline = centreY - 0.35f * font.ascent * scale;
+            float penX = -d.hw + kLabelPadX;
+            const std::string& s = d.lines[li];
+            std::size_t idx = 0;
+            while (idx < s.size()) {
+                const Glyph& g = font.glyphs[nextGlyphIndexUtf8(s, idx)];
+                if (g.width > 0.0f && g.height > 0.0f && glyphCount < kMaxGlyphsPerView) {
+                    GlyphInstance& gi = out[glyphCount++];
+                    gi.rect[0] = penX + g.bearingX * scale;
+                    gi.rect[1] = baseline - (g.height - g.bearingY) * scale;
+                    gi.rect[2] = g.width * scale;
+                    gi.rect[3] = g.height * scale;
+                    gi.uv[0] = g.u0;
+                    gi.uv[1] = g.v0;
+                    gi.uv[2] = g.u1;
+                    gi.uv[3] = g.v1;
+                    std::memcpy(gi.color, col, sizeof(gi.color));
+                }
+                penX += g.advance * scale;
+            }
+        }
+        if (glyphCount == start) continue;
+        TextPush tp{};
+        const Mat4 mvp = multiply(vpWorld, frame(d.centre, d.right, d.up, d.normal));
+        std::memcpy(tp.mvp, mvp.m, sizeof(tp.mvp));
+        vkCmdPushConstants(commandBuffer_, textPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(TextPush), &tp);
+        vkCmdDraw(commandBuffer_, 6, glyphCount - start, 0, start);
     }
 }
 
@@ -9302,7 +9806,7 @@ GltfMesh mirrorGltfMesh(const GltfMesh& inMesh) {
 
 } // namespace
 
-bool VulkanRenderer::uploadHandMesh(int hand, const GltfMesh& mesh) {
+bool VulkanRenderer::uploadHandMesh(int hand, const GltfMesh& mesh, bool mirrored) {
     if (hand < 0 || hand >= 2) return false;
     if (!mesh.ok || mesh.indices.empty()) return false;
 
@@ -9400,6 +9904,60 @@ bool VulkanRenderer::uploadHandMesh(int hand, const GltfMesh& mesh) {
     }
     hm.ready = true;
 
+    // Button-label anchors: the bounding-box centre of each node's geometry
+    // (render-model space, node transforms baked), keyed by node name. Logged
+    // with the names so the component mapping can be checked.
+    {
+        struct Box {
+            std::string name;
+            int submesh = -1;
+            math::Vec3 lo{1e9f, 1e9f, 1e9f};
+            math::Vec3 hi{-1e9f, -1e9f, -1e9f};
+        };
+        std::vector<Box> boxes;
+        const std::size_t vcount = mesh.vertices.size() / 8;
+        for (std::size_t si = 0; si < mesh.submeshes.size(); ++si) {
+            const GltfSubmesh& sm = mesh.submeshes[si];
+            if (sm.nodeName.empty()) continue;
+            auto it = std::find_if(boxes.begin(), boxes.end(), [&](const Box& b) { return b.name == sm.nodeName; });
+            if (it == boxes.end()) {
+                Box b;
+                b.name = sm.nodeName;
+                b.submesh = static_cast<int>(si);
+                boxes.push_back(std::move(b));
+                it = boxes.end() - 1;
+            }
+            const std::size_t end = std::min<std::size_t>(mesh.indices.size(),
+                                                          static_cast<std::size_t>(sm.firstIndex) + sm.indexCount);
+            for (std::size_t i = sm.firstIndex; i < end; ++i) {
+                const std::size_t v = mesh.indices[i];
+                if (v >= vcount) continue;
+                const float* p = &mesh.vertices[v * 8];
+                it->lo = {std::min(it->lo.x, p[0]), std::min(it->lo.y, p[1]), std::min(it->lo.z, p[2])};
+                it->hi = {std::max(it->hi.x, p[0]), std::max(it->hi.y, p[1]), std::max(it->hi.z, p[2])};
+            }
+        }
+        std::vector<LabelAnchor>& anchors = modelAnchors_[hand];
+        anchors.clear();
+        std::string names;
+        for (const Box& b : boxes) {
+            if (b.lo.x > b.hi.x) continue;  // no vertices
+            LabelAnchor a;
+            a.key = labelComponentKey(b.name);
+            a.centre = (b.lo + b.hi) * 0.5f;
+            a.submesh = b.submesh;
+            a.nodeName = b.name;
+            char buf[160];
+            std::snprintf(buf, sizeof(buf), "%s%s (%.4f, %.4f, %.4f)", names.empty() ? "" : ", ", b.name.c_str(),
+                          a.centre.x, a.centre.y, a.centre.z);
+            names += buf;
+            anchors.push_back(std::move(a));
+        }
+        PIXELVR_LOG_INFO("Controller model nodes [%s%s]: %s", hand == 0 ? "left" : "right",
+                         mirrored ? ", mirrored from the other hand" : "", names.empty() ? "(none)" : names.c_str());
+        labelJson_[hand].compared = false;  // log the json comparison for this mesh
+    }
+
     PIXELVR_LOG_INFO(
         "Controller model loaded for %s hand: %u indices, %zu submeshes, %zu textures",
         hand == 0 ? "left" : "right",
@@ -9422,7 +9980,7 @@ bool VulkanRenderer::loadControllerModel(int hand, const std::vector<uint8_t>& g
                              hand == 0 ? "left" : "right",
                              other == 0 ? "left" : "right");
             GltfMesh mirrored = mirrorGltfMesh(mesh);
-            uploadHandMesh(other, mirrored);
+            uploadHandMesh(other, mirrored, true);
         }
     }
     return ok;

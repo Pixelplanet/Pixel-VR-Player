@@ -236,7 +236,7 @@ Default buttons on the Steam Frame controllers:
 | **D-pad** | Up / Vol +, Down / Vol −, Left / −10 s, Right / +10 s | Move the highlight in menus; volume and seeking while watching |
 | **Right stick** | Scrub / Distance | Left/right scrubs through the video, up/down moves the screen nearer or farther |
 | **Left stick** | Skip / Distance | Left/right skips 30 s, up/down moves the screen |
-| **Stick click** | Show Controls | Opens the list of current buttons |
+| **Stick click** | Show Controls | Shows or hides the labels next to the controller buttons (also in Settings › Controls & Input › Button Labels) |
 | **Grip** | Laser Hand | Moves the laser to that hand |
 
 More actions have no default button, so you can put them on chords in SteamVR: Mute,

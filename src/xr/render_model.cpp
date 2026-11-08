@@ -198,6 +198,11 @@ bool RenderModelSystem::fetchModels() {
         PIXELVR_LOG_INFO("Render model for %s hand fetched: %u nodes, glTF %zu bytes",
                          hand == 0 ? "left" : "right",
                          mi.animatableNodeCount, mi.gltf.size());
+        // Animatable node names (the button labels map components to them).
+        std::string joined;
+        for (const std::string& n : mi.nodeNames) joined += (joined.empty() ? "" : ", ") + n;
+        PIXELVR_LOG_INFO("Render model %s animatable nodes: %s", hand == 0 ? "left" : "right",
+                         joined.empty() ? "(none)" : joined.c_str());
     }
 
     if (models_[0].ready && models_[1].ready) {

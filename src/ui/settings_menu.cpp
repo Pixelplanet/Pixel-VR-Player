@@ -278,6 +278,7 @@ void SettingsMenu::refresh() {
         title_ = "Settings > Controls & Input";
         hint(kButtonsStatus);
         rows_.push_back({"Controller Buttons", "Assigned in SteamOS", Action::EnterButtons});
+        toggle("Button Labels", buttonLabels_, Action::ToggleButtonLabels);
         segmented("Keyboard Layout", {"US", "Deutsch", "UK", "Français", "Nordic"}, keyboardLayout_ % 5,
                   Action::CycleKeyboardLayout);
         segmented("Laser Smoothing", {"Off", "Low", "Medium", "High"}, laserSmoothing_ % 4,
@@ -401,6 +402,11 @@ SettingsMenu::Action SettingsMenu::activate() {
             break;
         case Action::ToggleModels:
             drawModels_ = !drawModels_;
+            saveConfig();
+            refresh();
+            break;
+        case Action::ToggleButtonLabels:
+            buttonLabels_ = !buttonLabels_;
             saveConfig();
             refresh();
             break;
@@ -697,6 +703,13 @@ void SettingsMenu::close() {
     if (VaultManager::instance().isRecordingCombo()) VaultManager::instance().cancelRecordingCombo();
 }
 
+void SettingsMenu::setButtonLabels(bool on) {
+    if (buttonLabels_ == on) return;
+    buttonLabels_ = on;
+    saveConfig();
+    refresh();
+}
+
 void SettingsMenu::openButtons() {
     open_ = true;
     section_ = kButtonsSection;
@@ -785,6 +798,7 @@ void SettingsMenu::loadConfig() {
             else if (key == "stereo") stereoMode_ = std::clamp(std::stoi(val), 0, 2);
             else if (key == "swap_eyes") swapEyes_ = (val == "1");
             else if (key == "draw_models") drawModels_ = (val == "1");
+            else if (key == "button_labels") buttonLabels_ = (val == "1");
             else if (key == "show_stats") showStats_ = (val == "1");
             else if (key == "distance") screenDistance_ = std::clamp(std::stof(val), kDistanceMin, 10.0f);
             // Old press-to-bind keys: buttons are assigned in SteamVR now, so
@@ -856,6 +870,7 @@ void SettingsMenu::saveConfig() const {
             file << "stereo=" << stereoMode_ << "\n";
             file << "swap_eyes=" << (swapEyes_ ? 1 : 0) << "\n";
             file << "draw_models=" << (drawModels_ ? 1 : 0) << "\n";
+            file << "button_labels=" << (buttonLabels_ ? 1 : 0) << "\n";
             file << "show_stats=" << (showStats_ ? 1 : 0) << "\n";
             file << "distance=" << screenDistance_ << "\n";
             file << "download_dir=" << downloadDirIdx_ << "\n";

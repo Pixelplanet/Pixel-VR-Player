@@ -1367,6 +1367,78 @@ void App::refreshControlsInfo() {
     bindingsGenSeen_ = xr_.bindingsGeneration();
 }
 
+void App::updateButtonLabels(std::chrono::steady_clock::time_point nowT, bool laserOnWeb) {
+    const bool shown = settings_.buttonLabels();
+    // Bound sources can only be listed after a focused sync; re-read when the
+    // bindings generation moves, and every 2 s while the labels show (SteamVR
+    // can switch bindings without telling the app). Cheap: one call per action.
+    const bool stale = !labelSourcesRead_ || xr_.bindingsGeneration() != labelSourcesGen_ ||
+                       (shown && nowT - labelSourcesReadT_ > std::chrono::seconds(2));
+    if (stale && xr_.sessionFocused()) {
+        labelSources_.assign(static_cast<std::size_t>(InputAction::Count), {});
+        for (int i = 0; i < static_cast<int>(InputAction::Count); ++i) {
+            labelSources_[static_cast<std::size_t>(i)] = xr_.boundSourcePaths(static_cast<InputAction>(i));
+        }
+        labelSourcesRead_ = true;
+        labelSourcesGen_ = xr_.bindingsGeneration();
+        labelSourcesReadT_ = nowT;
+        // Which button each action's label goes to; logged when it changes.
+        std::string mapping;
+        for (int i = 0; i < static_cast<int>(InputAction::Count); ++i) {
+            for (const std::string& p : labelSources_[static_cast<std::size_t>(i)]) {
+                int hand = 1;
+                std::string component, detail;
+                mapping += mapping.empty() ? "" : "; ";
+                mapping += std::string(XrContext::actionLabel(static_cast<InputAction>(i))) + " <- " + p;
+                if (parseLabelSource(p, hand, component, detail)) {
+                    mapping += " = " + std::string(hand == 0 ? "left " : "right ") + component +
+                               (detail.empty() ? "" : " (" + detail + ")");
+                } else {
+                    mapping += " (no label)";
+                }
+            }
+        }
+        if (mapping != labelMappingLogged_) {
+            PIXELVR_LOG_INFO("Button labels: %s", mapping.empty() ? "nothing bound yet" : mapping.c_str());
+            labelMappingLogged_ = mapping;
+        }
+    }
+
+    ButtonLabelState st;
+    bool menus = settings_.isOpen() || downloadsWindow_ || actionMenu_.visible || !pendingDl_.empty() ||
+                 smbModal_.active;
+#ifdef PIXELVR_HAVE_FREETYPE
+    menus = menus || browser_.isOpen();
+#endif
+    st.context = textEntry_.active ? ButtonLabelState::Context::Keyboard
+                                   : (menus ? ButtonLabelState::Context::Menus : ButtonLabelState::Context::Watching);
+    st.dialog = actionMenu_.visible || !pendingDl_.empty() || smbModal_.active;
+    // Only the two-button delete confirm takes left / right; the other dialogs
+    // step up / down only.
+    st.dialogLeftRight = actionMenu_.visible && actionMenu_.page == 2 && pendingDl_.empty();
+#ifdef PIXELVR_HAVE_FREETYPE
+    // Options opens File Actions on the Files tab and closes an open action
+    // menu; it does nothing in Settings, Downloads or the download confirm.
+    st.optionsWork = !settings_.isOpen() && !downloadsWindow_ && pendingDl_.empty() &&
+                     (actionMenu_.visible || browser_.isOpen());
+    st.recenterWorks = browser_.isOpen() || downloadsWindow_ || settings_.isOpen();
+    // Downloads (laser only) and the download confirm read neither stick nor D-pad.
+    st.noStick = !pendingDl_.empty() ||
+                 (downloadsWindow_ && !settings_.isOpen() && !actionMenu_.visible);
+#else
+    st.recenterWorks = settings_.isOpen();
+#endif
+    st.laserOnWeb = laserOnWeb;
+    st.mediaOpen = cur().open;
+    st.web = cur().open && cur().web;
+#ifdef PIXELVR_HAVE_MEDIA
+    st.music = cur().open && !cur().web && cur().engine.audioOnly();
+#endif
+    st.sphere = settings_.projectionMode() != 0;
+    st.controlsVisible = cur().open && !hudDismissed_ && renderer_.controlBarVisible();
+    renderer_.setButtonLabels(shown, buildButtonLabelCards(labelSources_, st));
+}
+
 void App::openSmbModal(bool isNew, const std::string& smbPath) {
     actionMenu_.subtitle.clear();  // no stale error from a previous edit
 #ifdef PIXELVR_HAVE_FREETYPE
@@ -3590,16 +3662,13 @@ int App::run() {
                     browser_.open();  // last tab / location
                 }
             }
-            // Show Controls: the Buttons pages of Settings > Controls & Input, or
-            // close them again. (The keyboard and the combo gate consumed it.)
+            // Show Controls: the floating button labels on / off, remembered like
+            // Settings > Controls & Input > Button Labels. (The keyboard and the
+            // combo gate consumed it.) The Buttons pages stay in Settings.
             if (in.showControls) {
                 in.showControls = false;
-                if (settings_.isOpen() && settings_.showingButtons()) {
-                    closeHub();
-                } else {
-                    closeHub();
-                    settings_.openButtons();
-                }
+                settings_.setButtonLabels(!settings_.buttonLabels());
+                PIXELVR_LOG_INFO("Button labels %s", settings_.buttonLabels() ? "on" : "off");
             }
             // Back: one step back, never opens anything. (The keyboard, a grab and
             // a web page under the laser took theirs already.)
@@ -4132,6 +4201,7 @@ int App::run() {
                     for (int k = 0; k < 4; ++k) v.orientation[k] = c.orientation[k];
                     v.gripActive = c.gripActive;
                     float gp[3], gq[4];
+                    v.modelSpace = c.gripActive && modelCorrValid_[h];
                     if (c.gripActive && modelCorrValid_[h]) {
                         composePose(c.gripPosition, c.gripOrientation,
                                     modelCorrPos_[h], modelCorrQuat_[h], gp, gq);
@@ -4164,6 +4234,7 @@ int App::run() {
                 };
                 renderer_.setControllers(build(0), build(1));
             }
+            updateButtonLabels(nowT, laserOnWeb);
             // Click feedback on the panel (the renderer checks the laser is on it).
             if (in.select || in.togglePlay) renderer_.notifyPress();
 

@@ -186,6 +186,10 @@ public:
     // the hand(s) of its default are inactive (SteamVR lists active sources only),
     // or "See SteamVR bindings" when the runtime can't say. Logs each change.
     std::string describeBinding(InputAction a);
+    // The source paths SteamVR binds to an action right now, e.g.
+    // "/user/hand/right/input/a/click" (Laser Hand includes its analog
+    // fallback); empty when unbound, off or unknown. Quiet (no logging).
+    std::vector<std::string> boundSourcePaths(InputAction a);
     // The runtime has an interaction profile bound for this hand (0 left, 1 right).
     bool handActive(int hand) const;
     // Bumped after a focused sync once focus or the interaction profile changed

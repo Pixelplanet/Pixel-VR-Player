@@ -950,6 +950,34 @@ std::string XrContext::describeBinding(InputAction a) {
     return out;
 }
 
+std::vector<std::string> XrContext::boundSourcePaths(InputAction a) {
+    std::vector<std::string> out;
+    const int i = static_cast<int>(a);
+    if (i < 0 || i >= static_cast<int>(InputAction::Count) || !actionsReady_ || session_ == XR_NULL_HANDLE) {
+        return out;
+    }
+    std::vector<XrAction> acts{actions_[i]};
+    if (a == InputAction::LaserHand) acts.push_back(squeezeValueAction_);
+    for (XrAction x : acts) {
+        if (x == XR_NULL_HANDLE) continue;
+        XrBoundSourcesForActionEnumerateInfo info{XR_TYPE_BOUND_SOURCES_FOR_ACTION_ENUMERATE_INFO};
+        info.action = x;
+        uint32_t n = 0;
+        if (XR_FAILED(xrEnumerateBoundSourcesForAction(session_, &info, 0, &n, nullptr)) || n == 0) continue;
+        std::vector<XrPath> sources(n);
+        if (XR_FAILED(xrEnumerateBoundSourcesForAction(session_, &info, n, &n, sources.data()))) continue;
+        sources.resize(n);
+        for (XrPath p : sources) {
+            char pb[XR_MAX_PATH_LENGTH] = {};
+            uint32_t pl = 0;
+            if (XR_FAILED(xrPathToString(instance_, p, sizeof(pb), &pl, pb)) || pb[0] == '\0') continue;
+            std::string s(pb);
+            if (std::find(out.begin(), out.end(), s) == out.end()) out.push_back(std::move(s));
+        }
+    }
+    return out;
+}
+
 bool XrContext::handActive(int hand) const {
     if (session_ == XR_NULL_HANDLE || !actionsReady_ || hand < 0 || hand > 1) return false;
     XrInteractionProfileState ips{XR_TYPE_INTERACTION_PROFILE_STATE};

@@ -211,6 +211,16 @@ private:
     std::chrono::steady_clock::time_point lastControlsReadT_{};  // Buttons pages: ~1 Hz re-read
     bool controlsWarn_ = false;  // an essential action is unbound (warning hint)
     bool controlsNoticePending_ = false;  // old in-app button choices were reset
+    // Floating button labels (Show Controls / Settings > Button Labels): each
+    // action's bound source paths, re-read when the bindings change (and every
+    // few seconds while shown); the cards follow the context every frame.
+    std::vector<std::vector<std::string>> labelSources_;
+    bool labelSourcesRead_ = false;
+    uint32_t labelSourcesGen_ = 0;
+    std::chrono::steady_clock::time_point labelSourcesReadT_{};
+    std::string labelMappingLogged_;  // last logged button -> action mapping
+    // laserOnWeb: the laser is on a web page this frame (the page takes B and the stick).
+    void updateButtonLabels(std::chrono::steady_clock::time_point nowT, bool laserOnWeb);
     // Playback D-pad hold-to-repeat: 1 up, 2 down, 3 left, 4 right, 0 none.
     int dpadRepeatDir_ = 0;
     std::chrono::steady_clock::time_point dpadNextRepeat_{};

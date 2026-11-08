@@ -61,6 +61,7 @@ public:
         CycleLaserSmoothing,
         CycleRoom,
         EnterButtons,       // Controls & Input > Buttons (read-only binding pages)
+        ToggleButtonLabels, // Controls & Input > Button Labels (floating labels at the controllers)
     };
 
     // How a row's value is presented: the renderer draws a stepped slider for
@@ -110,6 +111,9 @@ public:
     bool swapEyes() const { return swapEyes_; }
     void setSwapEyes(bool s) { swapEyes_ = s; refresh(); }
     bool drawModels() const { return drawModels_; }
+    // Floating labels next to the controller buttons (Show Controls toggles them too; saved).
+    bool buttonLabels() const { return buttonLabels_; }
+    void setButtonLabels(bool on);
     bool showStats() const { return showStats_; }
     // Buttons are assigned in SteamVR only. The app hands over each action's
     // label and its live bound buttons; the Buttons pages show them read-only.
@@ -240,6 +244,7 @@ private:
     int stereoMode_ = 0;
     bool swapEyes_ = false;
     bool drawModels_ = true;   // our models (off: SteamVR draws its own controllers); laser stays
+    bool buttonLabels_ = true; // floating button labels (on for new installs: shows what the buttons do)
     bool showStats_ = false;
     float screenDistance_ = 4.0f;  // room for several screens without crowding
 

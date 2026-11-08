@@ -135,6 +135,7 @@ add_library(pixelvr_core STATIC
     src/gfx/vulkan_renderer.cpp
     src/gfx/gltf_mesh.cpp
     src/ui/settings_menu.cpp
+    src/ui/button_labels.cpp
     src/ui/thumbnail_cache.cpp
     src/app/vault_manager.cpp
     src/app/playback_memory.cpp
