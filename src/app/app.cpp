@@ -4318,11 +4318,20 @@ int App::run() {
                     if (sc.url[0] != '\0') {
                         openWebScreen(sc.url, sc.kiosk);
                     } else if (!settings_.jellyfinUrl().empty()) {  // Jellyfin: the user's own server
+                        PIXELVR_LOG_INFO("Jellyfin shortcut: opening %s/web/", settings_.jellyfinUrl().c_str());
                         openWebScreen(settings_.jellyfinUrl() + "/web/", sc.kiosk);
                     } else {
-                        browser_.setOpen(false);
-                        downloadsWindow_ = false;
-                        settings_.openShortcutsPage("Set the Jellyfin address first (e.g. 192.168.1.10:8096).");
+                        // No address yet: ask for it right here, then open the server.
+                        PIXELVR_LOG_INFO("Jellyfin shortcut: no address set, asking");
+                        const bool kiosk = sc.kiosk;
+                        openKeyboard("Jellyfin server address (e.g. 192.168.1.10:8096)", "", false, in,
+                                     [this, kiosk](const std::string& t) {
+                                         settings_.setJellyfinUrl(t);
+                                         if (!settings_.jellyfinUrl().empty()) {
+                                             PIXELVR_LOG_INFO("Jellyfin shortcut: opening %s/web/", settings_.jellyfinUrl().c_str());
+                                             openWebScreen(settings_.jellyfinUrl() + "/web/", kiosk);
+                                         }
+                                     });
                     }
                 } else if (sbHover == 0) {
                     // Main Tab: Files

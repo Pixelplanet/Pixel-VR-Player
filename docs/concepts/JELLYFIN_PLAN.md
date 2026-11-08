@@ -93,7 +93,10 @@ from the user for an end-to-end test.
 - [x] Rail shortcut "Jellyfin" (8th shortcut, `rail_shortcuts` bit 7) + "Jellyfin address" row in
       Settings > UI & Appearance > Shortcuts (keyboard; `jellyfin_url` in settings.conf). It is normalised:
       `192.168.1.10:8096` / `…/web/#/home` become `http://host:port`. The shortcut opens `<address>/web/`
-      as a kiosk page; with no address it opens the Shortcuts page with a hint. Built; not tried in the headset.
+      as a kiosk page.
+  - **Fix 2026-11-08 (user report):** with no address it used to jump to the Shortcuts page, which looked
+    broken (the user had just switched the shortcut on). Now it opens the keyboard right away ("Jellyfin server
+    address"), saves the address and opens the server. Log lines `Jellyfin shortcut: …`. Redeployed.
 - [x] **Downloads:** `Browser.downloadWillBegin` for `…/Items/{id}/Download?api_key|ApiKey=…` cancels Chromium's
       download and emits `savefile` to our download manager.
   - The name is the server file's own name (Jellyfin Web's `ApiClient.getItem` → `Path`).
