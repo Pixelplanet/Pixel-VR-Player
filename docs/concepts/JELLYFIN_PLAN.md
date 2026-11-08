@@ -131,3 +131,8 @@ from the user for an end-to-end test.
 - **Shortcut rework (requested):** compact rows; each shortcut = name + URL (+ on the rail or not); an
   "Add shortcut" button; the user can pre-fill Jellyfin. Planned storage: `~/.config/pixelvr/shortcuts.json`,
   migrated from `rail_shortcuts` + `jellyfin_url`.
+- **Reordering (requested 2026-11-08):** the shortcut list gets a way to reorder entries. Drag and drop
+  if the settings panel can do it, otherwise up / down arrows. The order on the rail follows the
+  order in the list (the `shortcut=` lines are saved in list order). First version: "Move up" /
+  "Move down" on a shortcut's edit page (works with the stick and the laser). Drag and drop needs
+  pointer-drag support in the settings card grid, which doesn't exist yet: a follow-up.

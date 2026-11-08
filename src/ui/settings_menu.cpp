@@ -28,7 +28,13 @@ constexpr int kDownloadDirCount = 3;
 
 // Web destinations the two lower rail tabs can open. Streaming services open
 // as a kiosk screen (just the page); "Browser" is the full browser.
-const SettingsMenu::RailShortcut kRailShortcuts[] = {
+// Built-in defaults for the shortcut list (and the meaning of the old rail_shortcuts bits).
+struct DefaultShortcut {
+    const char* name;
+    const char* url;
+    bool kiosk;
+};
+const DefaultShortcut kRailShortcuts[] = {
     {"YouTube", "https://www.youtube.com", true},
     {"Netflix", "https://www.netflix.com", true},
     {"Disney+", "https://www.disneyplus.com", true},
@@ -37,7 +43,7 @@ const SettingsMenu::RailShortcut kRailShortcuts[] = {
     {"Browser", "https://www.google.com", false},
     // Appended (not sorted) so saved rail_shortcuts bitmasks keep their meaning.
     {"Plex", "https://app.plex.tv", true},
-    {"Jellyfin", "", true},  // no fixed URL: <Jellyfin address>/web/ (Settings > Shortcuts)
+    {"Jellyfin", "", true},  // no fixed URL: the user's server, asked for on first use
 };
 constexpr int kRailShortcutCount = 8;
 static_assert(static_cast<int>(SettingsMenu::Action::ToggleRailShortcut0) + kRailShortcutCount - 1 ==
@@ -119,6 +125,7 @@ std::string getConfigPath() {
 
 SettingsMenu::SettingsMenu() {
     loadConfig();
+    ensureShortcuts();
     refresh();
 }
 
@@ -721,16 +728,46 @@ void SettingsMenu::openButtons() {
     refresh();
 }
 
-void SettingsMenu::setJellyfinUrl(const std::string& in) {
-    // "192.168.1.10:8096", "http://host:8096/web/#/home" -> "http://host:8096"
-    std::string url = in;
-    while (!url.empty() && (url.back() == ' ' || url.back() == '/')) url.pop_back();
-    while (!url.empty() && url.front() == ' ') url.erase(0, 1);
+void SettingsMenu::ensureShortcuts() {
+    if (!shortcuts_.empty()) return;
+    // First start with the shortcut list: the built-in services, with the old rail choice
+    // (rail_shortcuts bits) and the old Jellyfin address carried over.
+    for (int i = 0; i < kRailShortcutCount; ++i) {
+        Shortcut sc{kRailShortcuts[i].name, kRailShortcuts[i].url, kRailShortcuts[i].kiosk,
+                    ((railShortcutMask_ >> i) & 1) != 0};
+        if (sc.url.empty() && sc.name == "Jellyfin" && !legacyJellyfinUrl_.empty()) sc.url = legacyJellyfinUrl_ + "/web/";
+        shortcuts_.push_back(sc);
+    }
+}
+
+void SettingsMenu::setShortcutName(int idx, const std::string& in) {
+    if (idx < 0 || idx >= static_cast<int>(shortcuts_.size())) return;
+    std::string name;
+    for (const char c : in) {
+        if (c != '|' && static_cast<unsigned char>(c) >= 0x20) name += c;  // one line, no field separator
+    }
+    while (!name.empty() && name.back() == ' ') name.pop_back();
+    while (!name.empty() && name.front() == ' ') name.erase(0, 1);
+    if (name.empty()) return;
+    shortcuts_[static_cast<size_t>(idx)].name = name.substr(0, 40);
+    saveConfig();
+    refresh();
+}
+
+void SettingsMenu::setShortcutUrl(int idx, const std::string& in) {
+    if (idx < 0 || idx >= static_cast<int>(shortcuts_.size())) return;
+    // "192.168.1.10:8096" -> "http://192.168.1.10:8096"; a Jellyfin server opens at /web/.
+    std::string url;
+    for (const char c : in) {
+        if (c != '|' && c != ' ' && static_cast<unsigned char>(c) >= 0x20) url += c;
+    }
     if (!url.empty() && url.find("://") == std::string::npos) url = "http://" + url;
-    const size_t web = url.find("/web");
-    if (web != std::string::npos && url.find("://") < web) url.resize(web);
-    while (!url.empty() && url.back() == '/') url.pop_back();
-    jellyfinUrl_ = url;
+    Shortcut& sc = shortcuts_[static_cast<size_t>(idx)];
+    if (sc.name == "Jellyfin" && !url.empty() && url.find("/web") == std::string::npos) {
+        while (!url.empty() && url.back() == '/') url.pop_back();
+        url += "/web/";
+    }
+    sc.url = url;
     saveConfig();
     refresh();
 }
@@ -743,10 +780,11 @@ void SettingsMenu::openShortcutsPage(const std::string& hintText) {
     if (!hintText.empty()) status_ = hintText;
 }
 
-std::vector<const SettingsMenu::RailShortcut*> SettingsMenu::railShortcuts() const {
-    std::vector<const RailShortcut*> out;
-    for (int i = 0; i < kRailShortcutCount; ++i) {
-        if ((railShortcutMask_ >> i) & 1) out.push_back(&kRailShortcuts[i]);
+std::vector<SettingsMenu::RailShortcut> SettingsMenu::railShortcuts() const {
+    std::vector<RailShortcut> out;
+    for (size_t i = 0; i < shortcuts_.size() && out.size() < static_cast<size_t>(kMaxRailShortcuts); ++i) {
+        const Shortcut& sc = shortcuts_[i];
+        if (sc.onRail) out.push_back({static_cast<int>(i), sc.name, sc.url, sc.kiosk});
     }
     return out;
 }
@@ -840,7 +878,14 @@ void SettingsMenu::loadConfig() {
             else if (key == "bind_quick_path_btn") noteLegacyBinding(std::stoi(val) != 7);
             else if (key == "download_dir") downloadDirIdx_ = std::clamp(std::stoi(val), 0, kDownloadDirCount - 1);
             else if (key == "rail_shortcuts") railShortcutMask_ = std::stoi(val) & ((1 << kRailShortcutCount) - 1);
-            else if (key == "jellyfin_url") jellyfinUrl_ = val;
+            else if (key == "jellyfin_url") legacyJellyfinUrl_ = val;
+            else if (key == "shortcut") {  // onRail|kiosk|name|url
+                const size_t a = val.find('|'), b = val.find('|', a + 1), c = val.find('|', b + 1);
+                if (a != std::string::npos && b != std::string::npos && c != std::string::npos) {
+                    shortcuts_.push_back({val.substr(b + 1, c - b - 1), val.substr(c + 1), val.substr(a + 1, b - a - 1) == "1",
+                                          val.substr(0, a) == "1"});
+                }
+            }
             else if (key == "audio_lang") audioLangIdx_ = std::clamp(std::stoi(val), 0, kLangCount - 1);
             else if (key == "curvature") curvatureIdx_ = std::clamp(std::stoi(val), 0, kCurvatureCount - 1);
             else if (key == "ui_text_scale") uiTextScaleIdx_ = std::clamp(std::stoi(val), 0, kUiTextScaleCount - 1);
@@ -902,7 +947,9 @@ void SettingsMenu::saveConfig() const {
             file << "distance=" << screenDistance_ << "\n";
             file << "download_dir=" << downloadDirIdx_ << "\n";
             file << "rail_shortcuts=" << railShortcutMask_ << "\n";
-            file << "jellyfin_url=" << jellyfinUrl_ << "\n";
+            for (const Shortcut& sc : shortcuts_) {
+                file << "shortcut=" << (sc.onRail ? 1 : 0) << "|" << (sc.kiosk ? 1 : 0) << "|" << sc.name << "|" << sc.url << "\n";
+            }
             file << "audio_lang=" << audioLangIdx_ << "\n";
             file << "curvature=" << curvatureIdx_ << "\n";
             file << "ui_text_scale=" << uiTextScaleIdx_ << "\n";

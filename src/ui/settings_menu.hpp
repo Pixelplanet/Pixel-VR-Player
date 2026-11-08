@@ -21,7 +21,16 @@ public:
         ToggleRailShortcut5,
         ToggleRailShortcut6,
         ToggleRailShortcut7,
-        EditJellyfinAddress,  // the app opens the keyboard, then calls setJellyfinUrl()
+        // Shortcuts (UI & Appearance > Shortcuts): a list of name + address entries, each
+        // editable; row.data carries the shortcut index.
+        OpenShortcut,
+        AddShortcut,
+        EditShortcutName,     // the app opens the keyboard, then calls setShortcutName()
+        EditShortcutUrl,      // the app opens the keyboard, then calls setShortcutUrl()
+        ToggleShortcutRail,
+        CycleShortcutKiosk,
+        RemoveShortcut,
+        BackToShortcuts,
         ToggleSwapEyes,
         ToggleModels,
         ToggleStats,
@@ -138,17 +147,28 @@ public:
     bool legacyBindingsCustom() const { return legacyBindingsCustom_; }
     std::string downloadDir() const;
     // Web shortcuts shown as tabs on the hub's rail (in table order).
-    struct RailShortcut {
-        const char* name;
-        const char* url;
-        bool kiosk;   // just the page (streaming service) vs. the full browser
+    // A web shortcut: name + address; on the hub's rail or not; a page only (kiosk) or the
+    // full browser. An empty address is asked for on first use (e.g. a Jellyfin server).
+    struct Shortcut {
+        std::string name;
+        std::string url;
+        bool kiosk = true;
+        bool onRail = false;
     };
-    std::vector<const RailShortcut*> railShortcuts() const;
-    // Jellyfin server address (scheme://host:port, no /web); the Jellyfin shortcut has no
-    // fixed URL and opens <address>/web/. Empty = not set yet.
-    const std::string& jellyfinUrl() const { return jellyfinUrl_; }
-    void setJellyfinUrl(const std::string& url);
+    static constexpr int kMaxRailShortcuts = 5;  // tabs the rail has room for
+    struct RailShortcut {
+        int index = -1;  // into shortcuts()
+        std::string name;
+        std::string url;
+        bool kiosk = true;
+    };
+    std::vector<RailShortcut> railShortcuts() const;  // the first kMaxRailShortcuts on the rail
+    const std::vector<Shortcut>& shortcuts() const { return shortcuts_; }
+    int shortcutIdx() const { return shortcutIdx_; }  // the one on the edit page
+    void setShortcutName(int idx, const std::string& name);
+    void setShortcutUrl(int idx, const std::string& url);  // normalised (scheme added, Jellyfin /web trimmed)
     void openShortcutsPage(const std::string& hint);  // UI & Appearance > Shortcuts
+    bool compactPage() const { return section_ == 22; }  // dense cards: the shortcut list
     float screenDistance() const { return screenDistance_; }
     void setScreenDistance(float d) { screenDistance_ = d; refresh(); }
     float screenCurvature() const;
@@ -281,7 +301,10 @@ private:
     bool pauseLivestreams_ = false;
     bool privateBrowsing_ = false;
     bool screenNumbers_ = false;
-    std::string jellyfinUrl_;
+    std::vector<Shortcut> shortcuts_;  // `shortcut=` lines in settings.conf; defaults when absent
+    int shortcutIdx_ = 0;
+    void ensureShortcuts();  // defaults / migration from rail_shortcuts + jellyfin_url
+    std::string legacyJellyfinUrl_;
     bool audioFollow_ = false;
     int browserSort_ = 0;      // 0=Name, 1=Newest, 2=Largest
     bool listShowFormat_ = true;
