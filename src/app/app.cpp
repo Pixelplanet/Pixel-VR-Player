@@ -753,13 +753,15 @@ void App::updateStats() {
     if (!xr_.swapchains().empty()) {
         // Adaptive resolution: the size rendered this frame, of the swapchain's.
         const ViewSwapchain& esc = xr_.swapchains()[0];
-        if (esc.renderWidth > 0 && (esc.renderWidth != esc.width || esc.renderHeight != esc.height)) {
-            std::snprintf(buf, sizeof(buf), "Render %dx%d of %dx%d (%d%%)", esc.renderWidth, esc.renderHeight,
-                          esc.width, esc.height,
-                          static_cast<int>(std::lround(100.0 * esc.renderWidth / std::max(esc.width, 1))));
+        // What is really rendered per eye, and why: the panel is 2160x2160.
+        const int rw = esc.renderWidth > 0 ? esc.renderWidth : esc.width;
+        const int rh = esc.renderHeight > 0 ? esc.renderHeight : esc.height;
+        if (esc.width <= 2160) {
+            std::snprintf(buf, sizeof(buf), "Eye %dx%d (native)", rw, rh);
+        } else if (xr_.renderScale().fixed()) {
+            std::snprintf(buf, sizeof(buf), "Eye %dx%d (fixed, above native)", rw, rh);
         } else {
-            std::snprintf(buf, sizeof(buf), "Render %dx%d%s", esc.width, esc.height,
-                          xr_.renderScale().fixed() ? " (fixed)" : "");
+            std::snprintf(buf, sizeof(buf), "Eye %dx%d (adaptive, up to %dx%d)", rw, rh, esc.width, esc.height);
         }
         statsLines_.emplace_back(buf);
     }
@@ -792,6 +794,29 @@ void App::updateStats() {
         std::snprintf(buf, sizeof(buf), "GPU n/a");
     }
     statsLines_.emplace_back(buf);
+    // GPU time per frame (timestamp queries, ~0.5 s average) and the eye
+    // pass's MSAA / visibility-mask state.
+    {
+        const VulkanRenderer::GpuTimes& gt = renderer_.gpuTimesRecent();
+        if (gt.frames > 0) {
+            std::snprintf(buf, sizeof(buf), "GPU eye %.2f  mdl %.2f  ui %.2f  vid %.2f = %.2f ms", gt.eye,
+                          gt.models, gt.ui, gt.video, gt.total);
+            statsLines_.emplace_back(buf);
+            char msaa[16];
+            if (renderer_.eyeMsaaSamples() <= 1 || gt.msaaPasses == 0) {
+                std::snprintf(msaa, sizeof(msaa), "off");
+            } else if (gt.msaaPasses == gt.eyePasses) {
+                std::snprintf(msaa, sizeof(msaa), "%dx", renderer_.eyeMsaaSamples());
+            } else {
+                std::snprintf(msaa, sizeof(msaa), "mixed");
+            }
+            std::snprintf(buf, sizeof(buf), "Eye MSAA %s  mask %s", msaa,
+                          gt.maskPasses == 0 ? "off" : (gt.maskPasses == gt.eyePasses ? "on" : "partial"));
+            statsLines_.emplace_back(buf);
+        } else if (!renderer_.gpuTimingSupported()) {
+            statsLines_.emplace_back("GPU times n/a");
+        }
+    }
     if (memTotalKb > 0) {
         std::snprintf(buf, sizeof(buf), "RAM %ld / %ld MB",
                       (memTotalKb - memAvailKb) / 1024, memTotalKb / 1024);
@@ -5473,6 +5498,7 @@ int App::run() {
                 if (perfLastLog_.time_since_epoch().count() == 0) {
                     perfLastLog_ = now;
                     perfLastDecoded_ = cur().engine.decodedFrames();
+                    renderer_.takeGpuTimes();  // start the GPU averages with the window
                 } else {
                     const double since =
                         std::chrono::duration<double>(now - perfLastLog_).count();
@@ -5496,15 +5522,39 @@ int App::run() {
                         }
                         const uint64_t late = cur().engine.lateFrames();
                         const uint64_t waits = cur().engine.clockWaits();
+                        // GPU time per frame from timestamp queries (averaged over
+                        // this window) and the eye pass's MSAA / visibility-mask state.
+                        const VulkanRenderer::GpuTimes gt = renderer_.takeGpuTimes();
+                        char gpuBuf[200];
+                        if (gt.frames > 0) {
+                            std::snprintf(gpuBuf, sizeof(gpuBuf),
+                                          "gpu eye %.2f ms, models %.2f ms, ui %.2f ms, video %.2f ms, total %.2f ms",
+                                          gt.eye, gt.models, gt.ui, gt.video, gt.total);
+                        } else {
+                            std::snprintf(gpuBuf, sizeof(gpuBuf), "gpu n/a");
+                        }
+                        char msaaBuf[24];
+                        if (renderer_.eyeMsaaSamples() <= 1 || gt.msaaPasses == 0) {
+                            std::snprintf(msaaBuf, sizeof(msaaBuf), "off");
+                        } else if (gt.msaaPasses == gt.eyePasses) {
+                            std::snprintf(msaaBuf, sizeof(msaaBuf), "%dx", renderer_.eyeMsaaSamples());
+                        } else {
+                            std::snprintf(msaaBuf, sizeof(msaaBuf), "mixed");
+                        }
+                        const char* maskStr = gt.maskPasses == 0                ? "off"
+                                              : gt.maskPasses == gt.eyePasses ? "on"
+                                                                              : "partial";
                         PIXELVR_LOG_INFO(
                             "PERF: render %.1f fps, decode %.1f/%.2f fps | per frame: feed %.1f ms, frame %.1f ms, "
-                            "gpu wait %.1f ms, draw %.1f ms | gpu %ld MHz | late %llu, clock waits %llu | eye %dx%d",
+                            "gpu wait %.1f ms, draw %.1f ms | gpu %ld MHz | late %llu, clock waits %llu | eye %dx%d "
+                            "| %s | msaa %s, mask %s",
                             perfFrames_ / since, decFps, cur().engine.frameRate(), perfFeedMs_ / n,
                             perfFrameMs_ / n, gpuWaitMs / n, perfViewCpuMs_ / n, gpuMhz,
                             static_cast<unsigned long long>(late - perfLastLate_),
                             static_cast<unsigned long long>(waits - perfLastWaits_),
                             xr_.swapchains().empty() ? 0 : xr_.swapchains()[0].renderWidth,
-                            xr_.swapchains().empty() ? 0 : xr_.swapchains()[0].renderHeight);
+                            xr_.swapchains().empty() ? 0 : xr_.swapchains()[0].renderHeight, gpuBuf, msaaBuf,
+                            maskStr);
                         perfLastLate_ = late;
                         perfLastWaits_ = waits;
                         perfFeedMs_ = perfFrameMs_ = perfViewCpuMs_ = 0.0;

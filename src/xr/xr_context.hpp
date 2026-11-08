@@ -172,6 +172,17 @@ public:
     void releaseLayerImage(const ViewSwapchain& sc);
     bool cylinderLayerSupported() const { return cylinderLayerEnabled_; }
 
+    // XR_KHR_visibility_mask: per view, the hidden triangle mesh (the parts of
+    // the eye image the lenses never show), as 2D points on the z = -1 plane
+    // of that view (tangent space; project with the view's FOV) and a
+    // triangle-list index array. Empty when the extension is unavailable or
+    // the runtime has no mask. The generation bumps whenever a mask is
+    // (re)fetched (session start, XrEventDataVisibilityMaskChangedKHR).
+    bool visibilityMaskSupported() const { return visibilityMaskEnabled_; }
+    uint32_t visibilityMaskGeneration() const { return visibilityMaskGeneration_; }
+    const std::vector<XrVector2f>& visibilityMaskVertices(uint32_t view) const;
+    const std::vector<uint32_t>& visibilityMaskIndices(uint32_t view) const;
+
     // Controller input (OpenXR actions). Call createActions after createSession.
     bool createActions();
     const XrInputState& input() const { return input_; }
@@ -270,6 +281,18 @@ private:
     bool profileLoggedHand_[2] = {false, false};  // each hand logged once
 
     bool cylinderLayerEnabled_ = false;   // XR_KHR_composition_layer_cylinder
+
+    // XR_KHR_visibility_mask (see visibilityMaskVertices).
+    void refreshVisibilityMasks();
+    bool visibilityMaskEnabled_ = false;
+    PFN_xrGetVisibilityMaskKHR pfnGetVisibilityMask_ = nullptr;
+    struct VisibilityMask {
+        std::vector<XrVector2f> vertices;
+        std::vector<uint32_t> indices;
+        bool dirty = true;   // fetch before the next frame
+    };
+    std::vector<VisibilityMask> visibilityMasks_;
+    uint32_t visibilityMaskGeneration_ = 0;
     uint32_t maxLayerCount_ = 0;          // XrSystemGraphicsProperties (0 = not queried yet)
     bool layerLimitLogged_ = false;
 

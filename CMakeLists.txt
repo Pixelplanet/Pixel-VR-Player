@@ -115,7 +115,9 @@ set(PIXELVR_SHADERS
     shaders/ambilight_nv12.frag
     shaders/glass.vert
     shaders/glass_nv12.frag
-    shaders/glass_rgba.frag)
+    shaders/glass_rgba.frag
+    shaders/mask.vert
+    shaders/mask.frag)
 pixelvr_compile_shaders(pixelvr_shaders
     OUTPUT_DIR "${CMAKE_BINARY_DIR}/shaders"
     SOURCES ${PIXELVR_SHADERS})

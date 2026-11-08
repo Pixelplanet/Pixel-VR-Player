@@ -792,6 +792,35 @@ PanelPlacement computePanelPlacement(float uiDistance, bool flatContent, int fol
 constexpr int kUiBendSegments = 24;
 constexpr int kThumbBendSegments = 8;
 
+// GPU timestamp pairs of one frame (VulkanRenderer::kTsPairs): the two eye
+// passes, the UI layer pass, the screen-layer copies, the controller models
+// layer, the beam / cursor layers, then kTsVideoPairs for the video resolve /
+// upload command buffers (one each, up to that many per frame).
+constexpr int kTsEye0 = 0;
+constexpr int kTsUi = 2;
+constexpr int kTsCopies = 3;
+constexpr int kTsModels = 4;
+constexpr int kTsCursor = 5;
+constexpr int kTsVideo0 = 6;
+constexpr int kTsVideoPairs = 4;
+
+// Depth test of the pipelines the visibility mask should cut: the mask is
+// drawn at depth 0 and they draw with no depth writes, before the models, so
+// elsewhere they always pass against the cleared 1.0 (the sphere's fragments
+// are at depth 0 too, hence LESS, not LESS_OR_EQUAL).
+constexpr VkCompareOp kMaskTest = VK_COMPARE_OP_LESS;
+constexpr VkColorComponentFlags kWriteRgba =
+    VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT;
+
+bool envOff(const char* name) {
+    const char* e = std::getenv(name);
+    return e != nullptr && e[0] == '0';
+}
+bool envOn(const char* name) {
+    const char* e = std::getenv(name);
+    return e != nullptr && e[0] == '1';
+}
+
 #define PIXELVR_VK_CHECK(expr)                                        \
     do {                                                              \
         VkResult _res = (expr);                                       \
@@ -837,10 +866,22 @@ VulkanRenderer::~VulkanRenderer() {
             for (auto fb : vt.framebuffers) {
                 vkDestroyFramebuffer(device_, fb, nullptr);
             }
+            for (auto fb : vt.framebuffers1x) {
+                if (fb != VK_NULL_HANDLE) vkDestroyFramebuffer(device_, fb, nullptr);
+            }
             for (auto iv : vt.imageViews) {
                 vkDestroyImageView(device_, iv, nullptr);
             }
         }
+        destroyDepthTarget(depth1xImage_, depth1xMemory_, depth1xView_);
+        for (VkPipeline p : {pipeline1x_, spherePipeline1x_, uiPipeline1x_, uiPipelineDepth1x_, textPipeline1x_,
+                             thumbPipeline1x_, modelPipeline1x_, maskPipeline_, maskPipeline1x_}) {
+            if (p != VK_NULL_HANDLE) vkDestroyPipeline(device_, p, nullptr);
+        }
+        if (maskLayout_ != VK_NULL_HANDLE) vkDestroyPipelineLayout(device_, maskLayout_, nullptr);
+        destroyVisibilityMask();
+        if (tsPool_ != VK_NULL_HANDLE) vkDestroyQueryPool(device_, tsPool_, nullptr);
+        if (renderPass1x_ != VK_NULL_HANDLE) vkDestroyRenderPass(device_, renderPass1x_, nullptr);
         if (msaaView_ != VK_NULL_HANDLE)
             vkDestroyImageView(device_, msaaView_, nullptr);
         if (msaaImage_ != VK_NULL_HANDLE)
@@ -1133,15 +1174,15 @@ int64_t VulkanRenderer::chooseColorFormat(
                                   : runtimeFormats.front();
 }
 
-bool VulkanRenderer::createRenderPass(VkFormat format) {
-    const bool msaa = sampleCount_ != VK_SAMPLE_COUNT_1_BIT;
+bool VulkanRenderer::createRenderPass(VkFormat format, VkSampleCountFlagBits samples, VkRenderPass& out) {
+    const bool msaa = samples != VK_SAMPLE_COUNT_1_BIT;
     const uint32_t depthIndex = msaa ? 2u : 1u;
 
     VkAttachmentDescription attachments[3]{};
     // [0] Color attachment: the multisampled target when MSAA is on, otherwise
     // the swapchain image itself.
     attachments[0].format = format;
-    attachments[0].samples = sampleCount_;
+    attachments[0].samples = samples;
     attachments[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     attachments[0].storeOp =
         msaa ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE;
@@ -1162,7 +1203,7 @@ bool VulkanRenderer::createRenderPass(VkFormat format) {
     }
     // [depthIndex] Depth attachment (multisampled to match color; not stored).
     attachments[depthIndex].format = depthFormat_;
-    attachments[depthIndex].samples = sampleCount_;
+    attachments[depthIndex].samples = samples;
     attachments[depthIndex].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
     attachments[depthIndex].storeOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     attachments[depthIndex].stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
@@ -1214,7 +1255,7 @@ bool VulkanRenderer::createRenderPass(VkFormat format) {
     info.dependencyCount = 1;
     info.pDependencies = &dependency;
 
-    PIXELVR_VK_CHECK(vkCreateRenderPass(device_, &info, nullptr, &renderPass_));
+    PIXELVR_VK_CHECK(vkCreateRenderPass(device_, &info, nullptr, &out));
     return true;
 }
 
@@ -1285,23 +1326,33 @@ bool VulkanRenderer::createMsaaTarget(int32_t width, int32_t height) {
     return true;
 }
 
-bool VulkanRenderer::createDepthTarget(int32_t width, int32_t height) {
+void VulkanRenderer::destroyDepthTarget(VkImage& image, VkDeviceMemory& memory, VkImageView& view) {
+    if (view != VK_NULL_HANDLE) vkDestroyImageView(device_, view, nullptr);
+    if (image != VK_NULL_HANDLE) vkDestroyImage(device_, image, nullptr);
+    if (memory != VK_NULL_HANDLE) vkFreeMemory(device_, memory, nullptr);
+    view = VK_NULL_HANDLE;
+    image = VK_NULL_HANDLE;
+    memory = VK_NULL_HANDLE;
+}
+
+bool VulkanRenderer::createDepthTarget(int32_t width, int32_t height, VkSampleCountFlagBits samples,
+                                       VkImage& image, VkDeviceMemory& memory, VkImageView& view) {
     VkImageCreateInfo info{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     info.imageType = VK_IMAGE_TYPE_2D;
     info.format = depthFormat_;
     info.extent = {static_cast<uint32_t>(width), static_cast<uint32_t>(height), 1};
     info.mipLevels = 1;
     info.arrayLayers = 1;
-    info.samples = sampleCount_;
+    info.samples = samples;
     info.tiling = VK_IMAGE_TILING_OPTIMAL;
     info.usage = VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
                  VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT;
     info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    PIXELVR_VK_CHECK(vkCreateImage(device_, &info, nullptr, &depthImage_));
+    PIXELVR_VK_CHECK(vkCreateImage(device_, &info, nullptr, &image));
 
     VkMemoryRequirements req{};
-    vkGetImageMemoryRequirements(device_, depthImage_, &req);
+    vkGetImageMemoryRequirements(device_, image, &req);
     // Prefer lazily-allocated (tile) memory on Adreno; fall back to device-local.
     uint32_t memType = UINT32_MAX;
     VkPhysicalDeviceMemoryProperties mp{};
@@ -1321,17 +1372,17 @@ bool VulkanRenderer::createDepthTarget(int32_t width, int32_t height) {
     VkMemoryAllocateInfo alloc{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
     alloc.allocationSize = req.size;
     alloc.memoryTypeIndex = memType;
-    PIXELVR_VK_CHECK(vkAllocateMemory(device_, &alloc, nullptr, &depthMemory_));
-    PIXELVR_VK_CHECK(vkBindImageMemory(device_, depthImage_, depthMemory_, 0));
+    PIXELVR_VK_CHECK(vkAllocateMemory(device_, &alloc, nullptr, &memory));
+    PIXELVR_VK_CHECK(vkBindImageMemory(device_, image, memory, 0));
 
     VkImageViewCreateInfo iv{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-    iv.image = depthImage_;
+    iv.image = image;
     iv.viewType = VK_IMAGE_VIEW_TYPE_2D;
     iv.format = depthFormat_;
     iv.subresourceRange.aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT;
     iv.subresourceRange.levelCount = 1;
     iv.subresourceRange.layerCount = 1;
-    PIXELVR_VK_CHECK(vkCreateImageView(device_, &iv, nullptr, &depthView_));
+    PIXELVR_VK_CHECK(vkCreateImageView(device_, &iv, nullptr, &view));
     return true;
 }
 
@@ -1374,7 +1425,8 @@ bool VulkanRenderer::buildPipeline(const std::string& vertName,
                                    bool blend, VkRenderPass pass,
                                    VkSampleCountFlagBits samples,
                                    const VkPipelineVertexInputStateCreateInfo* vertexInputOverride,
-                                   VkColorComponentFlags writeMask, bool fade, bool depthTest) {
+                                   VkColorComponentFlags writeMask, bool fade, VkCompareOp depthCompare) {
+    const bool depthTest = depthCompare != VK_COMPARE_OP_MAX_ENUM;
     const VkRenderPass rp = (pass != VK_NULL_HANDLE) ? pass : renderPass_;
     const VkSampleCountFlagBits sc =
         (samples != VK_SAMPLE_COUNT_FLAG_BITS_MAX_ENUM) ? samples : sampleCount_;
@@ -1454,13 +1506,15 @@ bool VulkanRenderer::buildPipeline(const std::string& vertName,
     dynamic.pDynamicStates = dynamicStates.data();
 
     // 2D content (video, UI, text) paints in submission order; it never writes
-    // depth so the depth buffer is reserved for the 3D models. `depthTest`
-    // variants (label leader lines) are hidden where a model is nearer.
+    // depth so the depth buffer is reserved for the 3D models (and the
+    // visibility mask). Depth-tested variants: label leader lines (hidden
+    // where a model is nearer), and video / sphere / glow (kMaskTest: cut by
+    // the visibility mask).
     VkPipelineDepthStencilStateCreateInfo depthStencil{
         VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
     depthStencil.depthTestEnable = depthTest ? VK_TRUE : VK_FALSE;
     depthStencil.depthWriteEnable = VK_FALSE;
-    depthStencil.depthCompareOp = depthTest ? VK_COMPARE_OP_LESS_OR_EQUAL : VK_COMPARE_OP_ALWAYS;
+    depthStencil.depthCompareOp = depthTest ? depthCompare : VK_COMPARE_OP_ALWAYS;
 
     VkGraphicsPipelineCreateInfo pipelineInfo{
         VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
@@ -1534,24 +1588,117 @@ bool VulkanRenderer::createPipelines() {
     PIXELVR_VK_CHECK(
         vkCreatePipelineLayout(device_, &uiLayout, nullptr, &uiPipelineLayout_));
 
+    // Video quad, glow and sphere test the visibility mask (kMaskTest).
+    const VkSampleCountFlagBits dflt = VK_SAMPLE_COUNT_FLAG_BITS_MAX_ENUM;
     const bool ok = buildPipeline("quad.vert.spv", "quad.frag.spv", pipelineLayout_,
-                                  pipeline_) &&
+                                  pipeline_, false, VK_NULL_HANDLE, dflt, nullptr, kWriteRgba, false, kMaskTest) &&
                     buildPipeline("quad.vert.spv", "ambilight_nv12.frag.spv", pipelineLayout_,
-                                  ambilightPipeline_, true) &&
+                                  ambilightPipeline_, true, VK_NULL_HANDLE, dflt, nullptr, kWriteRgba, false,
+                                  kMaskTest) &&
                     buildPipeline("sphere.vert.spv", "sphere.frag.spv",
-                                  spherePipelineLayout_, spherePipeline_) &&
+                                  spherePipelineLayout_, spherePipeline_, false, VK_NULL_HANDLE, dflt, nullptr,
+                                  kWriteRgba, false, kMaskTest) &&
                     buildPipeline("ui.vert.spv", "ui.frag.spv", uiPipelineLayout_,
                                   uiPipeline_, true);
     // Best effort: without it the label lines are drawn untested (over the model).
     if (ok && !buildPipeline("ui.vert.spv", "ui.frag.spv", uiPipelineLayout_, uiPipelineDepth_, true,
-                             VK_NULL_HANDLE, VK_SAMPLE_COUNT_FLAG_BITS_MAX_ENUM, nullptr,
-                             VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
-                                 VK_COLOR_COMPONENT_A_BIT,
-                             false, true)) {
+                             VK_NULL_HANDLE, dflt, nullptr, kWriteRgba, false, VK_COMPARE_OP_LESS_OR_EQUAL)) {
         uiPipelineDepth_ = VK_NULL_HANDLE;
         PIXELVR_LOG_WARN("Depth-tested UI pipeline failed; button label lines are not hidden by the models");
     }
     return ok;
+}
+
+// The 1x variants of the eye-pass pipelines (renderPass1x_), same state as
+// their MSAA originals. Text / thumb / model variants are built with those
+// (initText, createModelPipeline); the YCbCr ones with each video slot.
+bool VulkanRenderer::createSingleSamplePipelines() {
+    if (renderPass1x_ == VK_NULL_HANDLE) return false;
+    const VkSampleCountFlagBits one = VK_SAMPLE_COUNT_1_BIT;
+    bool ok = buildPipeline("quad.vert.spv", "quad.frag.spv", pipelineLayout_, pipeline1x_, false, renderPass1x_, one,
+                            nullptr, kWriteRgba, false, kMaskTest) &&
+              buildPipeline("sphere.vert.spv", "sphere.frag.spv", spherePipelineLayout_, spherePipeline1x_, false,
+                            renderPass1x_, one, nullptr, kWriteRgba, false, kMaskTest) &&
+              buildPipeline("ui.vert.spv", "ui.frag.spv", uiPipelineLayout_, uiPipeline1x_, true, renderPass1x_, one);
+    if (ok && uiPipelineDepth_ != VK_NULL_HANDLE &&
+        !buildPipeline("ui.vert.spv", "ui.frag.spv", uiPipelineLayout_, uiPipelineDepth1x_, true, renderPass1x_, one,
+                       nullptr, kWriteRgba, false, VK_COMPARE_OP_LESS_OR_EQUAL)) {
+        ok = false;
+    }
+    if (!ok) PIXELVR_LOG_WARN("Single-sampled eye pipelines failed; 360/180 keeps MSAA");
+    return ok;
+}
+
+bool VulkanRenderer::createYcbcrSingleSample(VideoSlot& v) {
+    v.ycbcr1xTried = true;
+    if (renderPass1x_ == VK_NULL_HANDLE) return false;
+    const VkSampleCountFlagBits one = VK_SAMPLE_COUNT_1_BIT;
+    bool ok = true;
+    if (ok && v.ycbcrQuadPipeline != VK_NULL_HANDLE && v.ycbcrQuadPipeline1x == VK_NULL_HANDLE) {
+        ok = buildPipeline("quad.vert.spv", "video_quad.frag.spv", v.ycbcrQuadLayout, v.ycbcrQuadPipeline1x, false,
+                           renderPass1x_, one, nullptr, kWriteRgba, false, kMaskTest);
+    }
+    if (ok && v.ycbcrSpherePipeline != VK_NULL_HANDLE && v.ycbcrSpherePipeline1x == VK_NULL_HANDLE) {
+        ok = buildPipeline("sphere.vert.spv", "video_sphere.frag.spv", v.ycbcrSphereLayout, v.ycbcrSpherePipeline1x,
+                           false, renderPass1x_, one, nullptr, kWriteRgba, false, kMaskTest);
+    }
+    if (ok && v.ycbcrSphereDirectPipeline != VK_NULL_HANDLE && v.ycbcrSphereDirectPipeline1x == VK_NULL_HANDLE) {
+        ok = buildPipeline("sphere.vert.spv", "video_sphere.frag.spv", v.ycbcrSphereDirectLayout,
+                           v.ycbcrSphereDirectPipeline1x, false, renderPass1x_, one, nullptr, kWriteRgba, false,
+                           kMaskTest);
+    }
+    if (!ok) PIXELVR_LOG_WARN("Single-sampled video pipelines failed; this clip keeps MSAA in 360/180");
+    return ok;
+}
+
+bool VulkanRenderer::singleSamplePipelinesReady() const {
+    if (renderPass1x_ == VK_NULL_HANDLE) return false;
+    if (depth1xView_ == VK_NULL_HANDLE || viewTargets_.empty() || viewTargets_[0].framebuffers1x.empty()) return false;
+    // Everything the 360/180 eye pass may bind needs its 1x variant.
+    return pipeline1x_ != VK_NULL_HANDLE && spherePipeline1x_ != VK_NULL_HANDLE && uiPipeline1x_ != VK_NULL_HANDLE &&
+           (uiPipelineDepth_ == VK_NULL_HANDLE || uiPipelineDepth1x_ != VK_NULL_HANDLE) &&
+           (textPipeline_ == VK_NULL_HANDLE || textPipeline1x_ != VK_NULL_HANDLE) &&
+           (thumbPipeline_ == VK_NULL_HANDLE || thumbPipeline1x_ != VK_NULL_HANDLE) &&
+           (modelPipeline_ == VK_NULL_HANDLE || modelPipeline1x_ != VK_NULL_HANDLE) &&
+           (maskPipeline_ == VK_NULL_HANDLE || maskPipeline1x_ != VK_NULL_HANDLE);
+}
+
+bool VulkanRenderer::wantSingleSampleEye() {
+    if (renderPass1x_ == VK_NULL_HANDLE || singleSampleEyeOff_ || projectionMode_ == ProjectionMode::Flat) {
+        return false;
+    }
+    if (!singleSamplePipelinesReady()) return false;
+    for (VideoSlot& v : videoSlots_) {
+        const bool missing = (v.ycbcrQuadPipeline != VK_NULL_HANDLE && v.ycbcrQuadPipeline1x == VK_NULL_HANDLE) ||
+                             (v.ycbcrSpherePipeline != VK_NULL_HANDLE && v.ycbcrSpherePipeline1x == VK_NULL_HANDLE) ||
+                             (v.ycbcrSphereDirectPipeline != VK_NULL_HANDLE &&
+                              v.ycbcrSphereDirectPipeline1x == VK_NULL_HANDLE);
+        if (!missing) continue;
+        // Built the first time 360/180 needs them (a clip opened in 360/180
+        // already has them, see createYcbcrPipeline).
+        if (v.ycbcr1xTried || !createYcbcrSingleSample(v)) return false;
+    }
+    return true;
+}
+
+VkPipeline VulkanRenderer::eyePipeline(VkPipeline p) const {
+    if (!eyeSingleSample_ || p == VK_NULL_HANDLE) return p;
+    if (p == pipeline_) return pipeline1x_;
+    if (p == spherePipeline_) return spherePipeline1x_;
+    if (p == uiPipeline_) return uiPipeline1x_;
+    if (p == uiPipelineDepth_) return uiPipelineDepth1x_;
+    if (p == textPipeline_) return textPipeline1x_;
+    if (p == thumbPipeline_) return thumbPipeline1x_;
+    if (p == modelPipeline_) return modelPipeline1x_;
+    if (p == maskPipeline_) return maskPipeline1x_;
+    for (const VideoSlot& v : videoSlots_) {
+        if (p == v.ycbcrQuadPipeline) return v.ycbcrQuadPipeline1x;
+        if (p == v.ycbcrSpherePipeline) return v.ycbcrSpherePipeline1x;
+        if (p == v.ycbcrSphereDirectPipeline) return v.ycbcrSphereDirectPipeline1x;
+    }
+    // Flat-mode-only pipelines (screen glows, in-scene browser screens): never
+    // bound while the eye pass is single-sampled.
+    return p;
 }
 
 void VulkanRenderer::waitIdle() const {
@@ -1573,6 +1720,9 @@ bool VulkanRenderer::recreateSwapchainTargets(
                 vkDestroyFramebuffer(device_, fb, nullptr);
             }
         }
+        for (auto fb : vt.framebuffers1x) {
+            if (fb != VK_NULL_HANDLE) vkDestroyFramebuffer(device_, fb, nullptr);
+        }
         for (auto iv : vt.imageViews) {
             if (iv != VK_NULL_HANDLE) {
                 vkDestroyImageView(device_, iv, nullptr);
@@ -1580,6 +1730,7 @@ bool VulkanRenderer::recreateSwapchainTargets(
         }
     }
     viewTargets_.clear();
+    destroyDepthTarget(depth1xImage_, depth1xMemory_, depth1xView_);
 
     if (msaaView_ != VK_NULL_HANDLE) {
         vkDestroyImageView(device_, msaaView_, nullptr);
@@ -1619,8 +1770,15 @@ bool VulkanRenderer::recreateSwapchainTargets(
             return false;
         }
     }
-    if (!createDepthTarget(maxW, maxH)) {
+    if (!createDepthTarget(maxW, maxH, sampleCount_, depthImage_, depthMemory_, depthView_)) {
         return false;
+    }
+    // The single-sampled eye pass's depth (360/180; lazily allocated tile
+    // memory like the MSAA targets). Without it 360/180 keeps MSAA.
+    if (renderPass1x_ != VK_NULL_HANDLE &&
+        !createDepthTarget(maxW, maxH, VK_SAMPLE_COUNT_1_BIT, depth1xImage_, depth1xMemory_, depth1xView_)) {
+        destroyDepthTarget(depth1xImage_, depth1xMemory_, depth1xView_);
+        PIXELVR_LOG_WARN("Single-sampled depth target failed; 360/180 keeps MSAA");
     }
 
     // Image views + framebuffers per eye.
@@ -1668,6 +1826,15 @@ bool VulkanRenderer::recreateSwapchainTargets(
             fbInfo.layers = 1;
             PIXELVR_VK_CHECK(
                 vkCreateFramebuffer(device_, &fbInfo, nullptr, &vt.framebuffers[i]));
+            // 360/180: the swapchain image itself as the 1x colour target.
+            if (depth1xView_ != VK_NULL_HANDLE) {
+                if (vt.framebuffers1x.size() != sc.images.size()) vt.framebuffers1x.assign(sc.images.size(), VK_NULL_HANDLE);
+                const VkImageView att1x[2] = {vt.imageViews[i], depth1xView_};
+                fbInfo.renderPass = renderPass1x_;
+                fbInfo.attachmentCount = 2;
+                fbInfo.pAttachments = att1x;
+                PIXELVR_VK_CHECK(vkCreateFramebuffer(device_, &fbInfo, nullptr, &vt.framebuffers1x[i]));
+            }
         }
     }
     // The models layer's framebuffers use the MSAA / depth targets rebuilt above.
@@ -1684,6 +1851,9 @@ bool VulkanRenderer::recreateSwapchainTargets(
 
 void VulkanRenderer::destroyLayerTargets(ViewTargets& t) {
     for (auto fb : t.framebuffers) {
+        if (fb != VK_NULL_HANDLE) vkDestroyFramebuffer(device_, fb, nullptr);
+    }
+    for (auto fb : t.framebuffers1x) {
         if (fb != VK_NULL_HANDLE) vkDestroyFramebuffer(device_, fb, nullptr);
     }
     for (auto iv : t.imageViews) {
@@ -1938,10 +2108,21 @@ bool VulkanRenderer::createRenderResources(
     }
     colorFormat_ = static_cast<VkFormat>(swapchains.front().format);
     sampleCount_ = chooseSampleCount();
+    // A/B switches for the GPU measurements: PIXELVR_SPHERE_MSAA=1 keeps the
+    // MSAA eye pass in 360/180, PIXELVR_VISMASK=0 skips the visibility mask.
+    singleSampleEyeOff_ = envOn("PIXELVR_SPHERE_MSAA");
+    maskOff_ = envOff("PIXELVR_VISMASK");
 
-    if (!createRenderPass(colorFormat_) || !createSamplerAndDescriptors() ||
+    if (!createRenderPass(colorFormat_, sampleCount_, renderPass_) || !createSamplerAndDescriptors() ||
         !createPipelines()) {
         return false;
+    }
+    // 360/180 eye pass without MSAA (only when renderPass_ has it).
+    if (sampleCount_ != VK_SAMPLE_COUNT_1_BIT) {
+        if (!createRenderPass(colorFormat_, VK_SAMPLE_COUNT_1_BIT, renderPass1x_) ||
+            !createSingleSamplePipelines()) {
+            PIXELVR_LOG_WARN("360/180 eye pass keeps MSAA (no single-sampled pass)");
+        }
     }
 
     VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
@@ -1976,6 +2157,31 @@ bool VulkanRenderer::createRenderResources(
     if (!createModelPipeline()) {
         PIXELVR_LOG_WARN("Controller models disabled");
     }
+
+    // Visibility mask pipelines (the mesh itself arrives with the session's
+    // first frames, updateVisibilityMask).
+    {
+        VkPushConstantRange mp{};
+        mp.stageFlags = VK_SHADER_STAGE_VERTEX_BIT;
+        mp.size = sizeof(float) * 4;
+        VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
+        li.pushConstantRangeCount = 1;
+        li.pPushConstantRanges = &mp;
+        if (vkCreatePipelineLayout(device_, &li, nullptr, &maskLayout_) != VK_SUCCESS ||
+            !buildMaskPipeline(renderPass_, sampleCount_, maskPipeline_)) {
+            maskPipeline_ = VK_NULL_HANDLE;
+            PIXELVR_LOG_WARN("Visibility mask pipeline failed; the hidden lens area is rendered");
+        } else if (renderPass1x_ != VK_NULL_HANDLE &&
+                   !buildMaskPipeline(renderPass1x_, VK_SAMPLE_COUNT_1_BIT, maskPipeline1x_)) {
+            maskPipeline1x_ = VK_NULL_HANDLE;
+        }
+    }
+    if (renderPass1x_ != VK_NULL_HANDLE) {
+        const bool ready = singleSamplePipelinesReady();
+        PIXELVR_LOG_INFO("360/180 eye pass: %s", singleSampleEyeOff_ ? "MSAA (PIXELVR_SPHERE_MSAA=1)"
+                                                 : (ready ? "single-sampled (no MSAA)" : "MSAA (1x pipelines missing)"));
+    }
+    createTimestampPool();
 
     PIXELVR_LOG_INFO("Render resources ready (format %d)",
                      static_cast<int>(colorFormat_));
@@ -3332,6 +3538,18 @@ bool VulkanRenderer::initText() {
                        thumbPipeline_, true)) {
         PIXELVR_LOG_WARN("Failed to build thumb pipeline");
     }
+    // Single-sampled eye pass variants (360/180).
+    if (renderPass1x_ != VK_NULL_HANDLE) {
+        if (!buildPipeline("text.vert.spv", "text.frag.spv", textPipelineLayout_, textPipeline1x_, true,
+                           renderPass1x_, VK_SAMPLE_COUNT_1_BIT, &glyphInput)) {
+            textPipeline1x_ = VK_NULL_HANDLE;
+        }
+        if (thumbPipeline_ != VK_NULL_HANDLE &&
+            !buildPipeline("thumb.vert.spv", "thumb.frag.spv", textPipelineLayout_, thumbPipeline1x_, true,
+                           renderPass1x_, VK_SAMPLE_COUNT_1_BIT)) {
+            thumbPipeline1x_ = VK_NULL_HANDLE;
+        }
+    }
 
     // Per-pass glyph instance buffers (eyes + UI layer), persistently mapped.
     for (int v = 0; v < kRenderPasses; ++v) {
@@ -3361,12 +3579,26 @@ void VulkanRenderer::renderView(uint32_t viewIndex, uint32_t imageIndex,
     // Adaptive resolution: draw only the sub-rect XrContext submits this frame.
     eyeRenderW_ = swapchain.renderWidth > 0 ? swapchain.renderWidth : swapchain.width;
     eyeRenderH_ = swapchain.renderHeight > 0 ? swapchain.renderHeight : swapchain.height;
+    // 360/180: single-sampled straight into the swapchain image (no MSAA
+    // target, no resolve); flat: MSAA as before. Decided per eye pass, so a
+    // projection change takes effect on the next pass.
+    eyeSingleSample_ = wantSingleSampleEye();
+    if (eyeSingleSample_ != lastEyeSingle_ || !singleSampleLogged_) {
+        if (singleSampleLogged_ || eyeSingleSample_) {
+            PIXELVR_LOG_INFO("Eye pass: %s", eyeSingleSample_ ? "single-sampled (360/180)" : "MSAA");
+        }
+        singleSampleLogged_ = true;
+        lastEyeSingle_ = eyeSingleSample_;
+    }
     recordView(viewIndex, imageIndex, view, nullptr);
+    eyeSingleSample_ = false;  // the layer passes and the models layer keep their pipelines
 }
 
 void VulkanRenderer::renderLayersBefore(XrContext& xr, const XrView* views, uint32_t viewCount,
                                         std::vector<CompositionLayer>& out) {
     (void)out;  // the UI layer is submitted by renderLayersAfter, over the screens
+    gpuTimerNewFrame();  // this frame's timestamp slot (reads the one 4 frames old)
+    updateVisibilityMask(xr, views, viewCount);
     uiLayerPending_ = false;
     modelsInView_ = controllerModelsInView(views, viewCount);
     layoutButtonLabels(views, viewCount);
@@ -3886,9 +4118,16 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
         return;
     }
     uint32_t glyphCursor = 0;
-    for (const Pending& p : copies) {
-        recordScreenCopy(p.slot, screenLayers_[p.slot], p.imageIndex, p.badge, glyphCursor);
+    // GPU time: the screen copies count as video work, the models layer and
+    // the beam / cursor layers on their own (timestamps outside the passes).
+    if (!copies.empty()) {
+        const int tsCopy = gpuTimerBegin(commandBuffer_, kTsCopies);
+        for (const Pending& p : copies) {
+            recordScreenCopy(p.slot, screenLayers_[p.slot], p.imageIndex, p.badge, glyphCursor);
+        }
+        gpuTimerEnd(commandBuffer_, tsCopy);
     }
+    const int tsModel = modelPending ? gpuTimerBegin(commandBuffer_, kTsModels) : -1;
     if (modelPending) {
         // Same pass, MSAA and depth targets as the eye buffers, cleared to
         // transparent: model.frag writes alpha 1, so the (resolved) image is
@@ -3934,6 +4173,8 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
             vkCmdEndRenderPass(commandBuffer_);
         }
     }
+    gpuTimerEnd(commandBuffer_, tsModel);
+    const int tsCursor = (beamPending || cursorPending) ? gpuTimerBegin(commandBuffer_, kTsCursor) : -1;
     if (beamPending) {
         // Soft accent capsule, full height, fading at the sides.
         VkClearValue clear{};
@@ -4012,6 +4253,7 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
         draw(0.5f, UiShape::Cursor, white, 0.0f);
         vkCmdEndRenderPass(commandBuffer_);
     }
+    gpuTimerEnd(commandBuffer_, tsCursor);
     vkEndCommandBuffer(commandBuffer_);
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     submit.commandBufferCount = 1;
@@ -4310,8 +4552,12 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         PIXELVR_LOG_WARN("vkBeginCommandBuffer failed");
         return;
     }
+    // GPU time of this pass (outside the render pass).
+    const int tsPair = gpuTimerBegin(commandBuffer_, layerPass ? kTsUi : kTsEye0 + static_cast<int>(viewIndex % 2));
 
-    const bool msaa = !layerPass && sampleCount_ != VK_SAMPLE_COUNT_1_BIT;
+    // eyeSingleSample_ (360/180): renderPass1x_, the swapchain image as the
+    // 1x colour target, the 1x pipelines (eyePipeline).
+    const bool msaa = !layerPass && sampleCount_ != VK_SAMPLE_COUNT_1_BIT && !eyeSingleSample_;
     VkClearValue clears[3]{};
     if (layerPass) {
         clears[0].color = {{0.0f, 0.0f, 0.0f, 0.0f}};  // transparent: only the UI shows
@@ -4347,8 +4593,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
     }
 
     VkRenderPassBeginInfo rpBegin{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-    rpBegin.renderPass = layerPass ? uiLayerPass_ : renderPass_;
-    rpBegin.framebuffer = vt.framebuffers[imageIndex];
+    rpBegin.renderPass = layerPass ? uiLayerPass_ : (eyeSingleSample_ ? renderPass1x_ : renderPass_);
+    rpBegin.framebuffer = (!layerPass && eyeSingleSample_) ? vt.framebuffers1x[imageIndex] : vt.framebuffers[imageIndex];
     rpBegin.renderArea = clearArea;
     rpBegin.clearValueCount = layerPass ? 1u : (msaa ? 3u : 2u);
     rpBegin.pClearValues = clears;
@@ -4365,6 +4611,35 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
 
     VkRect2D scissor = area;
     vkCmdSetScissor(commandBuffer_, 0, 1, &scissor);
+
+    // Visibility mask first: the lens' hidden area at depth 0 (black), so the
+    // depth-tested video / sphere / glow and the models skip those pixels.
+    // Its vertices are tangents of the full view; mask.vert projects them
+    // with this view's FOV to NDC and the viewport above (the adaptive
+    // sub-rect, mapping the whole FOV) scales them into the rendered rect.
+    bool maskDrawn = false;
+    if (!layerPass && viewIndex < 2 && maskMeshes_[viewIndex].indexCount > 0 && !maskOff_) {
+        const VkPipeline maskPipe = eyePipeline(maskPipeline_);
+        if (maskPipe != VK_NULL_HANDLE) {
+            const MaskMesh& mm = maskMeshes_[viewIndex];
+            vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, maskPipe);
+            const VkDeviceSize vOff = 0;
+            vkCmdBindVertexBuffers(commandBuffer_, 0, 1, &mm.buffer, &vOff);
+            vkCmdBindIndexBuffer(commandBuffer_, mm.buffer, mm.indexOffset, VK_INDEX_TYPE_UINT32);
+            const float fov[4] = {std::tan(view.fov.angleLeft), std::tan(view.fov.angleRight),
+                                  std::tan(view.fov.angleUp), std::tan(view.fov.angleDown)};
+            vkCmdPushConstants(commandBuffer_, maskLayout_, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof(fov), fov);
+            vkCmdDrawIndexed(commandBuffer_, mm.indexCount, 1, 0, 0, 0);
+            maskDrawn = true;
+        }
+    }
+    if (!layerPass) {  // eye-pass state for the PERF line / stats overlay
+        for (GpuTimes* g : {&tsAccum_, &tsRecentAccum_}) {
+            ++g->eyePasses;
+            if (msaa) ++g->msaaPasses;
+            if (maskDrawn) ++g->maskPasses;
+        }
+    }
 
     // Transport HUD. For flat content it is world-locked just beneath the video
     // screen (so it stays put as the viewer looks around and only appears for a
@@ -4485,9 +4760,10 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
     GlyphInstance* const glyphOut = static_cast<GlyphInstance*>(glyphMapped_[slot]);
     const VkBuffer glyphBuf = glyphBuffer_[slot];
     // The layer pass draws with the pipelines built for its own render pass.
-    const VkPipeline textPipe = layerPass ? textPipelineLayer_ : textPipeline_;
+    // An eye pass in 360/180 with its single-sampled variants (eyePipeline).
+    const VkPipeline textPipe = layerPass ? textPipelineLayer_ : eyePipeline(textPipeline_);
     auto passPipeline = [&](VkPipeline pipe) -> VkPipeline {
-        if (!layerPass) return pipe;
+        if (!layerPass) return eyePipeline(pipe);
         if (pipe == uiPipeline_) return uiPipelineLayer_;
         if (pipe == textPipeline_) return textPipelineLayer_;
         if (pipe == thumbPipeline_) return thumbPipelineLayer_;
@@ -5147,7 +5423,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     if (textSetLayout_ == VK_NULL_HANDLE ||
                         vkCreatePipelineLayout(device_, &li, nullptr, &ambilightWebLayout_) != VK_SUCCESS ||
                         !buildPipeline("quad.vert.spv", "ambilight.frag.spv", ambilightWebLayout_,
-                                       ambilightWebPipeline_, true)) {
+                                       ambilightWebPipeline_, true, VK_NULL_HANDLE,
+                                       VK_SAMPLE_COUNT_FLAG_BITS_MAX_ENUM, nullptr, kWriteRgba, false, kMaskTest)) {
                         PIXELVR_LOG_WARN("Screen glow for browser screens unavailable");
                         ambilightWebPipeline_ = VK_NULL_HANDLE;
                     }
@@ -5158,7 +5435,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     const VkPipelineLayout ambLayout = webHere ? ambilightWebLayout_ : layout;
                     const VkDescriptorSet ambSet = webHere ? webTex_[slot].set : videoSet;
                     if (ambPipe != VK_NULL_HANDLE && ambLayout != VK_NULL_HANDLE) {
-                        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, ambPipe);
+                        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, eyePipeline(ambPipe));
                         vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                                 ambLayout, 0, 1, &ambSet, 0, nullptr);
                         const Vec3 ambCenter = center + fwd * 0.015f;
@@ -5206,7 +5483,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 } else if (webHere) {
                     // Page texture over the same 3.2 x 1.8 model quad, bent like
                     // quad.vert (arc of radius 3.2 / (curvature * 1.75)).
-                    vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, thumbPipeline_);
+                    vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, eyePipeline(thumbPipeline_));
                     vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                             textPipelineLayout_, 0, 1, &webTex_[slot].set, 0, nullptr);
                     TextPush tp{};
@@ -5226,7 +5503,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                                        sizeof(TextPush), &tp);
                     vkCmdDraw(commandBuffer_, tp.bend[0] > 0.0f ? 6 * kThumbBendSegments : 6, 1, 0, 0);
                 } else {
-                    vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+                    vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, eyePipeline(pipe));
                     vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                             layout, 0, 1, &videoSet, 0, nullptr);
                     PushConstants push{};
@@ -5419,7 +5696,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 VkPipelineLayout layout =
                     direct ? v.ycbcrSphereDirectLayout : (ycbcr ? v.ycbcrSphereLayout : spherePipelineLayout_);
                 const VkDescriptorSet set = direct ? v.directSets[v.directIdx] : videoSet;
-                vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+                vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, eyePipeline(pipe));
                 vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                         layout, 0, 1, &set, 0, nullptr);
                 // Fold the recenter yaw + viewpoint tilt into the camera orientation
@@ -8216,6 +8493,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
 
     flushText();
     vkCmdEndRenderPass(commandBuffer_);
+    gpuTimerEnd(commandBuffer_, tsPair);
     if (vkEndCommandBuffer(commandBuffer_) != VK_SUCCESS) {
         PIXELVR_LOG_WARN("vkEndCommandBuffer failed");
         return;
@@ -8899,6 +9177,13 @@ void VulkanRenderer::layoutButtonLabels(const XrView* views, uint32_t viewCount)
                 it->pLocal = base + stack * s;
                 it->dirLocal = fOut * static_cast<float>(side);
                 s -= it->hh + kLabelColGap;
+                // Never below its button's ring (out of the face): the stack
+                // sinks toward the face as it goes down, and the stick ring
+                // sits high around the cap, so its line ran down and back
+                // from the ring and looked off from the side.
+                const float ringH = dot(it->bRest - fC, fN) + kLabelRingLift + 0.001f;
+                const float cardH = dot(it->pLocal - fC, fN);
+                if (cardH < ringH) it->pLocal = it->pLocal + fN * (ringH - cardH);
             }
         }
 
@@ -9108,7 +9393,7 @@ void VulkanRenderer::drawButtonLabels(const XrView& view, void* glyphs, VkBuffer
     // (a button on the far side of the controller is hidden with its line);
     // drawn first so the cards cover any that cross them.
     const VkPipeline linePipe = (uiPipelineDepth_ != VK_NULL_HANDLE) ? uiPipelineDepth_ : uiPipeline_;
-    vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, linePipe);
+    vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, eyePipeline(linePipe));
     for (const LabelCardDraw& d : labelDraws_) {
         if (!d.ring || d.ringHW <= 0.0f || d.ringHH <= 0.0f) continue;
         // A circle / capsule outline in the face plane, its front turned to
@@ -9142,7 +9427,7 @@ void VulkanRenderer::drawButtonLabels(const XrView& view, void* glyphs, VkBuffer
             UiShape::FlatBox);
     }
     // Cards: always visible (no depth test), dark translucent grey, faint rim.
-    vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipeline_);
+    vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, eyePipeline(uiPipeline_));
     for (const LabelCardDraw& d : labelDraws_) {
         float bg[4], rim[4];
         faded(kLabelCardCol, d.alpha, bg);
@@ -9157,7 +9442,7 @@ void VulkanRenderer::drawButtonLabels(const XrView& view, void* glyphs, VkBuffer
     if (!font.ok || font.ascent <= 0.0f || fontSet == VK_NULL_HANDLE) return;
     const float scale = kLabelTextH / font.ascent;  // as layoutButtonLabels
     const float lineH = font.lineHeight > 0.0f ? font.lineHeight * scale : kLabelTextH * 1.3f;
-    vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipeline_);
+    vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, eyePipeline(textPipeline_));
     vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipelineLayout_, 0, 1, &fontSet, 0,
                             nullptr);
     const VkDeviceSize off = 0;
@@ -9649,18 +9934,29 @@ bool VulkanRenderer::createYcbcrPipeline(VideoSlot& v, uint32_t fourcc, int colo
     dl.pushConstantRangeCount = 1;
     dl.pPushConstantRanges = &spherePush;
     PIXELVR_VK_CHECK(vkCreatePipelineLayout(device_, &dl, nullptr, &v.ycbcrSphereDirectLayout));
+    // Eye-pass video pipelines test the visibility mask (kMaskTest).
+    const VkSampleCountFlagBits dflt = VK_SAMPLE_COUNT_FLAG_BITS_MAX_ENUM;
     if (!buildPipeline("sphere.vert.spv", "video_sphere.frag.spv", v.ycbcrSphereDirectLayout,
-                       v.ycbcrSphereDirectPipeline)) {
+                       v.ycbcrSphereDirectPipeline, false, VK_NULL_HANDLE, dflt, nullptr, kWriteRgba, false,
+                       kMaskTest)) {
         return false;
     }
 
     if (!buildPipeline("quad.vert.spv", "video_quad.frag.spv", v.ycbcrQuadLayout,
-                       v.ycbcrQuadPipeline) ||
+                       v.ycbcrQuadPipeline, false, VK_NULL_HANDLE, dflt, nullptr, kWriteRgba, false, kMaskTest) ||
         !buildPipeline("quad.vert.spv", "ambilight.frag.spv", v.ycbcrQuadLayout,
-                       v.ycbcrAmbilightPipeline, true) ||
+                       v.ycbcrAmbilightPipeline, true, VK_NULL_HANDLE, dflt, nullptr, kWriteRgba, false,
+                       kMaskTest) ||
         !buildPipeline("sphere.vert.spv", "video_sphere.frag.spv",
-                       v.ycbcrSphereLayout, v.ycbcrSpherePipeline)) {
+                       v.ycbcrSphereLayout, v.ycbcrSpherePipeline, false, VK_NULL_HANDLE, dflt, nullptr,
+                       kWriteRgba, false, kMaskTest)) {
         return false;
+    }
+    // A clip opened in 360/180: its single-sampled eye-pass variants now
+    // (else on the first 360/180 frame, wantSingleSampleEye).
+    v.ycbcr1xTried = false;
+    if (renderPass1x_ != VK_NULL_HANDLE && projectionMode_ != ProjectionMode::Flat && !singleSampleEyeOff_) {
+        createYcbcrSingleSample(v);
     }
     // The screen picker previews live video on the panel: needs a variant for
     // the UI layer's render pass.
@@ -9706,6 +10002,11 @@ void VulkanRenderer::destroyRetiredFrames(VideoSlot& v, std::size_t keep) {
 void VulkanRenderer::destroyYcbcr(VideoSlot& v) {
     destroyRetiredFrames(v, 0);  // callers have waited for the GPU
     v.directActive = false;
+    for (VkPipeline* p : {&v.ycbcrQuadPipeline1x, &v.ycbcrSpherePipeline1x, &v.ycbcrSphereDirectPipeline1x}) {
+        if (*p != VK_NULL_HANDLE && device_ != VK_NULL_HANDLE) vkDestroyPipeline(device_, *p, nullptr);
+        *p = VK_NULL_HANDLE;
+    }
+    v.ycbcr1xTried = false;
     if (v.ycbcrSphereDirectPipeline != VK_NULL_HANDLE) {
         vkDestroyPipeline(device_, v.ycbcrSphereDirectPipeline, nullptr);
         v.ycbcrSphereDirectPipeline = VK_NULL_HANDLE;
@@ -10110,6 +10411,19 @@ bool VulkanRenderer::createModelPipeline() {
         return false;
     }
 
+    if (!buildModelPipeline(renderPass_, sampleCount_, modelPipeline_)) {
+        modelPipeline_ = VK_NULL_HANDLE;
+        return false;
+    }
+    // Single-sampled eye pass variant (360/180; the models layer keeps MSAA).
+    if (renderPass1x_ != VK_NULL_HANDLE &&
+        !buildModelPipeline(renderPass1x_, VK_SAMPLE_COUNT_1_BIT, modelPipeline1x_)) {
+        modelPipeline1x_ = VK_NULL_HANDLE;
+    }
+    return true;
+}
+
+bool VulkanRenderer::buildModelPipeline(VkRenderPass pass, VkSampleCountFlagBits samples, VkPipeline& out) {
     VkShaderModule vert = loadShaderModule("model.vert.spv");
     VkShaderModule frag = loadShaderModule("model.frag.spv");
     if (vert == VK_NULL_HANDLE || frag == VK_NULL_HANDLE) {
@@ -10156,7 +10470,7 @@ bool VulkanRenderer::createModelPipeline() {
 
     VkPipelineMultisampleStateCreateInfo ms{
         VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
-    ms.rasterizationSamples = sampleCount_;
+    ms.rasterizationSamples = samples;
 
     VkPipelineColorBlendAttachmentState cba{};
     cba.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
@@ -10194,10 +10508,10 @@ bool VulkanRenderer::createModelPipeline() {
     gp.pDepthStencilState = &ds;
     gp.pDynamicState = &dynState;
     gp.layout = modelLayout_;
-    gp.renderPass = renderPass_;
+    gp.renderPass = pass;
     gp.subpass = 0;
     const VkResult res = vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &gp,
-                                                   nullptr, &modelPipeline_);
+                                                   nullptr, &out);
     vkDestroyShaderModule(device_, vert, nullptr);
     vkDestroyShaderModule(device_, frag, nullptr);
     if (res != VK_SUCCESS) {
@@ -10206,6 +10520,302 @@ bool VulkanRenderer::createModelPipeline() {
         return false;
     }
     return true;
+}
+
+// The visibility mask: hidden-area triangles at depth 0, black, depth written
+// (test LESS_OR_EQUAL against the cleared 1.0: same direction as the later
+// tests, so the GPU's early / low-resolution depth stays usable).
+bool VulkanRenderer::buildMaskPipeline(VkRenderPass pass, VkSampleCountFlagBits samples, VkPipeline& out) {
+    out = VK_NULL_HANDLE;
+    if (maskLayout_ == VK_NULL_HANDLE) return false;
+    VkShaderModule vert = loadShaderModule("mask.vert.spv");
+    VkShaderModule frag = loadShaderModule("mask.frag.spv");
+    if (vert == VK_NULL_HANDLE || frag == VK_NULL_HANDLE) {
+        if (vert != VK_NULL_HANDLE) vkDestroyShaderModule(device_, vert, nullptr);
+        if (frag != VK_NULL_HANDLE) vkDestroyShaderModule(device_, frag, nullptr);
+        return false;
+    }
+    std::array<VkPipelineShaderStageCreateInfo, 2> stages{};
+    stages[0] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = vert;
+    stages[0].pName = "main";
+    stages[1] = {VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO};
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = frag;
+    stages[1].pName = "main";
+
+    VkVertexInputBindingDescription vb{0, sizeof(float) * 2, VK_VERTEX_INPUT_RATE_VERTEX};
+    VkVertexInputAttributeDescription va{0, 0, VK_FORMAT_R32G32_SFLOAT, 0};
+    VkPipelineVertexInputStateCreateInfo vi{VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
+    vi.vertexBindingDescriptionCount = 1;
+    vi.pVertexBindingDescriptions = &vb;
+    vi.vertexAttributeDescriptionCount = 1;
+    vi.pVertexAttributeDescriptions = &va;
+    VkPipelineInputAssemblyStateCreateInfo ia{VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
+    ia.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineViewportStateCreateInfo vpState{VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
+    vpState.viewportCount = 1;
+    vpState.scissorCount = 1;
+    VkPipelineRasterizationStateCreateInfo raster{VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
+    raster.polygonMode = VK_POLYGON_MODE_FILL;
+    raster.cullMode = VK_CULL_MODE_NONE;  // winding as the runtime gives it
+    raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    raster.lineWidth = 1.0f;
+    VkPipelineMultisampleStateCreateInfo ms{VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
+    ms.rasterizationSamples = samples;
+    VkPipelineColorBlendAttachmentState cba{};
+    cba.colorWriteMask = kWriteRgba;
+    VkPipelineColorBlendStateCreateInfo cb{VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
+    cb.attachmentCount = 1;
+    cb.pAttachments = &cba;
+    std::array<VkDynamicState, 2> dyn{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynState{VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
+    dynState.dynamicStateCount = static_cast<uint32_t>(dyn.size());
+    dynState.pDynamicStates = dyn.data();
+    VkPipelineDepthStencilStateCreateInfo ds{VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
+    ds.depthTestEnable = VK_TRUE;
+    ds.depthWriteEnable = VK_TRUE;
+    ds.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
+
+    VkGraphicsPipelineCreateInfo gp{VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
+    gp.stageCount = 2;
+    gp.pStages = stages.data();
+    gp.pVertexInputState = &vi;
+    gp.pInputAssemblyState = &ia;
+    gp.pViewportState = &vpState;
+    gp.pRasterizationState = &raster;
+    gp.pMultisampleState = &ms;
+    gp.pColorBlendState = &cb;
+    gp.pDepthStencilState = &ds;
+    gp.pDynamicState = &dynState;
+    gp.layout = maskLayout_;
+    gp.renderPass = pass;
+    gp.subpass = 0;
+    const VkResult res = vkCreateGraphicsPipelines(device_, VK_NULL_HANDLE, 1, &gp, nullptr, &out);
+    vkDestroyShaderModule(device_, vert, nullptr);
+    vkDestroyShaderModule(device_, frag, nullptr);
+    if (res != VK_SUCCESS) {
+        PIXELVR_LOG_WARN("Visibility mask pipeline failed: VkResult(%d)", static_cast<int>(res));
+        out = VK_NULL_HANDLE;
+        return false;
+    }
+    return true;
+}
+
+void VulkanRenderer::destroyVisibilityMask() {
+    for (MaskMesh& m : maskMeshes_) {
+        if (m.buffer != VK_NULL_HANDLE) vkDestroyBuffer(device_, m.buffer, nullptr);
+        if (m.memory != VK_NULL_HANDLE) vkFreeMemory(device_, m.memory, nullptr);
+        m = MaskMesh{};
+    }
+}
+
+// Uploads the runtime's hidden-area meshes when XrContext fetched new ones
+// (session start, visibility-mask-changed event). Logs how much of each view
+// they cover (at this frame's FOV), and refuses a mesh that would cover the
+// middle of the view (wrong coordinate space): better no mask than a hole.
+void VulkanRenderer::updateVisibilityMask(XrContext& xr, const XrView* views, uint32_t viewCount) {
+    if (device_ == VK_NULL_HANDLE || maskPipeline_ == VK_NULL_HANDLE || maskOff_) return;
+    if (xr.visibilityMaskGeneration() == maskGeneration_) return;
+    maskGeneration_ = xr.visibilityMaskGeneration();
+    vkDeviceWaitIdle(device_);  // rare: the old buffers may still be drawn
+    destroyVisibilityMask();
+    for (uint32_t e = 0; e < 2 && e < viewCount; ++e) {
+        const std::vector<XrVector2f>& verts = xr.visibilityMaskVertices(e);
+        const std::vector<uint32_t>& idx = xr.visibilityMaskIndices(e);
+        if (verts.empty() || idx.size() < 3) continue;
+        const float tl = std::tan(views[e].fov.angleLeft), tr = std::tan(views[e].fov.angleRight);
+        const float tu = std::tan(views[e].fov.angleUp), td = std::tan(views[e].fov.angleDown);
+        if (tr - tl <= 1e-6f || tu - td <= 1e-6f) continue;
+        // Coverage on a 64 x 64 grid of the view (NDC as mask.vert computes it).
+        auto ndc = [&](const XrVector2f& p) {
+            return std::array<float, 2>{(2.0f * p.x - (tr + tl)) / (tr - tl), (2.0f * p.y - (tu + td)) / (td - tu)};
+        };
+        constexpr int kGrid = 64;
+        int covered = 0, coveredCentre = 0;
+        for (int gy = 0; gy < kGrid; ++gy) {
+            for (int gx = 0; gx < kGrid; ++gx) {
+                const float px = -1.0f + (2.0f * static_cast<float>(gx) + 1.0f) / kGrid;
+                const float py = -1.0f + (2.0f * static_cast<float>(gy) + 1.0f) / kGrid;
+                bool in = false;
+                for (std::size_t t = 0; t + 2 < idx.size() && !in; t += 3) {
+                    const auto a = ndc(verts[idx[t]]), b = ndc(verts[idx[t + 1]]), c = ndc(verts[idx[t + 2]]);
+                    const float d1 = (px - b[0]) * (a[1] - b[1]) - (a[0] - b[0]) * (py - b[1]);
+                    const float d2 = (px - c[0]) * (b[1] - c[1]) - (b[0] - c[0]) * (py - c[1]);
+                    const float d3 = (px - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (py - a[1]);
+                    const bool neg = d1 < 0.0f || d2 < 0.0f || d3 < 0.0f;
+                    const bool pos = d1 > 0.0f || d2 > 0.0f || d3 > 0.0f;
+                    in = !(neg && pos);
+                }
+                if (in) {
+                    ++covered;
+                    if (std::fabs(px) < 0.5f && std::fabs(py) < 0.5f) ++coveredCentre;
+                }
+            }
+        }
+        const float share = 100.0f * static_cast<float>(covered) / static_cast<float>(kGrid * kGrid);
+        if (coveredCentre > 0 || share > 50.0f) {
+            PIXELVR_LOG_WARN("Visibility mask view %u ignored: it would cover the middle of the view (%.1f%%)", e,
+                             share);
+            continue;
+        }
+        MaskMesh& m = maskMeshes_[e];
+        const VkDeviceSize vBytes = verts.size() * sizeof(XrVector2f);
+        const VkDeviceSize iBytes = idx.size() * sizeof(uint32_t);
+        VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+        bi.size = vBytes + iBytes;
+        bi.usage = VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
+        bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        if (vkCreateBuffer(device_, &bi, nullptr, &m.buffer) != VK_SUCCESS) {
+            m = MaskMesh{};
+            continue;
+        }
+        VkMemoryRequirements req{};
+        vkGetBufferMemoryRequirements(device_, m.buffer, &req);
+        VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+        ai.allocationSize = req.size;
+        ai.memoryTypeIndex = findMemoryType(req.memoryTypeBits,
+                                            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        void* mapped = nullptr;
+        if (vkAllocateMemory(device_, &ai, nullptr, &m.memory) != VK_SUCCESS ||
+            vkBindBufferMemory(device_, m.buffer, m.memory, 0) != VK_SUCCESS ||
+            vkMapMemory(device_, m.memory, 0, VK_WHOLE_SIZE, 0, &mapped) != VK_SUCCESS) {
+            if (m.buffer != VK_NULL_HANDLE) vkDestroyBuffer(device_, m.buffer, nullptr);
+            if (m.memory != VK_NULL_HANDLE) vkFreeMemory(device_, m.memory, nullptr);
+            m = MaskMesh{};
+            continue;
+        }
+        std::memcpy(mapped, verts.data(), static_cast<std::size_t>(vBytes));
+        std::memcpy(static_cast<char*>(mapped) + vBytes, idx.data(), static_cast<std::size_t>(iBytes));
+        vkUnmapMemory(device_, m.memory);
+        m.indexOffset = vBytes;  // a multiple of 8: fine for 32-bit indices
+        m.indexCount = static_cast<uint32_t>(idx.size());
+        float x0 = 1e9f, x1 = -1e9f, y0 = 1e9f, y1 = -1e9f;
+        for (const XrVector2f& q : verts) {
+            x0 = std::min(x0, q.x);
+            x1 = std::max(x1, q.x);
+            y0 = std::min(y0, q.y);
+            y1 = std::max(y1, q.y);
+        }
+        PIXELVR_LOG_INFO("Visibility mask view %u: %zu triangles, hides %.1f%% of the eye image (mesh x %.3f..%.3f, "
+                         "y %.3f..%.3f; view tan l %.3f r %.3f u %.3f d %.3f)",
+                         e, idx.size() / 3, share, x0, x1, y0, y1, tl, tr, tu, td);
+    }
+}
+
+void VulkanRenderer::createTimestampPool() {
+    VkPhysicalDeviceProperties props{};
+    vkGetPhysicalDeviceProperties(physicalDevice_, &props);
+    uint32_t familyCount = 0;
+    vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice_, &familyCount, nullptr);
+    std::vector<VkQueueFamilyProperties> families(familyCount);
+    vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice_, &familyCount, families.data());
+    const uint32_t validBits = queueFamilyIndex_ < familyCount ? families[queueFamilyIndex_].timestampValidBits : 0u;
+    if (validBits == 0 || props.limits.timestampPeriod <= 0.0f) {
+        PIXELVR_LOG_WARN("GPU timestamps unsupported on this queue (valid bits %u, compute+graphics %u); no GPU times",
+                         validBits, props.limits.timestampComputeAndGraphics);
+        return;
+    }
+    tsPeriodNs_ = static_cast<double>(props.limits.timestampPeriod);
+    tsMask_ = validBits >= 64 ? ~0ull : ((1ull << validBits) - 1ull);
+    VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+    qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
+    qi.queryCount = static_cast<uint32_t>(kTsFrames * kTsPairs * 2);
+    if (vkCreateQueryPool(device_, &qi, nullptr, &tsPool_) != VK_SUCCESS) {
+        tsPool_ = VK_NULL_HANDLE;
+        PIXELVR_LOG_WARN("GPU timestamp query pool failed; no GPU times");
+        return;
+    }
+    PIXELVR_LOG_INFO("GPU timestamps: %.2f ns/tick, %u valid bits%s", tsPeriodNs_, validBits,
+                     props.limits.timestampComputeAndGraphics ? "" : " (graphics queue only)");
+}
+
+int VulkanRenderer::gpuTimerBegin(VkCommandBuffer cb, int pair) {
+    if (tsPool_ == VK_NULL_HANDLE || pair < 0 || pair >= kTsPairs) return -1;
+    if (tsWritten_[tsFrame_][pair]) return -1;  // already used this frame (keep the first)
+    const uint32_t q = static_cast<uint32_t>((tsFrame_ * kTsPairs + pair) * 2);
+    vkCmdResetQueryPool(cb, tsPool_, q, 2);
+    // Begin at BOTTOM_OF_PIPE too: written once all earlier work on the queue
+    // is done, so a pass submitted while the previous one still runs (eye 1
+    // behind eye 0) does not count that one's tail.
+    vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, tsPool_, q);
+    tsWritten_[tsFrame_][pair] = true;
+    return pair;
+}
+
+void VulkanRenderer::gpuTimerEnd(VkCommandBuffer cb, int pair) {
+    if (tsPool_ == VK_NULL_HANDLE || pair < 0 || pair >= kTsPairs) return;
+    const uint32_t q = static_cast<uint32_t>((tsFrame_ * kTsPairs + pair) * 2);
+    vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, tsPool_, q + 1);
+}
+
+int VulkanRenderer::gpuTimerBeginVideo(VkCommandBuffer cb) {
+    if (tsPool_ == VK_NULL_HANDLE || tsVideoUsed_[tsFrame_] >= kTsVideoPairs) return -1;
+    return gpuTimerBegin(cb, kTsVideo0 + tsVideoUsed_[tsFrame_]++);
+}
+
+// Called once per frame before its first pass: reads the slot about to be
+// reused (written kTsFrames frames ago, long finished; never waits) into the
+// averages, then frees it for this frame.
+void VulkanRenderer::gpuTimerNewFrame() {
+    if (tsPool_ == VK_NULL_HANDLE) return;
+    tsFrame_ = (tsFrame_ + 1) % kTsFrames;
+    const int f = tsFrame_;
+    double ms[kTsPairs] = {};
+    bool any = false, complete = true;
+    for (int p = 0; p < kTsPairs; ++p) {
+        if (!tsWritten_[f][p]) continue;
+        uint64_t data[4] = {};  // begin, availability, end, availability
+        const uint32_t q = static_cast<uint32_t>((f * kTsPairs + p) * 2);
+        const VkResult r = vkGetQueryPoolResults(device_, tsPool_, q, 2, sizeof(data), data, 2 * sizeof(uint64_t),
+                                                 VK_QUERY_RESULT_64_BIT | VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+        if ((r != VK_SUCCESS && r != VK_NOT_READY) || data[1] == 0 || data[3] == 0) {
+            complete = false;
+            continue;
+        }
+        const uint64_t ticks = ((data[2] & tsMask_) - (data[0] & tsMask_)) & tsMask_;
+        ms[p] = static_cast<double>(ticks) * tsPeriodNs_ * 1e-6;
+        any = true;
+    }
+    const bool eyes = tsWritten_[f][kTsEye0] || tsWritten_[f][kTsEye0 + 1];
+    if (any && complete && eyes) {
+        double video = ms[kTsCopies];
+        for (int p = kTsVideo0; p < kTsVideo0 + kTsVideoPairs; ++p) video += ms[p];
+        for (GpuTimes* g : {&tsAccum_, &tsRecentAccum_}) {
+            g->eye += ms[kTsEye0] + ms[kTsEye0 + 1];
+            g->models += ms[kTsModels];
+            g->ui += ms[kTsUi] + ms[kTsCursor];
+            g->video += video;
+            g->frames += 1;
+        }
+        if (tsRecentAccum_.frames >= 45) {  // ~0.5 s at 90 Hz
+            const double n = tsRecentAccum_.frames;
+            tsRecent_ = tsRecentAccum_;
+            tsRecent_.eye /= n;
+            tsRecent_.models /= n;
+            tsRecent_.ui /= n;
+            tsRecent_.video /= n;
+            tsRecent_.total = tsRecent_.eye + tsRecent_.models + tsRecent_.ui + tsRecent_.video;
+            tsRecentAccum_ = GpuTimes{};
+        }
+    }
+    for (bool& w : tsWritten_[f]) w = false;
+    tsVideoUsed_[f] = 0;
+}
+
+VulkanRenderer::GpuTimes VulkanRenderer::takeGpuTimes() {
+    GpuTimes g = tsAccum_;
+    tsAccum_ = GpuTimes{};
+    if (g.frames > 0) {
+        const double n = g.frames;
+        g.eye /= n;
+        g.models /= n;
+        g.ui /= n;
+        g.video /= n;
+        g.total = g.eye + g.models + g.ui + g.video;
+    }
+    return g;
 }
 
 bool VulkanRenderer::createModelTexture(const uint8_t* rgba, int width,
@@ -10732,6 +11342,9 @@ void VulkanRenderer::resolveFrame(VideoSlot& v, VkImage importedImage, bool acqu
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
                          nullptr, 0, nullptr, 0, nullptr);
+    // GPU time of the conversion + mip chain (video); not for a frame drawn
+    // straight from the decoder (just the ownership barrier).
+    const int tsResolve = acquireOnly ? -1 : gpuTimerBeginVideo(cmd);
 
     // 1. Acquire the decoder-written buffer from the foreign (V4L2) producer and
     // move it into a shader-readable layout. The DRM modifier fixes the memory
@@ -10838,6 +11451,7 @@ void VulkanRenderer::resolveFrame(VideoSlot& v, VkImage importedImage, bool acqu
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
                          VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
                          nullptr, 1, &sr);
+    gpuTimerEnd(cmd, tsResolve);
 
     vkEndCommandBuffer(cmd);
     VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
@@ -11061,6 +11675,7 @@ void VulkanRenderer::updateVideoTexture(int width, int height, const uint8_t* y,
     VkCommandBufferBeginInfo begin{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(uploadCmd_, &begin);
+    const int tsUpload = gpuTimerBeginVideo(uploadCmd_);  // GPU time: video work
 
     const bool wasInit = v.videoLayoutInitialized;
 
@@ -11174,6 +11789,7 @@ void VulkanRenderer::updateVideoTexture(int width, int height, const uint8_t* y,
     upload_plane(v.lumaImage, width, height, v.lumaMipLevels, 0);
     upload_plane(v.chromaImage, width / 2, height / 2, v.chromaMipLevels,
                  static_cast<VkDeviceSize>(lumaBytes));
+    gpuTimerEnd(uploadCmd_, tsUpload);
 
     vkEndCommandBuffer(uploadCmd_);
 

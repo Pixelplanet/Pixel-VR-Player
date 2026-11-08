@@ -628,6 +628,25 @@ public:
         viewCpuMs = perfViewMs_;
         perfGpuWaitMs_ = perfViewMs_ = 0.0;
     }
+    // GPU time per rendered frame (timestamp queries, read back a few frames
+    // later without waiting), in milliseconds: both eye passes, the controller
+    // models layer, the UI panel layer (+ beam / cursor layers) and the video
+    // work (screen-layer copies, YCbCr resolve + mip chain, CPU-path uploads).
+    // `frames` = frames averaged (0: nothing measured, or no timestamp support).
+    // Eye-pass state over the same frames: how many eye passes ran with MSAA
+    // or single-sampled, and how many drew the visibility mask.
+    struct GpuTimes {
+        double eye = 0.0, models = 0.0, ui = 0.0, video = 0.0, total = 0.0;
+        int frames = 0;
+        int eyePasses = 0, msaaPasses = 0, maskPasses = 0;
+    };
+    bool gpuTimingSupported() const { return tsPool_ != VK_NULL_HANDLE; }
+    // The PERF window's averages since the last call; resets them.
+    GpuTimes takeGpuTimes();
+    // Rolling average over about the last half second (the stats overlay).
+    const GpuTimes& gpuTimesRecent() const { return tsRecent_; }
+    // The eye pass's MSAA sample count (1 = no MSAA).
+    int eyeMsaaSamples() const { return static_cast<int>(sampleCount_); }
     bool controlBarVisible() const { return controlBarVisible_; }
     void setHudLabels(const std::string& format, const std::string& audio,
                       const std::string& screen, bool formatEnabled = true,
@@ -708,10 +727,12 @@ public:
     VkDevice device() const { return device_; }
 
 private:
-    bool createRenderPass(VkFormat format);
+    bool createRenderPass(VkFormat format, VkSampleCountFlagBits samples, VkRenderPass& out);
     VkSampleCountFlagBits chooseSampleCount() const;
     bool createMsaaTarget(int32_t width, int32_t height);
-    bool createDepthTarget(int32_t width, int32_t height);
+    bool createDepthTarget(int32_t width, int32_t height, VkSampleCountFlagBits samples, VkImage& image,
+                           VkDeviceMemory& memory, VkImageView& view);
+    void destroyDepthTarget(VkImage& image, VkDeviceMemory& memory, VkImageView& view);
     bool initText();
     bool uploadFontAtlas(const FontAtlas& atlas, VkImage& image, VkDeviceMemory& memory,
                          VkImageView& view);
@@ -726,8 +747,39 @@ private:
                        VkColorComponentFlags writeMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                                                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
                        bool fade = false,  // fade: multiplies the target by the source alpha
-                       bool depthTest = false);  // test (never write) the depth buffer
+                       // Depth test (never write) with this compare op; MAX_ENUM = no test.
+                       VkCompareOp depthCompare = VK_COMPARE_OP_MAX_ENUM);
     struct VideoSlot;
+    // --- Single-sampled eye pass (360/180) -------------------------------
+    // In immersive projection the eye pass renders straight into the
+    // swapchain image (renderPass1x_: 1x colour + 1x depth, no MSAA target,
+    // no resolve) with 1x variants of every pipeline that pass can bind.
+    // Flat mode and the controller models layer keep renderPass_ (MSAA).
+    bool createSingleSamplePipelines();          // core set (startup)
+    bool createYcbcrSingleSample(VideoSlot& v);  // a video slot's sphere / quad
+    // Picks this frame's eye-pass variant (builds missing YCbCr 1x pipelines
+    // first); true = single-sampled.
+    bool wantSingleSampleEye();
+    // The 1x depth target, framebuffers and every non-YCbCr 1x pipeline the
+    // eye pass may bind exist (shared by wantSingleSampleEye and the startup log).
+    bool singleSamplePipelinesReady() const;
+    // The pipeline to bind in the current eye pass for `p` (its 1x variant
+    // while eyeSingleSample_; else `p`).
+    VkPipeline eyePipeline(VkPipeline p) const;
+    // Model pipeline for `pass` / `samples` (renderPass_ or renderPass1x_).
+    bool buildModelPipeline(VkRenderPass pass, VkSampleCountFlagBits samples, VkPipeline& out);
+    // --- Visibility mask (XR_KHR_visibility_mask) -------------------------
+    bool buildMaskPipeline(VkRenderPass pass, VkSampleCountFlagBits samples, VkPipeline& out);
+    void updateVisibilityMask(XrContext& xr, const XrView* views, uint32_t viewCount);
+    void destroyVisibilityMask();
+    // --- GPU timestamps ---------------------------------------------------
+    void createTimestampPool();
+    void gpuTimerNewFrame();
+    // A begin / end timestamp pair (outside render passes) in `cb`; begin
+    // returns the pair index or -1 (timing off / no free pair).
+    int gpuTimerBegin(VkCommandBuffer cb, int pair);
+    void gpuTimerEnd(VkCommandBuffer cb, int pair);
+    int gpuTimerBeginVideo(VkCommandBuffer cb);   // next free video pair
     bool createVideoResources(VideoSlot& v, int width, int height);
     void destroyVideoResources(VideoSlot& v);
     bool createYcbcrPipeline(VideoSlot& v, uint32_t fourcc, int colorspace, bool fullRange);
@@ -755,6 +807,8 @@ private:
         int32_t height = 0;
         std::vector<VkImageView> imageViews;
         std::vector<VkFramebuffer> framebuffers;
+        // Eye targets only: renderPass1x_ framebuffers (swapchain image + 1x depth).
+        std::vector<VkFramebuffer> framebuffers1x;
     };
 
     // One UI-layer pass: which image, the pixel sub-rect drawn, and the
@@ -1308,6 +1362,12 @@ private:
         int directW = 0, directH = 0;  // its frame size
         VkPipelineLayout ycbcrSphereDirectLayout = VK_NULL_HANDLE;
         VkPipeline ycbcrSphereDirectPipeline = VK_NULL_HANDLE;
+        // Single-sampled eye pass (renderPass1x_) variants, built when 360/180
+        // needs them; ycbcr1xTried: built (or failed) for the current set.
+        VkPipeline ycbcrQuadPipeline1x = VK_NULL_HANDLE;
+        VkPipeline ycbcrSpherePipeline1x = VK_NULL_HANDLE;
+        VkPipeline ycbcrSphereDirectPipeline1x = VK_NULL_HANDLE;
+        bool ycbcr1xTried = false;
         struct RetiredFrame {
             VkImage image = VK_NULL_HANDLE;
             VkDeviceMemory memory = VK_NULL_HANDLE;
@@ -1387,6 +1447,58 @@ private:
     VkDeviceMemory depthMemory_ = VK_NULL_HANDLE;
     VkImageView depthView_ = VK_NULL_HANDLE;
     VkFormat depthFormat_ = VK_FORMAT_D32_SFLOAT;
+
+    // Single-sampled eye pass (360/180): render pass, its 1x depth target
+    // (sized like depthImage_) and the 1x pipeline variants. All null when
+    // the device has no MSAA (renderPass_ is single-sampled already).
+    VkRenderPass renderPass1x_ = VK_NULL_HANDLE;
+    VkImage depth1xImage_ = VK_NULL_HANDLE;
+    VkDeviceMemory depth1xMemory_ = VK_NULL_HANDLE;
+    VkImageView depth1xView_ = VK_NULL_HANDLE;
+    VkPipeline pipeline1x_ = VK_NULL_HANDLE;
+    VkPipeline spherePipeline1x_ = VK_NULL_HANDLE;
+    VkPipeline uiPipeline1x_ = VK_NULL_HANDLE;
+    VkPipeline uiPipelineDepth1x_ = VK_NULL_HANDLE;
+    VkPipeline textPipeline1x_ = VK_NULL_HANDLE;
+    VkPipeline thumbPipeline1x_ = VK_NULL_HANDLE;
+    VkPipeline modelPipeline1x_ = VK_NULL_HANDLE;
+    bool singleSampleEyeOff_ = false;   // PIXELVR_SPHERE_MSAA=1: keep MSAA in 360/180
+    bool eyeSingleSample_ = false;      // the eye pass being recorded is single-sampled
+    bool singleSampleLogged_ = false;
+    bool lastEyeSingle_ = false;        // logged on change
+
+    // Visibility mask: per view, the hidden-area triangles (z = -1 plane of
+    // the view, i.e. tangents) in one host-visible buffer (vertices, then
+    // 32-bit indices), drawn at depth 0 (near) first in every eye pass so the
+    // depth test (VK_COMPARE_OP_LESS) of the video / sphere / glow pipelines
+    // and the models rejects those pixels early. Colour there is written black.
+    VkPipelineLayout maskLayout_ = VK_NULL_HANDLE;
+    VkPipeline maskPipeline_ = VK_NULL_HANDLE;    // renderPass_
+    VkPipeline maskPipeline1x_ = VK_NULL_HANDLE;  // renderPass1x_
+    struct MaskMesh {
+        VkBuffer buffer = VK_NULL_HANDLE;
+        VkDeviceMemory memory = VK_NULL_HANDLE;
+        VkDeviceSize indexOffset = 0;
+        uint32_t indexCount = 0;
+    };
+    MaskMesh maskMeshes_[2];
+    uint32_t maskGeneration_ = 0;       // XrContext::visibilityMaskGeneration() uploaded
+    bool maskOff_ = false;              // PIXELVR_VISMASK=0
+
+    // GPU timestamps: kTsFrames frames in flight, each with kTsPairs begin /
+    // end pairs (see the pair ids in vulkan_renderer.cpp); a frame's slot is
+    // read (no wait) just before it is reused, kTsFrames frames later.
+    static constexpr int kTsFrames = 4;
+    static constexpr int kTsPairs = 10;
+    VkQueryPool tsPool_ = VK_NULL_HANDLE;
+    double tsPeriodNs_ = 1.0;
+    uint64_t tsMask_ = ~0ull;
+    int tsFrame_ = 0;
+    bool tsWritten_[kTsFrames][kTsPairs] = {};
+    int tsVideoUsed_[kTsFrames] = {};
+    GpuTimes tsAccum_;                  // PERF window (takeGpuTimes); pass counts too
+    GpuTimes tsRecentAccum_;            // overlay window
+    GpuTimes tsRecent_;
 
     float clearColor_[4] = {0.02f, 0.02f, 0.05f, 1.0f};
     bool dmabufCapable_ = false;

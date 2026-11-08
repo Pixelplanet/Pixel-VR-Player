@@ -94,6 +94,16 @@ bool XrContext::createInstanceAndSystem(const char* appName) {
                          XR_KHR_COMPOSITION_LAYER_CYLINDER_EXTENSION_NAME);
     }
 
+    // Optional: the lens' hidden area per eye (the eye passes skip it).
+    if (has_ext(XR_KHR_VISIBILITY_MASK_EXTENSION_NAME)) {
+        enabledExts.push_back(XR_KHR_VISIBILITY_MASK_EXTENSION_NAME);
+        visibilityMaskEnabled_ = true;
+        PIXELVR_LOG_INFO("Visibility mask extension enabled");
+    } else {
+        PIXELVR_LOG_WARN("%s unavailable; the eye passes render the hidden lens area too",
+                         XR_KHR_VISIBILITY_MASK_EXTENSION_NAME);
+    }
+
     // Optional: real controller models via XR_EXT_render_model (depends on uuid +
     // interaction_render_model). Enabled only if all three are present.
     if (has_ext(XR_EXT_RENDER_MODEL_EXTENSION_NAME) &&
@@ -149,6 +159,10 @@ bool XrContext::createInstanceAndSystem(const char* appName) {
     if (!loadVulkanEnable2Functions()) {
         return false;
     }
+    if (visibilityMaskEnabled_ &&
+        !load_xr_function(instance_, "xrGetVisibilityMaskKHR", pfnGetVisibilityMask_)) {
+        visibilityMaskEnabled_ = false;
+    }
 
     // Enumerate the stereo view configuration.
     uint32_t viewCount = 0;
@@ -163,6 +177,7 @@ bool XrContext::createInstanceAndSystem(const char* appName) {
                                                        kViewConfigType, viewCount,
                                                        &viewCount, configViews_.data()));
     views_.assign(viewCount, XrView{XR_TYPE_VIEW});
+    visibilityMasks_.assign(viewCount, VisibilityMask{});
 
     PIXELVR_LOG_INFO("System ready: %u views, %ux%u per eye", viewCount,
                      configViews_[0].recommendedImageRectWidth,
@@ -347,8 +362,13 @@ bool XrContext::createSwapchains(int64_t colorFormat, float scaleFactor) {
                 recH = std::min(recH, configViews_[i].recommendedImageRectHeight);
             }
         }
-        const int minW = static_cast<int>(std::min(recW > 0 ? recW : 2160u, 2160u));
-        const int minH = static_cast<int>(std::min(recH > 0 ? recH : 2160u, 2160u));
+        // Floor: the panel's native 2160 (the swapchain is never smaller), even
+        // when SteamVR recommends less (its default is ~1728): adaptive scaling
+        // only ever trims an above-native setting.
+        (void)recW;
+        (void)recH;
+        const int minW = 2160;
+        const int minH = 2160;
         const char* fixedEnv = std::getenv("PIXELVR_FIXED_RES");
         const bool fixed = fixedEnv != nullptr && fixedEnv[0] == '1';
         renderScale_.configure(maxW, maxH, minW, minH, fixed);
@@ -1096,11 +1116,76 @@ bool XrContext::pollEvents(bool& exitRequested) {
                 PIXELVR_LOG_INFO("Interaction profile changed");
                 bindingsDirty_ = true;  // the Controls page re-reads the bindings
                 break;
+            case XR_TYPE_EVENT_DATA_VISIBILITY_MASK_CHANGED_KHR: {
+                const auto& ev = *reinterpret_cast<const XrEventDataVisibilityMaskChangedKHR*>(&event);
+                if (ev.viewConfigurationType == kViewConfigType && ev.viewIndex < visibilityMasks_.size()) {
+                    visibilityMasks_[ev.viewIndex].dirty = true;
+                    PIXELVR_LOG_INFO("Visibility mask changed (view %u)", ev.viewIndex);
+                }
+                break;
+            }
             default:
                 break;
         }
     }
     return true;
+}
+
+void XrContext::refreshVisibilityMasks() {
+    if (!visibilityMaskEnabled_ || pfnGetVisibilityMask_ == nullptr || session_ == XR_NULL_HANDLE) return;
+    for (uint32_t i = 0; i < visibilityMasks_.size(); ++i) {
+        VisibilityMask& m = visibilityMasks_[i];
+        if (!m.dirty) continue;
+        m.dirty = false;
+        m.vertices.clear();
+        m.indices.clear();
+        // Two-call idiom: sizes first, then the data.
+        XrVisibilityMaskKHR mask{XR_TYPE_VISIBILITY_MASK_KHR};
+        XrResult res = pfnGetVisibilityMask_(session_, kViewConfigType, i,
+                                             XR_VISIBILITY_MASK_TYPE_HIDDEN_TRIANGLE_MESH_KHR, &mask);
+        if (XR_SUCCEEDED(res) && mask.vertexCountOutput > 0 && mask.indexCountOutput > 0) {
+            m.vertices.resize(mask.vertexCountOutput);
+            m.indices.resize(mask.indexCountOutput);
+            mask.vertexCapacityInput = mask.vertexCountOutput;
+            mask.vertices = m.vertices.data();
+            mask.indexCapacityInput = mask.indexCountOutput;
+            mask.indices = m.indices.data();
+            res = pfnGetVisibilityMask_(session_, kViewConfigType, i,
+                                        XR_VISIBILITY_MASK_TYPE_HIDDEN_TRIANGLE_MESH_KHR, &mask);
+            if (XR_SUCCEEDED(res)) {
+                m.vertices.resize(mask.vertexCountOutput);
+                m.indices.resize(mask.indexCountOutput - mask.indexCountOutput % 3);
+                // An index past the vertices: no usable mask.
+                for (uint32_t idx : m.indices) {
+                    if (idx >= m.vertices.size()) {
+                        m.vertices.clear();
+                        m.indices.clear();
+                        break;
+                    }
+                }
+            } else {
+                m.vertices.clear();
+                m.indices.clear();
+            }
+        }
+        if (XR_FAILED(res)) {
+            PIXELVR_LOG_WARN("xrGetVisibilityMaskKHR(view %u) failed: %d", i, static_cast<int>(res));
+        } else {
+            PIXELVR_LOG_INFO("Visibility mask view %u: %zu vertices, %zu triangles", i, m.vertices.size(),
+                             m.indices.size() / 3);
+        }
+        ++visibilityMaskGeneration_;
+    }
+}
+
+const std::vector<XrVector2f>& XrContext::visibilityMaskVertices(uint32_t view) const {
+    static const std::vector<XrVector2f> kNone;
+    return view < visibilityMasks_.size() ? visibilityMasks_[view].vertices : kNone;
+}
+
+const std::vector<uint32_t>& XrContext::visibilityMaskIndices(uint32_t view) const {
+    static const std::vector<uint32_t> kNone;
+    return view < visibilityMasks_.size() ? visibilityMasks_[view].indices : kNone;
 }
 
 bool XrContext::userPresent() const {
@@ -1211,6 +1296,8 @@ bool XrContext::renderFrame(const RenderViewFn& renderView, const RenderLayersFn
 
     XrFrameBeginInfo beginInfo{XR_TYPE_FRAME_BEGIN_INFO};
     PIXELVR_XR_CHECK(instance_, xrBeginFrame(session_, &beginInfo));
+
+    refreshVisibilityMasks();  // first frame, and after a change event
 
     syncActions();
 
