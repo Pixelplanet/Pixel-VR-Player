@@ -9,11 +9,25 @@
 
 ## OPEN NOW (2026-11-08) — start here
 
-Priority: next candidates are Stage 2 of the controls (Options menus while watching / on web pages,
-previous / next file in a folder, small volume / seek indicators, vault page showing the button for
-each combo step), the parked on-screen controls rethink (music view dock buttons = prev / next track),
-and D1 2D→3D (needs a model/runtime decision). Foveated rendering is NOT needed for now (8K60 180° =
-~2-3 ms GPU at 2160 eyes after the single-sample 360/180 pass + visibility mask). Y*/S1 parked.
+Priority: everything in v1.14.0 is done and user-verified on the headset (2026-11-08, also the
+in-app updater). N1/N2, L1, R1, K1/K2 are done and user-verified. Next candidates:
+- **C2. Steam Input actions for the sticks** (new, user request 2026-11-08), see "Controls" below.
+- **C3. Controls Stage 2:** Options menus while watching / on web pages, previous / next file in a
+  folder, small volume / seek indicators, vault page showing the bound button for each combo step.
+- **C4. On-screen controls rethink** (parked by the user): music view dock buttons = prev / next
+  track instead of ±10 s.
+- D1 2D→3D (needs a model/runtime decision; research branch below).
+Foveated rendering is NOT needed for now (8K60 180° = ~2-3 ms GPU at 2160 eyes after the
+single-sample 360/180 pass + visibility mask). Y*/S1 are parked; M5 is low priority.
+
+**New 2026-11-08:** plugin system (P1), Jellyfin (J1), stereo convergence / autofocus (V1/V2),
+passthrough (PT0–PT3), Steam Cloud / Workshop (SC1) and the D1 research live in separate
+worktrees / branches. See "New items 2026-11-08" below for where each one is documented.
+**Those branches fork from `be3a940` (v1.13.x)** and are 12+ commits behind `main` (v1.14.0
+reworked input: `XrInputState` → semantic `InputAction`s, in-app remapping removed, the
+Controls settings pages replaced, controller models / labels moved to quad layers in
+`vulkan_renderer.cpp`). Rebase / merge onto `main` before building on them; P1 especially
+touches `app.cpp`, `settings_menu.*` and `vulkan_renderer.*`.
 
 State: released as **v1.14.0** (2026-11-08; notes in `docs/release-notes/v1.14.0.md`, tag push
 triggers `.github/workflows/release.yml`): SteamOS-native controls (one action set, SteamVR is the
@@ -25,14 +39,50 @@ The launch fix ("Up next" instead of "Resume Game") lives in `src/xr/vr_app_mani
 `tools/install.sh`. Headset: `ssh -i "$HOME/AppData/Local/steamos-devkit/steamos-devkit/devkit_rsa"
 steamos@192.168.178.61`; installed app is `~/PixelVRPlayer`.
 
-- [x] **N1. Play from the Downloads list ignores multi-screen:** FIXED 2026-11-07 (not yet user-verified): the Downloads row and "Open Share/Bookmark" go through `playFromBrowser` (picker / VR question in the Files hub; the click is consumed so the picker cannot take it). Original report: pressing Play on a
+### Controls (after v1.14.0)
+How input works now: one OpenXR action set `gameplay` ("Player Controls"); every action is in
+`kActionDefs` (`src/xr/xr_context.cpp`) with one `InputAction` enum entry each; SteamVR is the
+only place buttons are assigned (Settings › Controllers › Manage Controller Bindings); the app
+reads live bindings with `xrEnumerateBoundSourcesForAction` for the Controller Buttons pages and
+the floating labels (`src/ui/button_labels.*`). SteamVR shows the raw `actionName` (it drops
+`localizedActionName`), so names must read well on their own (`play-ok`, `main-menu`, …) and may
+not start with a digit. Renaming an action breaks users' saved custom bindings: say so in the
+release notes.
+
+- [ ] **C2. Steam Input actions for the sticks** (user request 2026-11-08). Today both sticks are
+  only exposed as two vector2 actions, `scrub-distance` (right) and `skip-distance` (left), so in
+  SteamVR's binding UI a stick can only be bound "as joystick" to one of those; scrub, fast
+  forward, skip or screen distance cannot be picked as separate actions, and a stick set to
+  D-pad / buttons mode has nothing sensible to bind to. Plan:
+  - Split the meaning out of the stick: e.g. `scrub` (vector1 or vector2 X, variable speed),
+    `screen-distance` (vector1), `zoom` / `tilt` for 360/180, and boolean actions per step
+    (`back-10s` / `forward-10s` exist as `left-back-10s` / `right-forward-10s`, `back-30s` /
+    `forward-30s`, `screen-closer` / `screen-farther`, `scrub-back` / `scrub-forward` held =
+    scrub at a fixed speed).
+  - Keep today's behaviour as the default binding (right stick = scrub X + distance Y, left =
+    skip 30 s + distance; 360/180 right = tilt/zoom, left X = scrub), so nothing changes for
+    users who never open the binding UI.
+  - The app logic in `app.cpp` (search `scrubTarget_`, `thumbstickRX`, `sphereMode`) reads
+    `in.thumbstick*`; it must instead combine the semantic actions (and the context rules:
+    stick latched by web pages `webStickLatched_`, menus scrolling, 360/180 swap).
+  - Check what SteamVR's binding UI offers per input mode (joystick / D-pad / buttons / scroll /
+    "touch" / gestures the user found) for vector1 vs vector2 vs boolean actions before choosing.
+  - Update the floating labels (stick card text) and Controller Buttons pages for the new
+    actions; mention renamed / split actions in the release notes.
+- [ ] **C3. Controls Stage 2** — see Priority above.
+- [ ] **C4. On-screen controls rethink** — parked by the user; music dock prev / next track.
+- Known limitation: label cards (quad layers at ~0.2–1.5 m) and 3D / 360 content are at
+  different depths, so eyes refocus; mitigated by near-opaque cards over 3D (user OK with it).
+- Gesture bindings (SteamVR "hold and rotate" etc.) did not work for the user yet; untested by us.
+
+- [x] **N1. Play from the Downloads list ignores multi-screen:** FIXED 2026-11-07, user-verified: the Downloads row and "Open Share/Bookmark" go through `playFromBrowser` (picker / VR question in the Files hub; the click is consumed so the picker cannot take it). Original report: pressing Play on a
   finished item in the Downloads window plays it immediately on the current screen. It
   must behave like opening a file from the file browser: with Multiple Screens on and
   screens open, show the screen picker (and 180/360 media replace everything, as elsewhere).
   Look at the Downloads-window play action in `src/app/app.cpp` (downloads window
   buttons/rows near the `drows`/`dbtns` code ~line 3430) vs. the file-browser play path
   (`loadMedia` / screen-picker logic ~lines 1897-1910, 2286-2303).
-- [x] **N2. Thumbstick input leaks to screen movement while using a Plex menu:** FIXED 2026-11-07 (not yet user-verified): two leaks — the page took the stick only above 0.2 while the screen push starts at 0.15, and a frame where the hit test slipped off the screen pushed it. Now the page always takes stick Y, latched while held and for 400 ms after the laser leaves (`webStickLatched_` / `webStickUntil_`). Original report: with
+- [x] **N2. Thumbstick input leaks to screen movement while using a Plex menu:** FIXED 2026-11-07, user-verified: two leaks — the page took the stick only above 0.2 while the screen push starts at 0.15, and a frame where the hit test slipped off the screen pushed it. Now the page always takes stick Y, latched while held and for 400 ms after the laser leaves (`webStickLatched_` / `webStickUntil_`). Original report: with
   Plex's "…" submenu open on a browser screen, moving the stick up/down repeatedly
   sometimes nudges the screen Plex is on by a tiny amount, as if the laser were beside the
   screen (move/zoom-screen stick handling). Stick input while the laser is on a web
@@ -192,7 +242,7 @@ hardware VP9/H.264 in our player (works with multi-screen).
   then WebDAV over libcurl (PROPFIND listing, ranged GET read-ahead; shares the HTTP reader
   with S2). NFS (libnfs, host-based auth) and DLNA only if asked. Check on the headset which
   of libssh / libssh2 / libnfs / libcurl SteamOS ships.
-- [x] **L1. Laser smoothing:** DONE 2026-11-07 (not yet user-verified): One Euro filter on the aim pose (`src/util/one_euro.hpp`, applied in `App::run` right after `xr_.input()`, so hit tests, beam and grabbing all use it); Settings › Controls › Laser Smoothing Off/Low/Medium/High (default Medium, `laser_smoothing`). Original note: SteamOS's own laser is steady even with a shaky
+- [x] **L1. Laser smoothing:** DONE 2026-11-07, user-verified: One Euro filter on the aim pose (`src/util/one_euro.hpp`, applied in `App::run` right after `xr_.input()`, so hit tests, beam and grabbing all use it); Settings › Controls › Laser Smoothing Off/Low/Medium/High (default Medium, `laser_smoothing`). Original note: SteamOS's own laser is steady even with a shaky
   hand; ours uses the raw aim pose. Filter the aim ray (One Euro filter on direction +
   origin: strong smoothing when slow, little lag on fast moves), applied to the ray used
   for hit testing and drawing alike; button presses keep the hit of the press frame.
@@ -208,18 +258,76 @@ hardware VP9/H.264 in our player (works with multi-screen).
   Depth Anything V2 *Small* (Apache-2.0; Base/Large are CC-BY-NC → not usable); check
   ZipDepth's licence before using it. Inference runtime on the Frame: Vulkan compute (ncnn,
   BSD-3) or the Adreno NPU if exposed. Prototype on 1080p flat first.
-- [x] **R1. Room colour:** DONE 2026-11-07 (not yet user-verified): Settings › Display › Room Midnight/Black/Slate/Warm (`room`); Black also turns the screen glow off. Environment scenes not done. Original note: user-selectable room backdrop —
+- [x] **R1. Room colour:** DONE 2026-11-07, user-verified: Settings › Display › Room Midnight/Black/Slate/Warm (`room`); the screen glow stays on in Black (user wish: it looks best on black). Environment scenes not done. Original note: user-selectable room backdrop —
   presets (current navy, pure black "cinema" with no distractions, a few tinted / themed
   rooms), later optional environment scenes. Applies to the projection-layer clear colour
   and the floor/ambient; pure black must also drop the ambilight glow when chosen.
-- [x] **K1. Keyboard closer to the Steam Frame default:** DONE 2026-11-07 (not yet user-verified), modelled on the SteamOS/PC layout (number row + Backspace, Enter on the home row, two Shifts, bottom row ?123 / @ / Space / arrows); compare with the real Frame keyboard. Original note: make our in-app
+- [x] **K1. Keyboard closer to the Steam Frame default:** DONE 2026-11-07, user-verified, modelled on the SteamOS/PC layout (number row + Backspace, Enter on the home row, two Shifts, bottom row ?123 / @ / Space / arrows); compare with the real Frame keyboard. Original note: make our in-app
   keyboard's key arrangement, sizes and special keys (shift, symbols, backspace, enter,
   space) match the SteamOS/Steam Frame on-screen keyboard so it feels familiar.
-- [x] **K2. More keyboard layouts:** DONE 2026-11-07 (not yet user-verified): US, Deutsch, UK, Français (AZERTY), Nordic (SE/FI, æ ø on the symbols page); `keyboard_layout` 0..4 keeps old values. Original note: add a layout choice (e.g. QWERTY US/UK,
+- [x] **K2. More keyboard layouts:** DONE 2026-11-07, user-verified: US, Deutsch, UK, Français (AZERTY), Nordic (SE/FI, æ ø on the symbols page); `keyboard_layout` 0..4 keeps old values. Original note: add a layout choice (e.g. QWERTY US/UK,
   QWERTZ German, AZERTY French, Nordic) with the matching umlauts/accents; remember the
   choice in settings.conf.
 - DRM services: Prime Video verified working in the browser screen (Widevine L3, 1080p);
   Netflix / Disney+ use the same path.
+
+### New items 2026-11-08 — research and work in their own worktrees / branches
+All of these live **outside `main`** until merged. Each branch has its doc under `docs/concepts/`.
+On the PC the worktrees sit next to the main checkout (`C:\Projects\PixelVRPlayer-*`); the
+branches are local (not pushed) unless noted.
+
+- [~] **P1. Plugin system + first-party plugins:** BUILT, not yet merged or tried in the headset.
+  - Branch `feature/plugin-system`, worktree `C:\Projects\PixelVRPlayer-plugins`.
+  - Spec, decisions and **progress log**: `docs/concepts/PLUGIN_SYSTEM_SPEC.md` (start here).
+  - Out-of-process JSON-lines plugins, Settings › Controls & Input › Plugins, vault opt-in per
+    plugin, `.pvrplugin` install from the file browser, plugins as separate release downloads.
+  - Plugins:
+    - `plugins/funscript` (Intiface/Buttplug v3; 25/25 against `tools/fake_intiface.py`).
+    - `plugins/deovr-remote` (DeoVR-compatible sync for MultiFunPlayer & co, 11/11).
+    - `plugins/example`.
+  - Headset builds of this branch go to `~/pixelvr-src-plugins` (never `~/pixelvr-src`).
+  - Touches `app.cpp`, `settings_menu.*`, `vulkan_renderer.*`, `browser.*`, `release.yml`, so
+    expect merge work with newer `main`.
+- [ ] **H1. Interactive devices (funscript / Buttplug / Lovense / The Handy) research:** DONE as
+  research. Branch `research/steam-cloud-workshop-haptics`, worktree
+  `C:\Projects\PixelVRPlayer-research`, `docs/concepts/HAPTICS_FUNSCRIPT_RESEARCH.md`. Implemented
+  as plugins in P1. Open: multi-axis scripts, The Handy API, TCode, a real-hardware test by a user.
+- [ ] **SC1. Steam Cloud + Workshop:** researched, not started. Same branch / worktree as H1,
+  `docs/concepts/STEAM_CLOUD_WORKSHOP_RESEARCH.md`.
+  - Auto-Cloud on a dedicated sync folder (never passwords, vault or browser profile).
+  - Workshop: "content packs" first (rooms, arrangements, lens profiles, keyboard layouts,
+    themes, LUTs …).
+- [ ] **J1. Jellyfin like Plex (decided: approach A):** Jellyfin Web in a browser screen, play
+  is handed to our player (Direct Play URL from our own `PlaybackInfo` + DeviceProfile), progress
+  through `/Sessions/Playing*`.
+  - Reuses the Plex intercept in `browser/pvr_browser.cpp` / `App::startPlexPlay`.
+  - Branch `research/jellyfin-autofocus-passthrough`, worktree `C:\Projects\PixelVRPlayer-research2`,
+    `docs/concepts/JELLYFIN_AUTOFOCUS_PASSTHROUGH_RESEARCH.md` §1 (API flows from Stereonaut,
+    MIT but AI-generated and unreviewed: reference only).
+  - A native Jellyfin library (approach B) is not planned.
+- [ ] **V1. Manual stereo depth / convergence per title (180/360):** horizontal shift of the two
+  eye pictures in the sphere shader. Same doc §2. Comes first; it is the base for V2.
+- [ ] **V2. Eye-tracked stereo "autofocus" (experimental, opt-in):** automatic convergence for
+  close subjects.
+  - Gaze from `XR_EXT_eye_gaze_interaction` (v2, verified on the headset), GPU disparity
+    measurement, threshold / hysteresis / fade.
+  - Same doc §2. Needs in-headset tuning by the user. Gaze is never exposed to plugins.
+- [ ] **PT0. Check passthrough support first:** extend `pixelvr --xrext` to print
+  `xrEnumerateEnvironmentBlendModes` (instance + system, no session). Every PT item needs
+  `XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND`, which is not verified by us. Same doc §3.
+- [ ] **PT1. Real-room preset:** a room option showing the camera view around the screens / hub,
+  with a dimming slider.
+- [ ] **PT2. Quick peek:** a button combo that shows the room for a moment.
+- [ ] **PT3. Passthrough videos:** per-title chroma key (green / blue / picked colour) so
+  green-screen subjects stand in the room. Same doc §3 for PT1–PT3.
+- [ ] **D1 research (see D1 above):** how Moonlight XR does 2D→3D, and which depth model runs fast
+  enough on the Frame. Branch `research/2d-to-3d`, worktree `C:\Projects\PixelVRPlayer-2d3d`,
+  `docs/concepts/2D_TO_3D_RESEARCH.md` (findings and headset benchmark numbers).
+  - First result (2026-11-08, ncnn, inference only): **ZipDepth** (MIT, Moonlight XR's default)
+    takes ~14 ms at 512x288 on the GPU and about the same on 4 CPU threads (9 ms at 256²).
+    MiDaS small takes 22 ms GPU. Depth Anything V2 Small is unusable (279 ms CPU).
+  - Still open: real-weight output check, measurements under playback load / sustained, the warp
+    pipeline. Benchmark files are in `~/depth-bench` on the headset.
 
 ### W. Browser engine (needed by Y2)
 - [x] **W1. DECIDED/DONE: headless system Chromium driven over CDP** (`browser/pvr_browser.cpp`, helper compiled into `pixelvr`; Widevine DRM works: Prime/Netflix/Disney+). Original options were: **WPE WebKit** (fdo backend exports dma-buf frames → zero-copy
@@ -317,7 +425,8 @@ hardware VP9/H.264 in our player (works with multi-screen).
 
 - [ ] A. Full-pitch recenter (usable lying down) — reorient screen + controls + 360/180 to full head orientation, not just horizon yaw.
 - [x] B. Real controller models — DONE (see F1).
-- [ ] C. Dynamic controller button labels from the user's bindings.
+- [x] C. Dynamic controller button labels from the user's bindings — DONE in v1.14.0 (floating
+  labels follow the live SteamVR bindings; Settings › Controls & Input › Controller Buttons).
 
 Completed (2026-10-18):
 - [x] I. Laser auto-release when pressing Steam button (unfocused session gates controller pointer).
@@ -333,6 +442,28 @@ Completed (2026-10-18):
 ---
 
 ## 1. Build / deploy / test (the loop that works)
+
+**Current loop (2026-11-08, used for v1.13–v1.14):** from Git Bash on Windows, no WSL.
+- Key: `~/AppData/Local/steamos-devkit/steamos-devkit/devkit_rsa`, host `steamos@192.168.178.61`.
+- Source on the headset: `~/pixelvr-src` (keep it at `main` / your branch HEAD), build dir
+  `build-embed` (our embedded FFmpeg). Install = copy `build-embed/bin/pixelvr` and
+  `build-embed/shaders/*.spv` into `~/PixelVRPlayer` (the real install, not `~/devkit-game`).
+- `tools/headset-build.sh [deploy]` does exactly that: it streams the files that differ from
+  HEAD (git status) under src/browser/shaders/cmake/tests/third_party to `~/pixelvr-src`,
+  builds, and with `deploy` installs. It assumes `~/pixelvr-src` already matches HEAD; after a
+  commit / branch switch, sync the whole tree first.
+- Feature branches in other worktrees build in their own dir (P1: `~/pixelvr-src-plugins`),
+  never in `~/pixelvr-src`.
+- The user starts the app from the headset; don't launch it over SSH without a reason. Log:
+  `~/pixelvr-run.log` (installer: `~/pixelvr-install.log`); a `PERF` line every few seconds
+  (eye size, GPU ms per part, MSAA, mask). Env switches: `PIXELVR_FIXED_RES=1`,
+  `PIXELVR_SPHERE_MSAA=1`, `PIXELVR_VISMASK=0`.
+- Releases: the version comes from the tag (`PIXELVR_VERSION` in CI); write `docs/release-notes/vX.Y.Z.md`, fast-forward `main`, push
+  tag `vX.Y.Z` → `.github/workflows/release.yml` builds and attaches
+  `pixelvr-linux-arm64.tar.gz(.sha256)`. Test with `tools/install.sh --update --no-steam` into a
+  temp dir on the headset. `gh` is not installed on the PC; use the GitHub REST API via curl.
+
+**Older loop (WSL, `~/devkit-game`), kept for reference — paths below are outdated.**
 
 **Build NATIVELY ON THE DEVICE** (cross-compiling risks a libstdc++/FFmpeg SONAME
 mismatch — device is GCC 15 + FFmpeg n7.0 `libavcodec.so.61`).
@@ -399,8 +530,8 @@ wsl -d Ubuntu -- bash -lc 'rsync -az -e "ssh -i $HOME/.config/steamos-devkit/dev
   streams `smb://` directly; `downloadFocused()` (A) is the explicit download.
   Verified headless (streamed a 15 GB file off the NAS).
 - In-VR file browser (FreeType text, local + SMB scan + avahi/mDNS discovery).
-- Controls remapped: A/X=play, B/Y=menu, Trigger=select, Grip=recenter,
-  thumbstick=nav/seek/distance.
+- Controls: superseded by v1.14.0 (see "Controls (after v1.14.0)" at the top and the README
+  Controls table).
 - Transport HUD **world-locked** below the flat video (was head-locked), auto-hide.
 - **Tracked controllers** — OpenXR aim-pose actions + per-hand action spaces
   (`xr_context.cpp`); `XrInputState.controllers[2]`. Laser pointer + cursor +
@@ -482,14 +613,18 @@ via `--xrext`). Our pinned OpenXR SDK **1.1.43** only declares the older
 - Transport HUD redesigned as a rounded pill progress track with glowing fill and thumb position dot.
 - Laser pointer cursor upgraded from a flat quad to a high-tech circular reticle.
 
-### F3. Controller remap settings UI — DONE
+### F3. Controller remap settings UI — DONE, then REMOVED in v1.14.0 (buttons are assigned in SteamVR only; the Controls pages are read-only)
 - Implemented `SettingsMenu` model (`src/ui/settings_menu.{hpp,cpp}`) and pointer-driven in-VR
   Settings panel overlay.
 - Users can view and cycle button bindings (Play/Pause, Menu, Select, Recenter) and player
   options (Projection Mode, Stereo 3D Mode, Screen Distance, Reset View).
 - Settings automatically persist to `~/.config/pixelvr/settings.conf` across restarts.
 
-### F4. Variable-speed joystick fast-forward/rewind — NOT implemented (today: fixed-interval skips)
+### F4. Variable-speed joystick fast-forward/rewind — DONE in v1.14.0 as scrubbing (user-verified)
+- Right stick X (left stick X in 360/180) scrubs at `t² × 60 s/s`; the bar and preview follow and
+  ONE exact seek commits on release (`app.cpp`, `scrubTarget_`; exact seek = decode-and-discard to
+  the target in `media_engine`). Left stick X steps 30 s. Separate Steam Input actions: C2.
+- Original plan, kept for reference:
 - First EVALUATE feasibility across all sources (local, SMB/SFTP/WebDAV, Plex https, browser
   pages) — continuous seeking over network sources may thrash. Flat video only: in 180/360
   the right stick already tilts/zooms the view.
