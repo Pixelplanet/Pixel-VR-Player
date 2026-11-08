@@ -175,3 +175,8 @@ from the user for an end-to-end test.
     single-column layout (12 lines), `hub::shortcutZone`, `setSettingsDrag`. App: drag in the
     settings block (`shortcutDragFrom_/To_`, `in.selectHeld`).
   - **Built and deployed; not yet seen in the headset.**
+- **Download speed follow-up (user: Plex is faster from the same server):** once the old download had
+  finished, the new reader measured **107 MB/s on `/Items/{id}/Download` and 120 MB/s on
+  `/Videos/{id}/stream?static=true`**, with the same size and first / last 4 MB identical (8.25 GB file).
+  The old 52 MB/s was mostly our 4 MB ranges. Downloads are now handed over as the static stream
+  (the name still comes from the server path).

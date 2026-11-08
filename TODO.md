@@ -328,6 +328,17 @@ branches are local (not pushed) unless noted.
     MiDaS small takes 22 ms GPU. Depth Anything V2 Small is unusable (279 ms CPU).
   - Still open: real-weight output check, measurements under playback load / sustained, the warp
     pipeline. Benchmark files are in `~/depth-bench` on the headset.
+- [ ] **SD1. SD cards and a free download target (asked for 2026-11-08):** users of the 256 GB Steam
+  Frame need the SD card's space.
+  - Check that the player works with SD cards: file browser, playback, thumbnails, the vault, removing
+    the card while it is in use.
+  - Offer the SD card as the download folder, maybe as the default when one is present.
+  - Let the user pick any download folder, not only the three fixed choices
+    (`kDownloadDirs` = ~/media, ~/Downloads, ~/Videos in `src/ui/settings_menu.cpp`).
+  - Facts (2026-11-08, the test headset has no card in it): SteamOS mounts cards under `/run/media/…`.
+    `/run/media/sdcard` (with Steam's `libraryfolder.vdf` + `steamapps`) and `/run/media/steamos/sdcard`
+    exist; `lsblk` shows no `mmcblk` device, so they are leftovers. Detect a card by its mount
+    (`/proc/mounts`), not the folder. Free space and "card removed" must be shown in the Downloads window.
 
 ### W. Browser engine (needed by Y2)
 - [x] **W1. DECIDED/DONE: headless system Chromium driven over CDP** (`browser/pvr_browser.cpp`, helper compiled into `pixelvr`; Widevine DRM works: Prime/Netflix/Disney+). Original options were: **WPE WebKit** (fdo backend exports dma-buf frames → zero-copy
