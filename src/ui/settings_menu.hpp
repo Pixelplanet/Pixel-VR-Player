@@ -20,6 +20,8 @@ public:
         ToggleRailShortcut4,
         ToggleRailShortcut5,
         ToggleRailShortcut6,
+        ToggleRailShortcut7,
+        EditJellyfinAddress,  // the app opens the keyboard, then calls setJellyfinUrl()
         ToggleSwapEyes,
         ToggleModels,
         ToggleStats,
@@ -142,6 +144,11 @@ public:
         bool kiosk;   // just the page (streaming service) vs. the full browser
     };
     std::vector<const RailShortcut*> railShortcuts() const;
+    // Jellyfin server address (scheme://host:port, no /web); the Jellyfin shortcut has no
+    // fixed URL and opens <address>/web/. Empty = not set yet.
+    const std::string& jellyfinUrl() const { return jellyfinUrl_; }
+    void setJellyfinUrl(const std::string& url);
+    void openShortcutsPage(const std::string& hint);  // UI & Appearance > Shortcuts
     float screenDistance() const { return screenDistance_; }
     void setScreenDistance(float d) { screenDistance_ = d; refresh(); }
     float screenCurvature() const;
@@ -274,6 +281,7 @@ private:
     bool pauseLivestreams_ = false;
     bool privateBrowsing_ = false;
     bool screenNumbers_ = false;
+    std::string jellyfinUrl_;
     bool audioFollow_ = false;
     int browserSort_ = 0;      // 0=Name, 1=Newest, 2=Largest
     bool listShowFormat_ = true;

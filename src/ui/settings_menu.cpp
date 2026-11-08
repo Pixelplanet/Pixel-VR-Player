@@ -37,10 +37,11 @@ const SettingsMenu::RailShortcut kRailShortcuts[] = {
     {"Browser", "https://www.google.com", false},
     // Appended (not sorted) so saved rail_shortcuts bitmasks keep their meaning.
     {"Plex", "https://app.plex.tv", true},
+    {"Jellyfin", "", true},  // no fixed URL: <Jellyfin address>/web/ (Settings > Shortcuts)
 };
-constexpr int kRailShortcutCount = 7;
+constexpr int kRailShortcutCount = 8;
 static_assert(static_cast<int>(SettingsMenu::Action::ToggleRailShortcut0) + kRailShortcutCount - 1 ==
-                  static_cast<int>(SettingsMenu::Action::ToggleRailShortcut6),
+                  static_cast<int>(SettingsMenu::Action::ToggleRailShortcut7),
               "one ToggleRailShortcutN action per shortcut");
 
 const char* kLangNames[] = {"Auto",    "English",  "German",  "French",
@@ -327,6 +328,8 @@ void SettingsMenu::refresh() {
             toggle(kRailShortcuts[i].name, on,
                    static_cast<Action>(static_cast<int>(Action::ToggleRailShortcut0) + i));
         }
+        rows_.push_back({"Jellyfin address", jellyfinUrl_.empty() ? std::string("Not set") : jellyfinUrl_,
+                         Action::EditJellyfinAddress});
         rows_.push_back({"Back to UI & Appearance", "", Action::BackToUI});
     } else if (section_ == 21) {
         title_ = "Settings > UI & Appearance > List Columns";
@@ -383,7 +386,8 @@ SettingsMenu::Action SettingsMenu::activate() {
         case Action::ToggleRailShortcut3:
         case Action::ToggleRailShortcut4:
         case Action::ToggleRailShortcut5:
-        case Action::ToggleRailShortcut6: {
+        case Action::ToggleRailShortcut6:
+        case Action::ToggleRailShortcut7: {
             const int i = static_cast<int>(act) - static_cast<int>(Action::ToggleRailShortcut0);
             railShortcutMask_ ^= (1 << i);
             saveConfig();
@@ -717,6 +721,28 @@ void SettingsMenu::openButtons() {
     refresh();
 }
 
+void SettingsMenu::setJellyfinUrl(const std::string& in) {
+    // "192.168.1.10:8096", "http://host:8096/web/#/home" -> "http://host:8096"
+    std::string url = in;
+    while (!url.empty() && (url.back() == ' ' || url.back() == '/')) url.pop_back();
+    while (!url.empty() && url.front() == ' ') url.erase(0, 1);
+    if (!url.empty() && url.find("://") == std::string::npos) url = "http://" + url;
+    const size_t web = url.find("/web");
+    if (web != std::string::npos && url.find("://") < web) url.resize(web);
+    while (!url.empty() && url.back() == '/') url.pop_back();
+    jellyfinUrl_ = url;
+    saveConfig();
+    refresh();
+}
+
+void SettingsMenu::openShortcutsPage(const std::string& hintText) {
+    section_ = 22;
+    selected_ = 0;
+    open_ = true;
+    refresh();
+    if (!hintText.empty()) status_ = hintText;
+}
+
 std::vector<const SettingsMenu::RailShortcut*> SettingsMenu::railShortcuts() const {
     std::vector<const RailShortcut*> out;
     for (int i = 0; i < kRailShortcutCount; ++i) {
@@ -814,6 +840,7 @@ void SettingsMenu::loadConfig() {
             else if (key == "bind_quick_path_btn") noteLegacyBinding(std::stoi(val) != 7);
             else if (key == "download_dir") downloadDirIdx_ = std::clamp(std::stoi(val), 0, kDownloadDirCount - 1);
             else if (key == "rail_shortcuts") railShortcutMask_ = std::stoi(val) & ((1 << kRailShortcutCount) - 1);
+            else if (key == "jellyfin_url") jellyfinUrl_ = val;
             else if (key == "audio_lang") audioLangIdx_ = std::clamp(std::stoi(val), 0, kLangCount - 1);
             else if (key == "curvature") curvatureIdx_ = std::clamp(std::stoi(val), 0, kCurvatureCount - 1);
             else if (key == "ui_text_scale") uiTextScaleIdx_ = std::clamp(std::stoi(val), 0, kUiTextScaleCount - 1);
@@ -875,6 +902,7 @@ void SettingsMenu::saveConfig() const {
             file << "distance=" << screenDistance_ << "\n";
             file << "download_dir=" << downloadDirIdx_ << "\n";
             file << "rail_shortcuts=" << railShortcutMask_ << "\n";
+            file << "jellyfin_url=" << jellyfinUrl_ << "\n";
             file << "audio_lang=" << audioLangIdx_ << "\n";
             file << "curvature=" << curvatureIdx_ << "\n";
             file << "ui_text_scale=" << uiTextScaleIdx_ << "\n";

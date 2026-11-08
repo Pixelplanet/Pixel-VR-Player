@@ -4315,7 +4315,15 @@ int App::run() {
                     // A web shortcut tab (Settings > UI & Appearance): a streaming
                     // service as a kiosk page, or the full browser.
                     const SettingsMenu::RailShortcut& sc = *settings_.railShortcuts()[sbHover - 10];
-                    openWebScreen(sc.url, sc.kiosk);
+                    if (sc.url[0] != '\0') {
+                        openWebScreen(sc.url, sc.kiosk);
+                    } else if (!settings_.jellyfinUrl().empty()) {  // Jellyfin: the user's own server
+                        openWebScreen(settings_.jellyfinUrl() + "/web/", sc.kiosk);
+                    } else {
+                        browser_.setOpen(false);
+                        downloadsWindow_ = false;
+                        settings_.openShortcutsPage("Set the Jellyfin address first (e.g. 192.168.1.10:8096).");
+                    }
                 } else if (sbHover == 0) {
                     // Main Tab: Files
                     downloadsWindow_ = false;
@@ -5009,6 +5017,10 @@ int App::run() {
                             switchTracks(true);
                         }
 #endif
+                        else if (act == SettingsMenu::Action::EditJellyfinAddress) {
+                            openKeyboard("Jellyfin address (e.g. 192.168.1.10:8096)", settings_.jellyfinUrl(), false, in,
+                                         [this](const std::string& t) { settings_.setJellyfinUrl(t); });
+                        }
                         else if (act == SettingsMenu::Action::ToggleHoverHaptics) {
                             const int pH = renderer_.pointerHand();
                             const int activeH = (pH >= 0 && pH <= 1) ? pH : 1;
