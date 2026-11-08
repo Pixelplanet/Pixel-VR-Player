@@ -710,6 +710,11 @@ public:
     void setSettingsCompact(bool on) { settingsCompact_ = on; }
     // Shortcut list: the line being dragged and where it would land (-1 = no drag).
     void setSettingsDrag(int from, int to) {
+        if (settingsDragFrom_ >= 0 && from < 0) {  // dropped: the line lands from where it was held
+            listLandIdx_ = settingsDragTo_ >= 0 ? settingsDragTo_ : settingsDragFrom_;
+            listLandPending_ = true;
+        }
+        if (from >= 0 && settingsDragFrom_ < 0) listDragInit_ = true;
         settingsDragFrom_ = from;
         settingsDragTo_ = to;
     }
@@ -1247,6 +1252,16 @@ private:
     bool settingsCompact_ = false;
     int settingsDragFrom_ = -1;
     int settingsDragTo_ = -1;
+    // List page animation: each line's offset from its slot, the dragged line's height.
+    std::vector<float> listAnimY_;
+    float listDragY_ = 0.0f;
+    float listPointerY_ = 0.0f;
+    bool listDragInit_ = false;
+    bool listLandPending_ = false;
+    int listLandIdx_ = -1;
+    std::chrono::steady_clock::time_point listAnimAt_{};
+    float listLineY(int r, int layoutN) const;
+    void advanceListAnim(int total, int layoutN);
     int settingsSelected_ = 0;
     int settingsHovered_ = -1;
     int settingsSegmentHovered_ = -1;

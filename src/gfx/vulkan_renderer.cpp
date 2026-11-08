@@ -465,6 +465,8 @@ inline UiRect downloadJobButton(int visIdx, int which) {
 }
 constexpr float kDownloadsFooterY = -0.44f;
 
+// List pages (the shortcut list): line slots from the top.
+constexpr float kListTop = 0.360f, kListPitch = 0.066f;
 // Settings cards (2-column grid; denser when there are more rows).
 struct SettingsCard {
     float cx, cy, halfW, halfH, labelY, ctrlY, ctrlHalfW, ctrlHalfH, textScale;
@@ -501,12 +503,12 @@ inline SettingsCard settingsCard(int i, int total, bool compact = false) {
         L.cx = 0.20f;
         L.halfW = 0.65f;
         L.ctrlHalfW = 0.60f;
-        L.cy = 0.345f - static_cast<float>(i) * 0.062f;
-        L.halfH = 0.027f;
+        L.cy = kListTop - static_cast<float>(i) * kListPitch;
+        L.halfH = 0.0295f;
         L.labelY = L.cy;
         L.ctrlY = L.cy;
-        L.ctrlHalfH = 0.020f;
-        L.textScale = 0.82f;
+        L.ctrlHalfH = 0.022f;
+        L.textScale = 1.0f;
     }
     return L;
 }
@@ -517,14 +519,14 @@ inline int settingsMaxVisible(int total, bool compact = false) { return compact 
 inline UiRect shortcutZone(const SettingsCard& L, int z) {
     const float left = L.cx - L.halfW, right = L.cx + L.halfW;
     switch (z) {
-        case 0: return {left + 0.030f, L.cy, 0.026f, L.halfH};
-        case 1: return {left + 0.098f, L.cy, 0.034f, L.halfH};
-        case 2: return {right - 0.165f, L.cy, 0.056f, L.halfH - 0.005f};
-        default: return {right - 0.056f, L.cy, 0.048f, L.halfH - 0.005f};
+        case 0: return {left + 0.032f, L.cy, 0.028f, L.halfH};
+        case 1: return {left + 0.104f, L.cy, 0.036f, L.halfH};
+        case 2: return {right - 0.178f, L.cy, 0.060f, L.halfH - 0.007f};
+        default: return {right - 0.062f, L.cy, 0.052f, L.halfH - 0.007f};
     }
 }
-constexpr float kShortcutNameX = 0.150f;  // from the line's left edge
-constexpr float kShortcutUrlX = 0.470f;
+constexpr float kShortcutNameX = 0.160f;  // from the line's left edge
+constexpr float kShortcutUrlX = 0.480f;
 inline UiRect settingsSegment(const SettingsCard& L, int s, int n) {
     const float left = L.cx - L.ctrlHalfW + 0.006f;
     const float right = L.cx + L.ctrlHalfW - 0.006f;
@@ -2731,6 +2733,51 @@ std::string VulkanRenderer::keyboardKeyText(int index, bool shift, bool symbols)
     return symbols ? k.sym : (shift ? k.upper : k.lower);
 }
 
+float VulkanRenderer::listLineY(int r, int layoutN) const {
+    if (r == settingsDragFrom_) return listDragY_;
+    const float off = (r >= 0 && r < static_cast<int>(listAnimY_.size())) ? listAnimY_[static_cast<size_t>(r)] : 0.0f;
+    return hub::settingsCard(r, layoutN, true).cy + off;
+}
+
+void VulkanRenderer::advanceListAnim(int total, int layoutN) {
+    // Called from both eyes' passes; the second call of a frame sees dt ~ 0 and changes nothing.
+    const auto now = std::chrono::steady_clock::now();
+    float dt = std::chrono::duration<float>(now - listAnimAt_).count();
+    listAnimAt_ = now;
+    dt = std::clamp(dt, 0.0f, 0.1f);
+    if (static_cast<int>(listAnimY_.size()) != total) listAnimY_.assign(static_cast<size_t>(std::max(0, total)), 0.0f);
+    int lines = 0;  // shortcut lines come first
+    while (lines < total && settingsRows_[static_cast<size_t>(lines)].kind == kSettingsKindShortcut) ++lines;
+    auto base = [&](int r) { return hub::settingsCard(r, layoutN, true).cy; };
+    if (listLandPending_) {
+        // Dropped: the shortcut now sits at its new slot; start it from where it was held so it slides in.
+        listLandPending_ = false;
+        std::fill(listAnimY_.begin(), listAnimY_.end(), 0.0f);
+        if (listLandIdx_ >= 0 && listLandIdx_ < total) listAnimY_[static_cast<size_t>(listLandIdx_)] = listDragY_ - base(listLandIdx_);
+    }
+    const int from = settingsDragFrom_, to = settingsDragTo_;
+    if (from >= 0 && from < lines) {
+        if (listDragInit_) {
+            listDragInit_ = false;
+            listDragY_ = base(from) + listAnimY_[static_cast<size_t>(from)];
+        }
+        const float top = base(0), bottom = base(std::max(0, lines - 1));
+        const float want = std::clamp(listPointerY_, bottom, top);
+        listDragY_ += (want - listDragY_) * (1.0f - std::exp(-dt * 30.0f));
+    }
+    const float pitch = hub::kListPitch;
+    for (int r = 0; r < total; ++r) {
+        float target = 0.0f;
+        if (from >= 0 && to >= 0 && r != from && r < lines) {
+            if (from < to && r > from && r <= to) target = pitch;   // move up into the gap
+            if (to < from && r >= to && r < from) target = -pitch;  // move down
+        }
+        float& y = listAnimY_[static_cast<size_t>(r)];
+        y += (target - y) * (1.0f - std::exp(-dt * 16.0f));
+        if (std::fabs(target - y) < 0.0004f) y = target;
+    }
+}
+
 void VulkanRenderer::setSettings(bool visible, const std::string& title,
                                  const std::vector<SettingsRowVis>& rows, int selected,
                                  const std::string& status) {
@@ -3098,6 +3145,7 @@ void VulkanRenderer::updatePointer() {
                 const int total = static_cast<int>(settingsRows_.size());
                 const int layoutN = settingsLayoutRows();
                 const int maxVis = hub::settingsMaxVisible(layoutN, settingsCompact_);
+                listPointerY_ = hyy;  // a dragged list line follows it
                 for (int i = 0; i < total && i < maxVis; ++i) {
                     const hub::SettingsCard L = hub::settingsCard(i, layoutN, settingsCompact_);
                     if (UiRect{L.cx, L.cy, L.halfW, L.halfH}.contains(hx, hyy)) {
@@ -7111,43 +7159,56 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const float cardBw = 0.0015f / L.halfH;
 
                 if (settingsCompact_) {
-                    // List line: a shortcut (grab handle, switch, name, address, Edit, Delete) or a
-                    // plain line (Add shortcut, Back).
-                    const hub::SettingsCard hc = hub::settingsCard(i, layoutN, settingsCompact_);
-                    const bool dragged = (i == settingsDragFrom_);
-                    const float* lineBg = (hov || dragged) ? glassCardHoverT.data() : glassCardT.data();
-                    const float* lineBord = dragged ? selBord : (hov ? tabActiveBord : kGlassRimFaint);
-                    drawUiElement(vpPanel, hc.cx, hc.cy, hc.halfW, hc.halfH, UiShape::RoundedBox, lineBg, 1.0f,
-                                  0.012f / hc.halfH, lineBord);
-                    if (settingsDragFrom_ >= 0 && i == settingsDragTo_ && settingsDragTo_ != settingsDragFrom_) {
-                        // Where the dragged shortcut lands: an accent bar on the side it moves to.
-                        const float y = settingsDragTo_ < settingsDragFrom_ ? hc.cy + hc.halfH + 0.004f
-                                                                            : hc.cy - hc.halfH - 0.004f;
-                        drawUiElement(vpPanel, hc.cx, y, hc.halfW, 0.0035f, UiShape::RoundedBox, themeAccentCol, 1.0f);
-                    }
-                    if (row.kind == kSettingsKindShortcut) {
-                        const int seg = hov ? settingsSegmentHovered_ : -1;
+                    if (i == 0) advanceListAnim(total, layoutN);
+                    // One list line at its animated height: a shortcut (grab handle, switch, name,
+                    // address, Edit, Delete) or a plain line (Add shortcut, Back). The dragged line
+                    // is drawn last, lifted, where the laser holds it.
+                    auto drawListLine = [&](int r) {
+                        const SettingsRowVis& lr = settingsRows_[static_cast<std::size_t>(r)];
+                        hub::SettingsCard hc = hub::settingsCard(r, layoutN, true);
+                        hc.cy = listLineY(r, layoutN);
+                        const bool dragged = (r == settingsDragFrom_);
+                        const bool lhov = (r == settingsHovered_) && lr.enabled && settingsDragFrom_ < 0;
+                        const float lift = dragged ? 0.006f : 0.0f;
+                        const float hw = hc.halfW + lift, hh = hc.halfH + lift * 0.5f;
+                        if (dragged) {
+                            const float shadow[4] = {0.0f, 0.0f, 0.0f, 0.45f};
+                            drawGlow(vpPanel, hc.cx, hc.cy - 0.010f, hw, hh, 0.022f, shadow, 0.014f / hh);
+                            drawGlow(vpPanel, hc.cx, hc.cy, hw, hh, 0.012f, hovGlow, 0.014f / hh);
+                        } else if (lhov) {
+                            drawGlow(vpPanel, hc.cx, hc.cy, hw, hh, 0.010f, hovGlow, 0.014f / hh);
+                        }
+                        const float* lineBg = (lhov || dragged) ? glassCardHoverT.data() : glassCardT.data();
+                        const float* lineBord = dragged ? selBord : (lhov ? tabActiveBord : kGlassRimFaint);
+                        drawUiElement(vpPanel, hc.cx, hc.cy, hw, hh, UiShape::RoundedBox, lineBg, 0.014f / hh,
+                                      (lhov || dragged ? 0.0019f : 0.0012f) / hh, lineBord);
+                        if (lr.kind != kSettingsKindShortcut) return;
+                        const int seg = lhov ? settingsSegmentHovered_ : -1;
                         const UiRect g = hub::shortcutZone(hc, 0);
                         const float* gripCol = (seg == 0 || dragged) ? themeAccentCol : switchOffKnob;
                         for (int b = -1; b <= 1; ++b) {
-                            drawUiElement(vpPanel, g.cx, g.cy + 0.008f * static_cast<float>(b), 0.012f, 0.0018f,
+                            drawUiElement(vpPanel, g.cx, g.cy + 0.0085f * static_cast<float>(b), 0.013f, 0.0016f,
                                           UiShape::RoundedBox, gripCol, 1.0f);
                         }
                         const UiRect t = hub::shortcutZone(hc, 1);
-                        const bool on = row.stepIdx != 0;
-                        if (seg == 1) drawGlow(vpPanel, t.cx, t.cy, 0.030f, 0.014f, 0.008f, hovGlow);
-                        drawUiElement(vpPanel, t.cx, t.cy, 0.030f, 0.014f, UiShape::RoundedBox,
+                        const bool on = lr.stepIdx != 0;
+                        if (seg == 1) drawGlow(vpPanel, t.cx, t.cy, 0.030f, 0.0145f, 0.008f, hovGlow);
+                        drawUiElement(vpPanel, t.cx, t.cy, 0.030f, 0.0145f, UiShape::RoundedBox,
                                       on ? switchOnTrack : switchOffTrack, 1.0f);
-                        drawUiElement(vpPanel, t.cx + (on ? 0.016f : -0.016f), t.cy, 0.011f, 0.011f, UiShape::RoundedBox,
-                                      on ? knobOn : switchOffKnob, 1.0f);
-                        const float delArmed[4] = {0.70f, 0.18f, 0.18f, 0.95f};
+                        drawUiElement(vpPanel, t.cx + (on ? 0.0155f : -0.0155f), t.cy, 0.0115f, 0.0115f,
+                                      UiShape::RoundedBox, on ? knobOn : switchOffKnob, 1.0f);
+                        const float delArmed[4] = {0.72f, 0.20f, 0.20f, 0.95f};
                         for (int z = 2; z <= 3; ++z) {
                             const UiRect bz = hub::shortcutZone(hc, z);
-                            const bool armed = (z == 3 && row.steps != 0);
-                            const float* bBg = armed ? delArmed : (seg == z ? glassCardHoverT.data() : glassCardT.data());
-                            drawUiElement(vpPanel, bz.cx, bz.cy, bz.hw, bz.hh, UiShape::RoundedBox, bBg, 1.0f,
-                                          0.010f / bz.hh, seg == z ? tabActiveBord : kGlassRimFaint);
+                            const bool armed = (z == 3 && lr.steps != 0);
+                            const float* bBg = armed ? delArmed : (seg == z ? glassCardHoverT.data() : kGlassVeil);
+                            drawUiElement(vpPanel, bz.cx, bz.cy, bz.hw, bz.hh, UiShape::RoundedBox, bBg, 0.012f / bz.hh,
+                                          0.0012f / bz.hh, seg == z ? tabActiveBord : kGlassRimFaint);
                         }
+                    };
+                    if (i != settingsDragFrom_) drawListLine(i);
+                    if (i == std::min(total, maxVis) - 1 && settingsDragFrom_ >= 0 && settingsDragFrom_ < total) {
+                        drawListLine(settingsDragFrom_);
                     }
                     continue;
                 }
@@ -7301,24 +7362,32 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const float ctrlLeft = L.cx - kSetCtrlHalfW;
 
                 if (settingsCompact_) {
-                    const hub::SettingsCard hc = hub::settingsCard(i, layoutN, settingsCompact_);
-                    const float left = hc.cx - hc.halfW;
-                    if (row.kind == kSettingsKindShortcut) {
-                        withHeadingFont([&] {
-                            drawFit(left + hub::kShortcutNameX, hc.cy, 0.30f, L.textSc, labelCol, row.label);
-                        });
-                        drawFit(left + hub::kShortcutUrlX, hc.cy, 0.53f, L.textSc * 0.90f, row.value.empty() ? dimCol : slateCol,
-                                row.value.empty() ? std::string("Address asked on first use") : row.value);
-                        const UiRect e = hub::shortcutZone(hc, 2);
-                        drawFitCentered(e.cx, e.cy, e.hw * 2.0f - 0.01f, L.textSc * 0.85f, themeTextCol, "Edit");
-                        const UiRect d = hub::shortcutZone(hc, 3);
-                        drawFitCentered(d.cx, d.cy, d.hw * 2.0f - 0.01f, L.textSc * 0.85f, themeTextCol,
-                                        row.steps != 0 ? "Sure?" : "Delete");
-                    } else {
-                        drawFit(left + 0.040f, hc.cy, 0.60f, L.textSc, labelCol, row.label);
-                        if (!row.value.empty()) {
-                            drawFit(left + hub::kShortcutUrlX, hc.cy, 0.53f, L.textSc * 0.90f, slateCol, row.value);
+                    auto drawListText = [&](int r) {
+                        const SettingsRowVis& lr = settingsRows_[static_cast<std::size_t>(r)];
+                        hub::SettingsCard hc = hub::settingsCard(r, layoutN, true);
+                        hc.cy = listLineY(r, layoutN);
+                        const float sc = setCard(r).textSc;
+                        const float* lc = lr.enabled ? themeTextCol : dimCol;
+                        const float left = hc.cx - hc.halfW;
+                        if (lr.kind == kSettingsKindShortcut) {
+                            withHeadingFont([&] { drawFit(left + hub::kShortcutNameX, hc.cy, 0.30f, sc, lc, lr.label); });
+                            drawFit(left + hub::kShortcutUrlX, hc.cy, 0.50f, sc * 0.90f, lr.value.empty() ? dimCol : slateCol,
+                                    lr.value.empty() ? std::string("Address asked on first use") : lr.value);
+                            const UiRect e = hub::shortcutZone(hc, 2);
+                            drawFitCentered(e.cx, e.cy, e.hw * 2.0f - 0.012f, sc * 0.88f, themeTextCol, "Edit");
+                            const UiRect d = hub::shortcutZone(hc, 3);
+                            drawFitCentered(d.cx, d.cy, d.hw * 2.0f - 0.012f, sc * 0.88f, themeTextCol,
+                                            lr.steps != 0 ? "Sure?" : "Delete");
+                        } else {
+                            withHeadingFont([&] { drawFit(left + 0.045f, hc.cy, 0.60f, sc, lc, lr.label); });
+                            if (!lr.value.empty()) {
+                                drawFit(left + hub::kShortcutUrlX, hc.cy, 0.50f, sc * 0.90f, slateCol, lr.value);
+                            }
                         }
+                    };
+                    if (i != settingsDragFrom_) drawListText(i);
+                    if (i == std::min(total, maxVis) - 1 && settingsDragFrom_ >= 0 && settingsDragFrom_ < total) {
+                        drawListText(settingsDragFrom_);
                     }
                     continue;
                 }
