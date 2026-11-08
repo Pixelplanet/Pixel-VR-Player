@@ -11,6 +11,9 @@
 
 Priority: N1/N2, L1, R1, K1/K2 are done and user-verified. Next: D1 2D→3D (needs a
 model/runtime decision). Y*/S1 are parked; M5 is low priority.
+**New 2026-11-08:** plugin system (P1), Jellyfin (J1), stereo convergence / autofocus (V1/V2),
+passthrough (PT0–PT3), Steam Cloud / Workshop (SC1) and the D1 research live in separate
+worktrees / branches. See "New items 2026-11-08" below for where each one is documented.
 
 State: released as **v1.13.0** (2026-11-07; notes in `docs/release-notes/v1.13.0.md`, tag push
 triggers `.github/workflows/release.yml`). The launch fix ("Up next" instead of "Resume Game")
@@ -214,6 +217,59 @@ hardware VP9/H.264 in our player (works with multi-screen).
   choice in settings.conf.
 - DRM services: Prime Video verified working in the browser screen (Widevine L3, 1080p);
   Netflix / Disney+ use the same path.
+
+### New items 2026-11-08 — research and work in their own worktrees / branches
+All of these live **outside `main`** until merged. Each branch has its doc under `docs/concepts/`.
+On the PC the worktrees sit next to the main checkout (`C:\Projects\PixelVRPlayer-*`); the
+branches are local (not pushed) unless noted.
+
+- [~] **P1. Plugin system + first-party plugins:** BUILT, not yet merged or tried in the headset.
+  - Branch `feature/plugin-system`, worktree `C:\Projects\PixelVRPlayer-plugins`.
+  - Spec, decisions and **progress log**: `docs/concepts/PLUGIN_SYSTEM_SPEC.md` (start here).
+  - Out-of-process JSON-lines plugins, Settings › Controls & Input › Plugins, vault opt-in per
+    plugin, `.pvrplugin` install from the file browser, plugins as separate release downloads.
+  - Plugins:
+    - `plugins/funscript` (Intiface/Buttplug v3; 25/25 against `tools/fake_intiface.py`).
+    - `plugins/deovr-remote` (DeoVR-compatible sync for MultiFunPlayer & co, 11/11).
+    - `plugins/example`.
+  - Headset builds of this branch go to `~/pixelvr-src-plugins` (never `~/pixelvr-src`).
+  - Touches `app.cpp`, `settings_menu.*`, `vulkan_renderer.*`, `browser.*`, `release.yml`, so
+    expect merge work with newer `main`.
+- [ ] **H1. Interactive devices (funscript / Buttplug / Lovense / The Handy) research:** DONE as
+  research. Branch `research/steam-cloud-workshop-haptics`, worktree
+  `C:\Projects\PixelVRPlayer-research`, `docs/concepts/HAPTICS_FUNSCRIPT_RESEARCH.md`. Implemented
+  as plugins in P1. Open: multi-axis scripts, The Handy API, TCode, a real-hardware test by a user.
+- [ ] **SC1. Steam Cloud + Workshop:** researched, not started. Same branch / worktree as H1,
+  `docs/concepts/STEAM_CLOUD_WORKSHOP_RESEARCH.md`.
+  - Auto-Cloud on a dedicated sync folder (never passwords, vault or browser profile).
+  - Workshop: "content packs" first (rooms, arrangements, lens profiles, keyboard layouts,
+    themes, LUTs …).
+- [ ] **J1. Jellyfin like Plex (decided: approach A):** Jellyfin Web in a browser screen, play
+  is handed to our player (Direct Play URL from our own `PlaybackInfo` + DeviceProfile), progress
+  through `/Sessions/Playing*`.
+  - Reuses the Plex intercept in `browser/pvr_browser.cpp` / `App::startPlexPlay`.
+  - Branch `research/jellyfin-autofocus-passthrough`, worktree `C:\Projects\PixelVRPlayer-research2`,
+    `docs/concepts/JELLYFIN_AUTOFOCUS_PASSTHROUGH_RESEARCH.md` §1 (API flows from Stereonaut,
+    MIT but AI-generated and unreviewed: reference only).
+  - A native Jellyfin library (approach B) is not planned.
+- [ ] **V1. Manual stereo depth / convergence per title (180/360):** horizontal shift of the two
+  eye pictures in the sphere shader. Same doc §2. Comes first; it is the base for V2.
+- [ ] **V2. Eye-tracked stereo "autofocus" (experimental, opt-in):** automatic convergence for
+  close subjects.
+  - Gaze from `XR_EXT_eye_gaze_interaction` (v2, verified on the headset), GPU disparity
+    measurement, threshold / hysteresis / fade.
+  - Same doc §2. Needs in-headset tuning by the user. Gaze is never exposed to plugins.
+- [ ] **PT0. Check passthrough support first:** extend `pixelvr --xrext` to print
+  `xrEnumerateEnvironmentBlendModes` (instance + system, no session). Every PT item needs
+  `XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND`, which is not verified by us. Same doc §3.
+- [ ] **PT1. Real-room preset:** a room option showing the camera view around the screens / hub,
+  with a dimming slider.
+- [ ] **PT2. Quick peek:** a button combo that shows the room for a moment.
+- [ ] **PT3. Passthrough videos:** per-title chroma key (green / blue / picked colour) so
+  green-screen subjects stand in the room. Same doc §3 for PT1–PT3.
+- [ ] **D1 research (see D1 above):** how Moonlight XR does 2D→3D, and which depth model runs fast
+  enough on the Frame. Branch `research/2d-to-3d`, worktree `C:\Projects\PixelVRPlayer-2d3d`,
+  `docs/concepts/2D_TO_3D_RESEARCH.md` (findings and headset benchmark numbers).
 
 ### W. Browser engine (needed by Y2)
 - [x] **W1. DECIDED/DONE: headless system Chromium driven over CDP** (`browser/pvr_browser.cpp`, helper compiled into `pixelvr`; Widevine DRM works: Prime/Netflix/Disney+). Original options were: **WPE WebKit** (fdo backend exports dma-buf frames → zero-copy
