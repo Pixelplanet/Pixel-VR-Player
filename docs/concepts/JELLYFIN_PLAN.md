@@ -80,7 +80,15 @@ from the user for an end-to-end test.
 - [x] Plan (this file).
 - [x] Helper: detection (IsPlayback + press within 4 s), own PlaybackInfo, Direct Play decision, emit, /Sessions/Playing* timeline, return, token redaction (helper + app log). Written, not yet built.
 - [x] App: `PlexPlay.service`, dock hint "return to Jellyfin".
-- [ ] Build on the headset (separate dir `~/pixelvr-src-jellyfin`), standalone helper test
-      against TheVault (needs a Jellyfin login).
+- [x] Built on the headset (`~/pixelvr-src-jellyfin/build`).
+- [x] **Standalone helper test against TheVault passed (2026-11-08):**
+  - Login via Jellyfin Web's form, then a real click on the film page's Play (`btnPlay`, data-action resume).
+  - Hand-off: `plex {url: …/Videos/{id}/stream?static=true&MediaSourceId=…&api_key=***, title: "8 Mile",
+    duration: 6627.8, service: jellyfin}`. The stream answers `206 video/x-matroska`.
+  - The server lists a session "Pixel VR Player" now playing 8 Mile.
+  - After `plexreturn 600000` the resume point is 600 s (ours wins over the web player's), and the
+    page is back on the details page.
+  - No token in the helper's stdout (outside the hand-off line) or stderr.
+  - The test's resume point was reset to 0 afterwards. The test script lived in a temp folder and isn't kept.
 - [ ] Rail shortcut + address setting.
 - [ ] In-headset test by the user.
