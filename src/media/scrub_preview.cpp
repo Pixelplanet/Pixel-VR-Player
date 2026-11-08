@@ -36,7 +36,12 @@ struct Decoder {
 
     bool open(const std::string& path) {
         close();
-        if (avformat_open_input(&fmt, path.c_str(), nullptr, nullptr) < 0 || !fmt) return false;
+        // Plex / Jellyfin streams: a stalled server must not hang the preview worker for good.
+        AVDictionary* opts = nullptr;
+        if (path.rfind("http://", 0) == 0 || path.rfind("https://", 0) == 0) av_dict_set(&opts, "rw_timeout", "10000000", 0);
+        const int rc = avformat_open_input(&fmt, path.c_str(), nullptr, &opts);
+        av_dict_free(&opts);
+        if (rc < 0 || !fmt) return false;
         if (avformat_find_stream_info(fmt, nullptr) < 0) return false;
         stream = av_find_best_stream(fmt, AVMEDIA_TYPE_VIDEO, -1, -1, nullptr, 0);
         if (stream < 0) return false;

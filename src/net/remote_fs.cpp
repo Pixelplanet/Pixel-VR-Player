@@ -420,6 +420,7 @@ private:
 namespace {
 
 constexpr int64_t kDavRange = 4 << 20;
+constexpr int64_t kDavRangeMax = 32 << 20;
 
 void curlInitOnce() {
     static std::once_flag once;
@@ -704,7 +705,12 @@ public:
         if (n <= 0) return 0;
         if (pos_ >= size_) return 0;
         if (pos_ < chunkOff_ || pos_ >= chunkOff_ + static_cast<int64_t>(chunk_.size())) {
-            const int64_t want = std::min<int64_t>(kDavRange, size_ - pos_);
+            // Reading straight on (a download): double the range up to 32 MB, since every request
+            // costs the server a lookup (Jellyfin 4 MB: 46 MB/s, 32 MB: 72 MB/s on the user's LAN).
+            // After a jump (seeking in playback) start small again for a quick answer.
+            const bool sequential = !chunk_.empty() && pos_ == chunkOff_ + static_cast<int64_t>(chunk_.size());
+            rangeLen_ = sequential ? std::min<int64_t>(rangeLen_ * 2, kDavRangeMax) : kDavRange;
+            const int64_t want = std::min<int64_t>(rangeLen_, size_ - pos_);
             std::string e;
             bool fetched = false;
             // A long transfer sees dropped connections now and then: back off and retry.
@@ -749,7 +755,7 @@ private:
             const size_t slash = col.contentRange.find('/');
             *total = slash == std::string::npos ? -1 : std::atoll(col.contentRange.c_str() + slash + 1);
         }
-        chunk_.assign(col.body.begin(), col.body.end());
+        chunk_.swap(col.body);  // no copy of up to 32 MB
         return true;
     }
 
@@ -760,7 +766,8 @@ private:
     int64_t size_ = 0;
     int64_t pos_ = 0;
     int64_t chunkOff_ = 0;
-    std::vector<char> chunk_;
+    std::string chunk_;
+    int64_t rangeLen_ = kDavRange;  // grows while reading sequentially
 };
 
 }  // namespace

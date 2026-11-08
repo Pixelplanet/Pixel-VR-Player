@@ -5561,7 +5561,10 @@ int App::run() {
             }
             // Timeline hover preview: follow the current clip/stereo layout, ask
             // for the hovered time and upload whatever the worker has finished.
-            scrubPreview_.setSource(cur().open && !cur().web && !cur().webSuspended && !isRemotePath(cur().path)
+            // Plex / Jellyfin streams (webSuspended, http) get it too: without it scrubbing showed
+            // nothing until release (user report). The worker opens its own connection.
+            scrubPreview_.setSource(cur().open && !cur().web && (!cur().webSuspended || isHttpUrl(cur().path)) &&
+                                            !isRemotePath(cur().path)
                                         ? cur().path
                                         : std::string(),
                                     settings_.stereoMode());
