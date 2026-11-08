@@ -315,5 +315,22 @@ go to `~/pixelvr-src-plugins` (never `~/pixelvr-src`, which belongs to the other
   - Both show only while the dock is visible (keep the dock open to watch sync).
   - Host: `heatBins(screen, 160)` (cached per media/version), `gauge()`. Host test checks both.
   - **Not yet seen in the headset.**
-- [ ] Phase 4 DeoVR bridge plugin, funscript plugin + fake Intiface tests.
+- [~] Phase 4 plugins.
+  - [x] `plugins/funscript/` (org.pixelvr.funscript): `funscript.hpp` (parse / interpolate /
+    speed / heat), `buttplug.hpp` (own ws:// client + Buttplug **spec v3**: LinearCmd /
+    ScalarCmd / RotateCmd / StopAllDevices, DeviceList/Added/Removed, Ping), `main.cpp`
+    (follows the heard screen; sidecar `{base}.funscript` or "Script folders"; soft start
+    500 ms after play/seek; commands at each script point with the time to the next one;
+    vibrate / rotate from speed or position at ≤10 Hz; offset, stroke range, speed limit,
+    invert; reconnects every 5 s; gauge = script position; heat track).
+  - Safety stops: pause, seek (re-sync), close, `worn:false`, `focused:false`, no tick for
+    1.5 s, shutdown, lost connection, "Stop all devices" action.
+  - [x] `tools/fake_intiface.py` (virtual stroker / vibrator / rotator, logs commands) +
+    `tools/funscript_plugin_test.py`: **25/25 pass on the headset**, commands within
+    ~2–4 ms of each script point:
+    `python3 tools/funscript_plugin_test.py build/plugins/funscript`.
+  - Not done: multi-axis scripts (only the main `{base}.funscript` drives devices; axis files
+    are offered but unused), The Handy's own API, TCode. **Never tried with real Intiface or
+    hardware.**
+  - [ ] DeoVR-compatible sync bridge plugin.
 - [ ] Phase 5 `.pvrplugin` install + release assets.
