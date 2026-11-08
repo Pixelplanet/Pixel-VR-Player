@@ -3590,12 +3590,12 @@ int App::run() {
                     for (int k = 0; k < 4; ++k) activityAnchorOrient_[h][k] = c.orientation[k];
                 }
             }
-            // In 360/180 the right stick Y tilts and the left stick X zooms the
-            // scene: used blindly, and a flat dock popping up over the whole view is
-            // distracting, so they don't wake the UI. Scrubbing (right X) does.
+            // In 360/180 the right stick tilts (Y) and zooms (X) the scene: used
+            // blindly, and a flat dock popping up over the whole view is
+            // distracting, so it doesn't wake the UI. Scrubbing (left X) does.
             const bool sphereView = settings_.projectionMode() != 0;
             const bool stickMoved =
-                sphereView ? (std::fabs(in.thumbstickRX) > 0.25f || std::fabs(in.thumbstickLY) > 0.25f)
+                sphereView ? (std::fabs(in.thumbstickLX) > 0.25f || std::fabs(in.thumbstickLY) > 0.25f)
                            : (std::fabs(in.thumbstickX) > 0.25f || std::fabs(in.thumbstickY) > 0.25f ||
                               std::fabs(in.thumbstickRX) > 0.25f || std::fabs(in.thumbstickRY) > 0.25f);
             // Only the digital full grip press or an action wakes the HUD (a soft
@@ -5149,7 +5149,7 @@ int App::run() {
                 }
                 // Viewpoint: flat screens move nearer/farther (thumbstick Y);
                 // immersive 360/180 uses the RIGHT stick -- up/down tilts (angle),
-                // left/right pushes content nearer/farther (distance).
+                // left/right zooms.
                 if (settings_.projectionMode() == 0) {
                     if (in.thumbstickY > 0.15f || in.thumbstickY < -0.15f) {
                         if (groupedScreen(selectedScreen_)) {
@@ -5180,10 +5180,11 @@ int App::run() {
                         interacted = true;
                     }
                 } else if (dt > 0.0f) {
-                    // 360/180: right stick Y tilts, left stick X zooms (right X
-                    // scrubs, below). Not "interacted": these keep the UI hidden.
+                    // 360/180: the right stick does the view on its own -- Y tilts,
+                    // X zooms (left X scrubs, below). Not "interacted": these keep
+                    // the UI hidden.
                     if (std::fabs(in.thumbstickRY) > 0.15f) renderer_.adjustSpherePitch(in.thumbstickRY * dt * 0.6f);
-                    if (std::fabs(in.thumbstickLX) > 0.15f) renderer_.adjustSphereZoom(in.thumbstickLX * dt * 0.6f);
+                    if (std::fabs(in.thumbstickRX) > 0.15f) renderer_.adjustSphereZoom(in.thumbstickRX * dt * 0.6f);
                 }
 #ifdef PIXELVR_HAVE_MEDIA
                 if (in.togglePlay && cur().open) {
@@ -5277,7 +5278,7 @@ int App::run() {
                 };
                 if (cur().open) {
                     // Left stick left/right steps -/+30s (flat only; in 360/180 the
-                    // left stick zooms instead).
+                    // left stick scrubs instead, the right one zooms).
                     constexpr double kStep = 30.0;
                     const bool sphereMode = settings_.projectionMode() != 0;
                     if (!sphereMode && in.thumbstickLX > 0.6f && seekStepArmed_) {
@@ -5301,12 +5302,13 @@ int App::run() {
                         curDuration() > 0.0) {
                         scrubTarget_ = curTimelineStart() + renderer_.pointerScrub() * (curDuration() - curTimelineStart());
                         scrubInput = true;
-                    } else if (std::fabs(in.thumbstickRX) > 0.15f && dt > 0.0f &&
+                    } else if (std::fabs(sphereMode ? in.thumbstickLX : in.thumbstickRX) > 0.15f && dt > 0.0f &&
                                curDuration() > 0.0) {
-                        // Right stick X scrubs, so one (right) controller can scrub;
-                        // the left stick X steps 30 s.
+                        // Flat: right stick X scrubs, so one (right) controller can
+                        // scrub; the left stick X steps 30 s. 360/180: the right
+                        // stick tilts and zooms, so the left stick X scrubs.
                         if (!scrubbing_) scrubTarget_ = shownPosition();
-                        const float ax = in.thumbstickRX;
+                        const float ax = sphereMode ? in.thumbstickLX : in.thumbstickRX;
                         const float t = (std::fabs(ax) - 0.15f) / 0.85f;
                         const double rate =
                             std::copysign(static_cast<double>(t * t) * 60.0, ax);

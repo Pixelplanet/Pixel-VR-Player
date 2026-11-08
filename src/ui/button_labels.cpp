@@ -54,9 +54,9 @@ const LabelTexts kLabelTexts[] = {
      kNeedsMedia | kNotWeb | kNotLaserOnWeb | kMenusStick | kMenusLeftRight},
     {InputAction::DpadRight, "Right", "+10 s", nullptr, nullptr, nullptr,
      kNeedsMedia | kNotWeb | kNotLaserOnWeb | kMenusStick | kMenusLeftRight},
-    {InputAction::StickRight, "Navigate", "Scrub \xC2\xB7 Distance", "Scrub \xC2\xB7 Tilt", "Scrub \xC2\xB7 Scroll",
+    {InputAction::StickRight, "Navigate", "Scrub \xC2\xB7 Distance", "Zoom \xC2\xB7 Tilt", "Scrub \xC2\xB7 Scroll",
      "Move Cursor", kNeedsMedia | kMenusStick},
-    {InputAction::StickLeft, "Navigate", "Skip 30 s \xC2\xB7 Distance", "Zoom", "Skip 30 s \xC2\xB7 Scroll",
+    {InputAction::StickLeft, "Navigate", "Skip 30 s \xC2\xB7 Distance", "Scrub", "Skip 30 s \xC2\xB7 Scroll",
      "Move Cursor", kNeedsMedia | kMenusStick},
     {InputAction::ShowControls, "Hide Labels", "Hide Labels", nullptr, nullptr, nullptr, 0},
     // No default binding (SteamVR chords / long presses).

@@ -80,7 +80,10 @@ void main() {
 
     // Shape 25 (glass panel) is a rounded box plus bevel + reflection sheen.
     bool glass = (shape == 25);
-    if (shape == 0 || glass) {
+    // Shape 40: the same rounded box in flat colours (no top light, no rim
+    // light), for strokes that must match each other exactly.
+    bool flatBox = (shape == 40);
+    if (shape == 0 || glass || flatBox) {
         // Shape 0: Rounded rectangle (e.g. button body, panel, progress bar)
         float r = clamp(pc.params.y, 0.0, 1.0);
         d = sdRoundedBox(pBox, boxHalf, r);

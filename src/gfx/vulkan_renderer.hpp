@@ -564,6 +564,7 @@ public:
         SkipFwd = 37,       // next track
         Repeat = 38,
         AudioFollow = 39,   // speaker with an arrow: audio follows the selection
+        FlatBox = 40,       // rounded box in its flat colours (no top light, no rim light)
         GlassPanel = 25, // rounded box with bevel + eye-dependent reflection sheen
     };
 
@@ -836,11 +837,13 @@ private:
         int hand = 1;
         math::Vec3 centre, right, up, normal;  // billboard frame (shared per hand)
         float hw = 0.0f, hh = 0.0f;            // half-size, metres
-        math::Vec3 edge, anchor;               // leader line: card edge -> button
-        // The button part's bounding box (half size, in the part's frame
-        // `anchorRot`): the dot is drawn just outside it toward each eye.
-        math::Vec3 anchorHalf{0.004f, 0.004f, 0.004f};
-        math::Quat anchorRot{0.0f, 0.0f, 0.0f, 1.0f};
+        math::Vec3 edge, tip;                  // leader line: card edge -> the button's edge / ring
+        // The ring around the part (world): centre, plane normal, the long
+        // axis in that plane, and the half-sizes along / across it (equal for
+        // a circle; a capsule round the pill-shaped menu / view button).
+        bool ring = false;
+        math::Vec3 ringCentre, ringNormal, ringAxis;
+        float ringHW = 0.0f, ringHH = 0.0f;
         bool leader = false;
         float alpha = 1.0f;
         std::vector<std::string> lines;

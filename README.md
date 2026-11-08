@@ -234,8 +234,8 @@ Default buttons on the Steam Frame controllers:
 | **X** | Recenter | Bring the screens and menus back in front of you |
 | **Bumpers** | Previous / Next | Switch tabs in the menu; previous / next track in music |
 | **D-pad** | Up / Vol +, Down / Vol −, Left / −10 s, Right / +10 s | Move the highlight in menus; volume and seeking while watching |
-| **Right stick** | Scrub / Distance | Left/right scrubs through the video, up/down moves the screen nearer or farther |
-| **Left stick** | Skip / Distance | Left/right skips 30 s, up/down moves the screen |
+| **Right stick** | Scrub / Distance | Left/right scrubs through the video, up/down moves the screen nearer or farther. In 360° / 180°: up/down tilts the view, left/right zooms |
+| **Left stick** | Skip / Distance | Left/right skips 30 s, up/down moves the screen. In 360° / 180°: left/right scrubs |
 | **Stick click** | Show Controls | Shows or hides the labels next to the controller buttons (also in Settings › Controls & Input › Button Labels) |
 | **Grip** | Laser Hand | Moves the laser to that hand |
 

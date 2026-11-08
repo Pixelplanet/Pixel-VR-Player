@@ -99,34 +99,55 @@ constexpr float kLabelRimCol[4] = {1.0f, 1.0f, 1.0f, 0.16f};      // faint light
 constexpr float kLabelTextCol[4] = {0.96f, 0.96f, 0.96f, 1.0f};
 constexpr float kLabelLineW = 0.001f;     // leader line width
 constexpr float kLabelLineCol[4] = {0.85f, 0.85f, 0.85f, 0.60f};
-constexpr float kLabelDotD = 0.003f;      // dot on the button, diameter
-constexpr float kLabelDotCol[4] = {0.88f, 0.88f, 0.88f, 0.85f};
-// The dot (and the line's end) sits this far outside the button part's
-// bounding box toward each eye (moved along that eye's ray to the button, so
-// it stays on the button in the image), at most kLabelDotMaxLift: then the
-// part itself never hides it, only the controller in front of the part does.
-constexpr float kLabelDotClear = 0.0015f;
-constexpr float kLabelDotMaxLift = 0.02f;
-// Where the cards sit: fixed to the controller, in its face frame (right =
-// across the face toward its outer side or the B button, up = along it toward
-// the tip, out = the face normal). Each card has an attach point there; the
-// card turns to face the head and keeps its edge nearest the button on that
-// point, and the leader line runs from it to the button. The top card (Y, or
-// D-pad Up) sits above its button; the rest of the face stands in two columns
-// beside the face, rising out of it (stacked forward-up), so no line crosses
-// the face. The parts under the front (trigger, bumper, grip) each get a card
+// The line stops at the button instead of covering its print: round parts
+// (face buttons, menu / view, stick, the whole D-pad) get a thin ring around
+// them (a capsule round the pill-shaped menu / view button), in the face plane
+// just above the face, and the line ends on that ring; a D-pad direction's line ends just past the tip of its arm; the parts
+// under the front (trigger, bumper, grip) have none, their line ends where it
+// leaves the part's bounding box.
+constexpr float kLabelRingW = 0.0007f;     // ring stroke
+constexpr float kLabelRingGap = 0.0018f;   // ring radius past the part's half width
+constexpr float kLabelRingLift = 0.004f;   // ring plane above the part's centre, along the face normal
+// Near the eyes (the controller held close and turned) the cards, lines and
+// rings fade out instead of sliding through the near plane: full at
+// kLabelNearFull from the nearest eye, gone at kLabelNearGone.
+constexpr float kLabelNearFull = 0.20f;
+constexpr float kLabelNearGone = 0.10f;
+// Where the cards sit: fixed to the controller, in its face frame (out =
+// across the face toward its outer side, up = along it toward the tip, n =
+// the face normal). Each card has an attach point there; the card turns to
+// face the head and keeps its edge nearest the button on that point, and the
+// leader line runs from it to the button. No two lines may cross, so the cards
+// keep the buttons' order around the face centre: the button nearest straight
+// up (Y, or D-pad Up) gets a card above it; the rest stand in two columns, the
+// outer one for the buttons on the outer half of the face and the inner one
+// (stick side) for the rest, each ordered top to bottom by the button's angle
+// around the face centre and centred on its buttons' height, stacked
+// forward-up and only a little out of the face (a high lift would shift the
+// cards against the buttons when the face is seen at a slant, and cross
+// lines). The parts under the front (trigger, bumper, grip) each get a card
 // of their own off the edge below the face, so their lines never run up
 // through the controller's head to reach the face-side columns.
 constexpr float kLabelMaxW = 0.16f;          // card width limit
-constexpr float kLabelTopOut = 0.050f;       // top card: this far toward the tip from its button ...
-constexpr float kLabelTopLift = 0.040f;      // ... and this far out of the face
-constexpr float kLabelColOut = 0.045f;       // outer column: sideways from the face centre
-constexpr float kLabelInnerColOut = 0.080f;  // inner column (stick side, more cards): sideways
-constexpr float kLabelColLift = 0.065f;      // both columns: out of the face
-constexpr float kLabelInnerColRaise = 0.050f;  // inner column: shifted forward-up along the stack
-constexpr float kLabelColGap = 0.018f;       // between stacked cards (along the forward-up stack)
-constexpr float kLabelDpadArm = 0.006f;      // D-pad direction lines end this far out on that arm
-constexpr float kLabelUnderOut = 0.12f;      // trigger / bumper / grip cards: this far from their part
+constexpr float kLabelTopOut = 0.035f;       // top card: this far toward the tip from its button ...
+constexpr float kLabelTopLift = 0.028f;      // ... and this far out of the face
+constexpr float kLabelTopMaxX = 0.006f;      // top card: only for a button this near the middle ...
+constexpr float kLabelTopMinAngle = 60.0f;   // ... and this near straight up (degrees from the side)
+constexpr float kLabelColOut = 0.032f;       // outer column: sideways from the face centre
+constexpr float kLabelInnerColOut = 0.064f;  // inner column (stick side, more cards): sideways
+constexpr float kLabelColLift = 0.015f;      // outer column: out of the face
+constexpr float kLabelInnerColLift = 0.005f;   // inner column: out of the face (higher, the D-pad lines
+                                               // climbing to it cross the view ring seen at a slant)
+constexpr float kLabelInnerColRaise = 0.025f;  // inner column: toward the tip from its buttons' height
+constexpr float kLabelStackLift = 0.8f;      // the stack rises this much out of the face per unit up
+constexpr float kLabelColGap = 0.018f;       // between stacked cards (along the stack)
+constexpr float kLabelDpadArm = 0.006f;      // a D-pad direction's own point, this far out on its arm
+constexpr float kLabelUnderOut = 0.10f;      // trigger / bumper / grip cards: this far from their part
+// ... in these directions (out, up, n): trigger to the stick side and down,
+// bumper to the outer side, back and down, grip to the stick side, back and down.
+constexpr float kLabelUnderTrigger[3] = {-1.0f, 0.0f, -0.5f};
+constexpr float kLabelUnderBumper[3] = {1.0f, -0.5f, -0.6f};
+constexpr float kLabelUnderGrip[3] = {-1.0f, -1.0f, -0.6f};
 constexpr float kLabelFade = 0.15f;          // seconds in / out
 
 // UTF-8 -> glyph slot of our atlases (ASCII, Latin-1, the few typographic
@@ -8480,16 +8501,22 @@ void VulkanRenderer::layoutButtonLabels(const XrView* views, uint32_t viewCount)
             fU = normalize(f);
             fR = cross(fU, fN);
         }
-        const Vec3 fOut = fR * outSide;          // toward the outer side
-        const Vec3 stack = normalize(fU + fN);   // the columns stack forward-up
+        const Vec3 fOut = fR * outSide;  // toward the outer side
+        // The columns stack forward-up: seen from behind the controller the
+        // face is foreshortened, and the rise keeps the stack apart there too.
+        const Vec3 stack = normalize(fU + fN * kLabelStackLift);
+        auto toDegrees = [](float rad) { return rad * 57.2957795f; };
 
         struct Item {
             const ButtonLabelCard* card = nullptr;
-            Vec3 aLocal, aRest;
+            Vec3 aLocal, aRest;  // the line's point on the part: animated / at rest (D-pad: on the arm)
+            Vec3 bLocal, bRest;  // the part's own centre, animated / at rest (D-pad: the pad's)
+            Vec3 armDir;         // D-pad direction cards: the arm's way in the face (zero otherwise)
             Vec3 aHalf{0.004f, 0.004f, 0.004f};
-            Quat aRot{};      // the part's turn in model space
-            int column = 0;   // 0 top card, 1 outer column, -1 inner column, 2 alone below the face
-            int order = 0;    // in its column, forward first
+            Quat aRot{};          // the part's turn in model space
+            int column = 0;       // 0 top card, 1 outer column, -1 inner column, 2 alone below the face
+            float x = 0.0f, y = 0.0f;  // the button in the face (out, up) from the face centre
+            float angle = 0.0f;   // ... and its angle there, degrees from the outer side toward the tip
             Vec3 pLocal, dirLocal;  // attach point, and the way the card extends from it
             float hw = 0.0f, hh = 0.0f;
             std::vector<std::string> lines;
@@ -8501,53 +8528,37 @@ void VulkanRenderer::layoutButtonLabels(const XrView* views, uint32_t viewCount)
             it.card = &card;
             if (!labelAnchor(h, card.component, it.aLocal, &it.aHalf, &it.aRot)) continue;
             if (!labelAnchor(h, card.component, it.aRest, nullptr, nullptr, false)) it.aRest = it.aLocal;
-            // Where a face button / D-pad arm points from the face centre.
+            it.bLocal = it.aLocal;
+            it.bRest = it.aRest;
             const std::string& cmp = card.component;
-            Vec3 dir{};
-            bool faceDir = true;
-            if (cmp == "button_y" || card.direction == "up") dir = fU;
-            else if (cmp == "button_a" || card.direction == "down") dir = fU * -1.0f;
-            else if (cmp == "button_b" || cmp == "button_x") {
-                // Across the diamond by where the button really is (a mirrored
-                // model has B on the left).
-                dir = dot(it.aRest - fC, fR) >= 0.0f ? fR : fR * -1.0f;
-            } else if (card.direction == "right") dir = fR;
-            else if (card.direction == "left") dir = fR * -1.0f;
-            else faceDir = false;
-            if (!card.direction.empty()) {  // the line ends on that arm of the pad
-                it.aLocal = it.aLocal + dir * kLabelDpadArm;
-                it.aRest = it.aRest + dir * kLabelDpadArm;
+            if (card.direction == "up") it.armDir = fU;
+            else if (card.direction == "down") it.armDir = fU * -1.0f;
+            else if (card.direction == "right") it.armDir = fR;
+            else if (card.direction == "left") it.armDir = fR * -1.0f;
+            if (!card.direction.empty()) {  // that arm of the pad
+                it.aLocal = it.aLocal + it.armDir * kLabelDpadArm;
+                it.aRest = it.aRest + it.armDir * kLabelDpadArm;
             }
-            if (faceDir) {
-                const float side = dot(dir, fOut);
-                if (dot(dir, fU) > 0.7f) it.column = 0;                   // Y / Up: above it
-                else if (side > 0.7f) { it.column = 1; it.order = 1; }    // B (right hand) / Left (left hand)
-                else if (side < -0.7f) { it.column = -1; it.order = 2; }  // X / Right: the stick side
-                else { it.column = 1; it.order = 2; }                     // A / Down: outer, below
-            } else if (cmp == "trigger" || cmp == "bumper" || cmp == "button_grip") {
-                // Under the front: alone, off the edge below the face (trigger
-                // to the stick side and forward, bumper to the outer side,
-                // grip to the stick side and back), the line leaving the part
-                // outward instead of climbing through the head to the face.
+            const Vec3 rel = it.aRest - fC;
+            it.x = dot(rel, fOut);
+            it.y = dot(rel, fU);
+            if (!card.direction.empty()) {
+                it.angle = toDegrees(std::atan2(dot(it.armDir, fU), dot(it.armDir, fOut)));
+            } else if (std::sqrt(it.x * it.x + it.y * it.y) < 0.003f) {
+                it.angle = 0.0f;  // on the face centre (the whole D-pad): the outer column
+            } else {
+                it.angle = toDegrees(std::atan2(it.y, it.x));
+            }
+            it.column = 1;  // decided below, with all the face's buttons known
+            if (cmp == "trigger" || cmp == "bumper" || cmp == "button_grip") {
+                // Under the front: alone, off the edge below the face, the line
+                // leaving the part outward instead of climbing through the head.
                 it.column = 2;
-                Vec3 d = cmp == "trigger"  ? fOut * -1.0f + fU * 0.6f - fN * 0.3f
-                         : cmp == "bumper" ? fOut - fN * 0.3f
-                                           : fOut * -1.0f - fU * 0.6f - fN * 0.2f;
-                d = normalize(d);
+                const float* k = cmp == "trigger" ? kLabelUnderTrigger : cmp == "bumper" ? kLabelUnderBumper
+                                                                                         : kLabelUnderGrip;
+                const Vec3 d = normalize(fOut * k[0] + fU * k[1] + fN * k[2]);
                 it.pLocal = it.aRest + d * kLabelUnderOut;
                 it.dirLocal = d;
-            } else if (cmp == "dpad") {  // the pad as one card (menus)
-                it.column = 1;
-                it.order = 3;
-            } else if (cmp == "button_menu" || cmp == "button_view") {
-                it.column = -1;
-                it.order = 1;
-            } else if (cmp == "thumbstick" || cmp == "trackpad") {
-                it.column = -1;
-                it.order = 3;
-            } else {
-                it.column = -1;
-                it.order = 5;
             }
             float w = 0.0f;
             for (const std::string& line : card.lines) {
@@ -8565,16 +8576,31 @@ void VulkanRenderer::layoutButtonLabels(const XrView* views, uint32_t viewCount)
             }
             it.hw = 0.5f * (w + 2.0f * kLabelPadX);
             it.hh = 0.5f * (static_cast<float>(it.lines.size()) * lineH + 2.0f * kLabelPadY);
-            if (it.column == 0) {
-                it.pLocal = it.aRest + fU * kLabelTopOut + fN * kLabelTopLift;
-                it.dirLocal = fU;
-            }
             items.push_back(std::move(it));
         }
         if (items.empty()) continue;
 
-        // The two columns: each card's inner edge on the column line beside
-        // the face, stacked forward-up without gaps closing (all in model
+        // The top card: the face button nearest straight up, if one is near
+        // the middle (Y, D-pad Up), the highest of them.
+        Item* top = nullptr;
+        for (Item& it : items) {
+            if (it.column == 2 || std::fabs(it.x) > kLabelTopMaxX) continue;
+            if (it.angle < kLabelTopMinAngle || it.angle > 180.0f - kLabelTopMinAngle) continue;
+            if (top == nullptr || it.y > top->y) top = &it;
+        }
+        if (top != nullptr) {
+            top->column = 0;
+            top->pLocal = top->aRest + fU * kLabelTopOut + fN * kLabelTopLift;
+            top->dirLocal = fU;
+        }
+        // The rest of the face in two columns, split by side: every line of
+        // the outer column stays on the outer side of every inner one.
+        for (Item& it : items) {
+            if (it.column == 1) it.column = it.x >= -1e-4f ? 1 : -1;
+        }
+        // Each column: the cards top to bottom in the order their buttons go
+        // round the face centre, each card's inner edge on the column line
+        // beside the face, centred on the buttons' height (all in model
         // space, so the whole set moves rigidly with the controller).
         for (const int side : {1, -1}) {
             std::vector<Item*> col;
@@ -8582,12 +8608,21 @@ void VulkanRenderer::layoutButtonLabels(const XrView* views, uint32_t viewCount)
                 if (it.column == side) col.push_back(&it);
             }
             if (col.empty()) continue;
-            std::stable_sort(col.begin(), col.end(), [](const Item* a, const Item* b) { return a->order < b->order; });
+            auto rank = [side](const Item* it) {
+                return side > 0 ? -it->angle : std::fmod(it->angle - 90.0f + 720.0f, 360.0f);
+            };
+            std::stable_sort(col.begin(), col.end(), [&](const Item* a, const Item* b) { return rank(a) < rank(b); });
             float total = kLabelColGap * static_cast<float>(col.size() - 1);
-            for (const Item* it : col) total += 2.0f * it->hh;
-            float s = 0.5f * total + (side < 0 ? kLabelInnerColRaise : 0.0f);
-            const Vec3 base = fC + fOut * (static_cast<float>(side) * (side > 0 ? kLabelColOut : kLabelInnerColOut)) +
-                              fN * kLabelColLift;
+            float yMean = 0.0f;
+            for (const Item* it : col) {
+                total += 2.0f * it->hh;
+                yMean += it->y;
+            }
+            yMean /= static_cast<float>(col.size());
+            const Vec3 base = fC + fU * (yMean + (side < 0 ? kLabelInnerColRaise : 0.0f)) +
+                              fOut * (static_cast<float>(side) * (side > 0 ? kLabelColOut : kLabelInnerColOut)) +
+                              fN * (side > 0 ? kLabelColLift : kLabelInnerColLift);
+            float s = 0.5f * total;
             for (Item* it : col) {
                 s -= it->hh;
                 it->pLocal = base + stack * s;
@@ -8596,6 +8631,13 @@ void VulkanRenderer::layoutButtonLabels(const XrView* views, uint32_t viewCount)
             }
         }
 
+        // The eyes, for the near fade.
+        Vec3 eyes[2];
+        const uint32_t eyeCount = std::min<uint32_t>(viewCount, 2u);
+        for (uint32_t v = 0; v < eyeCount; ++v) {
+            eyes[v] = Vec3{views[v].pose.position.x, views[v].pose.position.y, views[v].pose.position.z};
+        }
+        const Vec3 faceN = normalize(rotate(q, fN));
         for (Item& it : items) {
             LabelCardDraw dr;
             dr.hand = h;
@@ -8605,13 +8647,76 @@ void VulkanRenderer::layoutButtonLabels(const XrView* views, uint32_t viewCount)
             dr.hw = it.hw;
             dr.hh = it.hh;
             const Vec3 attach = world(it.pLocal);
-            dr.anchor = world(it.aLocal);
-            dr.anchorHalf = it.aHalf;
-            // World turn of the part: the controller's, then the node's.
-            dr.anchorRot = Quat{q.w * it.aRot.x + q.x * it.aRot.w + q.y * it.aRot.z - q.z * it.aRot.y,
-                                q.w * it.aRot.y - q.x * it.aRot.z + q.y * it.aRot.w + q.z * it.aRot.x,
-                                q.w * it.aRot.z + q.x * it.aRot.y - q.y * it.aRot.x + q.z * it.aRot.w,
-                                q.w * it.aRot.w - q.x * it.aRot.x - q.y * it.aRot.y - q.z * it.aRot.z};
+            const Vec3 button = world(it.bLocal);
+            const std::string& cmp = it.card->component;
+            // Where the line ends: on the ring round the part, past the tip of
+            // its D-pad arm, or where it leaves the part's box (under the front).
+            if (cmp == "trigger" || cmp == "bumper" || cmp == "button_grip") {
+                const Vec3 a = world(it.aLocal);
+                const Vec3 toCard = attach - a;
+                const float dist = length(toCard);
+                dr.tip = a;
+                if (dist > 1e-4f) {
+                    const Vec3 dirW = toCard * (1.0f / dist);
+                    // World turn of the part: the controller's, then the node's.
+                    const Quat pr{q.w * it.aRot.x + q.x * it.aRot.w + q.y * it.aRot.z - q.z * it.aRot.y,
+                                  q.w * it.aRot.y - q.x * it.aRot.z + q.y * it.aRot.w + q.z * it.aRot.x,
+                                  q.w * it.aRot.z + q.x * it.aRot.y - q.y * it.aRot.x + q.z * it.aRot.w,
+                                  q.w * it.aRot.w - q.x * it.aRot.x - q.y * it.aRot.y - q.z * it.aRot.z};
+                    const Vec3 l = rotate(Quat{-pr.x, -pr.y, -pr.z, pr.w}, dirW);  // in the part's frame
+                    float t = 1e9f;
+                    if (std::fabs(l.x) > 1e-5f) t = std::min(t, it.aHalf.x / std::fabs(l.x));
+                    if (std::fabs(l.y) > 1e-5f) t = std::min(t, it.aHalf.y / std::fabs(l.y));
+                    if (std::fabs(l.z) > 1e-5f) t = std::min(t, it.aHalf.z / std::fabs(l.z));
+                    dr.tip = a + dirW * std::min(t + 0.001f, 0.8f * dist);
+                }
+            } else {
+                // The part's half width across the face (its box's X: across
+                // the face on these controllers), clamped for odd parts.
+                const float rr = std::clamp(it.aHalf.x, 0.003f, 0.016f) + kLabelRingGap;
+                // At rest: a press or a stick tilt must not sink the ring into the face.
+                const Vec3 c = it.bRest + fN * kLabelRingLift;
+                if (!it.card->direction.empty()) {
+                    dr.tip = world(c + it.armDir * rr);
+                } else {
+                    Vec3 d = it.pLocal - c;
+                    d = d - fN * dot(d, fN);
+                    d = length(d) > 1e-5f ? normalize(d) : fOut;
+                    // The pill-shaped menu / view button gets a capsule hugging
+                    // it (long along the model's X, laid into the face): a
+                    // circle that wide reaches far past its short sides, into
+                    // the D-pad lines passing by.
+                    Vec3 ax = fR;
+                    float hw = rr, hh = rr;
+                    if (cmp == "button_menu" || cmp == "button_view") {
+                        const Vec3 mx = Vec3{1.0f, 0.0f, 0.0f} - fN * fN.x;
+                        if (length(mx) > 1e-3f) {
+                            ax = normalize(mx);
+                            hw = std::clamp(it.aHalf.x, 0.002f, 0.016f) + kLabelRingGap;
+                            hh = std::min(std::clamp(it.aHalf.y, 0.002f, 0.016f) + kLabelRingGap, hw);
+                        }
+                    }
+                    // Where the way to the card leaves the capsule (the
+                    // segment +-(hw - hh) along ax, grown by hh).
+                    const Vec3 ay = cross(fN, ax);
+                    const float dx = std::fabs(dot(d, ax)), dy = std::fabs(dot(d, ay));
+                    const float halfLen = hw - hh;
+                    float t = hw;
+                    if (dy > 1e-5f && dx * (hh / dy) <= halfLen) {
+                        t = hh / dy;  // through a straight side
+                    } else {
+                        const float b = halfLen * dx;  // through a round end
+                        t = b + std::sqrt(std::max(b * b - halfLen * halfLen + hh * hh, 0.0f));
+                    }
+                    dr.tip = world(c + d * t);
+                    dr.ring = true;
+                    dr.ringCentre = world(c);
+                    dr.ringNormal = faceN;
+                    dr.ringAxis = normalize(rotate(q, ax));
+                    dr.ringHW = hw;
+                    dr.ringHH = hh;
+                }
+            }
             // The card extends from the attach point the way its slot points,
             // as seen in the billboard; seen nearly end-on, that blends into
             // "away from the button" so the card never flips.
@@ -8620,7 +8725,7 @@ void VulkanRenderer::layoutButtonLabels(const XrView* views, uint32_t viewCount)
             const float dlen = std::sqrt(dx * dx + dy * dy);
             constexpr float kEndOn = 0.3f;
             if (dlen < kEndOn) {
-                const Vec3 away = attach - dr.anchor;
+                const Vec3 away = attach - button;
                 float ax = dot(away, r), ay = dot(away, u);
                 const float alen = std::sqrt(ax * ax + ay * ay);
                 if (alen > 1e-5f) {
@@ -8637,15 +8742,26 @@ void VulkanRenderer::layoutButtonLabels(const XrView* views, uint32_t viewCount)
             }
             dx /= len;
             dy /= len;
-            // Push the centre out until the card's edge passes through the point.
-            const float tx = std::fabs(dx) > 1e-4f ? it.hw / std::fabs(dx) : 1e9f;
-            const float ty = std::fabs(dy) > 1e-4f ? it.hh / std::fabs(dy) : 1e9f;
-            const float t = std::min(tx, ty);
-            dr.centre = attach + (r * dx + u * dy) * t;
+            // The attach point on the card's edge where that way leaves the
+            // card, mapped onto the box (so a side card keeps the point on its
+            // near end, not on its top edge, while its way tilts a little).
+            const float m = std::max(std::fabs(dx), std::fabs(dy));
+            dr.centre = attach + (r * (dx * it.hw) + u * (dy * it.hh)) * (1.0f / m);
             // Leader line from the attach point (on the card's near edge).
             dr.edge = attach;
-            dr.leader = length(dr.anchor - dr.edge) > 0.006f;
-            dr.alpha = fade;
+            dr.leader = length(dr.tip - dr.edge) > 0.006f;
+            // Near the eyes: fade with the distance from the nearest eye to the card.
+            float nearest = 1e9f;
+            for (uint32_t v = 0; v < eyeCount; ++v) {
+                const Vec3 e = eyes[v] - dr.centre;
+                const float cx = std::clamp(dot(e, r), -it.hw, it.hw);
+                const float cy = std::clamp(dot(e, u), -it.hh, it.hh);
+                nearest = std::min(nearest, length(e - r * cx - u * cy));
+            }
+            float k = std::clamp((nearest - kLabelNearGone) / (kLabelNearFull - kLabelNearGone), 0.0f, 1.0f);
+            k = k * k * (3.0f - 2.0f * k);
+            dr.alpha = fade * k;
+            if (dr.alpha <= 0.001f) continue;
             dr.lines = std::move(it.lines);
             labelDraws_.push_back(std::move(dr));
         }
@@ -8680,12 +8796,12 @@ void VulkanRenderer::drawButtonLabels(const XrView& view, void* glyphs, VkBuffer
         return m;
     };
     auto box = [&](const Mat4& model, float hw, float hh, const float col[4], float radius, float border,
-                   const float* borderCol) {
+                   const float* borderCol, UiShape shape = UiShape::RoundedBox) {
         UiPush push{};
         const Mat4 mvp = multiply(vpWorld, model);
         std::memcpy(push.mvp, mvp.m, sizeof(push.mvp));
         std::memcpy(push.color, col, sizeof(push.color));
-        push.params[0] = static_cast<float>(UiShape::RoundedBox);
+        push.params[0] = static_cast<float>(shape);
         push.params[1] = radius;
         push.params[2] = border;
         push.params[3] = 0.0f;
@@ -8696,41 +8812,29 @@ void VulkanRenderer::drawButtonLabels(const XrView& view, void* glyphs, VkBuffer
                            0, sizeof(UiPush), &push);
         vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
     };
-    // A small disc facing this eye.
-    auto disc = [&](const Vec3& p, float radius, const float col[4]) {
-        const Vec3 n = normalize(eye - p);
-        Vec3 r = cross(Vec3{0.0f, 1.0f, 0.0f}, n);
-        if (length(r) < 1e-4f) r = Vec3{1.0f, 0.0f, 0.0f};
-        r = normalize(r);
-        const Vec3 u = cross(n, r);
-        box(frame(p, r, u, n), radius, radius, col, 1.0f, 0.0f, nullptr);
-    };
-
-    // The button end of a leader line: just outside the part's bounding box
-    // toward this eye, on this eye's ray to the part (so it still shows on
-    // the button), so only the controller in front of the part hides it.
-    auto buttonPoint = [&](const LabelCardDraw& d) {
-        const Vec3 toEye = eye - d.anchor;
-        const float dist = length(toEye);
-        if (dist < 1e-3f) return d.anchor;
-        const Vec3 dir = toEye * (1.0f / dist);
-        const Quat inv{-d.anchorRot.x, -d.anchorRot.y, -d.anchorRot.z, d.anchorRot.w};
-        const Vec3 l = rotate(inv, dir);  // in the part's frame
-        const float support = std::fabs(l.x) * d.anchorHalf.x + std::fabs(l.y) * d.anchorHalf.y +
-                              std::fabs(l.z) * d.anchorHalf.z;
-        const float lift = std::min({support + kLabelDotClear, kLabelDotMaxLift, 0.5f * dist});
-        return d.anchor + dir * lift;
-    };
-
-    // Leader lines ending in a dot on the button, depth-tested against the
-    // models drawn just before in this pass (a button on the far side of the
-    // controller is hidden with its line); drawn first so the cards cover
-    // any that cross them.
+    // Leader lines ending at the button's edge, and the rings round the round
+    // buttons, depth-tested against the models drawn just before in this pass
+    // (a button on the far side of the controller is hidden with its line);
+    // drawn first so the cards cover any that cross them.
     const VkPipeline linePipe = (uiPipelineDepth_ != VK_NULL_HANDLE) ? uiPipelineDepth_ : uiPipeline_;
     vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, linePipe);
     for (const LabelCardDraw& d : labelDraws_) {
+        if (!d.ring || d.ringHW <= 0.0f || d.ringHH <= 0.0f) continue;
+        // A circle / capsule outline in the face plane, its front turned to
+        // this eye, in the line's own flat colour (no rim light).
+        Vec3 nrm = d.ringNormal;
+        if (dot(eye - d.ringCentre, nrm) < 0.0f) nrm = nrm * -1.0f;
+        const Vec3 a = d.ringAxis;
+        const Vec3 b = cross(nrm, a);
+        const float clear[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        float ringCol[4];
+        faded(kLabelLineCol, d.alpha, ringCol);
+        box(frame(d.ringCentre, a, b, nrm), d.ringHW, d.ringHH, clear, 1.0f,
+            kLabelRingW / std::min(d.ringHW, d.ringHH), ringCol, UiShape::FlatBox);
+    }
+    for (const LabelCardDraw& d : labelDraws_) {
         if (!d.leader) continue;
-        const Vec3 tip = buttonPoint(d);
+        const Vec3 tip = d.tip;
         const Vec3 axis = tip - d.edge;
         const float len = length(axis);
         if (len < 1e-4f) continue;
@@ -8741,11 +8845,10 @@ void VulkanRenderer::drawButtonLabels(const XrView& view, void* glyphs, VkBuffer
         if (length(toEye) < 1e-4f) continue;
         toEye = normalize(toEye);
         const Vec3 across = normalize(cross(up, toEye));
-        float lineCol[4], dotCol[4];
+        float lineCol[4];
         faded(kLabelLineCol, d.alpha, lineCol);
-        faded(kLabelDotCol, d.alpha, dotCol);
-        box(frame(mid, across, up, toEye), 0.5f * kLabelLineW, 0.5f * len, lineCol, 1.0f, 0.0f, nullptr);
-        disc(tip, 0.5f * kLabelDotD, dotCol);
+        box(frame(mid, across, up, toEye), 0.5f * kLabelLineW, 0.5f * len, lineCol, 1.0f, 0.0f, nullptr,
+            UiShape::FlatBox);
     }
     // Cards: always visible (no depth test), dark translucent grey, faint rim.
     vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipeline_);
