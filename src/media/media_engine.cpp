@@ -829,6 +829,15 @@ void MediaEngine::Impl::decodeLoop() {
             swrInFormat = frame->format;
             swrInRate = frame->sample_rate;
         }
+        // Every plane swr will read must exist (a frame without them crashed swr_convert).
+        if (frame->nb_samples <= 0 || frame->extended_data == nullptr) return;
+        const int planes = av_sample_fmt_is_planar(static_cast<AVSampleFormat>(frame->format)) ? frame->ch_layout.nb_channels : 1;
+        for (int pl = 0; pl < planes; ++pl) {
+            if (frame->extended_data[pl] == nullptr) {
+                PIXELVR_LOG_WARN("MediaEngine: audio frame without plane %d of %d dropped", pl, planes);
+                return;
+            }
+        }
         const int maxOut = swr_get_out_samples(swr, frame->nb_samples);
         if (maxOut <= 0) {
             return;
