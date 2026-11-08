@@ -107,6 +107,27 @@ constexpr float kLabelDotCol[4] = {0.88f, 0.88f, 0.88f, 0.85f};
 // part itself never hides it, only the controller in front of the part does.
 constexpr float kLabelDotClear = 0.0015f;
 constexpr float kLabelDotMaxLift = 0.02f;
+// Where the cards sit: fixed to the controller, in its face frame (right =
+// across the face toward its outer side or the B button, up = along it toward
+// the tip, out = the face normal). Each card has an attach point there; the
+// card turns to face the head and keeps its edge nearest the button on that
+// point, and the leader line runs from it to the button. The top card (Y, or
+// D-pad Up) sits above its button; the rest of the face stands in two columns
+// beside the face, rising out of it (stacked forward-up), so no line crosses
+// the face. The parts under the front (trigger, bumper, grip) each get a card
+// of their own off the edge below the face, so their lines never run up
+// through the controller's head to reach the face-side columns.
+constexpr float kLabelMaxW = 0.16f;          // card width limit
+constexpr float kLabelTopOut = 0.050f;       // top card: this far toward the tip from its button ...
+constexpr float kLabelTopLift = 0.040f;      // ... and this far out of the face
+constexpr float kLabelColOut = 0.045f;       // outer column: sideways from the face centre
+constexpr float kLabelInnerColOut = 0.080f;  // inner column (stick side, more cards): sideways
+constexpr float kLabelColLift = 0.065f;      // both columns: out of the face
+constexpr float kLabelInnerColRaise = 0.050f;  // inner column: shifted forward-up along the stack
+constexpr float kLabelColGap = 0.018f;       // between stacked cards (along the forward-up stack)
+constexpr float kLabelDpadArm = 0.006f;      // D-pad direction lines end this far out on that arm
+constexpr float kLabelUnderOut = 0.12f;      // trigger / bumper / grip cards: this far from their part
+constexpr float kLabelFade = 0.15f;          // seconds in / out
 
 // UTF-8 -> glyph slot of our atlases (ASCII, Latin-1, the few typographic
 // extras mapped to 127..136), advancing idx; '?' for anything else.
@@ -8213,7 +8234,7 @@ float VulkanRenderer::labelTextWidth(const FontAtlas& font, float scale, const s
 }
 
 bool VulkanRenderer::labelAnchor(int hand, const std::string& component, math::Vec3& out, math::Vec3* half,
-                                 math::Quat* rot) {
+                                 math::Quat* rot, bool animated) {
     using namespace math;
     if (hand < 0 || hand > 1) return false;
     // SteamVR's controller json, read once per hand (also logged against the
@@ -8306,7 +8327,7 @@ bool VulkanRenderer::labelAnchor(int hand, const std::string& component, math::V
                 nq = hm.nodeStates[static_cast<std::size_t>(found->submesh)].quat;
             }
             Quat nodeRot{};
-            if (np != nullptr && nq != nullptr &&
+            if (animated && np != nullptr && nq != nullptr &&
                 nq[0] * nq[0] + nq[1] * nq[1] + nq[2] * nq[2] + nq[3] * nq[3] >= 0.5f) {
                 nodeRot = Quat{nq[0], nq[1], nq[2], nq[3]};
                 c = Vec3{np[0], np[1], np[2]} + rotate(nodeRot, c);
@@ -8366,10 +8387,6 @@ void VulkanRenderer::layoutButtonLabels(const XrView* views, uint32_t viewCount)
 
     const FontAtlas& font = fontAtlasBold_.ok ? fontAtlasBold_ : fontAtlas_;
     const bool textOk = textReady_ && font.ok && font.ascent > 0.0f;
-    constexpr float kFade = 0.15f;         // seconds in / out
-    constexpr float kMaxW = 0.16f;         // card width limit
-    constexpr float kFaceOffset = 0.06f;   // face-button column, out from the buttons
-    constexpr float kColumnPitch = 0.035f; // at least this between card centres
     const float scale = textOk ? kLabelTextH / font.ascent : 0.0f;
     const float lineH = textOk ? (font.lineHeight > 0.0f ? font.lineHeight * scale : kLabelTextH * 1.3f) : 0.0f;
 
@@ -8379,7 +8396,7 @@ void VulkanRenderer::layoutButtonLabels(const XrView* views, uint32_t viewCount)
         for (const ButtonLabelCard& card : buttonLabels_) any = any || (card.hand == h && !card.lines.empty());
         const bool on = buttonLabelsShown_ && drawModels_ && c.active && any && textOk;
         float& fade = buttonLabelFade_[h];
-        fade = on ? std::min(1.0f, fade + dt / kFade) : std::max(0.0f, fade - dt / kFade);
+        fade = on ? std::min(1.0f, fade + dt / kLabelFade) : std::max(0.0f, fade - dt / kLabelFade);
         // Hidden with the model (inactive hand, models off) at once; else fading.
         if (!c.active || !drawModels_ || !textOk || fade <= 0.001f) {
             if (!c.active || !drawModels_) fade = 0.0f;
@@ -8391,7 +8408,8 @@ void VulkanRenderer::layoutButtonLabels(const XrView* views, uint32_t viewCount)
         const Quat q{qp[0], qp[1], qp[2], qp[3]};
         const Vec3 o{op[0], op[1], op[2]};
         auto world = [&](const Vec3& local) { return o + rotate(q, local); };
-        // One billboard frame per hand, facing the head, kept upright.
+        // One billboard frame per hand, facing the head, kept upright: only
+        // the cards' turn follows the head, never where they are.
         Vec3 n = head - o;
         if (length(n) < 1e-3f) continue;
         n = normalize(n);
@@ -8404,18 +8422,76 @@ void VulkanRenderer::layoutButtonLabels(const XrView* views, uint32_t viewCount)
         }
         u = normalize(u);
         const Vec3 r = cross(u, n);
-        auto px = [&](const Vec3& p) { return dot(p - o, r); };
-        auto py = [&](const Vec3& p) { return dot(p - o, u); };
-        auto pd = [&](const Vec3& p) { return dot(p - o, n); };
+
+        // The face frame in model space, from the parts at rest (a press or a
+        // stick tilt must not move the cards): right (fR), up toward the tip
+        // (fU), out of the face (fN), around the face centre fC.
+        auto rest = [&](const char* name, Vec3& p) { return labelAnchor(h, name, p, nullptr, nullptr, false); };
+        const float outSide = (h == 1) ? 1.0f : -1.0f;  // outer side: +X on the right hand, -X on the left
+        Vec3 fR{1.0f, 0.0f, 0.0f}, fU{0.0f, 0.0f, -1.0f}, fN{0.0f, 1.0f, 0.0f}, fC{0.0f, 0.0f, 0.04f};
+        bool frameOk = false;
+        {
+            Vec3 pa, pb, px, py;
+            if (rest("button_a", pa) && rest("button_b", pb) && rest("button_x", px) && rest("button_y", py)) {
+                // The diamond: right from X to B, up from A to Y, out = right x up.
+                const Vec3 across = pb - px;
+                Vec3 along = py - pa;
+                if (length(across) > 1e-3f) {
+                    fR = normalize(across);
+                    along = along - fR * dot(along, fR);
+                    if (length(along) > 1e-3f) {
+                        fU = normalize(along);
+                        fN = cross(fR, fU);
+                        fC = (pa + pb + px + py) * 0.25f;
+                        frameOk = true;
+                        // A mirrored model (the other hand's, until this hand's
+                        // own arrives) has B and X swapped across the face, so
+                        // right x up points into the body: turn it out of the
+                        // face, away from the trigger, and rebuild right.
+                        Vec3 trig;
+                        if (rest("trigger", trig) && dot(fN, fC - trig) < 0.0f) {
+                            fN = fN * -1.0f;
+                            fR = cross(fU, fN);
+                        }
+                    }
+                }
+            }
+        }
+        if (!frameOk) {
+            // No diamond (the left hand): the plane through the D-pad, the
+            // view / menu button and the stick, out of the face away from the
+            // trigger; up = the model's forward laid into that plane.
+            std::vector<Vec3> pts;
+            for (const char* name : {"dpad", "button_view", "button_menu", "thumbstick", "trackpad"}) {
+                Vec3 p;
+                if (pts.size() < 3 && rest(name, p)) pts.push_back(p);
+            }
+            Vec3 nn{-outSide * 0.13f, 0.81f, -0.57f};  // the Steam Frame face, when parts are missing
+            if (pts.size() == 3) {
+                const Vec3 c3 = cross(pts[1] - pts[0], pts[2] - pts[0]);
+                if (length(c3) > 1e-5f) nn = c3;
+            }
+            fN = normalize(nn);
+            if (!pts.empty()) fC = pts[0];
+            Vec3 trig;
+            if (rest("trigger", trig) && dot(fN, fC - trig) < 0.0f) fN = fN * -1.0f;
+            Vec3 f = Vec3{0.0f, 0.0f, -1.0f} - fN * (-fN.z);
+            if (length(f) < 1e-3f) f = cross(fN, Vec3{1.0f, 0.0f, 0.0f});
+            fU = normalize(f);
+            fR = cross(fU, fN);
+        }
+        const Vec3 fOut = fR * outSide;          // toward the outer side
+        const Vec3 stack = normalize(fU + fN);   // the columns stack forward-up
 
         struct Item {
             const ButtonLabelCard* card = nullptr;
-            Vec3 aLocal, aWorld;
+            Vec3 aLocal, aRest;
             Vec3 aHalf{0.004f, 0.004f, 0.004f};
-            Quat aRot{};  // the part's turn in model space
-            int cat = 0;  // 0 face / menu column, 1 stick (above), 2 trigger / grip / bumper (below)
-            bool column = false;
-            float hw = 0.0f, hh = 0.0f, x = 0.0f, y = 0.0f, d = 0.0f;
+            Quat aRot{};      // the part's turn in model space
+            int column = 0;   // 0 top card, 1 outer column, -1 inner column, 2 alone below the face
+            int order = 0;    // in its column, forward first
+            Vec3 pLocal, dirLocal;  // attach point, and the way the card extends from it
+            float hw = 0.0f, hh = 0.0f;
             std::vector<std::string> lines;
         };
         std::vector<Item> items;
@@ -8424,15 +8500,60 @@ void VulkanRenderer::layoutButtonLabels(const XrView* views, uint32_t viewCount)
             Item it;
             it.card = &card;
             if (!labelAnchor(h, card.component, it.aLocal, &it.aHalf, &it.aRot)) continue;
-            it.aWorld = world(it.aLocal);
-            if (card.component == "thumbstick" || card.component == "trackpad") it.cat = 1;
-            else if (card.component == "trigger" || card.component == "bumper" || card.component == "button_grip")
-                it.cat = 2;
+            if (!labelAnchor(h, card.component, it.aRest, nullptr, nullptr, false)) it.aRest = it.aLocal;
+            // Where a face button / D-pad arm points from the face centre.
+            const std::string& cmp = card.component;
+            Vec3 dir{};
+            bool faceDir = true;
+            if (cmp == "button_y" || card.direction == "up") dir = fU;
+            else if (cmp == "button_a" || card.direction == "down") dir = fU * -1.0f;
+            else if (cmp == "button_b" || cmp == "button_x") {
+                // Across the diamond by where the button really is (a mirrored
+                // model has B on the left).
+                dir = dot(it.aRest - fC, fR) >= 0.0f ? fR : fR * -1.0f;
+            } else if (card.direction == "right") dir = fR;
+            else if (card.direction == "left") dir = fR * -1.0f;
+            else faceDir = false;
+            if (!card.direction.empty()) {  // the line ends on that arm of the pad
+                it.aLocal = it.aLocal + dir * kLabelDpadArm;
+                it.aRest = it.aRest + dir * kLabelDpadArm;
+            }
+            if (faceDir) {
+                const float side = dot(dir, fOut);
+                if (dot(dir, fU) > 0.7f) it.column = 0;                   // Y / Up: above it
+                else if (side > 0.7f) { it.column = 1; it.order = 1; }    // B (right hand) / Left (left hand)
+                else if (side < -0.7f) { it.column = -1; it.order = 2; }  // X / Right: the stick side
+                else { it.column = 1; it.order = 2; }                     // A / Down: outer, below
+            } else if (cmp == "trigger" || cmp == "bumper" || cmp == "button_grip") {
+                // Under the front: alone, off the edge below the face (trigger
+                // to the stick side and forward, bumper to the outer side,
+                // grip to the stick side and back), the line leaving the part
+                // outward instead of climbing through the head to the face.
+                it.column = 2;
+                Vec3 d = cmp == "trigger"  ? fOut * -1.0f + fU * 0.6f - fN * 0.3f
+                         : cmp == "bumper" ? fOut - fN * 0.3f
+                                           : fOut * -1.0f - fU * 0.6f - fN * 0.2f;
+                d = normalize(d);
+                it.pLocal = it.aRest + d * kLabelUnderOut;
+                it.dirLocal = d;
+            } else if (cmp == "dpad") {  // the pad as one card (menus)
+                it.column = 1;
+                it.order = 3;
+            } else if (cmp == "button_menu" || cmp == "button_view") {
+                it.column = -1;
+                it.order = 1;
+            } else if (cmp == "thumbstick" || cmp == "trackpad") {
+                it.column = -1;
+                it.order = 3;
+            } else {
+                it.column = -1;
+                it.order = 5;
+            }
             float w = 0.0f;
             for (const std::string& line : card.lines) {
                 std::string l = line;
-                if (labelTextWidth(font, scale, l) > kMaxW - 2.0f * kLabelPadX) {
-                    while (!l.empty() && labelTextWidth(font, scale, l + "...") > kMaxW - 2.0f * kLabelPadX) {
+                if (labelTextWidth(font, scale, l) > kLabelMaxW - 2.0f * kLabelPadX) {
+                    while (!l.empty() && labelTextWidth(font, scale, l + "...") > kLabelMaxW - 2.0f * kLabelPadX) {
                         // drop one whole UTF-8 character
                         while (!l.empty() && (static_cast<unsigned char>(l.back()) & 0xC0) == 0x80) l.pop_back();
                         if (!l.empty()) l.pop_back();
@@ -8444,98 +8565,37 @@ void VulkanRenderer::layoutButtonLabels(const XrView* views, uint32_t viewCount)
             }
             it.hw = 0.5f * (w + 2.0f * kLabelPadX);
             it.hh = 0.5f * (static_cast<float>(it.lines.size()) * lineH + 2.0f * kLabelPadY);
+            if (it.column == 0) {
+                it.pLocal = it.aRest + fU * kLabelTopOut + fN * kLabelTopLift;
+                it.dirLocal = fU;
+            }
             items.push_back(std::move(it));
         }
         if (items.empty()) continue;
 
-        // Model space: +Y up, -Z forward, +X right. The face is tilted toward
-        // the player: faceUp runs along it away from them, faceN out of it.
-        const Vec3 faceUp = normalize(Vec3{0.0f, 0.78f, -0.62f});
-        const Vec3 faceN = normalize(Vec3{0.0f, 0.62f, 0.78f});
-        const float side = (h == 1) ? 1.0f : -1.0f;  // outer side of this hand
+        // The two columns: each card's inner edge on the column line beside
+        // the face, stacked forward-up without gaps closing (all in model
+        // space, so the whole set moves rigidly with the controller).
+        for (const int side : {1, -1}) {
+            std::vector<Item*> col;
+            for (Item& it : items) {
+                if (it.column == side) col.push_back(&it);
+            }
+            if (col.empty()) continue;
+            std::stable_sort(col.begin(), col.end(), [](const Item* a, const Item* b) { return a->order < b->order; });
+            float total = kLabelColGap * static_cast<float>(col.size() - 1);
+            for (const Item* it : col) total += 2.0f * it->hh;
+            float s = 0.5f * total + (side < 0 ? kLabelInnerColRaise : 0.0f);
+            const Vec3 base = fC + fOut * (static_cast<float>(side) * (side > 0 ? kLabelColOut : kLabelInnerColOut)) +
+                              fN * kLabelColLift;
+            for (Item* it : col) {
+                s -= it->hh;
+                it->pLocal = base + stack * s;
+                it->dirLocal = fOut * static_cast<float>(side);
+                s -= it->hh + kLabelColGap;
+            }
+        }
 
-        // Face buttons and menu: one column ~6 cm out from them, ordered by
-        // how high each button sits on the face, at least 3.5 cm apart.
-        std::vector<Item*> face;
-        Vec3 mean{};
-        for (Item& it : items) {
-            if (it.cat != 0) continue;
-            face.push_back(&it);
-            mean = mean + it.aLocal;
-        }
-        if (!face.empty()) {
-            mean = mean * (1.0f / static_cast<float>(face.size()));
-            const Vec3 base = world(Vec3{mean.x + side * kFaceOffset, mean.y, mean.z} + faceN * 0.01f);
-            const float bx = px(base), by = py(base), bd = pd(base);
-            const float ext = (std::fabs(bx) < 0.01f) ? side : (bx >= 0.0f ? 1.0f : -1.0f);
-            std::stable_sort(face.begin(), face.end(), [&](const Item* a, const Item* b) {
-                return dot(a->aLocal, faceUp) > dot(b->aLocal, faceUp);
-            });
-            float y = 0.0f;
-            for (std::size_t i = 0; i < face.size(); ++i) {
-                if (i > 0) y -= std::max(kColumnPitch, face[i - 1]->hh + face[i]->hh + 0.006f);
-                face[i]->y = y;
-            }
-            const float top = face.front()->y + face.front()->hh;
-            const float bottom = face.back()->y - face.back()->hh;
-            const float shift = by - 0.5f * (top + bottom);
-            for (Item* it : face) {
-                it->y += shift;
-                it->x = bx + ext * it->hw;  // inner edge on the column line
-                it->d = bd;
-                it->column = true;
-            }
-        }
-        // Stick: above it. Trigger / bumper / grip: ~13 cm below / forward.
-        for (Item& it : items) {
-            if (it.cat == 1) {
-                it.x = px(it.aWorld);
-                it.y = py(it.aWorld) + 0.03f + it.hh;
-                it.d = pd(it.aWorld);
-            } else if (it.cat == 2) {
-                Vec3 dir{0.0f, -0.8f, -0.6f};  // trigger: down and forward
-                float dist = 0.13f;
-                if (it.card->component == "bumper") {
-                    dir = Vec3{0.0f, -0.2f, -1.0f};  // forward, past the tip
-                } else if (it.card->component == "button_grip") {
-                    dir = Vec3{side * 0.5f, -1.0f, 0.25f};  // down, a little out
-                    dist = 0.12f;
-                }
-                const Vec3 t = world(it.aLocal + normalize(dir) * dist);
-                it.x = px(t);
-                it.y = py(t);
-                it.d = pd(t);
-            }
-        }
-        // No overlap: push apart along the shorter overlap (the column stays put).
-        constexpr float kMargin = 0.005f;
-        for (int iter = 0; iter < 8; ++iter) {
-            bool moved = false;
-            for (std::size_t i = 0; i < items.size(); ++i) {
-                for (std::size_t j = i + 1; j < items.size(); ++j) {
-                    Item& a = items[i];
-                    Item& b = items[j];
-                    if (a.column && b.column) continue;
-                    const float ox = a.hw + b.hw + kMargin - std::fabs(a.x - b.x);
-                    const float oy = a.hh + b.hh + kMargin - std::fabs(a.y - b.y);
-                    if (ox <= 0.0f || oy <= 0.0f) continue;
-                    const bool alongX = ox < oy;
-                    const float sx = (b.x >= a.x) ? 1.0f : -1.0f;
-                    const float sy = (b.y >= a.y) ? 1.0f : -1.0f;
-                    const float wa = a.column ? 0.0f : (b.column ? 1.0f : 0.5f);
-                    const float wb = 1.0f - wa;
-                    if (alongX) {
-                        a.x -= sx * ox * wa;
-                        b.x += sx * ox * wb;
-                    } else {
-                        a.y -= sy * oy * wa;
-                        b.y += sy * oy * wb;
-                    }
-                    moved = true;
-                }
-            }
-            if (!moved) break;
-        }
         for (Item& it : items) {
             LabelCardDraw dr;
             dr.hand = h;
@@ -8544,27 +8604,47 @@ void VulkanRenderer::layoutButtonLabels(const XrView* views, uint32_t viewCount)
             dr.normal = n;
             dr.hw = it.hw;
             dr.hh = it.hh;
-            // Never behind the controller (the labels are drawn over it).
-            dr.centre = o + r * it.x + u * it.y + n * std::max(it.d, 0.0f);
-            dr.anchor = it.aWorld;
+            const Vec3 attach = world(it.pLocal);
+            dr.anchor = world(it.aLocal);
             dr.anchorHalf = it.aHalf;
             // World turn of the part: the controller's, then the node's.
             dr.anchorRot = Quat{q.w * it.aRot.x + q.x * it.aRot.w + q.y * it.aRot.z - q.z * it.aRot.y,
                                 q.w * it.aRot.y - q.x * it.aRot.z + q.y * it.aRot.w + q.z * it.aRot.x,
                                 q.w * it.aRot.z + q.x * it.aRot.y - q.y * it.aRot.x + q.z * it.aRot.w,
                                 q.w * it.aRot.w - q.x * it.aRot.x - q.y * it.aRot.y - q.z * it.aRot.z};
-            // Leader line from the card edge nearest the button.
-            const float lx = px(it.aWorld) - it.x;
-            const float ly = py(it.aWorld) - it.y;
-            float ex = std::clamp(lx, -it.hw, it.hw);
-            float ey = std::clamp(ly, -it.hh, it.hh);
-            const bool inside = std::fabs(lx) < it.hw && std::fabs(ly) < it.hh;
-            if (inside) {
-                if (it.hw - std::fabs(lx) < it.hh - std::fabs(ly)) ex = std::copysign(it.hw, lx);
-                else ey = std::copysign(it.hh, ly);
+            // The card extends from the attach point the way its slot points,
+            // as seen in the billboard; seen nearly end-on, that blends into
+            // "away from the button" so the card never flips.
+            const Vec3 d = rotate(q, it.dirLocal);
+            float dx = dot(d, r), dy = dot(d, u);
+            const float dlen = std::sqrt(dx * dx + dy * dy);
+            constexpr float kEndOn = 0.3f;
+            if (dlen < kEndOn) {
+                const Vec3 away = attach - dr.anchor;
+                float ax = dot(away, r), ay = dot(away, u);
+                const float alen = std::sqrt(ax * ax + ay * ay);
+                if (alen > 1e-5f) {
+                    const float wgt = (kEndOn - dlen) / kEndOn;
+                    dx += ax / alen * wgt;
+                    dy += ay / alen * wgt;
+                }
             }
-            dr.edge = dr.centre + r * ex + u * ey;
-            dr.leader = !inside && length(dr.anchor - dr.edge) > 0.006f;
+            float len = std::sqrt(dx * dx + dy * dy);
+            if (len < 1e-5f) {
+                dx = 0.0f;
+                dy = 1.0f;
+                len = 1.0f;
+            }
+            dx /= len;
+            dy /= len;
+            // Push the centre out until the card's edge passes through the point.
+            const float tx = std::fabs(dx) > 1e-4f ? it.hw / std::fabs(dx) : 1e9f;
+            const float ty = std::fabs(dy) > 1e-4f ? it.hh / std::fabs(dy) : 1e9f;
+            const float t = std::min(tx, ty);
+            dr.centre = attach + (r * dx + u * dy) * t;
+            // Leader line from the attach point (on the card's near edge).
+            dr.edge = attach;
+            dr.leader = length(dr.anchor - dr.edge) > 0.006f;
             dr.alpha = fade;
             dr.lines = std::move(it.lines);
             labelDraws_.push_back(std::move(dr));

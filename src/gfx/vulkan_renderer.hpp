@@ -876,8 +876,9 @@ private:
     void drawButtonLabels(const XrView& view, void* glyphs, VkBuffer glyphBuf, uint32_t& glyphCount);
     // `half` (optional): the part's bounding-box half size (a few mm for a
     // json frame); `rot`: the node's animated turn in model space.
+    // `animated` false: the part at rest (no press / tilt), for the layout frame.
     bool labelAnchor(int hand, const std::string& component, math::Vec3& out, math::Vec3* half = nullptr,
-                     math::Quat* rot = nullptr);
+                     math::Quat* rot = nullptr, bool animated = true);
     float labelTextWidth(const FontAtlas& font, float scale, const std::string& s) const;
     // badge: 0 = none, else the screen number (+10 when it is the selected one);
     // glyphCursor: next free glyph instance in pass slot 3 (shared by the copies).

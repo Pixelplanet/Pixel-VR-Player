@@ -15,6 +15,9 @@ namespace pixelvr {
 struct ButtonLabelCard {
     int hand = 1;           // 0 = left, 1 = right
     std::string component;  // render-model component: "button_a", "dpad", "thumbstick", ...
+    // D-pad only: "up" / "down" / "left" / "right" for a card of one direction
+    // (drawn on that side of the pad); empty for the pad as a whole.
+    std::string direction;
     std::vector<std::string> lines;
 };
 

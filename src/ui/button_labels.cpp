@@ -245,6 +245,10 @@ std::vector<ButtonLabelCard> buildButtonLabelCards(
                 plainDirs += (plainDirs.empty() ? "" : " / ") + l.direction;
             }
         }
+        // A D-pad direction that does something of its own gets its own card
+        // on that side of the pad (the direction is where it sits, so no
+        // "Up: " prefix).
+        std::vector<ButtonLabelCard> dirCards;
         bool dirsAdded = false;
         for (const Line& l : p.lines) {
             if (!l.direction.empty() && l.text == l.direction) {
@@ -252,9 +256,26 @@ std::vector<ButtonLabelCard> buildButtonLabelCards(
                 dirsAdded = true;
                 continue;
             }
+            if (!l.direction.empty() && p.component == "dpad") {
+                std::string dir = l.direction;
+                for (char& ch : dir) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+                auto it = std::find_if(dirCards.begin(), dirCards.end(),
+                                       [&](const ButtonLabelCard& d) { return d.direction == dir; });
+                if (it == dirCards.end()) {
+                    ButtonLabelCard d;
+                    d.hand = p.hand;
+                    d.component = p.component;
+                    d.direction = dir;
+                    dirCards.push_back(std::move(d));
+                    it = dirCards.end() - 1;
+                }
+                it->lines.push_back(l.text);
+                continue;
+            }
             c.lines.push_back(l.prefix + l.text);
         }
         if (!c.lines.empty()) out.push_back(std::move(c));
+        for (ButtonLabelCard& d : dirCards) out.push_back(std::move(d));
     }
     return out;
 }
