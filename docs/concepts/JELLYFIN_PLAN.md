@@ -250,3 +250,17 @@ from the user for an end-to-end test.
 - **Episode title card:** the hand-off carries `info` ("Series · S6 E13 · Name", Jellyfin and Plex),
   shown as a notice for 5 s when an episode starts.
 - TODO: TV1 (series controls: previous / next episode, edge arrows while the laser aims at the screen).
+
+## User request 2026-11-08 (sixth round): no floating text; title and previous / next on the screen
+- **No head-locked floating text anywhere** (the `notice_` line drawn via `setDownloadStatus`): easy to
+  miss. Every message goes either **on the screen** (drawn into the screen layer's copy, like the screen
+  number badge) or **right above the control panel** (`setDockHint`, like "Press Stop to return").
+- **Episode title on the screen** when an episode starts ("Series · S1 E2 · Name", 5 s, fades).
+  Waiting / next / failure messages for Plex and Jellyfin are also on their screen.
+- **Previous / next episode:** an arrow button at the left / right edge of the screen while the laser
+  points at an episode screen. A click → `plexprev` / `plexnext` (the helper finds the target first,
+  only then reports "stopped" and hands it off; "none" → "No previous / next episode" on the screen,
+  playback continues).
+- Design: renderer `setScreenTitle(slot, text, s)`, `setScreenNav(slot, on)`, `screenNavHit(slot, side)`.
+  The copy is redone when the overlay changes (`ScreenLayer::drawnOverlay`), since a paused video gets
+  no new frames.
