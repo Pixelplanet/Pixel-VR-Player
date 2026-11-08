@@ -1013,9 +1013,12 @@ void MediaEngine::Impl::decodeLoop() {
         }
         playClock.resume();  // no-op unless resuming from pause
         const int readResult = av_read_frame(format, packet);
+        // The I/O position at the file's known size is its real end, whatever error came with it.
+        const int64_t ioSize = (format->pb != nullptr) ? avio_size(format->pb) : -1;
+        const bool atFileEnd = ioSize > 0 && avio_tell(format->pb) >= ioSize;
         if (readResult >= 0) {
             readRetries = 0;
-        } else if (httpSource && !eofFlushed && readRetries < 6 &&
+        } else if (httpSource && !eofFlushed && readRetries < 6 && !atFileEnd &&
                    (readResult != AVERROR_EOF || duration <= 0.0 || masterClock.load() < duration - 15.0)) {
             // A dropped connection far from the end is not the end of the file:
             // re-seek the I/O layer to where it stopped (this clears its sticky
@@ -1263,9 +1266,11 @@ bool MediaEngine::open(const std::string& path) {
     if (impl_->httpSource) {
         // Servers and NATs drop long transfers (Plex: every 10-60 s); resume
         // from the current offset instead of ending the stream.
+        // (Not reconnect_at_eof: at the file's real end it reconnected twice with 0+1+3 s waits, so an
+        // episode "ended" ~15 s late. A drop mid-file is "stream ends prematurely" (EIO) and is
+        // covered by reconnect while the offset is below the known file size.)
         av_dict_set(&httpOpts, "reconnect", "1", 0);
         av_dict_set(&httpOpts, "reconnect_streamed", "1", 0);
-        av_dict_set(&httpOpts, "reconnect_at_eof", "1", 0);
         av_dict_set(&httpOpts, "reconnect_on_network_error", "1", 0);
         av_dict_set(&httpOpts, "reconnect_on_http_error", "4xx,5xx", 0);
         av_dict_set(&httpOpts, "reconnect_delay_max", "5", 0);

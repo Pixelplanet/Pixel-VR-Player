@@ -1087,7 +1087,7 @@ int runScreen(const ScreenOptions& opt) {
         long long stoppedMs = 0;
         // Jellyfin (Jellyfin Web in the page): same hand-off, its own API (docs/concepts/JELLYFIN_PLAN.md).
         std::string service = "plex";  // plex | jellyfin
-        std::string jfItem, jfMediaSource, jfPlaySession, jfAuth, jfMethod;
+        std::string jfItem, jfMediaSource, jfPlaySession, jfAuth, jfMethod, jfUser, jfSeries;
         bool jfStarted = false;
         Clock::time_point anyPressAt{};  // the user's last press anywhere in a page
     } plex;
@@ -1118,6 +1118,103 @@ int runScreen(const ScreenOptions& opt) {
                    "','X-Plex-Product':'Pixel VR Player'}}).catch(()=>0)&&0");
     };
     const std::string kPauseAllJs = "for(const m of document.querySelectorAll('video,audio'))m.pause()";
+    // Jellyfin: our own PlaybackInfo for `itemId` (a profile matching our decoders; Direct Play is
+    // decided from the streams, since our FFmpeg plays DTS / DVD subtitles Jellyfin would transcode),
+    // then the hand-off. Used for the item played on the page and for the next episode.
+    auto jfStart = [&](const std::string& session, const std::string& itemId, const std::string& user,
+                       long long startTicks, int audioIdx, bool next) {
+        plex.jfItem = itemId;
+        plex.jfStarted = false;
+        static const char* kProfile =
+            "{\"DeviceProfile\":{\"Name\":\"Pixel VR Player\",\"MaxStreamingBitrate\":400000000,"
+            "\"MaxStaticBitrate\":400000000,\"DirectPlayProfiles\":[{\"Type\":\"Video\","
+            "\"Container\":\"mkv,mp4,m4v,mov,webm,ts\",\"VideoCodec\":\"h264,hevc,vp9,av1\","
+            "\"AudioCodec\":\"aac,ac3,eac3,mp3,opus,flac,dts,dca,truehd,vorbis,pcm_s16le,pcm_s24le\"}],"
+            "\"TranscodingProfiles\":[{\"Type\":\"Video\",\"Container\":\"ts\",\"Protocol\":\"hls\","
+            "\"VideoCodec\":\"hevc,h264\",\"AudioCodec\":\"aac\",\"Context\":\"Streaming\","
+            "\"MaxAudioChannels\":\"6\",\"BreakOnNonKeyFrames\":true}],"
+            "\"SubtitleProfiles\":[{\"Format\":\"srt\",\"Method\":\"Embed\"},{\"Format\":\"subrip\",\"Method\":\"Embed\"},"
+            "{\"Format\":\"ass\",\"Method\":\"Embed\"},{\"Format\":\"ssa\",\"Method\":\"Embed\"},"
+            "{\"Format\":\"pgssub\",\"Method\":\"Embed\"},{\"Format\":\"dvdsub\",\"Method\":\"Embed\"},"
+            "{\"Format\":\"vtt\",\"Method\":\"Embed\"}]}}";
+        const std::string js =
+            "(async()=>{const b=" + pvrjson::quote(plex.base) + ",h={'Authorization':" + pvrjson::quote(plex.jfAuth) +
+            ",'Content-Type':'application/json'},id=" + pvrjson::quote(itemId) + ";"
+            "let u=" + pvrjson::quote(user) + ";if(!u)u=(await (await fetch(b+'/Users/Me',{headers:h})).json()).Id;"
+            "const it=await (await fetch(b+'/Items/'+id+'?userId='+u,{headers:h})).json();"
+            "const pi=await (await fetch(b+'/Items/'+id+'/PlaybackInfo?UserId='+u+'&IsPlayback=true&AutoOpenLiveStream=true',"
+            "{method:'POST',headers:h,body:" + pvrjson::quote(kProfile) + "})).json();"
+            "const m=pi.MediaSources[0],v=(m.MediaStreams||[]).find(s=>s.Type==='Video')||{};"
+            "return JSON.stringify({title:it.SeriesName?it.SeriesName+' - '+it.Name:it.Name,"
+            "ticks:it.RunTimeTicks||m.RunTimeTicks||0,msid:m.Id,session:pi.PlaySessionId||'',user:u,"
+            "series:it.Type==='Episode'?(it.SeriesId||''):'',aud:(m.DefaultAudioStreamIndex??-1),"
+            "container:(m.Container||'').toLowerCase(),vcodec:(v.Codec||'').toLowerCase(),turl:m.TranscodingUrl||''})})()";
+        evalIn(session, js, [&, session, startTicks, audioIdx, next](const pvrjson::Value* v) {
+            pvrjson::Value info;
+            if (!v || v->type != pvrjson::Value::Type::String || !pvrjson::parse(v->str, info) ||
+                info.getString("msid").empty()) {
+                std::fprintf(stderr, "jellyfin: PlaybackInfo failed\n");
+                plex.intercepted = false;
+                plex.pauseUntil = {};
+                if (next) emitLine("plexnext none");  // a next episode that cannot start: back to the page
+                else evalIn(session, "(()=>{for(const m of document.querySelectorAll('video,audio'))m.play()})()");
+                return;
+            }
+            const std::string vc = info.getString("vcodec");
+            const std::string ct = info.getString("container");
+            const bool videoOk = vc == "h264" || vc == "hevc" || vc == "h265" || vc == "vp9" || vc == "av1";
+            bool containerOk = false;
+            for (const char* c : {"mkv", "matroska", "mp4", "m4v", "mov", "webm", "mpegts", "ts"}) {
+                containerOk = containerOk || ct.find(c) != std::string::npos;
+            }
+            plex.jfMediaSource = info.getString("msid");
+            plex.jfPlaySession = info.getString("session");
+            plex.jfUser = info.getString("user");
+            plex.jfSeries = info.getString("series");
+            std::string playUrl;
+            if ((videoOk && containerOk) || info.getString("turl").empty()) {
+                plex.jfMethod = "DirectPlay";
+                // ApiKey=: Jellyfin 12 refuses the legacy api_key= on some endpoints (/Download).
+                playUrl = plex.base + "/Videos/" + plex.jfItem + "/stream?static=true&MediaSourceId=" +
+                          plex.jfMediaSource + "&ApiKey=" + plex.token;
+            } else {
+                plex.jfMethod = "Transcode";
+                playUrl = plex.base + info.getString("turl");
+                if (playUrl.find("api_key=") == std::string::npos && playUrl.find("ApiKey=") == std::string::npos) {
+                    playUrl += (playUrl.find('?') == std::string::npos ? "?ApiKey=" : "&ApiKey=") + plex.token;
+                }
+            }
+            plex.durationMs = static_cast<long long>(info.getNumber("ticks") / 10000.0);
+            const int audio = audioIdx >= 0 ? audioIdx : static_cast<int>(info.getNumber("aud", -1));
+            char nums[160];
+            std::snprintf(nums, sizeof(nums),
+                          "%.3f,\"duration\":%.3f,\"service\":\"jellyfin\",\"audio\":%d,\"episode\":%s}",
+                          static_cast<double>(startTicks) / 1e7, plex.durationMs / 1000.0, audio,
+                          plex.jfSeries.empty() ? "false" : "true");
+            std::fprintf(stderr, "jellyfin: %s %s/%s audio %d%s\n", plex.jfMethod.c_str(), ct.c_str(), vc.c_str(), audio,
+                         plex.jfSeries.empty() ? "" : " (episode)");
+            emitLine("plex {\"url\":" + pvrjson::quote(playUrl) + ",\"title\":" + pvrjson::quote(info.getString("title")) +
+                     ",\"offset\":" + nums);
+        }, true);
+    };
+    // Plex: the part, title, duration and the audio track chosen in Plex for a metadata item.
+    auto plexEmit = [&](const pvrjson::Value& info, double offset) {
+        plex.ratingKey = info.getString("rk");
+        plex.key = info.getString("key");
+        plex.durationMs = static_cast<long long>(info.getNumber("dur"));
+        char nums[160];
+        std::snprintf(nums, sizeof(nums), "%.3f,\"duration\":%.3f,\"audio\":%d,\"episode\":%s}", offset,
+                      plex.durationMs / 1000.0, static_cast<int>(info.getNumber("aud", -1)),
+                      info.getString("type") == "episode" ? "true" : "false");
+        emitLine("plex {\"url\":" + pvrjson::quote(plex.base + info.getString("part") + "?X-Plex-Token=" + plex.token +
+                                                  "&download=0") +
+                 ",\"title\":" + pvrjson::quote(info.getString("title")) + ",\"offset\":" + nums);
+    };
+    // JS returning that info for the metadata object `m` (part `p`).
+    const std::string kPlexInfoJs =
+        "JSON.stringify({part:p.key,title:m.grandparentTitle?m.grandparentTitle+' - '+m.title:m.title,"
+        "dur:m.duration||0,off:m.viewOffset||0,rk:m.ratingKey,key:m.key,type:m.type||'',"
+        "aud:((p.Stream||[]).find(s=>s.streamType===2&&s.selected)||{index:-1}).index})";
 
     auto activeTab = [&]() -> Tab* { return (active >= 0 && active < static_cast<int>(tabs.size())) ? &tabs[active] : nullptr; };
     auto tabBySession = [&](const std::string& s) -> int {
@@ -1601,6 +1698,12 @@ int runScreen(const ScreenOptions& opt) {
                 if (const size_t st = body.find("\"StartTimeTicks\":"); st != std::string::npos) {
                     startTicks = std::atoll(body.c_str() + st + 17);
                 }
+                // The audio track chosen on the page (Jellyfin stream index = container index).
+                int audioIdx = -1;
+                if (const std::string a = queryParam(url, "AudioStreamIndex"); !a.empty()) audioIdx = std::atoi(a.c_str());
+                if (const size_t at = body.find("\"AudioStreamIndex\":"); at != std::string::npos) {
+                    audioIdx = std::atoi(body.c_str() + at + 19);
+                }
                 plex.service = "jellyfin";
                 plex.intercepted = true;
                 plex.restoring = false;
@@ -1608,76 +1711,10 @@ int runScreen(const ScreenOptions& opt) {
                 plex.base = url.substr(0, itemsAt);
                 plex.token = token;
                 plex.url = tabs[ti].url;
-                plex.jfItem = itemId;
-                plex.jfStarted = false;
                 plex.jfAuth = "MediaBrowser Client=\"Pixel VR Player\", Device=\"Steam Frame\", DeviceId=\"pixelvr-" +
                               std::to_string(getpid()) + "\", Version=\"1\", Token=\"" + token + "\"";
                 plex.pauseUntil = Clock::now() + std::chrono::seconds(90);  // as long as the app waits for the server
-                // Our own PlaybackInfo, with a profile matching our decoders; Direct Play is decided
-                // below from the streams (our FFmpeg plays DTS / DVD subtitles Jellyfin would transcode).
-                static const char* kProfile =
-                    "{\"DeviceProfile\":{\"Name\":\"Pixel VR Player\",\"MaxStreamingBitrate\":400000000,"
-                    "\"MaxStaticBitrate\":400000000,\"DirectPlayProfiles\":[{\"Type\":\"Video\","
-                    "\"Container\":\"mkv,mp4,m4v,mov,webm,ts\",\"VideoCodec\":\"h264,hevc,vp9,av1\","
-                    "\"AudioCodec\":\"aac,ac3,eac3,mp3,opus,flac,dts,dca,truehd,vorbis,pcm_s16le,pcm_s24le\"}],"
-                    "\"TranscodingProfiles\":[{\"Type\":\"Video\",\"Container\":\"ts\",\"Protocol\":\"hls\","
-                    "\"VideoCodec\":\"hevc,h264\",\"AudioCodec\":\"aac\",\"Context\":\"Streaming\","
-                    "\"MaxAudioChannels\":\"6\",\"BreakOnNonKeyFrames\":true}],"
-                    "\"SubtitleProfiles\":[{\"Format\":\"srt\",\"Method\":\"Embed\"},{\"Format\":\"subrip\",\"Method\":\"Embed\"},"
-                    "{\"Format\":\"ass\",\"Method\":\"Embed\"},{\"Format\":\"ssa\",\"Method\":\"Embed\"},"
-                    "{\"Format\":\"pgssub\",\"Method\":\"Embed\"},{\"Format\":\"dvdsub\",\"Method\":\"Embed\"},"
-                    "{\"Format\":\"vtt\",\"Method\":\"Embed\"}]}}";
-                const std::string js =
-                    "(async()=>{const b=" + pvrjson::quote(plex.base) + ",h={'Authorization':" + pvrjson::quote(plex.jfAuth) +
-                    ",'Content-Type':'application/json'},id=" + pvrjson::quote(itemId) + ";"
-                    "let u=" + pvrjson::quote(user) + ";if(!u)u=(await (await fetch(b+'/Users/Me',{headers:h})).json()).Id;"
-                    "const it=await (await fetch(b+'/Items/'+id+'?userId='+u,{headers:h})).json();"
-                    "const pi=await (await fetch(b+'/Items/'+id+'/PlaybackInfo?UserId='+u+'&IsPlayback=true&AutoOpenLiveStream=true',"
-                    "{method:'POST',headers:h,body:" + pvrjson::quote(kProfile) + "})).json();"
-                    "const m=pi.MediaSources[0],v=(m.MediaStreams||[]).find(s=>s.Type==='Video')||{};"
-                    "return JSON.stringify({title:it.SeriesName?it.SeriesName+' - '+it.Name:it.Name,"
-                    "ticks:it.RunTimeTicks||m.RunTimeTicks||0,msid:m.Id,session:pi.PlaySessionId||'',"
-                    "container:(m.Container||'').toLowerCase(),vcodec:(v.Codec||'').toLowerCase(),turl:m.TranscodingUrl||''})})()";
-                evalIn(session, js, [&, session, startTicks](const pvrjson::Value* v) {
-                    pvrjson::Value info;
-                    if (!v || v->type != pvrjson::Value::Type::String || !pvrjson::parse(v->str, info) ||
-                        info.getString("msid").empty()) {
-                        std::fprintf(stderr, "jellyfin: PlaybackInfo failed\n");
-                        plex.intercepted = false;
-                        plex.pauseUntil = {};
-                        evalIn(session, "(()=>{for(const m of document.querySelectorAll('video,audio'))m.play()})()");
-                        return;
-                    }
-                    const std::string vc = info.getString("vcodec");
-                    const std::string ct = info.getString("container");
-                    const bool videoOk = vc == "h264" || vc == "hevc" || vc == "h265" || vc == "vp9" || vc == "av1";
-                    bool containerOk = false;
-                    for (const char* c : {"mkv", "matroska", "mp4", "m4v", "mov", "webm", "mpegts", "ts"}) {
-                        containerOk = containerOk || ct.find(c) != std::string::npos;
-                    }
-                    plex.jfMediaSource = info.getString("msid");
-                    plex.jfPlaySession = info.getString("session");
-                    std::string playUrl;
-                    if ((videoOk && containerOk) || info.getString("turl").empty()) {
-                        plex.jfMethod = "DirectPlay";
-                        // ApiKey=: Jellyfin 12 refuses the legacy api_key= on some endpoints (/Download).
-                        playUrl = plex.base + "/Videos/" + plex.jfItem + "/stream?static=true&MediaSourceId=" +
-                                  plex.jfMediaSource + "&ApiKey=" + plex.token;
-                    } else {
-                        plex.jfMethod = "Transcode";
-                        playUrl = plex.base + info.getString("turl");
-                        if (playUrl.find("api_key=") == std::string::npos && playUrl.find("ApiKey=") == std::string::npos) {
-                            playUrl += (playUrl.find('?') == std::string::npos ? "?ApiKey=" : "&ApiKey=") + plex.token;
-                        }
-                    }
-                    plex.durationMs = static_cast<long long>(info.getNumber("ticks") / 10000.0);
-                    char nums[96];
-                    std::snprintf(nums, sizeof(nums), "%.3f,\"duration\":%.3f,\"service\":\"jellyfin\"}",
-                                  static_cast<double>(startTicks) / 1e7, plex.durationMs / 1000.0);
-                    std::fprintf(stderr, "jellyfin: %s %s/%s\n", plex.jfMethod.c_str(), ct.c_str(), vc.c_str());
-                    emitLine("plex {\"url\":" + pvrjson::quote(playUrl) + ",\"title\":" +
-                             pvrjson::quote(info.getString("title")) + ",\"offset\":" + nums);
-                }, true);
+                jfStart(session, itemId, user, startTicks, audioIdx, false);
                 return;
             }
             plex.service = "plex";
@@ -1714,8 +1751,7 @@ int runScreen(const ScreenOptions& opt) {
                 "fetch(" + pvrjson::quote(plex.base + path + "?X-Plex-Token=" + token) +
                 ",{headers:{Accept:'application/json'}}).then(r=>r.json()).then(j=>{const m=j.MediaContainer.Metadata[0],"
                 "p=(m.Media[" + std::to_string(mediaIndex) + "]||m.Media[0]).Part[0];"
-                "return JSON.stringify({part:p.key,title:m.grandparentTitle?m.grandparentTitle+' - '+m.title:m.title,"
-                "dur:m.duration||0,off:m.viewOffset||0,rk:m.ratingKey,key:m.key})})";
+                "return " + kPlexInfoJs + "})";
             evalIn(session, js, [&, session, offsetParam](const pvrjson::Value* v) {
                 pvrjson::Value info;
                 if (!v || v->type != pvrjson::Value::Type::String || !pvrjson::parse(v->str, info) ||
@@ -1725,15 +1761,8 @@ int runScreen(const ScreenOptions& opt) {
                     evalIn(session, "(()=>{for(const m of document.querySelectorAll('video,audio'))m.play()})()");
                     return;
                 }
-                plex.ratingKey = info.getString("rk");
-                plex.key = info.getString("key");
-                plex.durationMs = static_cast<long long>(info.getNumber("dur"));
                 const double offset = offsetParam.empty() ? info.getNumber("off") / 1000.0 : std::atof(offsetParam.c_str());
-                char nums[64];
-                std::snprintf(nums, sizeof(nums), "%.3f,\"duration\":%.3f}", offset, plex.durationMs / 1000.0);
-                emitLine("plex {\"url\":" + pvrjson::quote(plex.base + info.getString("part") + "?X-Plex-Token=" + plex.token +
-                                                          "&download=0") +
-                         ",\"title\":" + pvrjson::quote(info.getString("title")) + ",\"offset\":" + nums);
+                plexEmit(info, offset);
             }, true);
         } else if (method == "Runtime.bindingCalled" && session == toolbar) {
             handleToolbar(params->getString("payload"));
@@ -2163,6 +2192,53 @@ int runScreen(const ScreenOptions& opt) {
             if (const KeyInfo* esc = keyInfo("Escape")) keyEvent(esc, plex.session);
             plex.closeAt = Clock::now() + std::chrono::milliseconds(400);
             plex.returnCheckAt = Clock::now() + std::chrono::milliseconds(1200);
+        } else if (cmd == "plexnext") {
+            if (!plex.intercepted) {
+                emitLine("plexnext none");
+                return;
+            }
+            plexTimeline("stopped", std::atoll(rest.c_str()));  // the episode that just ended
+            plex.pauseUntil = Clock::now() + std::chrono::seconds(90);
+            if (plex.service == "jellyfin") {
+                if (plex.jfSeries.empty()) {
+                    emitLine("plexnext none");
+                    return;
+                }
+                const std::string js =
+                    "(async()=>{try{const r=await (await fetch(" +
+                    pvrjson::quote(plex.base + "/Shows/" + plex.jfSeries + "/Episodes?userId=" + plex.jfUser + "&startItemId=" +
+                                   plex.jfItem + "&limit=2") +
+                    ",{headers:{'Authorization':" + pvrjson::quote(plex.jfAuth) + "}})).json();"
+                    "const n=(r.Items||[])[1];return n?n.Id:''}catch(e){return ''}})()";
+                evalIn(plex.session, js, [&](const pvrjson::Value* v) {
+                    const std::string next = (v && v->type == pvrjson::Value::Type::String) ? v->str : std::string();
+                    std::fprintf(stderr, "jellyfin: next episode %s\n", next.empty() ? "none" : "found");
+                    if (next.empty()) emitLine("plexnext none");
+                    else jfStart(plex.session, next, plex.jfUser, 0, -1, true);
+                }, true);
+                return;
+            }
+            const std::string q = "?X-Plex-Token=" + plex.token;
+            const std::string js =
+                "(async()=>{try{const b=" + pvrjson::quote(plex.base) + ",q=" + pvrjson::quote(q) +
+                ",H={headers:{Accept:'application/json'}},md=async k=>(await (await fetch(b+'/library/metadata/'+k+q,H)).json())"
+                ".MediaContainer.Metadata[0];const c=await md(" + pvrjson::quote(plex.ratingKey) + ");"
+                "if(c.type!=='episode'||!c.grandparentRatingKey)return '';"
+                "const all=(await (await fetch(b+'/library/metadata/'+c.grandparentRatingKey+'/allLeaves'+q,H)).json())"
+                ".MediaContainer.Metadata||[];const i=all.findIndex(e=>String(e.ratingKey)===String(c.ratingKey));"
+                "if(i<0||i+1>=all.length)return '';const m=await md(all[i+1].ratingKey),p=m.Media[0].Part[0];"
+                "return " + kPlexInfoJs + "}catch(e){return ''}})()";
+            evalIn(plex.session, js, [&](const pvrjson::Value* v) {
+                pvrjson::Value info;
+                if (!v || v->type != pvrjson::Value::Type::String || !pvrjson::parse(v->str, info) ||
+                    info.getString("part").empty()) {
+                    std::fprintf(stderr, "plex: no next episode\n");
+                    emitLine("plexnext none");
+                    return;
+                }
+                std::fprintf(stderr, "plex: next episode found\n");
+                plexEmit(info, 0.0);
+            }, true);
         } else if (cmd == "plextimeline") {
             char state[16] = {};
             long long ms = 0;
