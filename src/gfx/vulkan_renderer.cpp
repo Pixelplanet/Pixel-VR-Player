@@ -86,10 +86,27 @@ struct GlyphInstance {
 };
 constexpr uint32_t kMaxGlyphsPerView = 16384;
 
-// Button-label cards (layoutButtonLabels / drawButtonLabels), metres.
-constexpr float kLabelTextH = 0.010f;  // text ascent
-constexpr float kLabelPadX = 0.0065f;
-constexpr float kLabelPadY = 0.0042f;
+// Button labels (layoutButtonLabels / drawButtonLabels): their whole look in
+// one place. Sizes in metres; colours are straight RGBA, their alpha is
+// further multiplied by the fade in / out.
+constexpr float kLabelTextH = 0.009f;   // text ascent
+constexpr float kLabelPadX = 0.006f;    // card padding around the text
+constexpr float kLabelPadY = 0.0038f;
+constexpr float kLabelCardCorner = 0.5f;  // corner radius, share of the shorter half side
+constexpr float kLabelRimW = 0.0006f;     // card rim width
+constexpr float kLabelCardCol[4] = {0.11f, 0.11f, 0.12f, 0.80f};  // dark translucent grey
+constexpr float kLabelRimCol[4] = {1.0f, 1.0f, 1.0f, 0.16f};      // faint light rim
+constexpr float kLabelTextCol[4] = {0.96f, 0.96f, 0.96f, 1.0f};
+constexpr float kLabelLineW = 0.001f;     // leader line width
+constexpr float kLabelLineCol[4] = {0.85f, 0.85f, 0.85f, 0.60f};
+constexpr float kLabelDotD = 0.003f;      // dot on the button, diameter
+constexpr float kLabelDotCol[4] = {0.88f, 0.88f, 0.88f, 0.85f};
+// The dot (and the line's end) sits this far outside the button part's
+// bounding box toward each eye (moved along that eye's ray to the button, so
+// it stays on the button in the image), at most kLabelDotMaxLift: then the
+// part itself never hides it, only the controller in front of the part does.
+constexpr float kLabelDotClear = 0.0015f;
+constexpr float kLabelDotMaxLift = 0.02f;
 
 // UTF-8 -> glyph slot of our atlases (ASCII, Latin-1, the few typographic
 // extras mapped to 127..136), advancing idx; '?' for anything else.
@@ -803,6 +820,8 @@ VulkanRenderer::~VulkanRenderer() {
             vkDestroyPipelineLayout(device_, spherePipelineLayout_, nullptr);
         if (uiPipeline_ != VK_NULL_HANDLE)
             vkDestroyPipeline(device_, uiPipeline_, nullptr);
+        if (uiPipelineDepth_ != VK_NULL_HANDLE)
+            vkDestroyPipeline(device_, uiPipelineDepth_, nullptr);
         if (uiPipelineLayout_ != VK_NULL_HANDLE)
             vkDestroyPipelineLayout(device_, uiPipelineLayout_, nullptr);
         if (modelPipeline_ != VK_NULL_HANDLE)
@@ -1301,7 +1320,7 @@ bool VulkanRenderer::buildPipeline(const std::string& vertName,
                                    bool blend, VkRenderPass pass,
                                    VkSampleCountFlagBits samples,
                                    const VkPipelineVertexInputStateCreateInfo* vertexInputOverride,
-                                   VkColorComponentFlags writeMask, bool fade) {
+                                   VkColorComponentFlags writeMask, bool fade, bool depthTest) {
     const VkRenderPass rp = (pass != VK_NULL_HANDLE) ? pass : renderPass_;
     const VkSampleCountFlagBits sc =
         (samples != VK_SAMPLE_COUNT_FLAG_BITS_MAX_ENUM) ? samples : sampleCount_;
@@ -1380,13 +1399,14 @@ bool VulkanRenderer::buildPipeline(const std::string& vertName,
     dynamic.dynamicStateCount = static_cast<uint32_t>(dynamicStates.size());
     dynamic.pDynamicStates = dynamicStates.data();
 
-    // 2D content (video, UI, text) paints in submission order; it neither tests
-    // nor writes depth so the depth buffer is reserved for the 3D models.
+    // 2D content (video, UI, text) paints in submission order; it never writes
+    // depth so the depth buffer is reserved for the 3D models. `depthTest`
+    // variants (label leader lines) are hidden where a model is nearer.
     VkPipelineDepthStencilStateCreateInfo depthStencil{
         VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
-    depthStencil.depthTestEnable = VK_FALSE;
+    depthStencil.depthTestEnable = depthTest ? VK_TRUE : VK_FALSE;
     depthStencil.depthWriteEnable = VK_FALSE;
-    depthStencil.depthCompareOp = VK_COMPARE_OP_ALWAYS;
+    depthStencil.depthCompareOp = depthTest ? VK_COMPARE_OP_LESS_OR_EQUAL : VK_COMPARE_OP_ALWAYS;
 
     VkGraphicsPipelineCreateInfo pipelineInfo{
         VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
@@ -1460,14 +1480,24 @@ bool VulkanRenderer::createPipelines() {
     PIXELVR_VK_CHECK(
         vkCreatePipelineLayout(device_, &uiLayout, nullptr, &uiPipelineLayout_));
 
-    return buildPipeline("quad.vert.spv", "quad.frag.spv", pipelineLayout_,
-                         pipeline_) &&
-           buildPipeline("quad.vert.spv", "ambilight_nv12.frag.spv", pipelineLayout_,
-                         ambilightPipeline_, true) &&
-           buildPipeline("sphere.vert.spv", "sphere.frag.spv",
-                         spherePipelineLayout_, spherePipeline_) &&
-           buildPipeline("ui.vert.spv", "ui.frag.spv", uiPipelineLayout_,
-                         uiPipeline_, true);
+    const bool ok = buildPipeline("quad.vert.spv", "quad.frag.spv", pipelineLayout_,
+                                  pipeline_) &&
+                    buildPipeline("quad.vert.spv", "ambilight_nv12.frag.spv", pipelineLayout_,
+                                  ambilightPipeline_, true) &&
+                    buildPipeline("sphere.vert.spv", "sphere.frag.spv",
+                                  spherePipelineLayout_, spherePipeline_) &&
+                    buildPipeline("ui.vert.spv", "ui.frag.spv", uiPipelineLayout_,
+                                  uiPipeline_, true);
+    // Best effort: without it the label lines are drawn untested (over the model).
+    if (ok && !buildPipeline("ui.vert.spv", "ui.frag.spv", uiPipelineLayout_, uiPipelineDepth_, true,
+                             VK_NULL_HANDLE, VK_SAMPLE_COUNT_FLAG_BITS_MAX_ENUM, nullptr,
+                             VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
+                                 VK_COLOR_COMPONENT_A_BIT,
+                             false, true)) {
+        uiPipelineDepth_ = VK_NULL_HANDLE;
+        PIXELVR_LOG_WARN("Depth-tested UI pipeline failed; button label lines are not hidden by the models");
+    }
+    return ok;
 }
 
 void VulkanRenderer::waitIdle() const {
@@ -1806,14 +1836,15 @@ bool VulkanRenderer::createLayerResources(XrContext& xr, int64_t colorFormat) {
         xr.destroyLayerSwapchain(beamSwapchain_);
         destroyLayerTargets(beamTargets_);
     }
-    // Controller models layer (see modelSwapchains_). Eye-buffer size: the
-    // eye buffers are already at the panel's native density (no
-    // supersampling), so anything smaller would make the models visibly
-    // softer than they were in the eye buffers; the fragment work is the
-    // same as before (only model pixels), the extra cost is clearing,
-    // resolving and storing one more image per eye. Both eyes share one size
-    // (the projection views share one image rect). PIXELVR_MODELS_LAYER=0
-    // keeps the models in the eye buffers.
+    // Controller models layers (see modelSwapchains_). Eye-buffer size: each
+    // quad is its eye's image plane, so its texels land exactly where the eye
+    // buffer's pixels do, and the eye buffers are already at the panel's
+    // native density (no supersampling): anything smaller would make the
+    // models visibly softer than in the eye buffers. The fragment work is the
+    // same as before (only model pixels); the extra cost is clearing,
+    // resolving and storing one more image per eye. Not larger than either
+    // eye buffer: the pass borrows their MSAA and depth targets.
+    // PIXELVR_MODELS_LAYER=0 keeps the models in the eye buffers.
     modelLayerReady_ = false;
     for (int e = 0; e < 2; ++e) {
         destroyLayerTargets(modelTargets_[e]);
@@ -3279,7 +3310,6 @@ void VulkanRenderer::renderLayersBefore(XrContext& xr, const XrView* views, uint
                                         std::vector<CompositionLayer>& out) {
     (void)out;  // the UI layer is submitted by renderLayersAfter, over the screens
     uiLayerPending_ = false;
-    modelLayerAllowed_ = xr.extraProjectionLayersOk();
     modelsInView_ = controllerModelsInView(views, viewCount);
     layoutButtonLabels(views, viewCount);
     if (!uiLayerLive() || viewCount == 0) {
@@ -3614,7 +3644,8 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
     submitUiLayer();
 
     // Controller models over the screens and the UI (the first eye pass left
-    // them out of the eye buffers).
+    // them out of the eye buffers), rendered with exactly these views: their
+    // quads below are placed from the same poses and FOVs.
     bool modelPending = false;
     uint32_t modelImage[2] = {0, 0};
     if (modelLayerThisFrame_ && modelLayerReady_ && viewCount == 2) {
@@ -3824,15 +3855,34 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
         xr.releaseLayerImage(modelSwapchains_[0]);
         xr.releaseLayerImage(modelSwapchains_[1]);
         if (submitted) {
-            // After the screens and the UI, under the beams and the cursor.
-            CompositionLayer cl;
-            cl.projection = true;
-            cl.blend = true;
-            cl.swapchain = modelSwapchains_[0].handle;
-            cl.projSwapchain[0] = modelSwapchains_[0].handle;
-            cl.projSwapchain[1] = modelSwapchains_[1].handle;
-            cl.imageRect = {{0, 0}, {modelTargets_[0].width, modelTargets_[0].height}};
-            out.push_back(cl);
+            // After the screens and the UI, under the beams and the cursor:
+            // per eye, a quad on that view's image plane at kModelLayerDist
+            // (perpendicular to its view axis, covering exactly its asymmetric
+            // frustum), so it shows the rendered pixels 1:1 and the compositor
+            // reprojects it as world-locked content. 0.5 m: about where the
+            // hands are (least reprojection error for the models) and nearer
+            // than any screen (2 m at the closest) or the UI panel, so a
+            // compositor that orders layers by depth still puts it in front.
+            for (uint32_t e = 0; e < 2; ++e) {
+                const XrView& v = views[e];
+                const float d = kModelLayerDist;
+                const float tl = std::tan(v.fov.angleLeft), tr = std::tan(v.fov.angleRight);
+                const float tu = std::tan(v.fov.angleUp), td = std::tan(v.fov.angleDown);
+                const Quat q{v.pose.orientation.x, v.pose.orientation.y, v.pose.orientation.z,
+                             v.pose.orientation.w};
+                const Vec3 offset{d * 0.5f * (tr + tl), d * 0.5f * (tu + td), -d};  // eye space
+                const Vec3 c = Vec3{v.pose.position.x, v.pose.position.y, v.pose.position.z} + rotate(q, offset);
+                CompositionLayer cl;
+                cl.swapchain = modelSwapchains_[e].handle;
+                cl.blend = true;  // premultiplied (cleared transparent)
+                cl.eye = (e == 0) ? XR_EYE_VISIBILITY_LEFT : XR_EYE_VISIBILITY_RIGHT;
+                cl.pose.orientation = v.pose.orientation;  // faces the eye (+Z toward it)
+                cl.pose.position = {c.x, c.y, c.z};
+                cl.width = d * (tr - tl);
+                cl.height = d * (tu - td);
+                cl.imageRect = {{0, 0}, {modelTargets_[e].width, modelTargets_[e].height}};
+                out.push_back(cl);
+            }
         }
     }
     for (const Beam& bm : beams) {
@@ -7754,7 +7804,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
 
     // Tracked controller 3D models (lit capsule), drawn before the laser/cursor.
     // While a screen or the UI is a composition layer they get their own
-    // projection layer instead (renderLayersAfter), composited over those
+    // per-eye quad layers instead (renderLayersAfter), composited over those
     // layers: in the eye buffers every layer screen would cover them.
     const bool anyHand = controllers_[0].active || controllers_[1].active;
     if (drawWorld && viewIndex == 0) {
@@ -7763,7 +7813,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         // Hands out of both views (e.g. in the lap): no models layer, whose
         // clears, resolves and full-view blend would cost every frame for nothing.
         modelLayerThisFrame_ = anyLayer && anyHand && modelsInView_ && drawModels_ && modelLayerReady_ &&
-                               modelLayerAllowed_ && uiLayerLive() && modelPipeline_ != VK_NULL_HANDLE;
+                               uiLayerLive() && modelPipeline_ != VK_NULL_HANDLE;
     }
     if (drawWorld && drawModels_ && anyHand && !modelLayerThisFrame_ &&
         modelPipeline_ != VK_NULL_HANDLE) {
@@ -8162,7 +8212,8 @@ float VulkanRenderer::labelTextWidth(const FontAtlas& font, float scale, const s
     return w;
 }
 
-bool VulkanRenderer::labelAnchor(int hand, const std::string& component, math::Vec3& out) {
+bool VulkanRenderer::labelAnchor(int hand, const std::string& component, math::Vec3& out, math::Vec3* half,
+                                 math::Quat* rot) {
     using namespace math;
     if (hand < 0 || hand > 1) return false;
     // SteamVR's controller json, read once per hand (also logged against the
@@ -8254,11 +8305,15 @@ bool VulkanRenderer::labelAnchor(int hand, const std::string& component, math::V
                 np = hm.nodeStates[static_cast<std::size_t>(found->submesh)].pos;
                 nq = hm.nodeStates[static_cast<std::size_t>(found->submesh)].quat;
             }
+            Quat nodeRot{};
             if (np != nullptr && nq != nullptr &&
                 nq[0] * nq[0] + nq[1] * nq[1] + nq[2] * nq[2] + nq[3] * nq[3] >= 0.5f) {
-                c = Vec3{np[0], np[1], np[2]} + rotate(Quat{nq[0], nq[1], nq[2], nq[3]}, c);
+                nodeRot = Quat{nq[0], nq[1], nq[2], nq[3]};
+                c = Vec3{np[0], np[1], np[2]} + rotate(nodeRot, c);
             }
             out = c;
+            if (half != nullptr) *half = found->half;
+            if (rot != nullptr) *rot = nodeRot;
             return true;
         }
     }
@@ -8285,6 +8340,9 @@ bool VulkanRenderer::labelAnchor(int hand, const std::string& component, math::V
             p = Vec3{p.x, ca * p.y - sa * p.z, sa * p.y + ca * p.z};
         }
         out = p;
+        // A frame origin only: assume a small part around it.
+        if (half != nullptr) *half = Vec3{0.004f, 0.004f, 0.004f};
+        if (rot != nullptr) *rot = Quat{};
         return true;
     }
     return false;
@@ -8353,6 +8411,8 @@ void VulkanRenderer::layoutButtonLabels(const XrView* views, uint32_t viewCount)
         struct Item {
             const ButtonLabelCard* card = nullptr;
             Vec3 aLocal, aWorld;
+            Vec3 aHalf{0.004f, 0.004f, 0.004f};
+            Quat aRot{};  // the part's turn in model space
             int cat = 0;  // 0 face / menu column, 1 stick (above), 2 trigger / grip / bumper (below)
             bool column = false;
             float hw = 0.0f, hh = 0.0f, x = 0.0f, y = 0.0f, d = 0.0f;
@@ -8363,7 +8423,7 @@ void VulkanRenderer::layoutButtonLabels(const XrView* views, uint32_t viewCount)
             if (card.hand != h || card.lines.empty()) continue;
             Item it;
             it.card = &card;
-            if (!labelAnchor(h, card.component, it.aLocal)) continue;
+            if (!labelAnchor(h, card.component, it.aLocal, &it.aHalf, &it.aRot)) continue;
             it.aWorld = world(it.aLocal);
             if (card.component == "thumbstick" || card.component == "trackpad") it.cat = 1;
             else if (card.component == "trigger" || card.component == "bumper" || card.component == "button_grip")
@@ -8487,6 +8547,12 @@ void VulkanRenderer::layoutButtonLabels(const XrView* views, uint32_t viewCount)
             // Never behind the controller (the labels are drawn over it).
             dr.centre = o + r * it.x + u * it.y + n * std::max(it.d, 0.0f);
             dr.anchor = it.aWorld;
+            dr.anchorHalf = it.aHalf;
+            // World turn of the part: the controller's, then the node's.
+            dr.anchorRot = Quat{q.w * it.aRot.x + q.x * it.aRot.w + q.y * it.aRot.z - q.z * it.aRot.y,
+                                q.w * it.aRot.y - q.x * it.aRot.z + q.y * it.aRot.w + q.z * it.aRot.x,
+                                q.w * it.aRot.z + q.x * it.aRot.y - q.y * it.aRot.x + q.z * it.aRot.w,
+                                q.w * it.aRot.w - q.x * it.aRot.x - q.y * it.aRot.y - q.z * it.aRot.z};
             // Leader line from the card edge nearest the button.
             const float lx = px(it.aWorld) - it.x;
             const float ly = py(it.aWorld) - it.y;
@@ -8519,9 +8585,12 @@ void VulkanRenderer::drawButtonLabels(const XrView& view, void* glyphs, VkBuffer
                                         std::tan(view.fov.angleUp), std::tan(view.fov.angleDown), 0.05f, 100.0f);
     const Mat4 vpWorld = multiply(proj, viewMat);
     const Vec3 eye{view.pose.position.x, view.pose.position.y, view.pose.position.z};
-    static const float kAccents[5][3] = {{0.25f, 0.78f, 1.00f}, {0.18f, 0.85f, 0.52f}, {1.00f, 0.68f, 0.20f},
-                                         {0.68f, 0.42f, 1.00f}, {0.96f, 0.28f, 0.36f}};
-    const float* ac = kAccents[std::clamp(uiAccentColorIdx_, 0, 4)];
+    auto faded = [](const float col[4], float alpha, float out[4]) {
+        out[0] = col[0];
+        out[1] = col[1];
+        out[2] = col[2];
+        out[3] = col[3] * alpha;
+    };
     auto frame = [](const Vec3& c, const Vec3& r, const Vec3& u, const Vec3& n) {
         Mat4 m;
         m.m[0] = r.x; m.m[1] = r.y; m.m[2] = r.z;
@@ -8557,33 +8626,55 @@ void VulkanRenderer::drawButtonLabels(const XrView& view, void* glyphs, VkBuffer
         box(frame(p, r, u, n), radius, radius, col, 1.0f, 0.0f, nullptr);
     };
 
-    vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipeline_);
-    // Leader lines (2 mm, light, a little transparent) ending in a dot on the
-    // button; drawn first so the cards cover any that cross them.
+    // The button end of a leader line: just outside the part's bounding box
+    // toward this eye, on this eye's ray to the part (so it still shows on
+    // the button), so only the controller in front of the part hides it.
+    auto buttonPoint = [&](const LabelCardDraw& d) {
+        const Vec3 toEye = eye - d.anchor;
+        const float dist = length(toEye);
+        if (dist < 1e-3f) return d.anchor;
+        const Vec3 dir = toEye * (1.0f / dist);
+        const Quat inv{-d.anchorRot.x, -d.anchorRot.y, -d.anchorRot.z, d.anchorRot.w};
+        const Vec3 l = rotate(inv, dir);  // in the part's frame
+        const float support = std::fabs(l.x) * d.anchorHalf.x + std::fabs(l.y) * d.anchorHalf.y +
+                              std::fabs(l.z) * d.anchorHalf.z;
+        const float lift = std::min({support + kLabelDotClear, kLabelDotMaxLift, 0.5f * dist});
+        return d.anchor + dir * lift;
+    };
+
+    // Leader lines ending in a dot on the button, depth-tested against the
+    // models drawn just before in this pass (a button on the far side of the
+    // controller is hidden with its line); drawn first so the cards cover
+    // any that cross them.
+    const VkPipeline linePipe = (uiPipelineDepth_ != VK_NULL_HANDLE) ? uiPipelineDepth_ : uiPipeline_;
+    vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, linePipe);
     for (const LabelCardDraw& d : labelDraws_) {
         if (!d.leader) continue;
-        const Vec3 axis = d.anchor - d.edge;
+        const Vec3 tip = buttonPoint(d);
+        const Vec3 axis = tip - d.edge;
         const float len = length(axis);
+        if (len < 1e-4f) continue;
         const Vec3 up = axis * (1.0f / len);
-        const Vec3 mid = (d.anchor + d.edge) * 0.5f;
+        const Vec3 mid = (tip + d.edge) * 0.5f;
         Vec3 toEye = eye - mid;
         toEye = toEye - up * dot(toEye, up);
         if (length(toEye) < 1e-4f) continue;
         toEye = normalize(toEye);
         const Vec3 across = normalize(cross(up, toEye));
-        const float lineCol[4] = {0.90f, 0.93f, 0.98f, 0.62f * d.alpha};
-        box(frame(mid, across, up, toEye), 0.001f, 0.5f * len, lineCol, 1.0f, 0.0f, nullptr);
-        const float ring[4] = {0.95f, 0.97f, 1.0f, 0.85f * d.alpha};
-        const float dot4[4] = {ac[0], ac[1], ac[2], d.alpha};
-        disc(d.anchor, 0.0032f, ring);
-        disc(d.anchor, 0.0021f, dot4);
+        float lineCol[4], dotCol[4];
+        faded(kLabelLineCol, d.alpha, lineCol);
+        faded(kLabelDotCol, d.alpha, dotCol);
+        box(frame(mid, across, up, toEye), 0.5f * kLabelLineW, 0.5f * len, lineCol, 1.0f, 0.0f, nullptr);
+        disc(tip, 0.5f * kLabelDotD, dotCol);
     }
-    // Cards: dark glass, light rim.
+    // Cards: always visible (no depth test), dark translucent grey, faint rim.
+    vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipeline_);
     for (const LabelCardDraw& d : labelDraws_) {
-        const float bg[4] = {0.06f, 0.07f, 0.09f, 0.93f * d.alpha};
-        const float rim[4] = {0.92f, 0.95f, 1.0f, 0.45f * d.alpha};
+        float bg[4], rim[4];
+        faded(kLabelCardCol, d.alpha, bg);
+        faded(kLabelRimCol, d.alpha, rim);
         const float shortHalf = std::max(std::min(d.hw, d.hh), 1e-4f);
-        box(frame(d.centre, d.right, d.up, d.normal), d.hw, d.hh, bg, 0.5f, 0.0009f / shortHalf, rim);
+        box(frame(d.centre, d.right, d.up, d.normal), d.hw, d.hh, bg, kLabelCardCorner, kLabelRimW / shortHalf, rim);
     }
     // Text: one instanced draw per card (each has its own transform).
     const bool bold = fontAtlasBold_.ok;
@@ -8600,7 +8691,8 @@ void VulkanRenderer::drawButtonLabels(const XrView& view, void* glyphs, VkBuffer
     GlyphInstance* const out = static_cast<GlyphInstance*>(glyphs);
     for (const LabelCardDraw& d : labelDraws_) {
         const uint32_t start = glyphCount;
-        const float col[4] = {0.97f, 0.98f, 1.0f, d.alpha};
+        float col[4];
+        faded(kLabelTextCol, d.alpha, col);
         for (std::size_t li = 0; li < d.lines.size(); ++li) {
             const float centreY = d.hh - kLabelPadY - lineH * (static_cast<float>(li) + 0.5f);
             const float baseline = centreY - 0.35f * font.ascent * scale;
@@ -9945,6 +10037,7 @@ bool VulkanRenderer::uploadHandMesh(int hand, const GltfMesh& mesh, bool mirrore
             LabelAnchor a;
             a.key = labelComponentKey(b.name);
             a.centre = (b.lo + b.hi) * 0.5f;
+            a.half = (b.hi - b.lo) * 0.5f;
             a.submesh = b.submesh;
             a.nodeName = b.name;
             char buf[160];

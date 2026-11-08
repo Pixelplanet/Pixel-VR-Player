@@ -1302,12 +1302,8 @@ bool XrContext::renderFrame(const RenderViewFn& renderView, const RenderLayersFn
     // Build the OpenXR structs (stable addresses: reserved up front).
     std::vector<XrCompositionLayerQuad> quads;
     std::vector<XrCompositionLayerCylinderKHR> cylinders;
-    std::vector<XrCompositionLayerProjection> projections;
-    std::vector<XrCompositionLayerProjectionView> projViews;
     quads.reserve(extra.size());
     cylinders.reserve(extra.size());
-    projections.reserve(extra.size());
-    projViews.reserve(extra.size() * views_.size());
     std::vector<XrCompositionLayerBaseHeader*> layers;
     layers.reserve(extra.size() + 1);
     layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader*>(&layer));
@@ -1321,48 +1317,17 @@ bool XrContext::renderFrame(const RenderViewFn& renderView, const RenderLayersFn
         }
         PIXELVR_LOG_INFO("Runtime composites up to %u layers", maxLayerCount_);
     }
-    // Further projection layers take one slot each; leave them out (their
-    // content is then missing for the frame) rather than fail the frame.
-    std::size_t extraSlots = 0;
     for (const CompositionLayer& cl : extra) {
-        if (!cl.projection && cl.swapchain != XR_NULL_HANDLE) ++extraSlots;
-    }
-    for (const CompositionLayer& cl : extra) {
-        if (cl.projection) {
-            if (!extraProjectionOk_ || views_.empty() || views_.size() > 2) continue;
-            bool haveAll = true;
-            for (std::size_t i = 0; i < views_.size(); ++i) {
-                haveAll = haveAll && cl.projSwapchain[i] != XR_NULL_HANDLE;
-            }
-            if (!haveAll) continue;
-            if (1 + extraSlots + projections.size() + 1 > maxLayerCount_) {
-                if (!layerLimitLogged_) {
-                    PIXELVR_LOG_WARN("Layer limit (%u) reached: a projection layer is left out", maxLayerCount_);
-                    layerLimitLogged_ = true;
-                }
-                continue;
-            }
-            XrCompositionLayerProjectionView* first = projViews.data() + projViews.size();
-            for (std::size_t i = 0; i < views_.size(); ++i) {
-                XrCompositionLayerProjectionView& pv = projViews.emplace_back();
-                pv = XrCompositionLayerProjectionView{XR_TYPE_COMPOSITION_LAYER_PROJECTION_VIEW};
-                pv.pose = views_[i].pose;
-                pv.fov = views_[i].fov;
-                pv.subImage.swapchain = cl.projSwapchain[i];
-                pv.subImage.imageRect = cl.imageRect;
-                pv.subImage.imageArrayIndex = 0;
-            }
-            XrCompositionLayerProjection& p = projections.emplace_back();
-            p = XrCompositionLayerProjection{XR_TYPE_COMPOSITION_LAYER_PROJECTION};
-            // Premultiplied alpha over everything submitted before it.
-            p.layerFlags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
-            p.space = appSpace_;
-            p.viewCount = static_cast<uint32_t>(views_.size());
-            p.views = first;
-            layers.push_back(reinterpret_cast<XrCompositionLayerBaseHeader*>(&p));
-            continue;
-        }
         if (cl.swapchain == XR_NULL_HANDLE) continue;
+        // Past the runtime's limit the frame would be rejected: leave the
+        // last layers out (the list is ordered bottom to top) instead.
+        if (layers.size() >= maxLayerCount_) {
+            if (!layerLimitLogged_) {
+                PIXELVR_LOG_WARN("Layer limit (%u) reached: the topmost layers are left out", maxLayerCount_);
+                layerLimitLogged_ = true;
+            }
+            break;
+        }
         // Blended layers are rendered with premultiplied alpha (straight-alpha
         // blending onto a cleared transparent target).
         const XrCompositionLayerFlags flags =
@@ -1406,32 +1371,7 @@ bool XrContext::renderFrame(const RenderViewFn& renderView, const RenderLayersFn
         ++viewFallbackStats_.zeroLayerFrames;
     }
 
-    XrResult endRes = xrEndFrame(session_, &endInfo);
-    if (XR_FAILED(endRes) && viewsValid && !projections.empty()) {
-        // OpenXR allows several projection layers, but a runtime may still
-        // refuse them: retry this frame without, and if that works keep them
-        // off from now on (the renderer draws that content into the eye
-        // buffers again).
-        char buf[XR_MAX_RESULT_STRING_SIZE];
-        PIXELVR_LOG_WARN("xrEndFrame with %zu extra projection layer(s) failed: %s; retrying without",
-                         projections.size(), xr_result_string(instance_, endRes, buf));
-        std::vector<XrCompositionLayerBaseHeader*> kept;
-        kept.reserve(layers.size());
-        for (XrCompositionLayerBaseHeader* l : layers) {
-            if (l->type != XR_TYPE_COMPOSITION_LAYER_PROJECTION ||
-                l == reinterpret_cast<XrCompositionLayerBaseHeader*>(&layer)) {
-                kept.push_back(l);
-            }
-        }
-        endInfo.layerCount = static_cast<uint32_t>(kept.size());
-        endInfo.layers = kept.data();
-        endRes = xrEndFrame(session_, &endInfo);
-        if (XR_SUCCEEDED(endRes)) {
-            extraProjectionOk_ = false;
-            PIXELVR_LOG_WARN("Runtime rejects a second projection layer: controller models go back "
-                             "into the eye buffers");
-        }
-    }
+    const XrResult endRes = xrEndFrame(session_, &endInfo);
     if (XR_FAILED(endRes)) {
         char buf[XR_MAX_RESULT_STRING_SIZE];
         PIXELVR_LOG_ERROR("xrEndFrame failed: %s", xr_result_string(instance_, endRes, buf));

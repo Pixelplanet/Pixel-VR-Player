@@ -724,7 +724,8 @@ private:
                        const VkPipelineVertexInputStateCreateInfo* vertexInput = nullptr,
                        VkColorComponentFlags writeMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT |
                                                          VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT,
-                       bool fade = false);  // fade: multiplies the target by the source alpha
+                       bool fade = false,  // fade: multiplies the target by the source alpha
+                       bool depthTest = false);  // test (never write) the depth buffer
     struct VideoSlot;
     bool createVideoResources(VideoSlot& v, int width, int height);
     void destroyVideoResources(VideoSlot& v);
@@ -798,17 +799,23 @@ private:
     ViewSwapchain beamSwapchain_;
     ViewTargets beamTargets_;
     bool beamDrawn_ = false;
-    // The controller models as a second projection layer, submitted after the
+    // The controller models (and button labels) as two world-space quad
+    // layers, one per eye (eye visibility left / right), submitted after the
     // screen and UI layers (under the beam and cursor): in the eye buffers
-    // they are composited first, so every layer screen covered them. One
-    // swapchain per eye at the eye-buffer size, drawn with renderPass_ (the
-    // eye pass's MSAA + depth targets, cleared transparent) and the same model
-    // pipeline. Used only while the models are drawn and a screen or the UI
-    // is a layer; otherwise they stay in the eye buffers.
+    // they are composited first, so every layer screen covered them, and
+    // SteamVR composites a further projection layer under the quad layers
+    // too. Each eye's image is rendered exactly like that eye's view (its
+    // pose and asymmetric FOV), and its quad is that view's image plane at
+    // kModelLayerDist (renderLayersAfter), so it shows the same pixels and
+    // is reprojected as world-locked content. One swapchain per eye at the
+    // eye-buffer size, drawn with renderPass_ (the eye pass's MSAA + depth
+    // targets, cleared transparent) and the same model pipeline. Used only
+    // while the models may be seen and a screen or the UI is a layer;
+    // otherwise they stay in the eye buffers.
+    static constexpr float kModelLayerDist = 0.5f;
     ViewSwapchain modelSwapchains_[2];
     ViewTargets modelTargets_[2];
     bool modelLayerReady_ = false;      // swapchains + framebuffers exist
-    bool modelLayerAllowed_ = true;     // runtime takes it (XrContext), cached per frame
     bool modelLayerThisFrame_ = false;  // decided by the first eye pass
     bool modelsInView_ = true;          // an active model may be seen (renderLayersBefore)
     // True when a bounding sphere around an active controller's model reaches
@@ -822,12 +829,18 @@ private:
     // Button labels (setButtonLabels). Laid out once per frame in world space
     // (renderLayersBefore), then drawn per view after the models, in the same
     // pass: the models layer, else the eye buffers. Cards billboard toward the
-    // head and follow the (smoothed) model pose.
+    // head and follow the (smoothed) model pose. Leader lines and button dots
+    // are depth-tested against the models (hidden behind the controller),
+    // the cards and their text are not.
     struct LabelCardDraw {
         int hand = 1;
         math::Vec3 centre, right, up, normal;  // billboard frame (shared per hand)
         float hw = 0.0f, hh = 0.0f;            // half-size, metres
         math::Vec3 edge, anchor;               // leader line: card edge -> button
+        // The button part's bounding box (half size, in the part's frame
+        // `anchorRot`): the dot is drawn just outside it toward each eye.
+        math::Vec3 anchorHalf{0.004f, 0.004f, 0.004f};
+        math::Quat anchorRot{0.0f, 0.0f, 0.0f, 1.0f};
         bool leader = false;
         float alpha = 1.0f;
         std::vector<std::string> lines;
@@ -842,6 +855,7 @@ private:
     struct LabelAnchor {
         std::string key;
         math::Vec3 centre;
+        math::Vec3 half;   // half size of the bounding box
         int submesh = -1;  // first submesh of the node (its animated pose)
         std::string nodeName;
     };
@@ -860,7 +874,10 @@ private:
     // Records the laid-out labels for one view (inside a renderPass_ pass);
     // glyph instances are appended at `glyphCount` in `glyphs` / `glyphBuf`.
     void drawButtonLabels(const XrView& view, void* glyphs, VkBuffer glyphBuf, uint32_t& glyphCount);
-    bool labelAnchor(int hand, const std::string& component, math::Vec3& out);
+    // `half` (optional): the part's bounding-box half size (a few mm for a
+    // json frame); `rot`: the node's animated turn in model space.
+    bool labelAnchor(int hand, const std::string& component, math::Vec3& out, math::Vec3* half = nullptr,
+                     math::Quat* rot = nullptr);
     float labelTextWidth(const FontAtlas& font, float scale, const std::string& s) const;
     // badge: 0 = none, else the screen number (+10 when it is the selected one);
     // glyphCursor: next free glyph instance in pass slot 3 (shared by the copies).
@@ -913,6 +930,9 @@ private:
     VkPipeline spherePipeline_ = VK_NULL_HANDLE;
     VkPipelineLayout uiPipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline uiPipeline_ = VK_NULL_HANDLE;
+    // uiPipeline_ with a depth test (no depth write) against the controller
+    // models: the button labels' leader lines and dots (renderPass_ only).
+    VkPipeline uiPipelineDepth_ = VK_NULL_HANDLE;
 
     float ambilightIntensity_ = 0.55f;
 
