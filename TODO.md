@@ -7,16 +7,22 @@
 
 ---
 
-## OPEN NOW (2026-11-07) — start here
+## OPEN NOW (2026-11-08) — start here
 
-Priority: N1/N2, L1, R1, K1/K2 are done and user-verified. Next: D1 2D→3D (needs a
-model/runtime decision). Y*/S1 are parked; M5 is low priority.
+Priority: next candidates are Stage 2 of the controls (Options menus while watching / on web pages,
+previous / next file in a folder, small volume / seek indicators, vault page showing the button for
+each combo step), the parked on-screen controls rethink (music view dock buttons = prev / next track),
+and D1 2D→3D (needs a model/runtime decision). Foveated rendering is NOT needed for now (8K60 180° =
+~2-3 ms GPU at 2160 eyes after the single-sample 360/180 pass + visibility mask). Y*/S1 parked.
 
-State: released as **v1.13.0** (2026-11-07; notes in `docs/release-notes/v1.13.0.md`, tag push
-triggers `.github/workflows/release.yml`). The launch fix ("Up next" instead of "Resume Game")
-lives in `src/xr/vr_app_manifest.cpp` (SteamVR prelaunch check + app manifest) and
-`tools/install.sh` (OpenVR flag; `--update` hands over to the release's own installer).
-Headset: `ssh -i "$HOME/AppData/Local/steamos-devkit/steamos-devkit/devkit_rsa"
+State: released as **v1.14.0** (2026-11-08; notes in `docs/release-notes/v1.14.0.md`, tag push
+triggers `.github/workflows/release.yml`): SteamOS-native controls (one action set, SteamVR is the
+only place buttons are assigned; src/xr/xr_context.cpp kActionDefs), floating button labels
+(src/ui/button_labels.*, layout/draw in vulkan_renderer.cpp, controller models + labels in cropped
+per-eye quad layers), exact seeks (media_engine), adaptive eye resolution (src/xr/render_scale.hpp,
+floor 2160), GPU timestamps in PERF, single-sample 360/180 eye pass, XR_KHR_visibility_mask.
+The launch fix ("Up next" instead of "Resume Game") lives in `src/xr/vr_app_manifest.cpp` and
+`tools/install.sh`. Headset: `ssh -i "$HOME/AppData/Local/steamos-devkit/steamos-devkit/devkit_rsa"
 steamos@192.168.178.61`; installed app is `~/PixelVRPlayer`.
 
 - [x] **N1. Play from the Downloads list ignores multi-screen:** FIXED 2026-11-07 (not yet user-verified): the Downloads row and "Open Share/Bookmark" go through `playFromBrowser` (picker / VR question in the Files hub; the click is consumed so the picker cannot take it). Original report: pressing Play on a
