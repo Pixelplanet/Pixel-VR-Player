@@ -1,0 +1,29 @@
+{
+  "id": "org.pixelvr.funscript",
+  "name": "Funscript devices",
+  "version": "0.1.0",
+  "api": 1,
+  "description": "Plays the .funscript next to a video on devices connected to Intiface Central (Buttplug.io). Untested with real devices: please report results.",
+  "author": "Pixel VR Player",
+  "homepage": "https://github.com/Pixelplanet/Pixel-VR-Player",
+  "license": "MIT",
+  "exec": ["funscript"],
+  "permissions": ["playback", "files.sidecar", "ui", "network"],
+  "sidecars": ["{base}.funscript", "{base}.*.funscript"],
+  "settings": [
+    { "key": "intiface", "type": "toggle", "label": "Use Intiface", "default": true },
+    { "key": "server", "type": "text", "label": "Intiface address", "default": "ws://127.0.0.1:12345" },
+    { "key": "scan", "type": "action", "label": "Scan for devices" },
+    { "key": "stop", "type": "action", "label": "Stop all devices" },
+    { "key": "offset", "type": "choice", "label": "Sync offset",
+      "options": ["-300 ms", "-250 ms", "-200 ms", "-150 ms", "-100 ms", "-50 ms", "0 ms", "+50 ms", "+100 ms", "+150 ms", "+200 ms", "+250 ms", "+300 ms"],
+      "default": 6 },
+    { "key": "bottom", "type": "choice", "label": "Stroke bottom", "options": ["0%", "10%", "20%", "30%"], "default": 0 },
+    { "key": "top", "type": "choice", "label": "Stroke top", "options": ["100%", "90%", "80%", "70%"], "default": 0 },
+    { "key": "speed", "type": "choice", "label": "Stroke speed limit", "options": ["Off", "500 /s", "400 /s", "300 /s", "200 /s"], "default": 0 },
+    { "key": "vibe", "type": "segmented", "label": "Vibration follows", "options": ["Speed", "Position"], "default": 0 },
+    { "key": "vibeMax", "type": "choice", "label": "Vibration strength", "options": ["100%", "75%", "50%", "25%"], "default": 0 },
+    { "key": "invert", "type": "toggle", "label": "Invert script", "default": false },
+    { "key": "folders", "type": "text", "label": "Script folders (; between)", "default": "" }
+  ]
+}

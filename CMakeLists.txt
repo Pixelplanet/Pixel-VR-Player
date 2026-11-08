@@ -340,7 +340,7 @@ endif()
 # .pvrplugin downloads, never inside the player package.
 option(PIXELVR_BUILD_PLUGINS "Build the first-party plugins (plugins/)" ON)
 if(PIXELVR_BUILD_PLUGINS AND UNIX)
-    foreach(plugin example)
+    foreach(plugin example funscript)
         add_executable(pvr-plugin-${plugin} plugins/${plugin}/main.cpp)
         set_target_properties(pvr-plugin-${plugin} PROPERTIES
             OUTPUT_NAME ${plugin}
