@@ -441,8 +441,12 @@ void BrowserHost::handleLine(const std::string& line) {
             p.offset = v.getNumber("offset");
             p.duration = v.getNumber("duration");
             if (!v.getString("service").empty()) p.service = v.getString("service");
+            p.audioStream = static_cast<int>(v.getNumber("audio", -1));
+            if (const pvrjson::Value* ep = v.get("episode")) p.episode = ep->boolean;
             plexPlays_.push_back(std::move(p));
         }
+    } else if (cmd == "plexnext") {  // "plexnext none": no next episode
+        plexNextNone_ = true;
     } else if (cmd == "savefile") {
         pvrjson::Value v;
         if (pvrjson::parse(rest.c_str(), v) && !v.getString("url").empty() && !v.getString("name").empty()) {

@@ -478,6 +478,10 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
         sc.engine.setPreferredVideoStream(-1);
         sc.engine.setPreferredAudioStream(-1);
     }
+    if (plexLoading_ && plexAudioStream_ >= 0) {  // Plex / Jellyfin: the audio track chosen on the page
+        sc.engine.setPreferredAudioLanguage("");
+        sc.engine.setPreferredAudioStream(plexAudioStream_);
+    }
     sc.open = sc.engine.open(path);
     if (!sc.open) {
         // Clear stale video from the previous clip so the renderer shows black
@@ -1159,9 +1163,15 @@ void App::startPlexPlay(int slot, const BrowserHost::PlexPlay& play) {
     sc.web = false;
     sc.webSuspended = true;
     sc.path.clear();
+    sc.plexEpisode = play.episode;
+    sc.plexAwaitingNext = false;
+    webHosts_[slot].takePlexNextNone();  // a stale answer must not end this one
     plexLoading_ = true;
+    plexAudioStream_ = play.audioStream;
     loadMedia(play.url, slot);
     plexLoading_ = false;
+    plexAudioStream_ = -1;
+    if (play.audioStream >= 0) PIXELVR_LOG_INFO("Web play: audio track %d as chosen on the page", play.audioStream);
     if (!sc.open || !sc.webSuspended) return;
     if (play.offset > 0.5 && (sc.engine.duration() <= 0.0 || play.offset < sc.engine.duration() - 5.0)) {
         sc.engine.seek(play.offset);
@@ -1186,6 +1196,10 @@ bool App::returnFromPlex(int slot) {
     if (slot < 0) slot = selectedScreen_;
     ScreenState& sc = screens_[slot];
     if (!sc.webSuspended) return false;
+    sc.plexAwaitingNext = false;  // a next episode still on its way is dropped
+    for (size_t p = 0; p < pendingWebPlays_.size(); ++p) {
+        if (pendingWebPlays_[p].slot == slot) pendingWebPlays_.erase(pendingWebPlays_.begin() + static_cast<long>(p--));
+    }
     webHosts_[slot].plexReturn(static_cast<int64_t>(sc.engine.position() * 1000.0));
     renderer_.setDockHint(std::string(), 0.0f);
     sc.engine.close();
@@ -1221,11 +1235,27 @@ bool App::updatePlexPlayback(int slot) {
 #ifdef PIXELVR_HAVE_MEDIA
     ScreenState& sc = screens_[slot];
     const double duration = sc.engine.duration();
+    const auto now = std::chrono::steady_clock::now();
     if (sc.engine.eof() && (duration <= 0.0 || sc.engine.position() >= duration - 5.0)) {
+        if (sc.plexEpisode && !sc.plexAwaitingNext) {
+            // An episode ended: the helper reports it and hands off the next one on this screen.
+            sc.plexAwaitingNext = true;
+            sc.plexNextSince = now;
+            webHosts_[slot].plexNext(static_cast<int64_t>((duration > 0.0 ? duration : sc.engine.position()) * 1000.0));
+            notice_ = "Starting the next episode...";
+            noticeUntil_ = now + std::chrono::seconds(20);
+            PIXELVR_LOG_INFO("Web play: episode ended on screen %d, asking for the next one", slot + 1);
+            return false;
+        }
+        if (sc.plexAwaitingNext) {
+            if (!webHosts_[slot].takePlexNextNone() && now - sc.plexNextSince < std::chrono::seconds(20)) return false;
+            PIXELVR_LOG_INFO("Web play: no next episode, back to the page");
+            sc.plexAwaitingNext = false;
+            notice_.clear();
+        }
         returnFromPlex(slot);
         return true;
     }
-    const auto now = std::chrono::steady_clock::now();
     if (now >= sc.plexReportAt) {
         sc.plexReportAt = now + std::chrono::seconds(10);
         webHosts_[slot].plexTimeline(sc.engine.paused() ? "paused" : "playing",
@@ -3194,7 +3224,8 @@ int App::run() {
                 }
                 BrowserHost::PlexPlay plexPlay;
                 while (host.takePlexPlay(plexPlay)) {
-                    if (!screens_[slot].web) continue;
+                    // (A screen that finished an episode takes the next one's hand-off too.)
+                    if (!screens_[slot].web && !screens_[slot].plexAwaitingNext) continue;
                     // Plex Web restores the play queue another window is already playing natively.
                     const std::string item = plexPlay.url.substr(0, plexPlay.url.find('?'));
                     bool playing = false;
@@ -3215,8 +3246,10 @@ int App::run() {
                     }
                     const int st = pw.state->load();
                     const bool timedOut = std::chrono::steady_clock::now() - pw.since > std::chrono::seconds(90);
-                    if (!screens_[slot].web) {
+                    if (!screens_[slot].web && !screens_[slot].webSuspended) {
                         pendingWebPlays_.erase(pendingWebPlays_.begin() + static_cast<long>(p));  // page closed meanwhile
+                    } else if (!screens_[slot].web && !screens_[slot].plexAwaitingNext) {
+                        pendingWebPlays_.erase(pendingWebPlays_.begin() + static_cast<long>(p));  // returned to the page meanwhile
                     } else if (st != 0 || timedOut) {
                         const BrowserHost::PlexPlay play = pw.play;
                         pendingWebPlays_.erase(pendingWebPlays_.begin() + static_cast<long>(p));

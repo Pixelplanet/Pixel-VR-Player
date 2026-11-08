@@ -135,6 +135,7 @@ private:
         std::chrono::steady_clock::time_point since;
     };
     std::vector<PendingWebPlay> pendingWebPlays_;
+    int plexAudioStream_ = -1;  // the page's audio track for the hand-off being loaded
     int shortcutDragFrom_ = -1;  // settings row of the shortcut being dragged (list page)
     int shortcutDragTo_ = -1;    // the row it would land on
     bool returnFromPlex(int slot);  // false when the slot is not playing a Plex hand-off
@@ -258,6 +259,9 @@ private:
         bool web = false;    // shows the web browser instead of a video
         bool webSuspended = false;  // its BrowserHost is alive, paused behind a natively playing (Plex) video
         std::chrono::steady_clock::time_point plexReportAt{};
+        bool plexEpisode = false;       // a TV episode: the next one is asked for when it ends
+        bool plexAwaitingNext = false;  // ended, waiting for the next episode's hand-off
+        std::chrono::steady_clock::time_point plexNextSince{};
         float volume = 1.0f; // this screen's own volume (on top of the system volume)
 #ifdef PIXELVR_HAVE_MEDIA
         MusicQueue queue;    // audio files: the folder they were opened from

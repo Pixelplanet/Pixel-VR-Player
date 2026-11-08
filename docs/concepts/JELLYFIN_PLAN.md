@@ -218,3 +218,17 @@ from the user for an end-to-end test.
   the part's selected audio stream (`Stream.selected`, `index` = container index). Passed as `audio` in
   the hand-off, applied with `setPreferredAudioStream`.
 - TODO: PX1 (skip intro / credits), ST1 (subtitle picker) added.
+- **Built + deployed (episode end, next episode, audio tracks):**
+  - Engine: no `reconnect_at_eof`, and no retries once the I/O position reached the file size.
+    Not yet seen: whether the end now comes at once.
+  - Helper: `jfStart()` (shared by the first play and the next episode), `plexEmit()` / `kPlexInfoJs`
+    (Plex: part, title, duration, `type`, the selected audio stream `index`), `plexnext <ms>`.
+  - **Jellyfin tested standalone against TheVault:** an episode's hand-off carries `"episode":true,"audio":1`;
+    `plexnext 0` found and handed off the next episode ("Futurama - Neutopia"); no token in the log.
+    - Jellyfin Web sends `"AudioStreamIndex":null` when nothing was picked (it parsed as 0 at first,
+      now digits only). Then Jellyfin's `DefaultAudioStreamIndex` (the user's language preference) is used.
+  - **Plex next episode and Plex audio: not tested** (no Plex test session outside the headset).
+  - App: `plexEpisode` / `plexAwaitingNext` per screen. At the end it shows "Starting the next
+    episode...", the next hand-off plays on the same screen, "none" (or 20 s) → back to the page.
+    Stop drops a next episode still on its way.
+  - No setting to turn auto-play off yet.

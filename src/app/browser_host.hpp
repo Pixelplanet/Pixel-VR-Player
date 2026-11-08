@@ -120,6 +120,8 @@ public:
         double offset = 0.0;
         double duration = 0.0;
         std::string service = "plex";  // plex | jellyfin (same hand-off, docs/concepts/JELLYFIN_PLAN.md)
+        int audioStream = -1;          // container index of the audio track chosen on the page (-1 = ours)
+        bool episode = false;          // a TV episode: the next one starts when it ends
     };
     void setPlexNative(bool on);
     bool takePlexPlay(PlexPlay& out);
@@ -131,6 +133,13 @@ public:
     bool takeSaveFile(SaveFile& out);
     void plexRelease() { send("plexrelease"); }  // close the page's player, no timeline report
     void plexReturn(int64_t ms) { send("plexreturn " + std::to_string(ms)); }  // close Plex's player, report "stopped" at ms
+    // An episode ended at ms: report it, and hand off the next one (a new PlexPlay), or answer "none".
+    void plexNext(int64_t ms) { send("plexnext " + std::to_string(ms)); }
+    bool takePlexNextNone() {
+        const bool v = plexNextNone_;
+        plexNextNone_ = false;
+        return v;
+    }
     void plexTimeline(const char* state, int64_t ms);  // playing | paused | stopped
 
     const std::string& url() const { return url_; }
@@ -174,6 +183,7 @@ private:
     int volumeState_ = -1;  // percent last sent
     std::vector<FocusEvent> focusEvents_;
     std::vector<PlexPlay> plexPlays_;
+    bool plexNextNone_ = false;
     std::vector<SaveFile> saveFiles_;
     bool plexNative_ = true;
     bool fieldValueNew_ = false;

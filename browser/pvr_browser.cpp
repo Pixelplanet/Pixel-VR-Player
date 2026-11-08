@@ -1700,8 +1700,13 @@ int runScreen(const ScreenOptions& opt) {
                 }
                 // The audio track chosen on the page (Jellyfin stream index = container index).
                 int audioIdx = -1;
-                if (const std::string a = queryParam(url, "AudioStreamIndex"); !a.empty()) audioIdx = std::atoi(a.c_str());
-                if (const size_t at = body.find("\"AudioStreamIndex\":"); at != std::string::npos) {
+                // (Jellyfin Web may send "AudioStreamIndex":null: only digits count.)
+                if (const std::string a = queryParam(url, "AudioStreamIndex");
+                    !a.empty() && std::isdigit(static_cast<unsigned char>(a[0]))) {
+                    audioIdx = std::atoi(a.c_str());
+                }
+                if (const size_t at = body.find("\"AudioStreamIndex\":");
+                    at != std::string::npos && at + 19 < body.size() && std::isdigit(static_cast<unsigned char>(body[at + 19]))) {
                     audioIdx = std::atoi(body.c_str() + at + 19);
                 }
                 plex.service = "jellyfin";
