@@ -5984,7 +5984,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 if (cb == CtrlButton::SeekBack) iconShape = UiShape::SeekBack;
                 else if (cb == CtrlButton::SeekFwd) iconShape = UiShape::SeekFwd;
                 else if (cb == CtrlButton::Stop) iconShape = UiShape::Stop;
-                else if (cb == CtrlButton::HideHud) iconShape = UiShape::Close;
+                else if (cb == CtrlButton::HideHud) iconShape = UiShape::HideDock;  // not Close's X
                 else if (cb == CtrlButton::ScreenAudioFollow) iconShape = UiShape::AudioFollow;
                 else if (cb == CtrlButton::ScreenLock)
                     iconShape = screensUnlocked_ ? UiShape::Unlocked : UiShape::Lock;

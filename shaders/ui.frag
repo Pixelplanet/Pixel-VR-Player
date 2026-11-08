@@ -326,6 +326,12 @@ void main() {
         float shaft = sdRoundedBox(p - vec2(0.24, 0.0), vec2(0.18, 0.065), 0.03);
         float head = sdTriangle(p, vec2(0.66, 0.0), vec2(0.36, 0.28), vec2(0.36, -0.28)) - 0.02;
         d = min(min(box, cone), min(shaft, head));
+    } else if (shape == 41) {
+        // Shape 41: Hide the controls (a chevron pointing down onto a bar: the panel folds away)
+        float c1 = sdSegment(p, vec2(-0.36, 0.30), vec2(0.0, -0.02)) - 0.075;
+        float c2 = sdSegment(p, vec2(0.0, -0.02), vec2(0.36, 0.30)) - 0.075;
+        float bar = sdRoundedBox(p - vec2(0.0, -0.36), vec2(0.42, 0.065), 0.05);
+        d = min(min(c1, c2), bar);
     } else {
         d = sdRoundedBox(p, vec2(1.0), 0.0);
     }

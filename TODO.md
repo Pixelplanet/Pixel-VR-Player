@@ -335,6 +335,14 @@ branches are local (not pushed) unless noted.
     (type intro / credits, startTimeOffset / endTimeOffset in ms) when the server has analysed them.
   - Jellyfin: Media Segments (`GET /MediaSegments/{itemId}`, Intro / Outro / Recap…, 10.10+), filled by
     plugins such as Intro Skipper.
+- [ ] **TV1. Series controls (asked for 2026-11-08):** rework the player UI / controls for TV series
+  (Plex, Jellyfin): previous / next episode from the player.
+  - Idea: an arrow at the left and right edge of the screen while the laser aims at the screen.
+  - Also possible: dock buttons, or a stick gesture.
+  - Builds on the next-episode hand-off (`plexnext`; a previous one needs `plexprev`).
+  - The episode title card (series · S1 E2 · name, 5 s) exists since 2026-11-08 and could become a
+    proper overlay.
+  - See also PX1 (skip intro / credits).
 - [ ] **ST1. Subtitle picker (asked for 2026-11-08):** we lack one for Plex and Jellyfin, and in general.
   - Pick embedded subtitle tracks in the player, plus "off".
   - Take the subtitle chosen on the Plex / Jellyfin page into our player (Plex: the part's selected

@@ -565,6 +565,7 @@ public:
         Repeat = 38,
         AudioFollow = 39,   // speaker with an arrow: audio follows the selection
         FlatBox = 40,       // rounded box in its flat colours (no top light, no rim light)
+        HideDock = 41,      // chevron down onto a bar: hide the player controls
         GlassPanel = 25, // rounded box with bevel + eye-dependent reflection sheen
     };
 

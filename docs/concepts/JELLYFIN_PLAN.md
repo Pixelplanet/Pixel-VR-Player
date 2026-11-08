@@ -232,3 +232,21 @@ from the user for an end-to-end test.
     episode...", the next hand-off plays on the same screen, "none" (or 20 s) → back to the page.
     Stop drops a next episode still on its way.
   - No setting to turn auto-play off yet.
+
+## User report 2026-11-08 (fifth test)
+- The next episode auto-start works in Plex and Jellyfin.
+- **Jellyfin: an almost empty page after Stop, and no new playback possible.** Reproduced standalone.
+  - Jellyfin Web's own player (held paused at its start by us) never finished starting and blocked the
+    page; a second Play reached nothing.
+  - Plus: on return we pressed Escape (Plex's close), which is "back a page" in Jellyfin Web.
+  - **Fix:** stop the page's player through the user's own session
+    (`ApiClient.sendPlayStateCommand(session, 'Stop')`, `kJfStopPageJs`) after the hand-off and on
+    return, and no Escape for Jellyfin.
+  - Tested: after return the page's `<video>` is gone, the details page stays, and Play hands off again.
+- **B no longer closes Plex / Jellyfin playback** (B = "Hide Controls"): the dock hint now says "Press
+  Stop to return to Jellyfin / Plex".
+- **Hide-controls icon** was the same X as Close Screen. It's now shape 41 `HideDock` (a chevron down
+  onto a bar) in `shaders/ui.frag`.
+- **Episode title card:** the hand-off carries `info` ("Series · S6 E13 · Name", Jellyfin and Plex),
+  shown as a notice for 5 s when an episode starts.
+- TODO: TV1 (series controls: previous / next episode, edge arrows while the laser aims at the screen).

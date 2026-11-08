@@ -443,6 +443,7 @@ void BrowserHost::handleLine(const std::string& line) {
             if (!v.getString("service").empty()) p.service = v.getString("service");
             p.audioStream = static_cast<int>(v.getNumber("audio", -1));
             if (const pvrjson::Value* ep = v.get("episode")) p.episode = ep->boolean;
+            p.episodeInfo = v.getString("info");
             plexPlays_.push_back(std::move(p));
         }
     } else if (cmd == "plexnext") {  // "plexnext none": no next episode

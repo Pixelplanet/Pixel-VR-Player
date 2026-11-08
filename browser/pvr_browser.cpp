@@ -1121,6 +1121,11 @@ int runScreen(const ScreenOptions& opt) {
     // Jellyfin: our own PlaybackInfo for `itemId` (a profile matching our decoders; Direct Play is
     // decided from the streams, since our FFmpeg plays DTS / DVD subtitles Jellyfin would transcode),
     // then the hand-off. Used for the item played on the page and for the next episode.
+    // Jellyfin Web's own player, held paused at its start, never finishes starting and then blocks the
+    // page (no new playback). Stop it the way a remote control would, through the user's own session.
+    const std::string kJfStopPageJs =
+        "(async()=>{try{const c=window.ApiClient;if(!c)return 0;const s=await c.getSessions({deviceId:c.deviceId()});"
+        "for(const x of s)await c.sendPlayStateCommand(x.Id,'Stop');return s.length}catch(e){return -1}})()";
     auto jfStart = [&](const std::string& session, const std::string& itemId, const std::string& user,
                        long long startTicks, int audioIdx, bool next) {
         plex.jfItem = itemId;
@@ -1148,6 +1153,8 @@ int runScreen(const ScreenOptions& opt) {
             "return JSON.stringify({title:it.SeriesName?it.SeriesName+' - '+it.Name:it.Name,"
             "ticks:it.RunTimeTicks||m.RunTimeTicks||0,msid:m.Id,session:pi.PlaySessionId||'',user:u,"
             "series:it.Type==='Episode'?(it.SeriesId||''):'',aud:(m.DefaultAudioStreamIndex??-1),"
+            "info:it.Type==='Episode'?[it.SeriesName,((it.ParentIndexNumber!=null?'S'+it.ParentIndexNumber:'')+"
+            "(it.IndexNumber!=null?' E'+it.IndexNumber:'')).trim(),it.Name].filter(Boolean).join(' '+String.fromCharCode(183)+' '):'',"
             "container:(m.Container||'').toLowerCase(),vcodec:(v.Codec||'').toLowerCase(),turl:m.TranscodingUrl||''})})()";
         evalIn(session, js, [&, session, startTicks, audioIdx, next](const pvrjson::Value* v) {
             pvrjson::Value info;
@@ -1191,10 +1198,11 @@ int runScreen(const ScreenOptions& opt) {
                           "%.3f,\"duration\":%.3f,\"service\":\"jellyfin\",\"audio\":%d,\"episode\":%s}",
                           static_cast<double>(startTicks) / 1e7, plex.durationMs / 1000.0, audio,
                           plex.jfSeries.empty() ? "false" : "true");
+            evalIn(session, kJfStopPageJs);  // the page's own player is not needed: ours plays it
             std::fprintf(stderr, "jellyfin: %s %s/%s audio %d%s\n", plex.jfMethod.c_str(), ct.c_str(), vc.c_str(), audio,
                          plex.jfSeries.empty() ? "" : " (episode)");
             emitLine("plex {\"url\":" + pvrjson::quote(playUrl) + ",\"title\":" + pvrjson::quote(info.getString("title")) +
-                     ",\"offset\":" + nums);
+                     ",\"info\":" + pvrjson::quote(info.getString("info")) + ",\"offset\":" + nums);
         }, true);
     };
     // Plex: the part, title, duration and the audio track chosen in Plex for a metadata item.
@@ -1208,13 +1216,16 @@ int runScreen(const ScreenOptions& opt) {
                       info.getString("type") == "episode" ? "true" : "false");
         emitLine("plex {\"url\":" + pvrjson::quote(plex.base + info.getString("part") + "?X-Plex-Token=" + plex.token +
                                                   "&download=0") +
-                 ",\"title\":" + pvrjson::quote(info.getString("title")) + ",\"offset\":" + nums);
+                 ",\"title\":" + pvrjson::quote(info.getString("title")) + ",\"info\":" +
+                 pvrjson::quote(info.getString("info")) + ",\"offset\":" + nums);
     };
     // JS returning that info for the metadata object `m` (part `p`).
     const std::string kPlexInfoJs =
         "JSON.stringify({part:p.key,title:m.grandparentTitle?m.grandparentTitle+' - '+m.title:m.title,"
         "dur:m.duration||0,off:m.viewOffset||0,rk:m.ratingKey,key:m.key,type:m.type||'',"
-        "aud:((p.Stream||[]).find(s=>s.streamType===2&&s.selected)||{index:-1}).index})";
+        "aud:((p.Stream||[]).find(s=>s.streamType===2&&s.selected)||{index:-1}).index,"
+        "info:m.type==='episode'?[m.grandparentTitle,((m.parentIndex!=null?'S'+m.parentIndex:'')+"
+        "(m.index!=null?' E'+m.index:'')).trim(),m.title].filter(Boolean).join(' '+String.fromCharCode(183)+' '):''})";
 
     auto activeTab = [&]() -> Tab* { return (active >= 0 && active < static_cast<int>(tabs.size())) ? &tabs[active] : nullptr; };
     auto tabBySession = [&](const std::string& s) -> int {
@@ -2194,7 +2205,12 @@ int runScreen(const ScreenOptions& opt) {
             if (!plex.intercepted || plex.closeAt != Clock::time_point{}) return;
             plex.stoppedMs = cmd == "plexrelease" ? -1 : std::atoll(rest.c_str());
             evalIn(plex.session, "(()=>{" + kPauseAllJs + "})()");
-            if (const KeyInfo* esc = keyInfo("Escape")) keyEvent(esc, plex.session);
+            if (plex.service == "jellyfin") {
+                // Escape means "back a page" in Jellyfin Web (it left an almost empty page): stop its player instead.
+                evalIn(plex.session, kJfStopPageJs);
+            } else if (const KeyInfo* esc = keyInfo("Escape")) {
+                keyEvent(esc, plex.session);
+            }
             plex.closeAt = Clock::now() + std::chrono::milliseconds(400);
             plex.returnCheckAt = Clock::now() + std::chrono::milliseconds(1200);
         } else if (cmd == "plexnext") {

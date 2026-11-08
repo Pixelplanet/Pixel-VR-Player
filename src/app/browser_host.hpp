@@ -122,6 +122,7 @@ public:
         std::string service = "plex";  // plex | jellyfin (same hand-off, docs/concepts/JELLYFIN_PLAN.md)
         int audioStream = -1;          // container index of the audio track chosen on the page (-1 = ours)
         bool episode = false;          // a TV episode: the next one starts when it ends
+        std::string episodeInfo;       // "Series · S1 E2 · Name", shown as the episode starts
     };
     void setPlexNative(bool on);
     bool takePlexPlay(PlexPlay& out);
