@@ -83,6 +83,20 @@ jobs:
           sha256sum pixelvr-linux-arm64.tar.gz > pixelvr-linux-arm64.tar.gz.sha256
           sha256sum "pixelvr-linux-arm64-${tag}.tar.gz" > "pixelvr-linux-arm64-${tag}.tar.gz.sha256"
 
+      # First-party plugins are separate downloads, never inside the player
+      # package (docs/concepts/PLUGIN_SYSTEM_SPEC.md).
+      - name: Package plugins
+        run: |
+          set -eux
+          mkdir -p plugin-assets
+          for p in funscript deovr-remote; do
+            f=$(sh tools/package-plugin.sh "build/plugins/$p" plugin-assets)
+            tar -tzf "$f" | grep -q "^$p/plugin.json$"
+            file "build/plugins/$p/$p" | grep -q 'ARM aarch64'
+          done
+          (cd plugin-assets && sha256sum *.pvrplugin > plugins.sha256)
+          ! tar -tzf pixelvr-linux-arm64.tar.gz | grep -q 'pvrplugin\|/plugins/'
+
       - name: Verify artifact
         run: |
           file build/bin/pixelvr
@@ -107,6 +121,7 @@ jobs:
             pixelvr-linux-arm64.tar.gz
             pixelvr-linux-arm64.tar.gz.sha256
             pixelvr-linux-arm64-v*.tar.gz
+            plugin-assets/*
 
       - name: Publish GitHub release
         if: startsWith(github.ref, 'refs/tags/v') || inputs.tag != ''
@@ -120,3 +135,5 @@ jobs:
             pixelvr-linux-arm64.tar.gz.sha256
             pixelvr-linux-arm64-v*.tar.gz
             pixelvr-linux-arm64-v*.tar.gz.sha256
+            plugin-assets/*.pvrplugin
+            plugin-assets/plugins.sha256

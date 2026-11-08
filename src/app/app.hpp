@@ -356,6 +356,7 @@ private:
     PluginHost plugins_;
     std::string plexTitles_[VulkanRenderer::kMaxVideoSlots];
     void updatePlugins();
+    void installPlugin(const std::string& file);  // a .pvrplugin chosen in the file browser
     int webMouseSlot_ = -1;      // browser screen the press / hover belongs to
     bool webMouseDown_ = false;
     bool webDragging_ = false;   // moved past the click slop while pressed

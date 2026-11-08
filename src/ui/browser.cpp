@@ -957,6 +957,10 @@ Browser::Result Browser::activate(std::string& playPath) {
         playPath = e.path;
         return Result::Play;
     }
+    if (!isRemotePath(e.path) && hasExtension(e.path, {".pvrplugin"})) {
+        playPath = e.path;
+        return Result::InstallPlugin;
+    }
     return Result::None;
 }
 

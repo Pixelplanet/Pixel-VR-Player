@@ -99,6 +99,11 @@ public:
     // App exit: asks every plugin to stop, waits briefly, then kills.
     void shutdownAll();
 
+    // Unpacks a .pvrplugin (gzip tar with one plugin folder) into the plugins
+    // folder, replacing an older version (stopped first; it restarts if it was
+    // on). Never runs the plugin: a new one stays off until the user enables it.
+    bool installPackage(const std::string& file, std::string& message);
+
     std::vector<Plugin>& plugins() { return plugins_; }
     const std::vector<Plugin>& plugins() const { return plugins_; }
     void rescan();

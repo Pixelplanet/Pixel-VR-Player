@@ -1978,6 +1978,17 @@ int App::freeScreenSlot() const {
     return -1;
 }
 
+void App::installPlugin(const std::string& file) {
+    std::string message;
+    const bool ok = plugins_.installPackage(file, message);
+    notice_ = message;
+    noticeUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
+    if (ok) {
+        browser_.setOpen(false);
+        settings_.openPluginsPage();  // the new plugin is listed there, still off
+    }
+}
+
 void App::updatePlugins() {
     std::vector<PluginScreenSnapshot> snap(VulkanRenderer::kMaxVideoSlots);
     for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
@@ -5156,6 +5167,8 @@ int App::run() {
                             openSmbModal(true);
                         } else if (res == Browser::Result::Play && !playPath.empty()) {
                             playFromBrowser(playPath);
+                        } else if (res == Browser::Result::InstallPlugin) {
+                            installPlugin(playPath);
                         }
                     } else if ((in.togglePlay || in.select) &&
                                renderer_.pointerButton() < 0 && stickActive) {
@@ -5165,6 +5178,8 @@ int App::run() {
                             openSmbModal(true);
                         } else if (res == Browser::Result::Play && !playPath.empty()) {
                             playFromBrowser(playPath);
+                        } else if (res == Browser::Result::InstallPlugin) {
+                            installPlugin(playPath);
                         }
                     }
                 }

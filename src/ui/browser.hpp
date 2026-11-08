@@ -32,7 +32,8 @@ public:
     // 2 = largest first. Folders always stay ahead of files.
     void setSortMode(int mode);
     int sortMode() const { return sortMode_.load(); }
-    enum class Result { None, Navigated, Play, AddSmbShare };
+    // InstallPlugin: a local .pvrplugin file was chosen; `playPath` holds its path.
+    enum class Result { None, Navigated, Play, AddSmbShare, InstallPlugin };
 
     Browser();
 

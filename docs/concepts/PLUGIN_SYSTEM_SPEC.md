@@ -338,4 +338,26 @@ go to `~/pixelvr-src-plugins` (never `~/pixelvr-src`, which belongs to the other
     private media → pings only; status shows the headset's LAN address.
     `tools/deovr_plugin_test.py`: **11/11 pass on the headset**. Not yet tried with the real
     MultiFunPlayer / FunFlixDroid.
-- [ ] Phase 5 `.pvrplugin` install + release assets.
+- [x] Phase 5 `.pvrplugin` install + release assets.
+  - `tools/package-plugin.sh <build>/plugins/<name> <out>` → `<id>-<version>.pvrplugin`
+    (stripped copy, gzip tar of one folder; funscript ≈ 54 KB, deovr-remote ≈ 35 KB).
+  - File browser: choosing a local `.pvrplugin` → `Browser::Result::InstallPlugin` →
+    `App::installPlugin` → `PluginHost::installPackage` (system `tar` into a staging dir,
+    exactly one folder with a valid manifest, no links; replaces an existing copy of the
+    same id in place, stopping it first; restarts it if it was on). **Installing never
+    enables a plugin**; the Plugins page opens with it listed and off.
+  - Release workflow (`.github/workflows/release.yml`): "Package plugins" step publishes
+    `org.pixelvr.funscript-*.pvrplugin`, `org.pixelvr.deovr-remote-*.pvrplugin` and
+    `plugins.sha256` next to the player; checks the player tarball contains no plugin.
+    **Not yet run in CI.**
+  - Host test covers install / replace / refusal of bad packages.
+
+### How to try it in the headset (not done yet; needs the headset free of the other agent's work)
+1. Build this branch (`~/pixelvr-src-plugins/build`) and run its `bin/pixelvr` instead of the
+   installed one (or deploy it to `~/PixelVRPlayer` after coordinating).
+2. Download / copy `org.pixelvr.funscript-0.1.0.pvrplugin` to `~/Downloads`, open it in the file
+   browser → Plugins page → enable "Funscript devices".
+3. Put `Name.funscript` next to `Name.mp4`, play it, keep the dock open: the "Script" gauge
+   must move with the action; the heat strip shows above the timeline.
+4. With Intiface Central on a phone (Settings → listen on all interfaces), set
+   "Intiface address" to `ws://<phone-ip>:12345`, Scan, and test with a device.

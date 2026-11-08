@@ -287,6 +287,12 @@ public:
     // Plugins page. The host outlives the menu (both belong to App).
     void setPluginHost(PluginHost* host) { plugins_ = host; }
     bool onPluginPage() const { return section_ == kPluginsSection || section_ == kPluginSection; }  // live status: refresh now and then
+    void openPluginsPage() {  // after installing a plugin
+        section_ = kPluginsSection;
+        selected_ = 0;
+        open_ = true;
+        refresh();
+    }
     // After Action::EditPluginText: the text setting being edited and its value.
     int editingPluginSetting() const { return editingPluginSetting_; }
     std::string editingPluginText() const;

@@ -1041,6 +1041,89 @@ void PluginHost::shutdownAll() {
     }
 }
 
+bool PluginHost::installPackage(const std::string& file, std::string& message) {
+    std::error_code ec;
+    fs::create_directories(pluginsDir(), ec);
+    std::string tmpl = pluginsDir() + "/.install-XXXXXX";
+    if (!mkdtemp(tmpl.data())) {
+        message = "Cannot install: no room for a temporary folder";
+        return false;
+    }
+    const std::string staging = tmpl;
+    auto fail = [&](const std::string& why) {
+        fs::remove_all(staging, ec);
+        message = "Cannot install the plugin: " + why;
+        PIXELVR_LOG_WARN("Plugin install %s: %s", file.c_str(), why.c_str());
+        return false;
+    };
+    // GNU tar refuses absolute and ".." member names; links are rejected below.
+    std::vector<std::string> argStore = {"tar", "-xzf", file, "-C", staging, "--no-same-owner"};
+    std::vector<char*> argv;
+    for (std::string& a : argStore) argv.push_back(a.data());
+    argv.push_back(nullptr);
+    pid_t pid = -1;
+    if (posix_spawnp(&pid, "tar", nullptr, nullptr, argv.data(), environ) != 0) return fail("tar is missing");
+    int st = 0;
+    while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {
+    }
+    if (!WIFEXITED(st) || WEXITSTATUS(st) != 0) return fail("not a valid .pvrplugin file");
+    std::string dir;
+    int found = 0;
+    for (const auto& e : fs::directory_iterator(staging, ec)) {
+        if (e.is_directory(ec) && !e.is_symlink(ec) && fs::exists(e.path() / "plugin.json", ec)) {
+            dir = e.path().string();
+            ++found;
+        }
+    }
+    if (found != 1) return fail("the package must contain exactly one plugin folder");
+    for (const auto& e : fs::recursive_directory_iterator(staging, ec)) {
+        if (e.is_symlink(ec)) return fail("the package contains links");
+    }
+    Plugin probe;
+    loadManifest(dir, probe);
+    if (!probe.manifestError.empty()) return fail(probe.manifestError);
+
+    // Stop a running older version and wait for it (up to ~3 s).
+    for (Plugin& p : plugins_) {
+        if (p.id != probe.id || p.pid <= 0) continue;
+        stop(p, false);
+        const auto t0 = Clock::now();
+        while (p.pid > 0) {
+            flush(p);
+            readFrom(p);
+            const auto waited = Clock::now() - t0;
+            if (waited > std::chrono::seconds(2)) kill(-p.pid, SIGTERM);
+            if (waited > std::chrono::seconds(3)) {
+                kill(-p.pid, SIGKILL);
+                waitpid(p.pid, nullptr, 0);
+            }
+            reap(p);
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+    }
+    std::string target = pluginsDir() + "/" + probe.id;
+    for (const Plugin& p : plugins_) {
+        if (p.id == probe.id) target = p.dir;  // e.g. copied in by hand under another folder name
+    }
+    fs::remove_all(target + ".old", ec);
+    if (fs::exists(target, ec)) fs::rename(target, target + ".old", ec);
+    fs::rename(dir, target, ec);
+    if (ec) {
+        std::error_code ec2;
+        fs::rename(target + ".old", target, ec2);  // put the old version back
+        return fail(ec.message());
+    }
+    fs::remove_all(target + ".old", ec);
+    fs::remove_all(staging, ec);
+    rescan();
+    bool enabled = false;
+    for (const Plugin& p : plugins_) enabled = enabled || (p.id == probe.id && p.enabled);
+    message = "Installed " + probe.name + " " + probe.version +
+              (enabled ? ". It restarts with the new version." : ". Turn it on under Settings > Controls & Input > Plugins.");
+    PIXELVR_LOG_INFO("Plugin %s %s installed from %s", probe.id.c_str(), probe.version.c_str(), file.c_str());
+    return true;
+}
+
 void PluginHost::setEnabled(int idx, bool on) {
     if (idx < 0 || idx >= static_cast<int>(plugins_.size())) return;
     Plugin& p = plugins_[static_cast<size_t>(idx)];

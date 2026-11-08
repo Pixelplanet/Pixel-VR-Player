@@ -178,6 +178,28 @@ int main(int argc, char** argv) {
     runUntil(7.0, nullptr);
     check(controls.size() == 1 && controls[0].screen == 0 && controls[0].action == "pause", "control request reaches the app");
 
+    // Installing a .pvrplugin over the running copy (which lives under another folder name).
+    const std::string pkg = std::string(tmp) + "/example.pvrplugin";
+    const std::string tarCmd = "tar -czf '" + pkg + "' -C '" + exampleSrc.parent_path().string() + "' '" +
+                               exampleSrc.filename().string() + "'";
+    check(std::system(tarCmd.c_str()) == 0, "package built with tar");
+    std::string msg;
+    const bool installed = host.installPackage(pkg, msg);
+    check(installed && msg.find("restarts with the new version") != std::string::npos, "install replaces the running plugin: " + msg);
+    int copies = 0;
+    for (const auto& p : host.plugins()) copies += p.id == "org.pixelvr.example" ? 1 : 0;
+    check(copies == 1, "no duplicate after the install");
+    fs::create_directories(fs::path(tmp) / "bad/notaplugin");
+    writeFile(fs::path(tmp) / "bad/notaplugin/readme.txt", "x");
+    const std::string badCmd = "tar -czf '" + std::string(tmp) + "/bad.pvrplugin' -C '" + tmp + "/bad' notaplugin";
+    std::system(badCmd.c_str());
+    check(!host.installPackage(std::string(tmp) + "/bad.pvrplugin", msg) && msg.find("one plugin folder") != std::string::npos,
+          "a package without plugin.json is refused");
+    check(!host.installPackage(std::string(tmp) + "/media/Clip One.txt", msg), "a non-archive is refused");
+    runUntil(8.5, nullptr);
+    const int ex2 = findPlugin(host, "org.pixelvr.example");
+    check(ex2 >= 0 && host.plugins()[ex2].pid > 0 && host.plugins()[ex2].helloDone, "the plugin is running again after the update");
+
     const int crash = findPlugin(host, "test.crash");
     const int silent = findPlugin(host, "test.silent");
     check(crash >= 0 && host.plugins()[crash].crashes >= 2, "crashing plugin is restarted with backoff");
@@ -195,7 +217,7 @@ int main(int argc, char** argv) {
     check(host.plugins()[ex].pid <= 0 && host.plugins()[silent].pid <= 0, "all plugins stopped on shutdown");
 
     const std::string log = readFile(fs::path(tmp) / ".local/share/pixelvr/plugin-data/org.pixelvr.example/events.log");
-    check(countOf(log, "\"type\":\"hello\"") == 1, "hello received once");
+    check(countOf(log, "\"type\":\"hello\"") == 2, "hello once per start (first start + after the update)");
     check(log.find("\"type\":\"screens\"") != std::string::npos, "screens received");
     check(log.find("\"fileName\":\"Test Movie.mkv\"") != std::string::npos, "media.open with the file name");
     check(log.find("secret") == std::string::npos, "no credentials and no vault file name reach the plugin");
