@@ -1839,15 +1839,27 @@ int runScreen(const ScreenOptions& opt) {
                     pathOnly.compare(pathOnly.size() - 9, 9, "/Download") == 0 &&
                     (!queryParam(dlUrl, "api_key").empty() || !queryParam(dlUrl, "ApiKey").empty())) {
                     send("Browser.cancelDownload", "{\"guid\":" + pvrjson::quote(params->getString("guid")) + ctxParam + "}", "");
-                    std::string name = params->getString("suggestedFilename");
-                    if (name.empty() || name == "download" || name == "Download") {
-                        name = "Jellyfin " + pathOnly.substr(itemsAt + 7, pathOnly.size() - 9 - itemsAt - 7);
-                    }
-                    std::string clean;
-                    for (const char c : name) {
-                        if (c != '/' && c != '\\' && static_cast<unsigned char>(c) >= 0x20) clean += c;
-                    }
-                    emitLine("savefile {\"url\":" + pvrjson::quote(dlUrl) + ",\"name\":" + pvrjson::quote(clean) + "}");
+                    // Jellyfin sends no file name ("Download.txt"): use the server file's own name (Path).
+                    const std::string itemId = pathOnly.substr(itemsAt + 7, pathOnly.size() - 9 - itemsAt - 7);
+                    std::string tok = queryParam(dlUrl, "api_key");
+                    if (tok.empty()) tok = queryParam(dlUrl, "ApiKey");
+                    const std::string js =
+                        "(async()=>{try{const c=window.ApiClient;let it=null;"
+                        "if(c&&c.getCurrentUserId())it=await c.getItem(c.getCurrentUserId()," + pvrjson::quote(itemId) + ");"
+                        "if(!it){const j=await (await fetch(" +
+                        pvrjson::quote(dlUrl.substr(0, itemsAt) + "/Items?ids=" + itemId + "&fields=Path&api_key=" + tok) +
+                        ")).json();it=(j.Items||[])[0]}"
+                        "if(!it)return '';const p=(it.Path||'').split(/[\\\\/]/).pop();"
+                        "return p||(it.Name?it.Name+(it.Container?'.'+it.Container.split(',')[0]:''):'')}catch(e){return ''}})()";
+                    evalIn(tabs[dti].session, js, [&, dlUrl, itemId](const pvrjson::Value* v) {
+                        std::string name = (v && v->type == pvrjson::Value::Type::String) ? v->str : std::string();
+                        if (name.empty()) name = "Jellyfin " + itemId;
+                        std::string clean;
+                        for (const char c : name) {
+                            if (c != '/' && c != '\\' && static_cast<unsigned char>(c) >= 0x20) clean += c;
+                        }
+                        emitLine("savefile {\"url\":" + pvrjson::quote(dlUrl) + ",\"name\":" + pvrjson::quote(clean) + "}");
+                    }, true);
                     return;
                 }
             }
