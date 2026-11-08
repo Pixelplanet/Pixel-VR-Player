@@ -253,10 +253,8 @@ void SettingsMenu::refresh() {
                   downloadDirIdx_ % kDownloadDirCount, Action::CycleDownloadDir);
         {
             std::string on;
-            for (int i = 0; i < kRailShortcutCount; ++i) {
-                if ((railShortcutMask_ >> i) & 1) on += (on.empty() ? "" : ", ") + std::string(kRailShortcuts[i].name);
-            }
-            rows_.push_back({"Shortcuts", on.empty() ? "None" : on, Action::EnterRailShortcuts});
+            for (const RailShortcut& r : railShortcuts()) on += (on.empty() ? "" : ", ") + r.name;
+            rows_.push_back({"Shortcuts", on.empty() ? "None on the rail" : on, Action::EnterRailShortcuts});
         }
         rows_.push_back({"List View Columns", "Customize", Action::EnterListColsConfig});
     } else if (section_ == 2) {
@@ -330,14 +328,39 @@ void SettingsMenu::refresh() {
     } else if (section_ == 22) {
         title_ = "Settings > UI & Appearance > Shortcuts";
         hint(kShortcutsStatus);
-        for (int i = 0; i < kRailShortcutCount; ++i) {
-            const bool on = (railShortcutMask_ >> i) & 1;
-            toggle(kRailShortcuts[i].name, on,
-                   static_cast<Action>(static_cast<int>(Action::ToggleRailShortcut0) + i));
+        // One small card per shortcut (name; rail mark + address), in rail order.
+        for (size_t i = 0; i < shortcuts_.size(); ++i) {
+            const Shortcut& sc = shortcuts_[i];
+            std::string where = sc.url;
+            if (const size_t p = where.find("://"); p != std::string::npos) where = where.substr(p + 3);
+            while (!where.empty() && where.back() == '/') where.pop_back();
+            Row r{sc.name, std::string(sc.onRail ? "On the rail  " : "") + (where.empty() ? "Address asked on first use" : where),
+                  Action::OpenShortcut};
+            r.data = static_cast<int>(i);
+            rows_.push_back(r);
         }
-        rows_.push_back({"Jellyfin address", jellyfinUrl_.empty() ? std::string("Not set") : jellyfinUrl_,
-                         Action::EditJellyfinAddress});
+        rows_.push_back({"Add shortcut", "Name and address", Action::AddShortcut});
         rows_.push_back({"Back to UI & Appearance", "", Action::BackToUI});
+    } else if (section_ == 17) {
+        if (shortcutIdx_ < 0 || shortcutIdx_ >= static_cast<int>(shortcuts_.size())) shortcutIdx_ = 0;
+        const Shortcut& sc = shortcuts_.empty() ? Shortcut{} : shortcuts_[static_cast<size_t>(shortcutIdx_)];
+        title_ = "Settings > UI & Appearance > Shortcuts > " + sc.name;
+        hint("The rail shows the first " + std::to_string(kMaxRailShortcuts) + " shortcuts that are on, in list order.");
+        rows_.push_back({"Name", sc.name, Action::EditShortcutName});
+        rows_.push_back({"Address", sc.url.empty() ? std::string("Asked on first use") : sc.url, Action::EditShortcutUrl});
+        toggle("Show on the Rail", sc.onRail, Action::ToggleShortcutRail);
+        segmented("Opens as", {"Page only", "Full browser"}, sc.kiosk ? 0 : 1, Action::CycleShortcutKiosk);
+        {
+            Row up{"Move Up", shortcutIdx_ > 0 ? "Earlier on the rail" : "Already first", Action::MoveShortcutUp};
+            up.enabled = shortcutIdx_ > 0;
+            rows_.push_back(up);
+            Row down{"Move Down", shortcutIdx_ + 1 < static_cast<int>(shortcuts_.size()) ? "Later on the rail" : "Already last",
+                     Action::MoveShortcutDown};
+            down.enabled = shortcutIdx_ + 1 < static_cast<int>(shortcuts_.size());
+            rows_.push_back(down);
+        }
+        rows_.push_back({"Remove Shortcut", "Delete it from the list", Action::RemoveShortcut});
+        rows_.push_back({"Back to Shortcuts", "", Action::BackToShortcuts});
     } else if (section_ == 21) {
         title_ = "Settings > UI & Appearance > List Columns";
         toggle("Format / VR Badge", listShowFormat_, Action::ToggleListColFormat);
@@ -396,11 +419,56 @@ SettingsMenu::Action SettingsMenu::activate() {
         case Action::ToggleRailShortcut6:
         case Action::ToggleRailShortcut7: {
             const int i = static_cast<int>(act) - static_cast<int>(Action::ToggleRailShortcut0);
-            railShortcutMask_ ^= (1 << i);
+            if (i < static_cast<int>(shortcuts_.size())) shortcuts_[static_cast<size_t>(i)].onRail ^= true;
             saveConfig();
             refresh();
             break;
         }
+        case Action::OpenShortcut:
+            shortcutIdx_ = rows_[static_cast<size_t>(selected_)].data;
+            section_ = 17;
+            selected_ = 0;
+            refresh();
+            break;
+        case Action::AddShortcut:
+            shortcuts_.push_back({"New shortcut", "", false, true});
+            shortcutIdx_ = static_cast<int>(shortcuts_.size()) - 1;
+            saveConfig();
+            section_ = 17;
+            selected_ = 0;  // Name: the app opens the keyboard for it at once
+            refresh();
+            break;
+        case Action::ToggleShortcutRail:
+        case Action::CycleShortcutKiosk:
+        case Action::RemoveShortcut:
+        case Action::MoveShortcutUp:
+        case Action::MoveShortcutDown: {
+            if (shortcutIdx_ < 0 || shortcutIdx_ >= static_cast<int>(shortcuts_.size())) break;
+            const size_t i = static_cast<size_t>(shortcutIdx_);
+            if (act == Action::ToggleShortcutRail) shortcuts_[i].onRail ^= true;
+            if (act == Action::CycleShortcutKiosk) shortcuts_[i].kiosk ^= true;
+            if (act == Action::MoveShortcutUp && i > 0) {
+                std::swap(shortcuts_[i], shortcuts_[i - 1]);
+                --shortcutIdx_;
+            }
+            if (act == Action::MoveShortcutDown && i + 1 < shortcuts_.size()) {
+                std::swap(shortcuts_[i], shortcuts_[i + 1]);
+                ++shortcutIdx_;
+            }
+            if (act == Action::RemoveShortcut) {
+                shortcuts_.erase(shortcuts_.begin() + static_cast<long>(i));
+                section_ = 22;
+                selected_ = std::min(static_cast<int>(i), static_cast<int>(shortcuts_.size()));
+            }
+            saveConfig();
+            refresh();
+            break;
+        }
+        case Action::BackToShortcuts:
+            section_ = 22;
+            selected_ = shortcutIdx_;
+            refresh();
+            break;
         case Action::CycleDownloadDir:
             downloadDirIdx_ = (downloadDirIdx_ + 1) % kDownloadDirCount;
             saveConfig();

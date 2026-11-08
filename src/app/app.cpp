@@ -3541,8 +3541,8 @@ int App::run() {
             renderer_.setRoomColor(settings_.roomColor());
             {
                 std::vector<VulkanRenderer::RailShortcut> rail;
-                for (const SettingsMenu::RailShortcut* sc : settings_.railShortcuts()) {
-                    rail.push_back({sc->name, sc->kiosk});
+                for (const SettingsMenu::RailShortcut& sc : settings_.railShortcuts()) {
+                    rail.push_back({sc.name, sc.kiosk});
                 }
                 renderer_.setRailShortcuts(rail);
             }
@@ -4234,6 +4234,7 @@ int App::run() {
                     sRows.push_back(std::move(v));
                 }
                 renderer_.setSettingsSection(settings_.section());
+                renderer_.setSettingsCompact(settings_.compactPage());
                 renderer_.setSettings(true, settings_.title(), sRows,
                                       settings_.selected(), settings_.status());
                 settingsOpen = true;
@@ -4369,22 +4370,22 @@ int App::run() {
                 if (sbHover >= 10 && sbHover < 10 + static_cast<int>(settings_.railShortcuts().size())) {
                     // A web shortcut tab (Settings > UI & Appearance): a streaming
                     // service as a kiosk page, or the full browser.
-                    const SettingsMenu::RailShortcut& sc = *settings_.railShortcuts()[sbHover - 10];
-                    if (sc.url[0] != '\0') {
+                    const SettingsMenu::RailShortcut sc = settings_.railShortcuts()[sbHover - 10];
+                    if (!sc.url.empty()) {
+                        PIXELVR_LOG_INFO("Shortcut \"%s\": opening %s", sc.name.c_str(), sc.url.c_str());
                         openWebScreen(sc.url, sc.kiosk);
-                    } else if (!settings_.jellyfinUrl().empty()) {  // Jellyfin: the user's own server
-                        PIXELVR_LOG_INFO("Jellyfin shortcut: opening %s/web/", settings_.jellyfinUrl().c_str());
-                        openWebScreen(settings_.jellyfinUrl() + "/web/", sc.kiosk);
                     } else {
-                        // No address yet: ask for it right here, then open the server.
-                        PIXELVR_LOG_INFO("Jellyfin shortcut: no address set, asking");
+                        // No address yet (e.g. the user's Jellyfin server): ask for it, save it, open it.
+                        PIXELVR_LOG_INFO("Shortcut \"%s\": no address set, asking", sc.name.c_str());
+                        const int idx = sc.index;
                         const bool kiosk = sc.kiosk;
-                        openKeyboard("Jellyfin server address (e.g. 192.168.1.10:8096)", "", false, in,
-                                     [this, kiosk](const std::string& t) {
-                                         settings_.setJellyfinUrl(t);
-                                         if (!settings_.jellyfinUrl().empty()) {
-                                             PIXELVR_LOG_INFO("Jellyfin shortcut: opening %s/web/", settings_.jellyfinUrl().c_str());
-                                             openWebScreen(settings_.jellyfinUrl() + "/web/", kiosk);
+                        openKeyboard(sc.name + " address (e.g. 192.168.1.10:8096)", "", false, in,
+                                     [this, idx, kiosk](const std::string& t) {
+                                         settings_.setShortcutUrl(idx, t);
+                                         const auto& list = settings_.shortcuts();
+                                         if (idx >= 0 && idx < static_cast<int>(list.size()) && !list[static_cast<size_t>(idx)].url.empty()) {
+                                             PIXELVR_LOG_INFO("Shortcut: opening %s", list[static_cast<size_t>(idx)].url.c_str());
+                                             openWebScreen(list[static_cast<size_t>(idx)].url, kiosk);
                                          }
                                      });
                     }
@@ -5081,9 +5082,23 @@ int App::run() {
                             switchTracks(true);
                         }
 #endif
-                        else if (act == SettingsMenu::Action::EditJellyfinAddress) {
-                            openKeyboard("Jellyfin address (e.g. 192.168.1.10:8096)", settings_.jellyfinUrl(), false, in,
-                                         [this](const std::string& t) { settings_.setJellyfinUrl(t); });
+                        else if (act == SettingsMenu::Action::EditShortcutName || act == SettingsMenu::Action::AddShortcut) {
+                            // Add opens the new entry's page and asks for its name straight away.
+                            const int idx = settings_.shortcutIdx();
+                            const auto& list = settings_.shortcuts();
+                            const std::string cur = (act == SettingsMenu::Action::AddShortcut || idx < 0 ||
+                                                     idx >= static_cast<int>(list.size()))
+                                                        ? std::string()
+                                                        : list[static_cast<size_t>(idx)].name;
+                            openKeyboard("Shortcut name", cur, false, in,
+                                         [this, idx](const std::string& t) { settings_.setShortcutName(idx, t); });
+                        } else if (act == SettingsMenu::Action::EditShortcutUrl) {
+                            const int idx = settings_.shortcutIdx();
+                            const auto& list = settings_.shortcuts();
+                            const std::string cur = (idx >= 0 && idx < static_cast<int>(list.size())) ? list[static_cast<size_t>(idx)].url
+                                                                                                         : std::string();
+                            openKeyboard("Shortcut address (e.g. 192.168.1.10:8096 or https://...)", cur, false, in,
+                                         [this, idx](const std::string& t) { settings_.setShortcutUrl(idx, t); });
                         }
                         else if (act == SettingsMenu::Action::ToggleHoverHaptics) {
                             const int pH = renderer_.pointerHand();

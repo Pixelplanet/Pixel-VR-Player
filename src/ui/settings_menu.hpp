@@ -30,6 +30,8 @@ public:
         ToggleShortcutRail,
         CycleShortcutKiosk,
         RemoveShortcut,
+        MoveShortcutUp,       // the list order is the rail order
+        MoveShortcutDown,
         BackToShortcuts,
         ToggleSwapEyes,
         ToggleModels,

@@ -469,12 +469,13 @@ constexpr float kDownloadsFooterY = -0.44f;
 struct SettingsCard {
     float cx, cy, halfW, halfH, labelY, ctrlY, ctrlHalfW, ctrlHalfH, textScale;
 };
-inline SettingsCard settingsCard(int i, int total) {
+inline SettingsCard settingsCard(int i, int total, bool compact = false) {
     SettingsCard L{};
     L.cx = (i % 2 == 0) ? -0.135f : 0.535f;
     L.halfW = 0.315f;
     L.ctrlHalfW = 0.275f;
     const float r = static_cast<float>(i / 2);
+    if (compact) total = 99;  // always the dense tier
     if (total <= 6) {
         L.cy = 0.22f - r * 0.24f;
         L.halfH = 0.098f;
@@ -489,17 +490,24 @@ inline SettingsCard settingsCard(int i, int total) {
         L.ctrlY = L.cy - 0.024f;
         L.ctrlHalfH = 0.027f;
         L.textScale = 0.95f;
-    } else {
+    } else if (!compact) {
         L.cy = 0.28f - r * 0.152f;
         L.halfH = 0.066f;
         L.labelY = L.cy + 0.028f;
         L.ctrlY = L.cy - 0.020f;
         L.ctrlHalfH = 0.023f;
         L.textScale = 0.90f;
+    } else {  // dense list pages (the shortcut list): 7 rows of 2
+        L.cy = 0.30f - r * 0.106f;
+        L.halfH = 0.048f;
+        L.labelY = L.cy + 0.020f;
+        L.ctrlY = L.cy - 0.016f;
+        L.ctrlHalfH = 0.018f;
+        L.textScale = 0.80f;
     }
     return L;
 }
-inline int settingsMaxVisible(int total) { return total > 8 ? 10 : 8; }
+inline int settingsMaxVisible(int total, bool compact = false) { return compact ? 14 : (total > 8 ? 10 : 8); }
 // Segment `s` of `n` inside a settings control well (segmented choices).
 inline UiRect settingsSegment(const SettingsCard& L, int s, int n) {
     const float left = L.cx - L.ctrlHalfW + 0.006f;
@@ -3073,9 +3081,9 @@ void VulkanRenderer::updatePointer() {
                 }
                 const int total = static_cast<int>(settingsRows_.size());
                 const int layoutN = settingsLayoutRows();
-                const int maxVis = hub::settingsMaxVisible(layoutN);
+                const int maxVis = hub::settingsMaxVisible(layoutN, settingsCompact_);
                 for (int i = 0; i < total && i < maxVis; ++i) {
-                    const hub::SettingsCard L = hub::settingsCard(i, layoutN);
+                    const hub::SettingsCard L = hub::settingsCard(i, layoutN, settingsCompact_);
                     if (UiRect{L.cx, L.cy, L.halfW, L.halfH}.contains(hx, hyy)) {
                         settingsRow_ = i;
                         settingsHovered_ = i;
@@ -7012,7 +7020,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         else if (settingsVisible_) {
             const int total = static_cast<int>(settingsRows_.size());
             const int layoutN = settingsLayoutRows();  // card size: the same on every page
-            const int maxVis = hub::settingsMaxVisible(layoutN);
+            const int maxVis = hub::settingsMaxVisible(layoutN, settingsCompact_);
             const bool pager = settingsPages_ > 1;
             constexpr float kSetCardHalfW = 0.315f;
             constexpr float kSetCtrlHalfW = 0.275f;
@@ -7025,7 +7033,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 float cx, cy, halfH, labelY, ctrlY, ctrlHalfH, textSc;
             };
             auto setCard = [&](int i) -> SetCard {
-                const hub::SettingsCard c = hub::settingsCard(i, layoutN);
+                const hub::SettingsCard c = hub::settingsCard(i, layoutN, settingsCompact_);
                 return {c.cx, c.cy, c.halfH, c.labelY, c.ctrlY, c.ctrlHalfH, scSub * c.textScale};
             };
             auto isListening = [](const std::string& v) {
@@ -7110,7 +7118,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                               UiShape::RoundedBox, glassWellT.data(), 1.0f, 0.06f, kGlassRimFaint);
 
                 if (row.kind == kSegmented && !row.options.empty()) {
-                    const hub::SettingsCard hc = hub::settingsCard(i, layoutN);
+                    const hub::SettingsCard hc = hub::settingsCard(i, layoutN, settingsCompact_);
                     const int n = static_cast<int>(row.options.size());
                     for (int sg = 0; sg < n; ++sg) {
                         const UiRect r = hub::settingsSegment(hc, sg, n);
@@ -7242,7 +7250,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 withHeadingFont([&] { drawFit(ctrlLeft, L.labelY, 0.55f, L.textSc, labelCol, row.label); });
                 const float valSc = L.textSc * 0.92f;
                 if (row.kind == kSegmented && !row.options.empty()) {
-                    const hub::SettingsCard hc = hub::settingsCard(i, layoutN);
+                    const hub::SettingsCard hc = hub::settingsCard(i, layoutN, settingsCompact_);
                     const int n = static_cast<int>(row.options.size());
                     for (int sg = 0; sg < n; ++sg) {
                         const UiRect r = hub::settingsSegment(hc, sg, n);

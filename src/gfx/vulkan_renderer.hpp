@@ -705,6 +705,8 @@ public:
     static constexpr int kSettingsKindSegmented = 6;
 
     // Settings overlay panel (re-uses panel & pointer interaction)
+    // Dense cards (7 rows of 2) for long list pages such as the shortcut list.
+    void setSettingsCompact(bool on) { settingsCompact_ = on; }
     void setSettings(bool visible, const std::string& title,
                      const std::vector<SettingsRowVis>& rows, int selected,
                      const std::string& status);
@@ -1236,6 +1238,7 @@ private:
     std::string settingsTitle_;
     std::string settingsStatus_;
     std::vector<SettingsRowVis> settingsRows_;
+    bool settingsCompact_ = false;
     int settingsSelected_ = 0;
     int settingsHovered_ = -1;
     int settingsSegmentHovered_ = -1;
