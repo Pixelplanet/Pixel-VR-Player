@@ -265,6 +265,7 @@ float wrapAngle(float a) { return std::atan2(std::sin(a), std::cos(a)); }
 App::App() = default;
 
 App::~App() {
+    plugins_.shutdownAll();  // plugins stop their devices before anything else goes away
     watchdogRunning_.store(false);
     if (watchdogThread_.joinable()) {
         watchdogThread_.join();
@@ -414,6 +415,8 @@ bool App::init(const std::string& mediaPath) {
     (void)mediaPath;
 #endif
     browser_.setDownloadDir(settings_.downloadDir());
+    plugins_.init();
+    settings_.setPluginHost(&plugins_);
     // No clip requested: open the file browser instead of a test video.
     if (mediaPath.empty()) {
 #ifdef PIXELVR_HAVE_FREETYPE
@@ -1168,6 +1171,7 @@ void App::startPlexPlay(int slot, const BrowserHost::PlexPlay& play) {
     sc.plexAwaitingNext = false;
     sc.plexNavManual = false;
     webHosts_[slot].takePlexNextNone();  // a stale answer must not end this one
+    plexTitles_[slot] = play.title;
     plexLoading_ = true;
     plexAudioStream_ = play.audioStream;
     loadMedia(play.url, slot);
@@ -1972,6 +1976,59 @@ int App::freeScreenSlot() const {
         if (!screens_[slot].open) return slot;
     }
     return -1;
+}
+
+void App::updatePlugins() {
+    std::vector<PluginScreenSnapshot> snap(VulkanRenderer::kMaxVideoSlots);
+    for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
+        const ScreenState& sc = screens_[slot];
+        PluginScreenSnapshot& s = snap[static_cast<size_t>(slot)];
+        s.selected = slot == selectedScreen_;
+        s.audio = !sc.muted;
+        if (sc.web && !sc.webSuspended) {
+            s.kind = PluginScreenSnapshot::Kind::Web;
+            continue;
+        }
+#ifdef PIXELVR_HAVE_MEDIA
+        if (!sc.open || sc.path.empty()) continue;
+        s.kind = PluginScreenSnapshot::Kind::Video;
+        s.path = sc.path;
+        const bool plex = sc.webSuspended;
+        const std::string clean = PluginHost::sanitizePath(sc.path);
+        const std::string base = clean.substr(clean.find_last_of('/') + 1);
+        s.fileName = plex ? plexTitles_[slot] : base;
+        s.title = plex ? plexTitles_[slot] : base.substr(0, base.find_last_of('.'));
+        if (plex) s.source = "plex";
+        else if (sc.path.rfind("smb://", 0) == 0) s.source = "smb";
+        else if (sc.path.rfind("sftp://", 0) == 0) s.source = "sftp";
+        else if (sc.path.rfind("dav://", 0) == 0 || sc.path.rfind("davs://", 0) == 0) s.source = "webdav";
+        else if (sc.path.find("://") != std::string::npos) s.source = "http";
+        else s.source = "local";
+        s.isPrivate = VaultManager::instance().isVaultPath(sc.path);
+        s.duration = sc.engine.duration();
+        s.position = sc.engine.position();
+        s.playing = !sc.engine.paused() && !sc.engine.eof();
+        s.ended = sc.engine.eof();
+        s.projection = sc.projection;
+        s.stereo = sc.stereo;
+#endif
+    }
+    PluginAppSnapshot app;
+    app.focused = xr_.sessionFocused();
+    app.worn = xr_.userPresent();
+    app.vaultUnlocked = VaultManager::instance().isUnlocked();
+    plugins_.update(snap, app);
+    const auto now = std::chrono::steady_clock::now();
+    std::string n;
+    while (plugins_.takeNotice(n)) {
+        notice_ = n;
+        noticeUntil_ = now + std::chrono::seconds(4);
+    }
+    static std::chrono::steady_clock::time_point nextPageRefresh{};
+    if (settings_.isOpen() && settings_.onPluginPage() && now >= nextPageRefresh) {
+        nextPageRefresh = now + std::chrono::milliseconds(500);
+        settings_.refresh();  // plugin status lines change on their own
+    }
 }
 
 void App::applyAudioFollow() {
@@ -2885,6 +2942,8 @@ int App::run() {
         if (!xr_.pollEvents(exitRequested_) || exitRequested_) {
             break;
         }
+        // No frames run without a session: plugins still learn it lost focus.
+        if (!xr_.sessionRunning()) updatePlugins();
 
         if (xr_.sessionRunning()) {
             const auto now = std::chrono::steady_clock::now();
@@ -3884,6 +3943,7 @@ int App::run() {
                     browser_.setOpen(false);
                 }
             }
+            updatePlugins();
             if (browser_.downloadActive()) {
                 downloadToastText_ = browser_.downloadText();
                 downloadToast_ = nowT + std::chrono::seconds(10);
@@ -5196,6 +5256,9 @@ int App::run() {
                                                                                                          : std::string();
                             openKeyboard("Shortcut address (e.g. 192.168.1.10:8096 or https://...)", cur, false, in,
                                          [this, idx](const std::string& t) { settings_.setShortcutUrl(idx, t); });
+                        } else if (act == SettingsMenu::Action::EditPluginText) {
+                            openKeyboard("Plugin setting", settings_.editingPluginText(), false, in,
+                                         [this](const std::string& t) { settings_.submitPluginText(t); });
                         }
                         else if (act == SettingsMenu::Action::ToggleHoverHaptics) {
                             const int pH = renderer_.pointerHand();

@@ -201,21 +201,32 @@ void PluginHost::rescan() {
         found.push_back(std::move(p));
     }
     std::sort(found.begin(), found.end(), [](const Plugin& a, const Plugin& b) { return a.name < b.name; });
-    // Keep running plugins (and their state) that are still installed.
+    // Plugins still installed keep their user configuration, running ones their
+    // process (a changed manifest applies on the next restart).
     for (Plugin& n : found) {
         for (Plugin& o : plugins_) {
-            if (o.id == n.id && o.dir == n.dir && o.pid > 0) {
+            if (o.id != n.id) continue;
+            if (o.pid > 0 && o.dir == n.dir) {
                 n = std::move(o);
-                break;
+                o.pid = -1;
+                o.toFd = o.fromFd = -1;
+            } else {
+                n.enabled = o.enabled;
+                n.vaultGrant = o.vaultGrant;
+                n.values = o.values;
+                n.crashes = o.crashes;
+                n.restartAt = o.restartAt;
+                if (n.manifestError.empty()) n.status = o.status;
             }
+            break;
         }
     }
-    for (Plugin& o : plugins_) {
-        const bool kept = std::any_of(found.begin(), found.end(), [&](const Plugin& n) { return n.pid == o.pid && o.pid > 0; });
-        if (o.pid > 0 && !kept) {
-            stop(o, true);
-            reap(o);
-        }
+    for (Plugin& o : plugins_) {  // uninstalled while running
+        if (o.pid <= 0) continue;
+        kill(-o.pid, SIGKILL);
+        waitpid(o.pid, nullptr, 0);
+        if (o.toFd >= 0) close(o.toFd);
+        if (o.fromFd >= 0) close(o.fromFd);
     }
     plugins_ = std::move(found);
     for (Plugin& p : plugins_) {
@@ -244,7 +255,7 @@ void PluginHost::loadConfig() {
                 if (kv.second.type == pvrjson::Value::Type::String) p.values[kv.first] = kv.second.str;
             }
         }
-        if (p.enabled && p.manifestError.empty()) p.status = "Starting…";
+        if (p.enabled && p.manifestError.empty()) p.status = "Starting...";
     }
 }
 
@@ -391,7 +402,7 @@ void PluginHost::start(Plugin& p) {
     p.stopping = false;
     p.startedAt = Clock::now();
     p.gaugeValue = -1.0f;
-    p.status = "Starting…";
+    p.status = "Starting...";
     p.statusLevel = "ok";
     PIXELVR_LOG_INFO("Plugin %s %s started (pid %d)", p.id.c_str(), p.version.c_str(), static_cast<int>(pid));
     sendHello(p);
@@ -405,7 +416,7 @@ void PluginHost::stop(Plugin& p, bool hard) {
         p.stopping = true;
         p.termAt = Clock::now() + std::chrono::seconds(2);
         p.killAt = Clock::now() + std::chrono::seconds(3);
-        p.status = "Stopping…";
+        p.status = "Stopping...";
     }
     if (hard) kill(-p.pid, SIGKILL);
 }
@@ -424,7 +435,7 @@ void PluginHost::reap(Plugin& p) {
     const auto now = Clock::now();
     if (p.stopping) {
         p.stopping = false;
-        p.status = p.enabled ? "Restarting…" : "Off";
+        p.status = p.enabled ? "Restarting..." : "Off";
         p.statusLevel = "ok";
         p.restartAt = now + std::chrono::milliseconds(200);
         return;
@@ -446,7 +457,7 @@ void PluginHost::reap(Plugin& p) {
     }
     static const int kBackoffSec[] = {1, 5, 30};
     p.restartAt = now + std::chrono::seconds(kBackoffSec[std::min(p.crashes, 3) - 1]);
-    p.status = "Stopped unexpectedly, restarting…";
+    p.status = "Stopped unexpectedly, restarting...";
     p.statusLevel = "warn";
 }
 
@@ -511,7 +522,7 @@ void PluginHost::handleLine(Plugin& p, const std::string& line) {
         if (p.helloDone) return;
         p.helloDone = true;
         p.crashes = 0;
-        if (p.status == "Starting…") p.status = "Running";
+        if (p.status == "Starting...") p.status = "Running";
         sendScreens(p);
         sendAppState(p);
         for (int i = 0; i < static_cast<int>(tracks_.size()); ++i) {
@@ -800,7 +811,7 @@ void PluginHost::setEnabled(int idx, bool on) {
     p.enabled = on;
     p.crashes = 0;
     p.restartAt = {};
-    if (on && p.pid <= 0 && p.manifestError.empty()) p.status = "Starting…";
+    if (on && p.pid <= 0 && p.manifestError.empty()) p.status = "Starting...";
     if (!on) {
         if (p.pid > 0) stop(p, false);
         else if (p.manifestError.empty()) p.status = "Off";

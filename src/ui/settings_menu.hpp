@@ -8,6 +8,8 @@
 
 namespace pixelvr {
 
+class PluginHost;
+
 class SettingsMenu {
 public:
     enum class Action {
@@ -76,6 +78,16 @@ public:
         CycleRoom,
         EnterButtons,       // Controls & Input > Buttons (read-only binding pages)
         ToggleButtonLabels, // Controls & Input > Button Labels (floating labels at the controllers)
+        // Plugins (Controls & Input > Plugins); row.data carries the setting index.
+        EnterPlugins,
+        OpenPlugin,
+        TogglePluginEnabled,
+        PluginSetting,
+        EditPluginText,  // the app opens the keyboard, then calls submitPluginText()
+        PluginVaultGrant,
+        PluginRestart,
+        BackToPlugins,
+        BackToControls,
     };
 
     // How a row's value is presented: the renderer draws a stepped slider for
@@ -272,7 +284,18 @@ public:
     void onKeyboardSubmit(const std::string& text) { (void)text; }
     void onKeyboardCancel() {}
 
+    // Plugins page. The host outlives the menu (both belong to App).
+    void setPluginHost(PluginHost* host) { plugins_ = host; }
+    bool onPluginPage() const { return section_ == kPluginsSection || section_ == kPluginSection; }  // live status: refresh now and then
+    // After Action::EditPluginText: the text setting being edited and its value.
+    int editingPluginSetting() const { return editingPluginSetting_; }
+    std::string editingPluginText() const;
+    void submitPluginText(const std::string& text);
+
 private:
+    PluginHost* plugins_ = nullptr;
+    int pluginIdx_ = 0;              // plugin shown on the detail page (kPluginSection)
+    int editingPluginSetting_ = -1;
     bool open_ = false;
     std::string title_ = "Settings > Display & Cinema";
     std::string status_ = "Point + Trigger: Change Setting  |  B: Close";
@@ -287,6 +310,8 @@ private:
     bool showStats_ = false;
     float screenDistance_ = 4.0f;  // room for several screens without crowding
 
+    static constexpr int kPluginsSection = 15;  // Controls & Input > Plugins (list)
+    static constexpr int kPluginSection = 16;   // one plugin's page
     static constexpr int kButtonsSection = 23;  // 23.. one section per Buttons page
     static constexpr int kButtonsPerPage = 10;  // all bindings; the header pager turns pages
     std::vector<std::pair<std::string, std::string>> controlsInfo_;  // (action label, bound buttons)
@@ -331,7 +356,7 @@ private:
     int ambilightIdx_ = 2;     // 0=Off, 1=Subtle, 2=Medium (default), 3=Strong
     bool ambilightAllScreens_ = true;  // multi-screen: glow around every screen
 
-    int section_ = 0;   // 0=Display, 1=UI, 2=Audio, 3=Controls, 4=Vault; 10..12, 21, 22, 23..=sub-pages
+    int section_ = 0;   // 0=Display, 1=UI, 2=Audio, 3=Controls, 4=Vault; 10..12, 21, 22, 23..=sub-pages; 15/16=plugins
     std::vector<std::pair<int, std::string>> videoStreams_;  // (index, label)
     std::vector<std::pair<int, std::string>> audioStreams_;
     int videoSel_ = 0;      // position within videoStreams_

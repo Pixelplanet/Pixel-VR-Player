@@ -19,6 +19,7 @@
 #include "app/browser_host.hpp"
 #include "app/chromium_installer.hpp"
 #include "app/music_queue.hpp"
+#include "plugins/plugin_host.hpp"
 #include "util/one_euro.hpp"
 #include "xr/vr_app_manifest.hpp"
 
@@ -350,6 +351,11 @@ private:
     // screen picker uses for "open a browser here".
     static constexpr const char* kWebPath = "web://";
     BrowserHost webHosts_[VulkanRenderer::kMaxVideoSlots];
+    // Plugins (docs/concepts/PLUGIN_SYSTEM_SPEC.md): fed one snapshot of the
+    // screens per frame; the Plex title stands in for the tokenised URL.
+    PluginHost plugins_;
+    std::string plexTitles_[VulkanRenderer::kMaxVideoSlots];
+    void updatePlugins();
     int webMouseSlot_ = -1;      // browser screen the press / hover belongs to
     bool webMouseDown_ = false;
     bool webDragging_ = false;   // moved past the click slop while pressed

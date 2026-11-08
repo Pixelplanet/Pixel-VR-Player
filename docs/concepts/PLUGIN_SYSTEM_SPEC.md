@@ -282,9 +282,20 @@ go to `~/pixelvr-src-plugins` (never `~/pixelvr-src`, which belongs to the other
   - [x] `tools/plugin_host_test.cpp`: 30 checks, **all pass on the headset** (quick g++ build in
     `~/pixelvr-src-plugins/qb`):
     `g++ -std=c++20 -Isrc tools/plugin_host_test.cpp src/plugins/plugin_host.cpp src/util/logging.cpp`.
-  - [ ] App hook (snapshot builder + `update` per frame + `shutdownAll`), notices → notice line.
-  - [ ] Settings → Controls & Input → Plugins page (list, detail, enable, settings, vault grant).
-  - [ ] Full CMake build of the app on the headset in `~/pixelvr-src-plugins`.
+  - [x] App hook: `App::updatePlugins()` builds the snapshot each frame (also while no XR
+    session runs, so plugins see `focused:false`); `~App` calls `shutdownAll()` first; plugin
+    notices use the existing notice line; Plex screens report the Plex title, never the URL.
+  - [x] Settings → Controls & Input → "Plugins" row → list (section 30) → plugin page
+    (section 31): Enabled, its settings (toggle / choice / segmented / action / text via
+    the keyboard), "Use with vault videos" (only while unlocked), Restart, Permissions.
+    The page refreshes every 0.5 s for live status.
+  - [x] Full CMake build on the headset in `~/pixelvr-src-plugins/build` (deps reused from
+    `~/pixelvr-src/build/_deps` via `FETCHCONTENT_SOURCE_DIR_*`, read-only); `plugin_host_test`
+    passes against the CMake-built example plugin.
+  - [ ] **In-headset check (needs the user):** install the example plugin
+    (`cp -r build/plugins/example ~/.local/share/pixelvr/plugins/`), run this build, enable it
+    under Controls & Input > Plugins, play a video: a notice "Opened …", status "Watching …".
+    The gauge is stored by the host but not drawn yet (phase 3).
 - [ ] Phase 2 settings / files / control.
 - [ ] Phase 3 timeline heat, gauge, quick button.
 - [ ] Phase 4 DeoVR bridge plugin, funscript plugin + fake Intiface tests.

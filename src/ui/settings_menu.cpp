@@ -1,6 +1,7 @@
 #include "ui/settings_menu.hpp"
 #include "app/vault_manager.hpp"
 #include "net/smb_credentials.hpp"
+#include "plugins/plugin_host.hpp"
 #include "xr/vr_keyboard.hpp"
 
 #include "util/logging.hpp"
@@ -121,6 +122,11 @@ std::string getConfigPath() {
     return "pixelvr_settings.conf";
 }
 
+const std::vector<PluginHost::Plugin>& pluginList(const PluginHost* host) {
+    static const std::vector<PluginHost::Plugin> none;
+    return host ? host->plugins() : none;
+}
+
 } // namespace
 
 SettingsMenu::SettingsMenu() {
@@ -133,10 +139,27 @@ void SettingsMenu::open() {
     open_ = true;
     // Sub-pages (track lists, list columns) reopen at their parent section; the
     // Vault section is only reachable while the vault is unlocked.
-    if (section_ < 0 || section_ > 4 ||
+    if (section_ == kPluginSection) section_ = kPluginsSection;  // a plugin's page reopens at the plugin list
+    if (section_ == kPluginsSection && plugins_) plugins_->rescan();
+    if (section_ < 0 || (section_ > 4 && section_ != kPluginsSection) ||
         (section_ == 4 && !VaultManager::instance().isUnlocked())) {
         section_ = 0;
     }
+    refresh();
+}
+
+std::string SettingsMenu::editingPluginText() const {
+    if (!plugins_ || editingPluginSetting_ < 0 || pluginIdx_ >= static_cast<int>(plugins_->plugins().size())) return {};
+    const auto& p = plugins_->plugins()[static_cast<size_t>(pluginIdx_)];
+    if (editingPluginSetting_ >= static_cast<int>(p.settings.size())) return {};
+    const auto& s = p.settings[static_cast<size_t>(editingPluginSetting_)];
+    const auto it = p.values.find(s.key);
+    return it == p.values.end() ? s.def : it->second;
+}
+
+void SettingsMenu::submitPluginText(const std::string& text) {
+    if (plugins_ && editingPluginSetting_ >= 0) plugins_->setTextSetting(pluginIdx_, editingPluginSetting_, text);
+    editingPluginSetting_ = -1;
     refresh();
 }
 
@@ -294,6 +317,70 @@ void SettingsMenu::refresh() {
         choice("Rumble Strength", hoverHapticsStrengthStr(), kHoverHapticsStrengthCount,
                hoverHapticsStrengthIdx_ % kHoverHapticsStrengthCount,
                Action::CycleHoverHapticsStrength, hoverHapticsEnabled_);
+        if (plugins_) {
+            int on = 0;
+            for (const auto& p : plugins_->plugins()) on += p.enabled ? 1 : 0;
+            const size_t n = plugins_->plugins().size();
+            rows_.push_back({"Plugins", n == 0 ? std::string("None installed") : std::to_string(on) + " of " + std::to_string(n) + " on",
+                             Action::EnterPlugins});
+        }
+    } else if (section_ == kPluginsSection) {
+        title_ = "Settings > Controls & Input > Plugins";
+        const auto& list = pluginList(plugins_);
+        status_ = list.empty() ? "No plugins installed. Plugins are separate downloads (.pvrplugin)."
+                               : "Plugins are separate programs. Only enable plugins you trust.";
+        for (size_t i = 0; i < list.size(); ++i) {
+            Row r{list[i].name + (list[i].version.empty() ? "" : " " + list[i].version),
+                  list[i].enabled || !list[i].manifestError.empty() ? list[i].status : std::string("Off"), Action::OpenPlugin};
+            r.data = static_cast<int>(i);
+            rows_.push_back(r);
+        }
+        rows_.push_back({"Back to Controls & Input", "", Action::BackToControls});
+    } else if (section_ == kPluginSection) {
+        const auto& list = pluginList(plugins_);
+        if (pluginIdx_ < 0 || pluginIdx_ >= static_cast<int>(list.size())) {
+            section_ = kPluginsSection;
+            refresh();
+            return;
+        }
+        const PluginHost::Plugin& p = list[static_cast<size_t>(pluginIdx_)];
+        title_ = "Settings > Plugins > " + p.name;
+        status_ = p.status + (p.description.empty() ? "" : "  |  " + p.description);
+        if (!p.manifestError.empty()) {
+            rows_.push_back({"Cannot run: " + p.manifestError, "", Action::None, false});
+        } else {
+            toggle("Enabled", p.enabled, Action::TogglePluginEnabled);
+            for (size_t si = 0; si < p.settings.size(); ++si) {
+                const PluginHost::Setting& s = p.settings[si];
+                const std::string value = plugins_->settingValueLabel(pluginIdx_, static_cast<int>(si));
+                Row r{s.label, value, s.type == "text" ? Action::EditPluginText : Action::PluginSetting};
+                r.data = static_cast<int>(si);
+                const auto it = p.values.find(s.key);
+                const int cur = std::atoi((it == p.values.end() ? s.def : it->second).c_str());
+                if (s.type == "toggle") {
+                    r.kind = Kind::Toggle;
+                    r.stepIdx = value == "On" ? 1 : 0;
+                } else if (s.type == "choice") {
+                    r.kind = Kind::Choice;
+                    r.steps = static_cast<int>(s.options.size());
+                    r.stepIdx = cur;
+                } else if (s.type == "segmented") {
+                    r.kind = Kind::Segmented;
+                    r.steps = static_cast<int>(s.options.size());
+                    r.stepIdx = cur;
+                    r.options = s.options;
+                }
+                rows_.push_back(r);
+            }
+            if (VaultManager::instance().isUnlocked() && p.hasPermission("playback")) {
+                toggle("Use with vault videos", p.vaultGrant, Action::PluginVaultGrant);
+            }
+            rows_.push_back({"Restart", p.pid > 0 ? "" : "not running", Action::PluginRestart, p.pid > 0});
+        }
+        std::string perms;
+        for (const std::string& perm : p.permissions) perms += (perms.empty() ? "" : ", ") + perm;
+        rows_.push_back({"Permissions", perms.empty() ? "none" : perms, Action::None, false});
+        rows_.push_back({"Back to Plugins", "", Action::BackToPlugins});
     } else if (section_ == 4) {
         title_ = "Settings > Vault & Privacy";
         toggle("Auto-Lock on Headset Removal", VaultManager::instance().autoLockHeadsetOff(),
@@ -682,6 +769,47 @@ SettingsMenu::Action SettingsMenu::activate() {
         case Action::BackToUI:
             section_ = 1;
             selected_ = 0;
+            refresh();
+            break;
+        case Action::EnterPlugins:
+        case Action::BackToPlugins:
+            if (plugins_) plugins_->rescan();
+            section_ = kPluginsSection;
+            selected_ = 0;
+            refresh();
+            break;
+        case Action::BackToControls:
+            section_ = 3;
+            selected_ = 0;
+            refresh();
+            break;
+        case Action::OpenPlugin:
+            pluginIdx_ = rows_[static_cast<size_t>(selected_)].data;
+            section_ = kPluginSection;
+            selected_ = 0;
+            refresh();
+            break;
+        case Action::TogglePluginEnabled:
+            if (plugins_ && pluginIdx_ < static_cast<int>(plugins_->plugins().size())) {
+                plugins_->setEnabled(pluginIdx_, !plugins_->plugins()[static_cast<size_t>(pluginIdx_)].enabled);
+            }
+            refresh();
+            break;
+        case Action::PluginSetting:
+            if (plugins_) plugins_->activateSetting(pluginIdx_, rows_[static_cast<size_t>(selected_)].data);
+            refresh();
+            break;
+        case Action::EditPluginText:
+            editingPluginSetting_ = rows_[static_cast<size_t>(selected_)].data;
+            break;
+        case Action::PluginVaultGrant:
+            if (plugins_ && pluginIdx_ < static_cast<int>(plugins_->plugins().size())) {
+                plugins_->setVaultGrant(pluginIdx_, !plugins_->plugins()[static_cast<size_t>(pluginIdx_)].vaultGrant);
+            }
+            refresh();
+            break;
+        case Action::PluginRestart:
+            if (plugins_) plugins_->restart(pluginIdx_);
             refresh();
             break;
         default:
