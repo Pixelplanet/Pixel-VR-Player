@@ -103,4 +103,8 @@ from the user for an end-to-end test.
   - **Tested against TheVault:** name `8 Mile (2002) - 2002 - 1080p - x264 - DTS.mkv`; the handed-over URL
     answers 206 with the same Content-Disposition name; no file left in ~/Downloads; no token in the log.
     The app side (`savefile` → `startDownload`) is the generic path Plex already uses.
+- [x] **Deployed to the headset 2026-11-08** for the user's test: `~/pixelvr-src-jellyfin/build-embed` (bundled
+      FFmpeg from `~/ffbuild8/prefix`, like `~/pixelvr-src/build-embed`), copied to `~/PixelVRPlayer/pixelvr`
+      and its shaders. `--ffmpeg-info`: bundled libavcodec 62.11.100, zero-copy yes.
+  - Backup of v1.14.0: `~/pixelvr-backup-v1.14.0/` (pixelvr + shaders). To revert, copy both back.
 - [ ] In-headset test by the user.
