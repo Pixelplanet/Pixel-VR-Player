@@ -16,10 +16,13 @@ Status: **design for review**, nothing implemented yet. Background:
 4. **Testable without hardware.** The protocol is plain JSON lines, so a plugin can be driven by
    a simulator on a PC, and fake devices exist for every output we build (§9). We have no
    devices and must build blind.
-5. **Language-agnostic.** A plugin is any program that reads stdin and writes stdout. First-party
-   plugins use **Python 3, standard library only**: SteamOS ships `/usr/bin/python3` (3.14.3, from
-   the `python` package, verified on the headset; `asyncio`/`json`/`socket`/`ssl` present, no
-   third-party modules). Native aarch64 executables are fine too.
+5. **Language-agnostic.** A plugin is any program that reads stdin and writes stdout.
+   - **First-party plugins are native C++** (decided 2026-11-08). They are built by our CMake/CI
+     for aarch64 in `plugins/<name>/`, using the header-only SDK `plugins/sdk/pvr_plugin.hpp`
+     (JSONL I/O, media-clock extrapolation; reuses `browser/mini_json.hpp`).
+   - Third-party plugins may use anything. SteamOS also ships `/usr/bin/python3` (3.14.3,
+     stdlib only, verified on the headset).
+   - Dev and test tools (simulator, fake Intiface) may be Python; they are never shipped.
 
 **Non-goals for v1**
 - In-process plugins (`.so`), embedded scripting, plugins drawing their own 3D or textures.
@@ -69,7 +72,8 @@ Status: **design for review**, nothing implemented yet. Background:
 - **Stop or app exit:** host sends `shutdown` → waits 2 s → SIGTERM → waits 1 s → SIGKILL.
   **Plugins must stop all devices on `shutdown`, on stdin EOF and on SIGTERM.**
 - **Install:**
-  - v1: a `*.pvrplugin` file (zip containing one plugin folder) opened in the file browser shows
+  - v1: a `*.pvrplugin` file (a gzip tar containing one plugin folder, unpacked with the
+    system `tar` into a staging dir and validated before it is moved) opened in the file browser shows
     "Install plugin X (permissions …)?", then it is unpacked into the plugins dir. The flow:
     download in our browser → Downloads → click it.
   - Copying the folder by hand also works.
@@ -173,7 +177,8 @@ Remaining display latency is covered by the plugin's offset setting.
   stop devices immediately.
 
 ## 7. UI in the host
-- **Settings → Plugins** (new section):
+- **Settings → Controls & Input → "Plugins ›"** (a sub-page like Shortcuts; a rail tab of its own
+  can come later):
   - One row per installed plugin: name, version, status line, enable switch.
   - A plugin's page: description, permission list, status, its settings (rendered with the
     existing row kinds), the vault grant (§6), "Restart", "Uninstall".
@@ -253,8 +258,23 @@ Keep the host in new files, add the app hooks last, and build on the headset in 
 source dir** (e.g. `~/pixelvr-src-plugins`). Don't deploy over `~/PixelVRPlayer` without
 coordination.
 
-## 12. Open decisions
-- Vault grant: per-plugin opt-in as in §6, or never?
-- First-party plugin language: Python 3 stdlib (proposed) or native C++?
-- Distribution: separate `.pvrplugin` downloads for every build (proposed), or bundled but
-  disabled in the GitHub tarball?
+## 12. Decisions (2026-11-08, by the user)
+- **Vault:** per-plugin opt-in, as in §6. Off by default, only offered while the vault is unlocked.
+- **First-party plugins:** native C++ (see §1.5). The funscript plugin's WebSocket client is a
+  small copy of the browser helper's `class WebSocket` (`browser/pvr_browser.cpp:207`), not a
+  shared refactor, to avoid conflicts with the browser work.
+- **Distribution:** separate `.pvrplugin` downloads for every build. The Steam depot and the
+  GitHub tarball contain only the host.
+- **No hardware in the team:** everything is built blind. The fake Intiface, the simulator and the
+  in-VR gauge (§9) are the acceptance tests until users report back.
+
+## 13. Progress log (keep updated — another agent may continue from here)
+Branch `feature/plugin-system`, worktree `C:\Projects\PixelVRPlayer-plugins` (based on
+`research/steam-cloud-workshop-haptics`, which is `origin/main` + research docs). Headset builds
+go to `~/pixelvr-src-plugins` (never `~/pixelvr-src`, which belongs to the other agent).
+- [x] Spec v1 written and decisions recorded.
+- [ ] Phase 1 host core (`src/plugins/plugin_host.*`, app hook, Plugins page, example plugin, SDK).
+- [ ] Phase 2 settings / files / control.
+- [ ] Phase 3 timeline heat, gauge, quick button.
+- [ ] Phase 4 DeoVR bridge plugin, funscript plugin + fake Intiface tests.
+- [ ] Phase 5 `.pvrplugin` install + release assets.
