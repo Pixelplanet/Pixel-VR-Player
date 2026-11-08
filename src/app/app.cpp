@@ -653,10 +653,10 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
     // since at 4K+ that means stutter the viewer would otherwise blame on us.
     const std::string blockedBy = sc.engine.hardwareBlockedBy();
     if (!blockedBy.empty() && static_cast<long long>(w) * h >= 3840LL * 2000LL) {
-        notice_ = "Software decoding: the hardware decoder is held by " + blockedBy +
-                  " - close that video (Steam overlay / store) or restart Steam";
-        noticeUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(12);
-        PIXELVR_LOG_WARN("%s", notice_.c_str());
+        const std::string msg = "Software decoding: the hardware decoder is held by " + blockedBy +
+                                " - close that video (Steam overlay / store) or restart Steam";
+        renderer_.setScreenTitle(slot, msg, 12.0f);
+        PIXELVR_LOG_WARN("%s", msg.c_str());
     }
 }
 
@@ -1146,8 +1146,9 @@ void App::beginWebPlay(int slot, const BrowserHost::PlexPlay& play) {
         state->store(ok ? 1 : 2);
     }).detach();
     pendingWebPlays_.push_back(std::move(pw));
-    notice_ = play.service == "jellyfin" ? "Waiting for Jellyfin to start the video..." : "Waiting for Plex to start the video...";
-    noticeUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(90);
+    renderer_.setScreenTitle(slot, play.service == "jellyfin" ? "Waiting for Jellyfin to start the video..."
+                                                             : "Waiting for Plex to start the video...",
+                             90.0f);
     PIXELVR_LOG_INFO("Web play: waiting for the server (\"%s\")", play.title.c_str());
 }
 
@@ -1165,6 +1166,7 @@ void App::startPlexPlay(int slot, const BrowserHost::PlexPlay& play) {
     sc.path.clear();
     sc.plexEpisode = play.episode;
     sc.plexAwaitingNext = false;
+    sc.plexNavManual = false;
     webHosts_[slot].takePlexNextNone();  // a stale answer must not end this one
     plexLoading_ = true;
     plexAudioStream_ = play.audioStream;
@@ -1181,10 +1183,8 @@ void App::startPlexPlay(int slot, const BrowserHost::PlexPlay& play) {
     lastControllerActivity_ = now;
     renderer_.setDockHint(play.service == "jellyfin" ? "Press Stop to return to Jellyfin" : "Press Stop to return to Plex",
                           8.0f);
-    if (!play.episodeInfo.empty()) {  // an episode: which one, briefly
-        notice_ = play.episodeInfo;
-        noticeUntil_ = now + std::chrono::seconds(5);
-    }
+    // An episode: which one, briefly, on the screen itself (else the waiting message goes).
+    renderer_.setScreenTitle(slot, play.episodeInfo, play.episodeInfo.empty() ? 0.0f : 5.0f);
     sc.plexReportAt = now + std::chrono::seconds(10);
     webHosts_[slot].plexTimeline("playing", static_cast<int64_t>(play.offset * 1000.0));
     PIXELVR_LOG_INFO("Plex: playing \"%s\" on screen %d", play.title.c_str(), slot + 1);
@@ -1239,14 +1239,21 @@ bool App::updatePlexPlayback(int slot) {
     ScreenState& sc = screens_[slot];
     const double duration = sc.engine.duration();
     const auto now = std::chrono::steady_clock::now();
+    if (sc.plexAwaitingNext && sc.plexNavManual) {
+        // The screen's arrow asked for another episode: none (or no answer) keeps this one playing.
+        const bool none = webHosts_[slot].takePlexNextNone();
+        if (none || now - sc.plexNextSince > std::chrono::seconds(20)) {
+            sc.plexAwaitingNext = sc.plexNavManual = false;
+            renderer_.setScreenTitle(slot, none ? "There is no such episode" : "The server did not answer", 3.0f);
+        }
+    }
     if (sc.engine.eof() && (duration <= 0.0 || sc.engine.position() >= duration - 5.0)) {
         if (sc.plexEpisode && !sc.plexAwaitingNext) {
             // An episode ended: the helper reports it and hands off the next one on this screen.
             sc.plexAwaitingNext = true;
             sc.plexNextSince = now;
             webHosts_[slot].plexNext(static_cast<int64_t>((duration > 0.0 ? duration : sc.engine.position()) * 1000.0));
-            notice_ = "Starting the next episode...";
-            noticeUntil_ = now + std::chrono::seconds(20);
+            renderer_.setScreenTitle(slot, "Starting the next episode...", 20.0f);
             PIXELVR_LOG_INFO("Web play: episode ended on screen %d, asking for the next one", slot + 1);
             return false;
         }
@@ -1254,7 +1261,7 @@ bool App::updatePlexPlayback(int slot) {
             if (!webHosts_[slot].takePlexNextNone() && now - sc.plexNextSince < std::chrono::seconds(20)) return false;
             PIXELVR_LOG_INFO("Web play: no next episode, back to the page");
             sc.plexAwaitingNext = false;
-            notice_.clear();
+            renderer_.setScreenTitle(slot, std::string(), 0.0f);
         }
         returnFromPlex(slot);
         return true;
@@ -2944,11 +2951,33 @@ int App::run() {
             const auto nowT = std::chrono::steady_clock::now();
             XrInputState in = xr_.input();
 #ifdef PIXELVR_HAVE_MEDIA
+            // Plex / Jellyfin episodes: previous / next arrows on the screen while the laser is on it.
+            for (int s = 0; s < VulkanRenderer::kMaxVideoSlots; ++s) {
+                const ScreenState& es = screens_[s];
+                renderer_.setScreenNav(s, es.open && es.webSuspended && es.plexEpisode && !es.plexAwaitingNext);
+            }
+            if (in.select) {
+                int ns = -1, side = -1;
+                if (renderer_.screenNavHit(ns, side) && screens_[ns].webSuspended && screens_[ns].plexEpisode &&
+                    !screens_[ns].plexAwaitingNext) {
+                    ScreenState& es = screens_[ns];
+                    const int64_t ms = static_cast<int64_t>(es.engine.position() * 1000.0);
+                    if (side == 0) webHosts_[ns].plexPrev(ms);
+                    else webHosts_[ns].plexNext(ms);
+                    es.plexAwaitingNext = true;
+                    es.plexNavManual = true;
+                    es.plexNextSince = nowT;
+                    renderer_.setScreenTitle(ns, side == 0 ? "Previous episode..." : "Next episode...", 20.0f);
+                    xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.02f, 0.0f, 0.4f);
+                    PIXELVR_LOG_INFO("Web play: %s episode asked for on screen %d", side == 0 ? "previous" : "next", ns + 1);
+                    in.select = in.togglePlay = false;  // the arrow took the trigger
+                }
+            }
             if (controlsNoticePending_ && xr_.sessionFocused()) {  // once the user can see it
                 controlsNoticePending_ = false;
-                notice_ = "Button choices moved to SteamOS: SteamVR Settings > Controllers. "
-                          "Your custom buttons were reset.";
-                noticeUntil_ = nowT + std::chrono::seconds(20);
+                renderer_.setDockHint("Button choices moved to SteamOS: SteamVR Settings > Controllers. "
+                                      "Your custom buttons were reset.",
+                                      20.0f);
             }
 #endif
             if (!in.selectHeld) volumeDragging_ = false;  // a volume-bar drag ends with the trigger
@@ -3256,13 +3285,11 @@ int App::run() {
                     } else if (st != 0 || timedOut) {
                         const BrowserHost::PlexPlay play = pw.play;
                         pendingWebPlays_.erase(pendingWebPlays_.begin() + static_cast<long>(p));
-                        notice_.clear();
                         if (st == 1) {
                             startPlexPlay(slot, play);
                         } else {
                             PIXELVR_LOG_WARN("Web play: the server did not send \"%s\"", play.title.c_str());
-                            notice_ = "The server did not start the video. Try again.";
-                            noticeUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(6);
+                            renderer_.setScreenTitle(slot, "The server did not start the video. Try again.", 6.0f);
                             host.plexRelease();
                         }
                     } else {
@@ -3879,8 +3906,8 @@ int App::run() {
             const bool dlAnyActive = browser_.downloadActive() || browser_.hasQueuedDownloads();
             // The head-locked line carries short notices instead (software
             // decoding because another process holds the hardware decoder).
-            const bool noticeOn = !notice_.empty() && std::chrono::steady_clock::now() < noticeUntil_;
-            renderer_.setDownloadStatus(noticeOn, noticeOn ? notice_ : std::string());
+            // (No head-locked text line: messages go on their screen or above the control panel.)
+            renderer_.setDownloadStatus(false, std::string());
             renderer_.setDownloadsBadge(dlAnyActive,
                                         !dlAnyActive &&
                                             browser_.hasDownloads() && dlRecent,

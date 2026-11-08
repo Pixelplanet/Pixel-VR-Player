@@ -264,3 +264,20 @@ from the user for an end-to-end test.
 - Design: renderer `setScreenTitle(slot, text, s)`, `setScreenNav(slot, on)`, `screenNavHit(slot, side)`.
   The copy is redone when the overlay changes (`ScreenLayer::drawnOverlay`), since a paused video gets
   no new frames.
+- **Built + deployed (on-screen messages, episode arrows):**
+  - Renderer: `setScreenTitle` / `setScreenNav` / `screenNavHit`; `drawScreenOverlay` + `drawCopyText`
+    in `recordScreenCopy`:
+    - a title pill at the top that fades in and out
+    - round arrow buttons at the left / right edge while the laser is on an episode screen; the hovered
+      one is larger, with an accent rim
+    - Episode screens count as pointable.
+  - App: no more `notice_` / head-locked line (`setDownloadStatus(false)`). On the screen: software
+    decoding, Waiting for Jellyfin / Plex, the episode title (5 s), Starting the next episode, the
+    server did not start, Previous / Next episode..., "There is no such episode". The controls-moved
+    notice goes to the dock hint.
+  - Arrow click → `plexPrev` / `plexNext` with the current position; "none" keeps playing.
+  - Helper: `plexnext` / `plexprev` look up first, then report "stopped", then hand off.
+    - Jellyfin: the series' full episode list, ±1.
+    - Plex: allLeaves ±1.
+  - **Tested standalone (Jellyfin):** S6 E13 → next S6 E14 "Neutopia" → previous S6 E13, each with its
+    title. Plex previous: not tested outside the headset. Drawing: not yet seen in the headset.

@@ -2213,13 +2213,16 @@ int runScreen(const ScreenOptions& opt) {
             }
             plex.closeAt = Clock::now() + std::chrono::milliseconds(400);
             plex.returnCheckAt = Clock::now() + std::chrono::milliseconds(1200);
-        } else if (cmd == "plexnext") {
+        } else if (cmd == "plexnext" || cmd == "plexprev") {
+            // The next (end of an episode, or the screen's arrow) or previous episode: find it first,
+            // then report the current one as stopped at <ms> and hand the other one off. "plexnext none"
+            // when there is none (the app then keeps playing, or returns to the page at the end).
+            const int dir = cmd == "plexnext" ? 1 : -1;
+            const long long atMs = std::atoll(rest.c_str());
             if (!plex.intercepted) {
                 emitLine("plexnext none");
                 return;
             }
-            plexTimeline("stopped", std::atoll(rest.c_str()));  // the episode that just ended
-            plex.pauseUntil = Clock::now() + std::chrono::seconds(90);
             if (plex.service == "jellyfin") {
                 if (plex.jfSeries.empty()) {
                     emitLine("plexnext none");
@@ -2227,15 +2230,21 @@ int runScreen(const ScreenOptions& opt) {
                 }
                 const std::string js =
                     "(async()=>{try{const r=await (await fetch(" +
-                    pvrjson::quote(plex.base + "/Shows/" + plex.jfSeries + "/Episodes?userId=" + plex.jfUser + "&startItemId=" +
-                                   plex.jfItem + "&limit=2") +
+                    pvrjson::quote(plex.base + "/Shows/" + plex.jfSeries + "/Episodes?userId=" + plex.jfUser) +
                     ",{headers:{'Authorization':" + pvrjson::quote(plex.jfAuth) + "}})).json();"
-                    "const n=(r.Items||[])[1];return n?n.Id:''}catch(e){return ''}})()";
-                evalIn(plex.session, js, [&](const pvrjson::Value* v) {
-                    const std::string next = (v && v->type == pvrjson::Value::Type::String) ? v->str : std::string();
-                    std::fprintf(stderr, "jellyfin: next episode %s\n", next.empty() ? "none" : "found");
-                    if (next.empty()) emitLine("plexnext none");
-                    else jfStart(plex.session, next, plex.jfUser, 0, -1, true);
+                    "const a=r.Items||[],i=a.findIndex(e=>e.Id===" + pvrjson::quote(plex.jfItem) + ");"
+                    "const n=i<0?null:a[i+(" + std::to_string(dir) + ")];return n?n.Id:''}catch(e){return ''}})()";
+                evalIn(plex.session, js, [&, dir, atMs](const pvrjson::Value* v) {
+                    const std::string target = (v && v->type == pvrjson::Value::Type::String) ? v->str : std::string();
+                    std::fprintf(stderr, "jellyfin: %s episode %s\n", dir > 0 ? "next" : "previous",
+                                 target.empty() ? "none" : "found");
+                    if (target.empty()) {
+                        emitLine("plexnext none");
+                        return;
+                    }
+                    plexTimeline("stopped", atMs);  // the episode being left
+                    plex.pauseUntil = Clock::now() + std::chrono::seconds(90);
+                    jfStart(plex.session, target, plex.jfUser, 0, -1, true);
                 }, true);
                 return;
             }
@@ -2247,17 +2256,20 @@ int runScreen(const ScreenOptions& opt) {
                 "if(c.type!=='episode'||!c.grandparentRatingKey)return '';"
                 "const all=(await (await fetch(b+'/library/metadata/'+c.grandparentRatingKey+'/allLeaves'+q,H)).json())"
                 ".MediaContainer.Metadata||[];const i=all.findIndex(e=>String(e.ratingKey)===String(c.ratingKey));"
-                "if(i<0||i+1>=all.length)return '';const m=await md(all[i+1].ratingKey),p=m.Media[0].Part[0];"
+                "const t=i<0?null:all[i+(" + std::to_string(dir) + ")];if(!t)return '';"
+                "const m=await md(t.ratingKey),p=m.Media[0].Part[0];"
                 "return " + kPlexInfoJs + "}catch(e){return ''}})()";
-            evalIn(plex.session, js, [&](const pvrjson::Value* v) {
+            evalIn(plex.session, js, [&, dir, atMs](const pvrjson::Value* v) {
                 pvrjson::Value info;
                 if (!v || v->type != pvrjson::Value::Type::String || !pvrjson::parse(v->str, info) ||
                     info.getString("part").empty()) {
-                    std::fprintf(stderr, "plex: no next episode\n");
+                    std::fprintf(stderr, "plex: no %s episode\n", dir > 0 ? "next" : "previous");
                     emitLine("plexnext none");
                     return;
                 }
-                std::fprintf(stderr, "plex: next episode found\n");
+                std::fprintf(stderr, "plex: %s episode found\n", dir > 0 ? "next" : "previous");
+                plexTimeline("stopped", atMs);  // the episode being left (uses its ratingKey, before plexEmit)
+                plex.pauseUntil = Clock::now() + std::chrono::seconds(90);
                 plexEmit(info, 0.0);
             }, true);
         } else if (cmd == "plextimeline") {

@@ -136,6 +136,7 @@ public:
     void plexReturn(int64_t ms) { send("plexreturn " + std::to_string(ms)); }  // close Plex's player, report "stopped" at ms
     // An episode ended at ms: report it, and hand off the next one (a new PlexPlay), or answer "none".
     void plexNext(int64_t ms) { send("plexnext " + std::to_string(ms)); }
+    void plexPrev(int64_t ms) { send("plexprev " + std::to_string(ms)); }  // the previous episode (same answers)
     bool takePlexNextNone() {
         const bool v = plexNextNone_;
         plexNextNone_ = false;

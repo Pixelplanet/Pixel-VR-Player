@@ -261,6 +261,7 @@ private:
         std::chrono::steady_clock::time_point plexReportAt{};
         bool plexEpisode = false;       // a TV episode: the next one is asked for when it ends
         bool plexAwaitingNext = false;  // ended, waiting for the next episode's hand-off
+        bool plexNavManual = false;     // ... asked for with the screen's arrow (keeps playing if there is none)
         std::chrono::steady_clock::time_point plexNextSince{};
         float volume = 1.0f; // this screen's own volume (on top of the system volume)
 #ifdef PIXELVR_HAVE_MEDIA

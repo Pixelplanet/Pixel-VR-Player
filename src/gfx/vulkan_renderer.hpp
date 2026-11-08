@@ -617,6 +617,20 @@ public:
     // A one-line glass pill just above the dock (e.g. how to leave a hand-off).
     // `seconds` count down only while the dock is visible; it hides while the
     // scrub bubble shows.
+    // On-screen messages and episode navigation, drawn into the screen layer itself (no
+    // head-locked floating text): a title pill at the top that fades after `seconds`, and
+    // previous / next arrows at the screen's edges while the laser is on an episode screen.
+    void setScreenTitle(int slot, const std::string& text, float seconds);
+    void setScreenNav(int slot, bool on) {
+        if (slot >= 0 && slot < kMaxVideoSlots) screenOverlay_[slot].nav = on;
+    }
+    // The laser is on the previous (side 0) or next (side 1) arrow of an episode screen.
+    bool screenNavHit(int& slot, int& side) const {
+        if (screenNavSlot_ < 0 || screenNavHover_ < 0) return false;
+        slot = screenNavSlot_;
+        side = screenNavHover_;
+        return true;
+    }
     void setDockHint(const std::string& text, float seconds) {
         dockHintText_ = text;
         dockHintLeft_ = seconds;
@@ -856,6 +870,7 @@ private:
         ViewTargets targets;
         uint64_t drawnSerial = 0;   // frameSerial_ last copied
         int drawnBadge = -1;        // screen number drawn into it (0 = none)
+        int drawnOverlay = -1;      // on-screen title / episode arrows drawn into it
         bool web = false;
     };
     ScreenLayer screenLayers_[kMaxVideoSlots];
@@ -1114,6 +1129,19 @@ private:
     bool volumeMuted_ = false;
     MusicView musicViews_[kMaxVideoSlots];
     int musicHoverSlot_ = -1;
+    struct ScreenOverlay {
+        std::string title;
+        std::chrono::steady_clock::time_point shownAt{}, until{};
+        bool nav = false;  // an episode: previous / next arrows while the laser is on it
+    };
+    ScreenOverlay screenOverlay_[kMaxVideoSlots];
+    int screenNavSlot_ = -1;   // the episode screen the laser is on
+    int screenNavHover_ = -1;  // 0 = previous arrow, 1 = next arrow
+    float screenTitleAlpha(int slot) const;
+    int screenOverlayKey(int slot) const;
+    void drawCopyText(const std::string& utf8, float cx, float cy, float h, float maxW, const float color[4], float ax,
+                      const math::Mat4& ortho, uint32_t& glyphCursor);
+    void drawScreenOverlay(int slot, float ax, const math::Mat4& ortho, uint32_t& glyphCursor);
     int musicHoverId_ = kMusicNone;
     std::string hudFormat_ = "2D Flat";
     std::string hudAudio_ = "Audio";

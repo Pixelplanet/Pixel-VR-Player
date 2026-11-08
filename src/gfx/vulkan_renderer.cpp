@@ -2838,8 +2838,11 @@ void VulkanRenderer::updatePointer() {
     bool anyWeb = false;
     for (bool w : webSlots_) anyWeb = anyWeb || w;
     for (const MusicView& mv : musicViews_) anyWeb = anyWeb || mv.active;  // laser targets too
+    for (const ScreenOverlay& so : screenOverlay_) anyWeb = anyWeb || so.nav;  // episode arrows
     musicHoverSlot_ = -1;
     musicHoverId_ = kMusicNone;
+    screenNavSlot_ = -1;
+    screenNavHover_ = -1;
     const bool screensPointable = (multiScreenActive_ || anyWeb) && !hubOpen && !modalOpen &&
                                   !actionMenuOpen && !kbOpen;
     if (!kbOpen && !hubOpen && !modalOpen && !controlBar && !actionMenuOpen &&
@@ -3244,6 +3247,14 @@ void VulkanRenderer::updatePointer() {
                 webPointerSlot_ = screenHitSlot;
                 webPointerU_ = screenHitU;
                 webPointerV_ = screenHitV;
+            }
+            if (screenOverlay_[screenHitSlot].nav) {
+                // Episode arrows: the outer 13 % of the screen's width, middle 60 % of its height.
+                screenNavSlot_ = screenHitSlot;
+                if (screenHitV > 0.20f && screenHitV < 0.80f) {
+                    if (screenHitU < 0.13f) screenNavHover_ = 0;
+                    if (screenHitU > 0.87f) screenNavHover_ = 1;
+                }
             }
             const MusicView& mv = musicViews_[screenHitSlot];
             if (mv.active) {
@@ -3980,12 +3991,14 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
         const int badgeKey = badge == 0 ? 0
                                         : badge | (static_cast<int>(st) << 8) |
                                               (std::clamp(uiAccentColorIdx_, 0, 4) << 12);
-        if (L.drawnSerial != frameSerial_[slot] || L.drawnBadge != badgeKey) {
+        const int overlayKey = screenOverlayKey(slot);
+        if (L.drawnSerial != frameSerial_[slot] || L.drawnBadge != badgeKey || L.drawnOverlay != overlayKey) {
             uint32_t idx = 0;
             if (xr.acquireLayerImage(L.sc, idx) && idx < L.targets.framebuffers.size()) {
                 copies.push_back({slot, idx, badge});
                 L.drawnSerial = frameSerial_[slot];
                 L.drawnBadge = badgeKey;
+                L.drawnOverlay = overlayKey;
             }
         }
 
@@ -4629,7 +4642,177 @@ void VulkanRenderer::recordScreenCopy(int slot, const ScreenLayer& L, uint32_t i
             }
         }
     }
+    if (screenOverlayKey(slot) != 0 && uiPipelineLayer_ != VK_NULL_HANDLE && textPipelineLayer_ != VK_NULL_HANDLE &&
+        textReady_ && glyphMapped_[3] != nullptr) {
+        const StereoMode st = L.web ? StereoMode::Mono : ((slot == 0) ? stereoMode_ : screenPlacements_[slot].stereo);
+        const int views = (st == StereoMode::Mono) ? 1 : 2;
+        const float w = static_cast<float>(L.targets.width);
+        const float h = static_cast<float>(L.targets.height);
+        for (int e = 0; e < views; ++e) {
+            VkViewport hv{1.0f, 1.0f, w - 2.0f, h - 2.0f, 0.0f, 1.0f};
+            if (st == StereoMode::SideBySide) {
+                hv.x = 1.0f + e * std::floor(w * 0.5f);
+                hv.width = std::floor(w * 0.5f) - 2.0f;
+            } else if (st == StereoMode::TopBottom) {
+                hv.y = 1.0f + e * std::floor(h * 0.5f);
+                hv.height = std::floor(h * 0.5f) - 2.0f;
+            }
+            if (hv.width < 8.0f || hv.height < 8.0f) continue;
+            vkCmdSetViewport(commandBuffer_, 0, 1, &hv);
+            const ScreenHitInfo& shb = screenHit_[slot];
+            const float dispAspect = (shb.valid && shb.halfH > 0.0f) ? shb.halfW / shb.halfH : hv.width / hv.height;
+            drawScreenOverlay(slot, (16.0f / 9.0f) / dispAspect, ortho, glyphCursor);
+        }
+    }
     vkCmdEndRenderPass(commandBuffer_);
+}
+
+void VulkanRenderer::setScreenTitle(int slot, const std::string& text, float seconds) {
+    if (slot < 0 || slot >= kMaxVideoSlots) return;
+    ScreenOverlay& so = screenOverlay_[slot];
+    const auto now = std::chrono::steady_clock::now();
+    if (so.title != text || now >= so.until) so.shownAt = now;  // a new message fades in
+    so.title = text;
+    so.until = now + std::chrono::milliseconds(static_cast<int>(std::max(0.0f, seconds) * 1000.0f));
+}
+
+float VulkanRenderer::screenTitleAlpha(int slot) const {
+    const ScreenOverlay& so = screenOverlay_[slot];
+    if (so.title.empty()) return 0.0f;
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= so.until) return 0.0f;
+    const float in = std::chrono::duration<float>(now - so.shownAt).count() / 0.25f;
+    const float out = std::chrono::duration<float>(so.until - now).count() / 0.6f;
+    return std::clamp(std::min(in, out), 0.0f, 1.0f);
+}
+
+int VulkanRenderer::screenOverlayKey(int slot) const {
+    // 0 = nothing on top of the picture; otherwise changes whenever the overlay looks different.
+    const int alphaStep = static_cast<int>(screenTitleAlpha(slot) * 20.0f + 0.5f);
+    const bool arrows = screenOverlay_[slot].nav && screenNavSlot_ == slot;
+    if (alphaStep == 0 && !arrows) return 0;
+    const int hover = arrows ? (screenNavHover_ + 2) : 0;  // 1 = arrows, no hover; 2/3 = hovered side
+    return 1 + alphaStep + 32 * hover + 256 * static_cast<int>(std::hash<std::string>{}(screenOverlay_[slot].title) & 0xFFFF);
+}
+
+void VulkanRenderer::drawCopyText(const std::string& utf8, float cx, float cy, float h, float maxW, const float color[4],
+                                  float ax, const math::Mat4& ortho, uint32_t& glyphCursor) {
+    const bool bold = fontAtlasBold_.ok;
+    const FontAtlas& font = bold ? fontAtlasBold_ : fontAtlas_;
+    if (!font.ok || font.lineHeight <= 0.0f) return;
+    // UTF-8 -> Latin-1 (the atlas holds 32..126 and 160..255).
+    std::vector<unsigned char> cps;
+    for (size_t i = 0; i < utf8.size();) {
+        const unsigned char c = static_cast<unsigned char>(utf8[i]);
+        unsigned cp = c;
+        int n = 1;
+        if (c >= 0xC0 && c < 0xE0 && i + 1 < utf8.size()) {
+            cp = ((c & 0x1Fu) << 6) | (static_cast<unsigned char>(utf8[i + 1]) & 0x3Fu);
+            n = 2;
+        } else if (c >= 0xE0) {
+            cp = '?';
+            n = (c >= 0xF0) ? 4 : 3;
+        }
+        cps.push_back(cp < 256 ? static_cast<unsigned char>(cp) : static_cast<unsigned char>('?'));
+        i += static_cast<size_t>(n);
+    }
+    float scale = h / font.lineHeight;
+    float width = 0.0f;
+    for (unsigned char cp : cps) width += font.glyphs[cp].advance * scale;
+    if (width * ax > maxW && width > 0.0f) {
+        scale *= maxW / (width * ax);
+        width = maxW / ax;
+    }
+    const float baseline = cy - 0.36f * h * (scale * font.lineHeight / h);
+    float pen = cx / ax - 0.5f * width;  // in unscaled model x; multiplied by ax below
+    const uint32_t first = glyphCursor;
+    for (unsigned char cp : cps) {
+        const Glyph& g = font.glyphs[cp];
+        if (g.width > 0.0f && g.height > 0.0f && glyphCursor < kMaxGlyphsPerView) {
+            GlyphInstance& gi = static_cast<GlyphInstance*>(glyphMapped_[3])[glyphCursor++];
+            gi.rect[0] = (pen + g.bearingX * scale) * ax;
+            gi.rect[1] = baseline + (g.bearingY - g.height) * scale;
+            gi.rect[2] = g.width * scale * ax;
+            gi.rect[3] = g.height * scale;
+            gi.uv[0] = g.u0;
+            gi.uv[1] = g.v0;
+            gi.uv[2] = g.u1;
+            gi.uv[3] = g.v1;
+            std::memcpy(gi.color, color, sizeof(gi.color));
+        }
+        pen += g.advance * scale;
+    }
+    if (glyphCursor == first) return;
+    const VkDescriptorSet fontSet = bold ? textSetBold_ : textSet_;
+    vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipelineLayer_);
+    vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipelineLayout_, 0, 1, &fontSet, 0, nullptr);
+    const VkDeviceSize off = 0;
+    vkCmdBindVertexBuffers(commandBuffer_, 0, 1, &glyphBuffer_[3], &off);
+    TextPush tp{};
+    std::memcpy(tp.mvp, ortho.m, sizeof(tp.mvp));
+    vkCmdPushConstants(commandBuffer_, textPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                       sizeof(TextPush), &tp);
+    vkCmdDraw(commandBuffer_, 6, glyphCursor - first, 0, first);
+}
+
+void VulkanRenderer::drawScreenOverlay(int slot, float ax, const math::Mat4& ortho, uint32_t& glyphCursor) {
+    using namespace math;
+    static const float kAccents[5][3] = {{0.25f, 0.78f, 1.00f}, {0.18f, 0.85f, 0.52f}, {1.00f, 0.68f, 0.20f},
+                                         {0.68f, 0.42f, 1.00f}, {0.96f, 0.28f, 0.36f}};
+    const float* ac = kAccents[std::clamp(uiAccentColorIdx_, 0, 4)];
+    const Mat4 mvp = multiply(ortho, scaling(Vec3{ax, 1.0f, 1.0f}));  // square model units stay square
+    auto shape = [&](float cx, float cy, float hw, float hh, UiShape s, const float col[4], float radius, float border,
+                     const float bcol[4]) {
+        UiPush up{};
+        std::memcpy(up.mvp, mvp.m, sizeof(up.mvp));
+        std::memcpy(up.color, col, sizeof(up.color));
+        up.params[0] = static_cast<float>(s);
+        up.params[1] = radius;
+        up.params[2] = border;
+        up.params[3] = 0.0f;
+        std::memcpy(up.borderColor, bcol, sizeof(up.borderColor));
+        up.rect[0] = cx;
+        up.rect[1] = cy;
+        up.rect[2] = hw;
+        up.rect[3] = hh;
+        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipelineLayer_);
+        vkCmdPushConstants(commandBuffer_, uiPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                           sizeof(UiPush), &up);
+        vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
+    };
+    // Title pill near the top: series, season / episode and name, or a short message.
+    const float a = screenTitleAlpha(slot);
+    if (a > 0.01f) {
+        const float textH = 0.080f;
+        const float maxTextW = 2.6f;  // drawn units (the screen is 3.2 wide)
+        const FontAtlas& font = fontAtlasBold_.ok ? fontAtlasBold_ : fontAtlas_;
+        float textW = 0.0f;
+        if (font.ok && font.lineHeight > 0.0f) {
+            for (unsigned char ch : screenOverlay_[slot].title) textW += font.glyphs[ch].advance * (textH / font.lineHeight);
+        }
+        textW = std::min(textW * ax, maxTextW);
+        const float pillHw = (0.5f * textW + 0.07f) / ax, pillHh = 0.068f;
+        const float bg[4] = {0.03f, 0.04f, 0.06f, 0.74f * a};
+        const float rim[4] = {1.0f, 1.0f, 1.0f, 0.16f * a};
+        shape(0.0f, 0.70f, pillHw, pillHh, UiShape::RoundedBox, bg, 1.0f, 0.04f, rim);
+        const float white[4] = {1.0f, 1.0f, 1.0f, a};
+        drawCopyText(screenOverlay_[slot].title, 0.0f, 0.70f, textH, maxTextW, white, ax, ortho, glyphCursor);
+    }
+    // Previous / next episode arrows at the edges while the laser is on this screen.
+    if (screenOverlay_[slot].nav && screenNavSlot_ == slot) {
+        for (int side = 0; side < 2; ++side) {
+            const bool hov = screenNavHover_ == side;
+            const float x = (side == 0 ? -1.0f : 1.0f) * (1.6f - 0.19f * ax) / ax;
+            const float r = hov ? 0.125f : 0.11f;
+            const float bg[4] = {0.03f, 0.04f, 0.06f, hov ? 0.86f : 0.62f};
+            const float rim[4] = {hov ? ac[0] : 1.0f, hov ? ac[1] : 1.0f, hov ? ac[2] : 1.0f, hov ? 1.0f : 0.30f};
+            shape(x, 0.0f, r, r, UiShape::RoundedBox, bg, 1.0f, hov ? 0.07f : 0.04f, rim);
+            const float icon[4] = {1.0f, 1.0f, 1.0f, hov ? 1.0f : 0.85f};
+            const float none[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+            shape(x + (side == 0 ? -0.008f : 0.008f), 0.0f, (side == 0 ? -1.0f : 1.0f) * r * 0.42f, r * 0.42f,
+                  UiShape::Chevron, icon, 0.0f, 0.0f, none);
+        }
+    }
 }
 
 void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
