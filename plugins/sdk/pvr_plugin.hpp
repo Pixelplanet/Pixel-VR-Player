@@ -101,6 +101,10 @@ public:
         send("{\"type\":\"status\",\"text\":" + pvrjson::quote(text) + ",\"level\":\"" + level + "\"}");
     }
     void notice(const std::string& text) { send("{\"type\":\"notice\",\"text\":" + pvrjson::quote(text) + "}"); }
+    // Saves one of the plugin's own text settings (e.g. an address it found); a settings message follows.
+    void setSetting(const std::string& key, const std::string& value) {
+        send("{\"type\":\"settings.set\",\"key\":" + pvrjson::quote(key) + ",\"value\":" + pvrjson::quote(value) + "}");
+    }
     void log(const std::string& text) { send("{\"type\":\"log\",\"level\":\"info\",\"text\":" + pvrjson::quote(text) + "}"); }
     // value < 0 hides the gauge.
     void gauge(const std::string& label, double value) {

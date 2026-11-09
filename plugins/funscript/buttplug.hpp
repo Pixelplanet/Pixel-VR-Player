@@ -279,6 +279,8 @@ class Client {
 public:
     bool connected() const { return ws_.open() && ready_; }
     bool connecting() const { return ws_.open() && !ready_; }
+    int session() const { return session_; }             // +1 per handshake (reconnects included)
+    bool deviceListSeen() const { return listSeen_; }   // the server answered RequestDeviceList
     int fd() const { return ws_.fd(); }
     const std::map<int, Device>& devices() const { return devices_; }
     const std::string& serverName() const { return serverName_; }
@@ -371,11 +373,14 @@ private:
                 const pvrjson::Value& m = kv.second;
                 if (type == "ServerInfo") {
                     ready_ = true;
+                    ++session_;
+                    listSeen_ = false;
                     serverName_ = m.getString("ServerName");
                     maxPingMs_ = static_cast<long long>(m.getNumber("MaxPingTime"));
                     send("RequestDeviceList", "");
                 } else if (type == "DeviceList") {
                     devices_.clear();
+                    listSeen_ = true;
                     if (const pvrjson::Value* list = m.get("Devices")) {
                         for (const auto& d : list->array) addDevice(d);
                     }
@@ -392,6 +397,8 @@ private:
 
     WebSocket ws_;
     bool ready_ = false;
+    int session_ = 0;
+    bool listSeen_ = false;
     int nextId_ = 1;
     long long maxPingMs_ = 0;
     long long lastPing_ = 0;

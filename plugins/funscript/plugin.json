@@ -1,7 +1,7 @@
 {
   "id": "org.pixelvr.funscript",
   "name": "Funscript devices",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "api": 1,
   "description": "Plays the .funscript next to a video on devices connected to Intiface Central (Buttplug.io). Untested with real devices: please report results.",
   "author": "Pixel VR Player",
@@ -13,6 +13,7 @@
   "settings": [
     { "key": "intiface", "type": "toggle", "label": "Use Intiface", "default": true },
     { "key": "server", "type": "text", "label": "Intiface address", "default": "ws://127.0.0.1:12345" },
+    { "key": "find", "type": "action", "label": "Find Intiface on the network" },
     { "key": "scan", "type": "action", "label": "Scan for devices" },
     { "key": "stop", "type": "action", "label": "Stop all devices" },
     { "key": "offset", "type": "choice", "label": "Sync offset",

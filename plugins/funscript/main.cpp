@@ -6,6 +6,7 @@
 
 #include "../sdk/pvr_plugin.hpp"
 #include "buttplug.hpp"
+#include "mdns.hpp"
 #include "funscript.hpp"
 
 #include <cctype>
@@ -103,6 +104,8 @@ int main() {
     bool folderTried = false;
     // Device drive state.
     bool active = false;
+    int seenSession = 0;     // the Intiface session the outputs were last sent in
+    bool listHandled = false;
     long long holdUntil = 0;  // after a seek while playing: devices held still until then
     double fade = 1.0;        // output level: 0 while scrubbing / held, eases back to 1
     long long fadeAt = 0;
@@ -208,7 +211,17 @@ int main() {
                 }
             } else if (type == "action") {
                 const std::string a = m.getString("action");
-                if (a == "scan") {
+                if (a == "find") {
+                    const std::vector<std::string> hosts = mdns::find();
+                    if (hosts.empty()) {
+                        io.notice("No Intiface found. In Intiface Central turn on Settings > Advanced > "
+                                  "Broadcast Server Info via mDNS (and listen on all interfaces), or type the address");
+                    } else {
+                        const std::string url = "ws://" + hosts.front() + ":12345";
+                        io.setSetting("server", url);  // saved; the settings message reconnects
+                        io.notice("Found Intiface at " + hosts.front() + (hosts.size() > 1 ? " (" + std::to_string(hosts.size()) + " found, using the first)" : ""));
+                    }
+                } else if (a == "scan") {
                     if (bp.connected()) {
                         bp.startScanning();
                         scanUntil = pvrplugin::monoMs() + 10000;
@@ -255,6 +268,27 @@ int main() {
             std::string err;
             connError = bp.connect(cfg.server, err) ? std::string() : err;
             nextConnect = now + 5000;
+        }
+        if (bp.connected() && bp.session() != seenSession) {
+            // (Re)connected: nothing sent before counts, so the next loop starts fresh with a soft start
+            // and re-sends the vibration. Without this a reconnect left the devices idle.
+            seenSession = bp.session();
+            listHandled = false;
+            active = false;
+            lastVibe = -1.0;
+            sentFor = SIZE_MAX;
+            lastStatus.clear();
+        }
+        if (bp.connected() && bp.deviceListSeen() && !listHandled) {
+            listHandled = true;
+            if (bp.devices().empty() && !scanUntil) {
+                // Intiface may drop its devices with the old connection: look for them again.
+                bp.startScanning();
+                scanUntil = now + 10000;
+                io.notice("Reconnected to Intiface: scanning for devices");
+            } else if (seenSession > 1) {
+                io.notice("Reconnected to Intiface: " + std::to_string(bp.devices().size()) + " devices");
+            }
         }
         if (!cfg.useIntiface && (bp.connected() || bp.connecting())) {
             stopDevices();

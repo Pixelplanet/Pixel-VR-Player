@@ -7694,7 +7694,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                             drawFitCentered(d.cx, d.cy, d.hw * 2.0f - 0.012f, sc * 0.88f, themeTextCol,
                                             lr.steps != 0 ? "Sure?" : "Delete");
                         } else {
-                            withHeadingFont([&] { drawFit(left + 0.045f, hc.cy, 0.60f, sc, lc, lr.label); });
+                            // Up to the value column (a long label shrinks instead of running into the value).
+                            const float labelW = lr.value.empty() ? 0.90f : hub::kShortcutUrlX - 0.045f - 0.02f;
+                            withHeadingFont([&] { drawFit(left + 0.045f, hc.cy, labelW, sc, lc, lr.label); });
                             if (!lr.value.empty()) {
                                 drawFit(left + hub::kShortcutUrlX, hc.cy, 0.50f, sc * 0.90f, slateCol, lr.value);
                             }

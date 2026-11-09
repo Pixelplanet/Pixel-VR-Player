@@ -696,6 +696,17 @@ void PluginHost::handleLine(Plugin& p, const std::string& line) {
         p.status = clip(m.getString("text"), 120);
         const std::string level = m.getString("level");
         p.statusLevel = (level == "warn" || level == "error") ? level : "ok";
+    } else if (type == "settings.set") {
+        // A plugin saves one of its own text settings (only declared text settings).
+        const std::string key = m.getString("key");
+        for (const Setting& s : p.settings) {
+            if (s.key == key && s.type == "text") {
+                p.values[key] = clip(m.getString("value"), 400);
+                saveConfig();
+                sendSettings(p);
+                break;
+            }
+        }
     } else if (type == "log") {
         PIXELVR_LOG_INFO("Plugin %s: %s", p.id.c_str(), clip(m.getString("text"), 400).c_str());
     } else if (type == "notice" && ui) {
