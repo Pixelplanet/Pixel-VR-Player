@@ -2,6 +2,7 @@
 #include "app/vault_manager.hpp"
 #include "net/smb_credentials.hpp"
 #include "plugins/plugin_host.hpp"
+#include "plugins/plugin_repo.hpp"
 #include "xr/vr_keyboard.hpp"
 
 #include "util/logging.hpp"
@@ -377,6 +378,28 @@ void SettingsMenu::refresh() {
             }
             pluginPackages_ = std::move(offered);
         }
+        // The plugin repository: what is not installed yet, and newer versions.
+        repoRows_.clear();
+        if (repo_) {
+            repo_->refresh();
+            const auto entries = repo_->entries();
+            for (size_t ei = 0; ei < entries.size(); ++ei) {
+                const PluginRepo::Entry& e = entries[ei];
+                const PluginHost::Plugin* have = nullptr;
+                for (const auto& pl : list) {
+                    if (pl.id == e.id) have = &pl;
+                }
+                if (have && PluginHost::compareVersions(e.version, have->version) <= 0) continue;
+                const bool busy = repo_->downloading(e.id);
+                Row r{have ? "Update " + e.name + " " + have->version + " to " + e.version : "Install " + e.name + " " + e.version,
+                      busy ? std::string("Downloading...") : (e.description.empty() ? std::string("Plugin repository") : e.description),
+                      Action::InstallRepoPlugin, !busy};
+                r.data = static_cast<int>(repoRows_.size());
+                repoRows_.push_back(static_cast<int>(ei));
+                rows_.push_back(r);
+            }
+            if (!repo_->state().empty() && entries.empty()) rows_.push_back({repo_->state(), "", Action::None, false});
+        }
         if (!list.empty()) {
             rows_.push_back({"Timeline graph", heatStyle_ % 2 ? "Line" : "Bars", Action::CycleHeatStyle});
         }
@@ -546,6 +569,11 @@ SettingsMenu::Action SettingsMenu::activate() {
             saveConfig();
             refresh();
             break;
+        case Action::InstallRepoPlugin: {
+            const int i = rows_[static_cast<size_t>(selected_)].data;
+            repoEntryToInstall_ = (i >= 0 && i < static_cast<int>(repoRows_.size())) ? repoRows_[static_cast<size_t>(i)] : -1;
+            break;  // the app downloads and installs it
+        }
         case Action::InstallPluginPackage: {
             const int i = rows_[static_cast<size_t>(selected_)].data;
             pluginPackageToInstall_ = (i >= 0 && i < static_cast<int>(pluginPackages_.size()))

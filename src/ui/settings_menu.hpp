@@ -9,6 +9,7 @@
 namespace pixelvr {
 
 class PluginHost;
+class PluginRepo;
 
 class SettingsMenu {
 public:
@@ -89,6 +90,7 @@ public:
         BackToPlugins,
         BackToControls,
         InstallPluginPackage,
+        InstallRepoPlugin,  // from the plugin repository; the app downloads repoEntryToInstall()
         CycleHeatStyle,  // plugins' timeline graph: bars / line  // a .pvrplugin found in Downloads; the app installs pluginPackageToInstall()
     };
 
@@ -299,6 +301,9 @@ public:
 
     // Plugins page. The host outlives the menu (both belong to App).
     void setPluginHost(PluginHost* host) { plugins_ = host; }
+    void setPluginRepo(PluginRepo* repo) { repo_ = repo; }
+    // The repository entry the last InstallRepoPlugin row points at (index into repo entries).
+    int repoEntryToInstall() const { return repoEntryToInstall_; }
     bool onPluginPage() const { return section_ == kPluginsSection || section_ == kPluginSection; }  // live status: refresh now and then
     // The package the last InstallPluginPackage row points at; a message for the page's status line.
     const std::string& pluginPackageToInstall() const { return pluginPackageToInstall_; }
@@ -317,6 +322,9 @@ public:
 
 private:
     PluginHost* plugins_ = nullptr;
+    PluginRepo* repo_ = nullptr;
+    int repoEntryToInstall_ = -1;
+    std::vector<int> repoRows_;  // row data -> repo entry
     int pluginIdx_ = 0;
     std::vector<std::string> pluginPackages_;  // .pvrplugin files found in the download folders
     std::string pluginPackageToInstall_;

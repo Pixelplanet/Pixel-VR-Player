@@ -20,6 +20,7 @@
 #include "app/chromium_installer.hpp"
 #include "app/music_queue.hpp"
 #include "plugins/plugin_host.hpp"
+#include "plugins/plugin_repo.hpp"
 #include "util/one_euro.hpp"
 #include "xr/vr_app_manifest.hpp"
 
@@ -355,6 +356,7 @@ private:
     // Plugins (docs/concepts/PLUGIN_SYSTEM_SPEC.md): fed one snapshot of the
     // screens per frame; the Plex title stands in for the tokenised URL.
     PluginHost plugins_;
+    PluginRepo pluginRepo_;
     std::string plexTitles_[VulkanRenderer::kMaxVideoSlots];
     void updatePlugins();
     void installPlugin(const std::string& file);  // a .pvrplugin chosen in the file browser

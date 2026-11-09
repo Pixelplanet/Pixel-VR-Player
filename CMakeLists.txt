@@ -144,6 +144,7 @@ add_library(pixelvr_core STATIC
     src/app/browser_host.cpp
     src/plugins/plugin_host.cpp
     src/plugins/plugin_files.cpp
+    src/plugins/plugin_repo.cpp
     src/app/chromium_installer.cpp
     src/app/app.cpp)
 

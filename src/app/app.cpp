@@ -417,6 +417,7 @@ bool App::init(const std::string& mediaPath) {
     browser_.setDownloadDir(settings_.downloadDir());
     plugins_.init();
     settings_.setPluginHost(&plugins_);
+    settings_.setPluginRepo(&pluginRepo_);
     // No clip requested: open the file browser instead of a test video.
     if (mediaPath.empty()) {
 #ifdef PIXELVR_HAVE_FREETYPE
@@ -2050,6 +2051,17 @@ void App::updatePlugins() {
     }
     const auto now = std::chrono::steady_clock::now();
     std::string n;
+    {
+        std::string file, error;
+        if (pluginRepo_.takeReady(file, error)) {
+            if (error.empty()) {
+                installPlugin(file);  // verified download: installs, shows the result on the Plugins page
+            } else {
+                settings_.openPluginsPage();
+                settings_.showStatus(error);
+            }
+        }
+    }
     while (plugins_.takeNotice(n)) {
         // On the plugin pages' status line, and above the control panel (no floating text).
         settings_.showPluginNotice(n);
@@ -5315,6 +5327,14 @@ int App::run() {
                                                                                                          : std::string();
                             openKeyboard("Shortcut address (e.g. 192.168.1.10:8096 or https://...)", cur, false, in,
                                          [this, idx](const std::string& t) { settings_.setShortcutUrl(idx, t); });
+                        } else if (act == SettingsMenu::Action::InstallRepoPlugin) {
+                            const auto entries = pluginRepo_.entries();
+                            const int ei = settings_.repoEntryToInstall();
+                            if (ei >= 0 && ei < static_cast<int>(entries.size())) {
+                                pluginRepo_.download(entries[static_cast<size_t>(ei)]);
+                                settings_.refresh();
+                                settings_.showStatus("Downloading " + entries[static_cast<size_t>(ei)].name + "...");
+                            }
                         } else if (act == SettingsMenu::Action::InstallPluginPackage) {
                             if (!settings_.pluginPackageToInstall().empty()) installPlugin(settings_.pluginPackageToInstall());
                         } else if (act == SettingsMenu::Action::EditPluginText) {
