@@ -367,6 +367,9 @@ void SettingsMenu::refresh() {
             r.data = static_cast<int>(i);
             rows_.push_back(r);
         }
+        if (!list.empty()) {
+            segmented("Timeline Graph", {"Bars", "Line"}, heatStyle_ % 2, Action::CycleHeatStyle);
+        }
         status_ = list.empty() && pluginPackages_.empty()
                       ? "No plugins installed. Plugins are separate downloads (.pvrplugin) - put them in Downloads."
                   : list.empty() ? "Plugin packages found in Downloads: install one below (it starts off)."
@@ -530,6 +533,11 @@ SettingsMenu::Action SettingsMenu::activate() {
         case Action::Back:
             section_ = (section_ >= 10) ? 2 : 0;  // list -> Tracks; else -> Display
             selected_ = 0;
+            refresh();
+            break;
+        case Action::CycleHeatStyle:
+            heatStyle_ = (heatStyle_ + 1) % 2;
+            saveConfig();
             refresh();
             break;
         case Action::InstallPluginPackage: {
@@ -1179,6 +1187,7 @@ void SettingsMenu::loadConfig() {
             else if (key == "download_dir") downloadDirIdx_ = std::clamp(std::stoi(val), 0, kDownloadDirCount - 1);
             else if (key == "rail_shortcuts") railShortcutMask_ = std::stoi(val) & ((1 << kRailShortcutCount) - 1);
             else if (key == "jellyfin_url") legacyJellyfinUrl_ = val;
+            else if (key == "heat_style") heatStyle_ = std::stoi(val) % 2;
             else if (key == "shortcut") {  // onRail|kiosk|name|url
                 const size_t a = val.find('|'), b = val.find('|', a + 1), c = val.find('|', b + 1);
                 if (a != std::string::npos && b != std::string::npos && c != std::string::npos) {
@@ -1247,6 +1256,7 @@ void SettingsMenu::saveConfig() const {
             file << "distance=" << screenDistance_ << "\n";
             file << "download_dir=" << downloadDirIdx_ << "\n";
             file << "rail_shortcuts=" << railShortcutMask_ << "\n";
+            file << "heat_style=" << heatStyle_ << "\n";
             for (const Shortcut& sc : shortcuts_) {
                 file << "shortcut=" << (sc.onRail ? 1 : 0) << "|" << (sc.kiosk ? 1 : 0) << "|" << sc.name << "|" << sc.url << "\n";
             }

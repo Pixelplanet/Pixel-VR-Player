@@ -6249,7 +6249,40 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             const float baseLine[4] = {1.0f, 1.0f, 1.0f, 0.07f};
             drawUiElement(vpPanel, 0.0f, baseY, trackHalfW, 0.0008f, UiShape::RoundedBox, baseLine, 1.0f);
             const float playedX = -trackHalfW + 2.0f * trackHalfW * std::clamp(transportProgress_, 0.0f, 1.0f);
-            for (int i = 0; i < n; ++i) {
+            auto heatColour = [&](float t, bool played, float alpha, float out[4]) {
+                const float a = std::min(t * 2.0f, 1.0f), b = std::max(t * 2.0f - 1.0f, 0.0f);
+                out[0] = 0.18f + 0.82f * a;
+                out[1] = 0.80f - 0.08f * a - 0.42f * b;
+                out[2] = 0.85f - 0.65f * a + 0.18f * b;
+                out[3] = played ? alpha * 0.45f : alpha;
+            };
+            if (heatStyle_ == 1) {
+                // Smooth line graph: Catmull-Rom through the bins, a soft filled area under a bright line.
+                auto bin = [&](int i) {
+                    return std::clamp(transportHeat_[static_cast<size_t>(std::clamp(i, 0, n - 1))], 0.0f, 1.0f);
+                };
+                const int samples = std::min(n * 2, 320);
+                const float sw = 2.0f * trackHalfW / static_cast<float>(samples);
+                for (int k = 0; k < samples; ++k) {
+                    const float u = (static_cast<float>(k) + 0.5f) / static_cast<float>(samples) * static_cast<float>(n) - 0.5f;
+                    const int i = static_cast<int>(std::floor(u));
+                    const float f = u - static_cast<float>(i);
+                    const float p0 = bin(i - 1), p1 = bin(i), p2 = bin(i + 1), p3 = bin(i + 2);
+                    const float t = std::clamp(
+                        0.5f * (2.0f * p1 + (p2 - p0) * f + (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * f * f +
+                                (3.0f * p1 - p0 - 3.0f * p2 + p3) * f * f * f),
+                        0.0f, 1.0f);
+                    const float x = -trackHalfW + sw * (static_cast<float>(k) + 0.5f);
+                    const bool played = x < playedX;
+                    const float top = 0.0030f + 0.0190f * t;
+                    float area[4], line[4];
+                    heatColour(t, played, 0.30f, area);
+                    heatColour(t, played, 0.98f, line);
+                    drawUiElement(vpPanel, x, baseY + 0.5f * top, 0.5f * sw + 0.0002f, 0.5f * top, UiShape::FlatBox, area, 0.0f);
+                    drawUiElement(vpPanel, x, baseY + top, 0.5f * sw + 0.0004f, 0.0011f, UiShape::RoundedBox, line, 1.0f);
+                }
+            }
+            for (int i = 0; i < n && heatStyle_ != 1; ++i) {
                 const float h = transportHeat_[static_cast<size_t>(i)];
                 if (h < 0.0f) continue;
                 const float t = std::clamp(h, 0.0f, 1.0f);

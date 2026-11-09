@@ -88,7 +88,8 @@ public:
         PluginRestart,
         BackToPlugins,
         BackToControls,
-        InstallPluginPackage,  // a .pvrplugin found in Downloads; the app installs pluginPackageToInstall()
+        InstallPluginPackage,
+        CycleHeatStyle,  // plugins' timeline graph: bars / line  // a .pvrplugin found in Downloads; the app installs pluginPackageToInstall()
     };
 
     // How a row's value is presented: the renderer draws a stepped slider for
@@ -290,6 +291,7 @@ public:
     bool onPluginPage() const { return section_ == kPluginsSection || section_ == kPluginSection; }  // live status: refresh now and then
     // The package the last InstallPluginPackage row points at; a message for the page's status line.
     const std::string& pluginPackageToInstall() const { return pluginPackageToInstall_; }
+    int heatStyle() const { return heatStyle_; }  // 0 = bars, 1 = line
     void showStatus(const std::string& s) { status_ = s; }
     void openPluginsPage() {  // after installing a plugin
         section_ = kPluginsSection;
@@ -306,7 +308,8 @@ private:
     PluginHost* plugins_ = nullptr;
     int pluginIdx_ = 0;
     std::vector<std::string> pluginPackages_;  // .pvrplugin files found in the download folders
-    std::string pluginPackageToInstall_;              // plugin shown on the detail page (kPluginSection)
+    std::string pluginPackageToInstall_;
+    int heatStyle_ = 0;              // plugin shown on the detail page (kPluginSection)
     int editingPluginSetting_ = -1;
     bool open_ = false;
     std::string title_ = "Settings > Display & Cinema";

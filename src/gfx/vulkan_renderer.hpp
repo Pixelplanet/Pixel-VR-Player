@@ -267,6 +267,7 @@ public:
     // whole duration, heat 0..1, < 0 = no data; empty hides it) and one live
     // gauge pill above the dock (value < 0 hides it).
     void setTransportHeat(std::vector<float> bins) { transportHeat_ = std::move(bins); }
+    void setHeatStyle(int style) { heatStyle_ = style; }  // 0 = bars, 1 = smooth line graph
     void setPluginGauge(const std::string& label, float value) {
         pluginGaugeLabel_ = label;
         pluginGaugeValue_ = value;
@@ -1197,6 +1198,7 @@ private:
     float hubOpenAnim_ = 0.0f;                    // hub / modal scale-in
     float dockOpenAnim_ = 0.0f;                   // dock slide-in from below
     std::vector<float> transportHeat_;            // plugin heat bins over the timeline
+    int heatStyle_ = 0;
     std::string pluginGaugeLabel_;
     float pluginGaugeValue_ = -1.0f;
     float pluginGaugeAlpha_ = 0.0f;               // fade 0..1

@@ -2031,6 +2031,7 @@ void App::updatePlugins() {
     app.vaultUnlocked = VaultManager::instance().isUnlocked();
     plugins_.update(snap, app);
     renderer_.setTransportHeat(plugins_.heatBins(selectedScreen_, 160));
+    renderer_.setHeatStyle(settings_.heatStyle());
     {
         std::string label;
         float value = -1.0f;
