@@ -14,7 +14,7 @@ import base64
 from datetime import datetime
 
 DEFAULT_SSH_KEY = os.path.expanduser(r"~\AppData\Local\steamos-devkit\steamos-devkit\devkit_rsa")
-DEFAULT_HOST = "steamos@192.168.178.61"
+DEFAULT_HOST = os.environ.get("PIXELVR_HEADSET", "steamos@steamframe.local")  # or --host steamos@<ip>
 
 CPP_CODE = r"""#include <iostream>
 #include <thread>

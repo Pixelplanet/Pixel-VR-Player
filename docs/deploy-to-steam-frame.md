@@ -260,7 +260,7 @@ To capture real in-headset screenshots directly from the SteamVR compositor whil
 python tools/take_headset_screenshot.py --delay 5
 
 # Point to a specific headset IP:
-python tools/take_headset_screenshot.py --host steamos@192.168.178.61 --delay 3
+python tools/take_headset_screenshot.py --host steamos@<headset-ip> --delay 3
 
 # Continuous series (e.g. 5 captures spaced 2 seconds apart):
 python tools/take_headset_screenshot.py --interval 2 --count 5
