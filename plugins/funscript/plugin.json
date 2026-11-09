@@ -24,6 +24,7 @@
     { "key": "vibe", "type": "segmented", "label": "Vibration follows", "options": ["Speed", "Position"], "default": 0 },
     { "key": "vibeMax", "type": "choice", "label": "Vibration strength", "options": ["100%", "75%", "50%", "25%"], "default": 0 },
     { "key": "invert", "type": "toggle", "label": "Invert script", "default": false },
+    { "key": "scrub", "type": "segmented", "label": "While scrubbing", "options": ["Stop", "Keep running"], "default": 0 },
     { "key": "folders", "type": "text", "label": "Script folders (; between)", "default": "" }
   ]
 }

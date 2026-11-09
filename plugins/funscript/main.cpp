@@ -32,6 +32,7 @@ struct Settings {
     bool vibeByPosition = false;
     double vibeMax = 1.0;
     bool invert = false;
+    bool keepOnScrub = false;  // "While scrubbing: Keep running"
     std::vector<std::string> folders;
 };
 
@@ -62,6 +63,7 @@ void readSettings(const pvrjson::Value* s, Settings& c) {
     }
     if (const pvrjson::Value* v = s->get("intiface")) c.useIntiface = v->boolean;
     if (const pvrjson::Value* v = s->get("invert")) c.invert = v->boolean;
+    if (const pvrjson::Value* v = s->get("scrub"); v && v->type == pvrjson::Value::Type::Number) c.keepOnScrub = v->number >= 1.0;
     c.offsetMs = pick(kOffsets, s, "offset", c.offsetMs);
     c.bottom = pick(kBottom, s, "bottom", c.bottom);
     c.top = pick(kTop, s, "top", c.top);
@@ -288,7 +290,7 @@ int main() {
                 // commands flooded in and everything ran at 100 %.
                 holdUntil = now + 400;
             }
-            if (c->scrubbing) holdUntil = std::max(holdUntil, now + 400);
+            if (c->scrubbing && !cfg.keepOnScrub) holdUntil = std::max(holdUntil, now + 400);
             const bool held = now < holdUntil;
             // Gentle: while held the vibration fades out over ~0.3 s, then the devices stop; afterwards
             // the stroker glides in (soft start) and the vibration ramps up over ~0.6 s.
