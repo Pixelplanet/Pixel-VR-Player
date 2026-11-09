@@ -167,9 +167,26 @@ def main():
         state("seek")
         time.sleep(0.06)
     during = server.commands()[mark:]
-    moving = [c for c in during if c[1] in ("LinearCmd", "ScalarCmd", "RotateCmd")]
-    check(len(moving) <= 3, "scrubbing: devices held still (%d commands in 0.6 s)" % len(moving))
+    strokes = [c for c in during if c[1] == "LinearCmd"]
+    vib = [s["Scalar"] for c in during if c[1] == "ScalarCmd" for s in c[2]["Scalars"]]
+    check(len(strokes) <= 1, "scrubbing: no new strokes (%d)" % len(strokes))
+    check(all(b <= a + 1e-6 for a, b in zip(vib, vib[1:])), "scrubbing: vibration only fades down")
     check(any(c[1] == "StopAllDevices" for c in during), "scrubbing: devices stopped")
+    # Dragging the timeline: no seek until release, only the player's scrubbing flag.
+    play(1.2)  # running again after the seeks above
+    mark = len(server.commands())
+    t0 = now_ms()
+    send({"type": "media.state", "screen": 0, "media": "m1", "playing": True, "buffering": False, "scrubbing": True,
+          "position": clock["pos"] + (t0 - clock["at"]) / 1000.0, "rate": 1.0, "clock": int(t0), "reason": "scrub"})
+    for _ in range(4):
+        time.sleep(0.25)
+        t = now_ms()
+        send({"type": "media.state", "screen": 0, "media": "m1", "playing": True, "buffering": False, "scrubbing": True,
+              "position": clock["pos"] + (t - clock["at"]) / 1000.0, "rate": 1.0, "clock": int(t), "reason": "tick"})
+    during = server.commands()[mark:]
+    check(any(c[1] == "StopAllDevices" for c in during) and not [c for c in during[-3:] if c[1] == "LinearCmd"],
+          "timeline drag (scrubbing flag): devices fade out and stop")
+    state("tick")  # scrubbing over (the flag is absent)
     mark = len(server.commands())
     play(1.0)
     after = [c for c in server.commands()[mark:] if c[1] == "LinearCmd"]

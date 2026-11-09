@@ -136,6 +136,7 @@ private:
         std::chrono::steady_clock::time_point since;
     };
     std::vector<PendingWebPlay> pendingWebPlays_;
+    bool pluginScrubbing_ = false;  // scrubbing right now (told to plugins)
     int plexAudioStream_ = -1;  // the page's audio track for the hand-off being loaded
     int shortcutDragFrom_ = -1;  // settings row of the shortcut being dragged (list page)
     int shortcutDragTo_ = -1;    // the row it would land on

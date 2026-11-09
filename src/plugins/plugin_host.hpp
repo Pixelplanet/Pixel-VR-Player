@@ -34,6 +34,7 @@ struct PluginScreenSnapshot {
     double rate = 1.0;
     bool playing = false;
     bool buffering = false;
+    bool scrubbing = false;    // the user drags the timeline / holds the scrub stick (devices pause)
     bool ended = false;        // reached the end of the file
     int projection = 0;        // 0 flat, 1 360, 2 180
     int stereo = 0;            // 0 mono, 1 SBS, 2 TB

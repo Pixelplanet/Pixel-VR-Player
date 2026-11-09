@@ -150,6 +150,7 @@ struct MediaClock {
     double duration = 0.0;
     bool playing = false;
     bool buffering = false;
+    bool scrubbing = false;  // the user is scrubbing: hold outputs still
     double position = 0.0;
     double rate = 1.0;
     long long clock = 0;
@@ -217,6 +218,8 @@ public:
             const pvrjson::Value* bu = m.get("buffering");
             c.playing = pl && pl->boolean;
             c.buffering = bu && bu->boolean;
+            const pvrjson::Value* sb = m.get("scrubbing");
+            c.scrubbing = sb && sb->boolean;
             c.position = m.getNumber("position");
             c.rate = m.getNumber("rate", 1.0);
             c.clock = static_cast<long long>(m.getNumber("clock", static_cast<double>(monoMs())));

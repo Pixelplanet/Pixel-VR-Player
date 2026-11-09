@@ -2020,6 +2020,7 @@ void App::updatePlugins() {
         s.position = sc.engine.position();
         s.playing = !sc.engine.paused() && !sc.engine.eof();
         s.ended = sc.engine.eof();
+        s.scrubbing = (slot == selectedScreen_) && pluginScrubbing_;
         s.projection = sc.projection;
         s.stereo = sc.stereo;
 #endif
@@ -5635,6 +5636,8 @@ int App::run() {
                         scrubTarget_ = std::clamp(scrubTarget_ + rate * dt, curTimelineStart(), curDuration());
                         scrubInput = true;
                     }
+                    // Plugins (device outputs) pause while the user scrubs: stick or timeline drag.
+                    pluginScrubbing_ = scrubInput || (renderer_.pointerOnTimeline() && in.selectHeld);
                     if (scrubInput) {
                         scrubbing_ = true;
                         interacted = true;

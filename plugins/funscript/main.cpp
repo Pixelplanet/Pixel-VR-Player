@@ -102,6 +102,9 @@ int main() {
     // Device drive state.
     bool active = false;
     long long holdUntil = 0;  // after a seek while playing: devices held still until then
+    double fade = 1.0;        // output level: 0 while scrubbing / held, eases back to 1
+    long long fadeAt = 0;
+    bool fadedOut = false;
     double lastT = -1.0;
     long long lastLoop = 0, softUntil = 0, nextVibe = 0, lastVibeSent = 0;
     size_t sentFor = SIZE_MAX;
@@ -284,10 +287,31 @@ int main() {
                 // position settles, then glide back in. Without this every seek restarted the soft start,
                 // commands flooded in and everything ran at 100 %.
                 holdUntil = now + 400;
-                if (active) bp.stopAll();
-                active = false;
             }
+            if (c->scrubbing) holdUntil = std::max(holdUntil, now + 400);
             const bool held = now < holdUntil;
+            // Gentle: while held the vibration fades out over ~0.3 s, then the devices stop; afterwards
+            // the stroker glides in (soft start) and the vibration ramps up over ~0.6 s.
+            const double fdt = fadeAt ? static_cast<double>(now - fadeAt) / 1000.0 : 0.0;
+            fadeAt = now;
+            fade = held ? std::max(0.0, fade - fdt / 0.3) : std::min(1.0, fade + fdt / 0.6);
+            if (held && fade <= 0.0 && !fadedOut) {
+                bp.stopAll();
+                active = false;
+                fadedOut = true;
+            }
+            if (!held) fadedOut = false;
+            if (held && active && fade > 0.0) {
+                // Fading out: vibration steps down at the usual 10 Hz; no new strokes.
+                if (now >= nextVibe) {
+                    nextVibe = now + 100;
+                    const double v = lastVibe > 0.0 ? lastVibe * fade : 0.0;
+                    for (const auto& kv : bp.devices()) {
+                        if (!kv.second.scalars.empty()) bp.scalar(kv.second, v);
+                        if (kv.second.rotate > 0) bp.rotate(kv.second, v, true);
+                    }
+                }
+            }
             if (!held && (!active || jumped)) {
                 // Soft start: glide to where the script will be in half a second.
                 active = true;
@@ -318,7 +342,7 @@ int main() {
                 nextVibe = now + 100;  // vibrators and rotators: at most 10 updates per second
                 double v = cfg.vibeByPosition ? mapPos(funscript::positionAt(script, t)) / 100.0
                                               : std::clamp(funscript::speedBetween(script, t - 250.0, t + 250.0) / 400.0, 0.0, 1.0);
-                v *= cfg.vibeMax;
+                v *= cfg.vibeMax * fade;
                 if (std::fabs(v - lastVibe) > 0.02 || now - lastVibeSent > 1000) {
                     for (const auto& kv : bp.devices()) {
                         if (!kv.second.scalars.empty()) bp.scalar(kv.second, v);

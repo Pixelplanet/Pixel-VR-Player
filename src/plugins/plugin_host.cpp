@@ -860,7 +860,8 @@ void PluginHost::sendState(Plugin& p, int screen, const char* reason) {
     const ScreenTrack& t = tracks_[static_cast<size_t>(screen)];
     const PluginScreenSnapshot& s = t.last;
     send(p, "{\"type\":\"media.state\",\"screen\":" + std::to_string(screen) + ",\"media\":" + pvrjson::quote(t.mediaId) +
-                ",\"playing\":" + jbool(s.playing) + ",\"buffering\":" + jbool(s.buffering) + ",\"position\":" +
+                ",\"playing\":" + jbool(s.playing) + ",\"buffering\":" + jbool(s.buffering) +
+                ",\"scrubbing\":" + jbool(s.scrubbing) + ",\"position\":" +
                 num(s.position) + ",\"rate\":" + num(s.rate) + ",\"clock\":" + std::to_string(monoMs()) +
                 ",\"reason\":\"" + reason + "\"}");
 }
@@ -961,6 +962,8 @@ void PluginHost::update(const std::vector<PluginScreenSnapshot>& screens, const 
             reason = s.playing ? "play" : "pause";
         } else if (s.buffering != t.last.buffering) {
             reason = "buffer";
+        } else if (s.scrubbing != t.last.scrubbing) {
+            reason = "scrub";
         } else if (std::fabs(s.rate - t.last.rate) > 1e-3) {
             reason = "rate";
         } else {
