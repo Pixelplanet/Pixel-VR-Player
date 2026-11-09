@@ -1,9 +1,9 @@
 {
   "id": "org.pixelvr.deovr-remote",
-  "name": "DeoVR-compatible sync",
-  "version": "0.1.1",
+  "name": "Sync with MultiFunPlayer / XBVR (DeoVR protocol)",
+  "version": "0.1.2",
   "api": 1,
-  "description": "Lets sync apps that follow DeoVR (MultiFunPlayer, FunFlixDroid, ScriptPlayer, XBVR) follow Pixel VR Player over your network. Reports the file name and position of the screen you hear.",
+  "description": "Only needed if you control your devices from MultiFunPlayer, ScriptPlayer, FunFlixDroid or XBVR on another device. They follow the video on the selected screen (name, position, pause) over your network, as they would follow DeoVR.",
   "author": "Pixel VR Player",
   "homepage": "https://github.com/Pixelplanet/Pixel-VR-Player",
   "license": "MIT",
