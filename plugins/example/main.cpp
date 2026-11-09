@@ -1,5 +1,5 @@
 // Example plugin: shows what a plugin receives and can do. It follows the
-// screen being heard, shows its progress as a gauge, announces opened files,
+// selected screen, shows its progress as a gauge, announces opened files,
 // reads a "<video name>.txt" next to the video and can pause the video. With
 // "Log every event" on, it writes each message it gets to
 // $PIXELVR_PLUGIN_DATA/events.log (used by tools/plugin_host_test).

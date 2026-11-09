@@ -1169,6 +1169,7 @@ void App::startPlexPlay(int slot, const BrowserHost::PlexPlay& play) {
     sc.webSuspended = true;
     sc.path.clear();
     sc.plexEpisode = play.episode;
+    sc.plexService = play.service == "jellyfin" ? "jellyfin" : "plex";
     sc.plexAwaitingNext = false;
     sc.plexNavManual = false;
     webHosts_[slot].takePlexNextNone();  // a stale answer must not end this one
@@ -2010,7 +2011,7 @@ void App::updatePlugins() {
         const std::string base = clean.substr(clean.find_last_of('/') + 1);
         s.fileName = plex ? plexTitles_[slot] : base;
         s.title = plex ? plexTitles_[slot] : base.substr(0, base.find_last_of('.'));
-        if (plex) s.source = "plex";
+        if (plex) s.source = sc.plexService.empty() ? "plex" : sc.plexService;
         else if (sc.path.rfind("smb://", 0) == 0) s.source = "smb";
         else if (sc.path.rfind("sftp://", 0) == 0) s.source = "sftp";
         else if (sc.path.rfind("dav://", 0) == 0 || sc.path.rfind("davs://", 0) == 0) s.source = "webdav";

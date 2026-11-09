@@ -3,7 +3,7 @@
   "name": "Example plugin",
   "version": "0.2.0",
   "api": 1,
-  "description": "Shows what plugins can see and do: a progress gauge for the screen you hear, a notice when a file opens, reading a text file next to the video, pausing the video, and a log of every event.",
+  "description": "Shows what plugins can see and do: a progress gauge for the selected screen, a notice when a file opens, reading a text file next to the video, pausing the video, and a log of every event.",
   "author": "Pixel VR Player",
   "homepage": "https://github.com/Pixelplanet/Pixel-VR-Player",
   "license": "MIT",

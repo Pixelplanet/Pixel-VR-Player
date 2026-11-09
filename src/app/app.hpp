@@ -262,6 +262,7 @@ private:
         bool web = false;    // shows the web browser instead of a video
         bool webSuspended = false;  // its BrowserHost is alive, paused behind a natively playing (Plex) video
         std::chrono::steady_clock::time_point plexReportAt{};
+        std::string plexService;        // "plex" or "jellyfin" (told to plugins)
         bool plexEpisode = false;       // a TV episode: the next one is asked for when it ends
         bool plexAwaitingNext = false;  // ended, waiting for the next episode's hand-off
         bool plexNavManual = false;     // ... asked for with the screen's arrow (keeps playing if there is none)
