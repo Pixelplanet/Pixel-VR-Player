@@ -1897,7 +1897,7 @@ int runScreen(const ScreenOptions& opt) {
                         ")).json();it=(j.Items||[])[0]}"
                         "if(!it)return '';const p=(it.Path||'').split(/[\\\\/]/).pop();"
                         "return p||(it.Name?it.Name+(it.Container?'.'+it.Container.split(',')[0]:''):'')}catch(e){return ''}})()";
-                    // Fetch the same bytes through the static stream: on TheVault /Download gave 107 MB/s,
+                    // Fetch the same bytes through the static stream: on a test server /Download gave 107 MB/s,
                     // /Videos/{id}/stream?static=true 120 MB/s (same size, same content). Jellyfin 12
                     // refuses the legacy api_key= on /Download, so ApiKey= throughout.
                     const std::string fetchUrl = dlUrl.substr(0, itemsAt) + "/Videos/" + itemId +

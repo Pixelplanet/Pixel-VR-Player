@@ -54,3 +54,13 @@ Thumbs.db
 
 # Local agent session logs
 /c--Projects-PixelVRPlayer/
+
+# Internal planning, agent handoff and personal dev tools: kept locally, not on GitHub
+/TODO.md
+/UI_HANDOFF_ROADMAP.md
+/docs/concepts/
+/docs/ui-redesign/
+/docs/screenshots/screenshot_*.png
+/tools/headset-build.sh
+/tools/chroma_check.py
+/tools/probe_smb.sh
