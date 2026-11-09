@@ -6284,28 +6284,34 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     const float h = graphH * t + 0.0006f;
                     drawUiElement(vpPanel, x, baseY + 0.5f * h, 0.5f * fw + 0.0003f, 0.5f * h, UiShape::FlatBox, area, 0.0f);
                 }
-                // The line: step along the curve so neighbouring dots overlap by about half.
-                const float spanX = 2.0f * trackHalfW;
-                float prevX = -trackHalfW, prevY = baseY + graphH * curve(-0.5f);
-                int dots = 0;
-                const int maxDots = 1400;
+                // The line: the curve sampled finely, then dots spaced evenly along its whole length.
+                // (A fixed spacing ran out of dots in intense stretches and left the end as bare fill.)
                 const int coarse = std::min(n * 3, 480);
-                for (int k = 1; k <= coarse && dots < maxDots; ++k) {
-                    const float u0 = (static_cast<float>(k) / static_cast<float>(coarse)) * static_cast<float>(n) - 0.5f;
-                    const float x1 = -trackHalfW + spanX * static_cast<float>(k) / static_cast<float>(coarse);
-                    const float y1 = baseY + graphH * curve(u0);
-                    const float len = std::hypot(x1 - prevX, y1 - prevY);
-                    const int steps = std::max(1, static_cast<int>(std::ceil(len / (r * 0.9f))));
-                    for (int j = 1; j <= steps && dots < maxDots; ++j, ++dots) {
-                        const float f = static_cast<float>(j) / static_cast<float>(steps);
-                        const float x = prevX + (x1 - prevX) * f;
-                        const float y = prevY + (y1 - prevY) * f;
+                std::vector<float> px(static_cast<size_t>(coarse) + 1), py(static_cast<size_t>(coarse) + 1);
+                float total = 0.0f;
+                for (int k = 0; k <= coarse; ++k) {
+                    const float u = (static_cast<float>(k) / static_cast<float>(coarse)) * static_cast<float>(n) - 0.5f;
+                    px[static_cast<size_t>(k)] = -trackHalfW + 2.0f * trackHalfW * static_cast<float>(k) / static_cast<float>(coarse);
+                    py[static_cast<size_t>(k)] = baseY + graphH * curve(u);
+                    if (k > 0) total += std::hypot(px[static_cast<size_t>(k)] - px[static_cast<size_t>(k - 1)],
+                                                   py[static_cast<size_t>(k)] - py[static_cast<size_t>(k - 1)]);
+                }
+                const int maxDots = 1600;
+                const float spacing = std::max(r * 0.9f, total / static_cast<float>(maxDots));
+                float carry = 0.0f;  // distance along the current segment to the next dot
+                for (int k = 1; k <= coarse; ++k) {
+                    const float x0 = px[static_cast<size_t>(k - 1)], y0 = py[static_cast<size_t>(k - 1)];
+                    const float dx = px[static_cast<size_t>(k)] - x0, dy = py[static_cast<size_t>(k)] - y0;
+                    const float len = std::hypot(dx, dy);
+                    for (float d = carry; d < len; d += spacing) {
+                        const float f = len > 0.0f ? d / len : 0.0f;
+                        const float x = x0 + dx * f, y = y0 + dy * f;
                         float col[4];
                         heatColour((y - baseY) / graphH, x < playedX, 0.95f, col);
                         drawUiElement(vpPanel, x, y, r, r, UiShape::RoundedBox, col, 1.0f);
+                        carry = d + spacing - len;
                     }
-                    prevX = x1;
-                    prevY = y1;
+                    if (len <= carry) carry -= len;
                 }
             }
             for (int i = 0; i < n && heatStyle_ != 1; ++i) {
