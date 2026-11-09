@@ -115,7 +115,7 @@ int main() {
     size_t sentFor = SIZE_MAX;
     double lastSentPos = -1.0, lastVibe = -1.0;
     bool focused = true, worn = true;
-    long long nextConnect = 0, scanUntil = 0, nextGauge = 0, nextStatus = 0;
+    long long nextConnect = 0, scanUntil = 0, nextGauge = 0, nextStatus = 0, lastRefusedNotice = -60000;
     bool gaugeShown = false;
     std::string connError, lastStatus;
 
@@ -267,6 +267,15 @@ int main() {
         if (cfg.useIntiface && !bp.connected() && !bp.connecting() && now >= nextConnect) {
             std::string err;
             connError = bp.connect(cfg.server, err) ? std::string() : err;
+            if (connError.find("refused") != std::string::npos) {
+                // Intiface takes one app at a time: a second one is refused while another is connected.
+                const std::string busy = "refused - Intiface takes one app at a time: is another app (e.g. MultiFunPlayer) connected to it?";
+                if (lastRefusedNotice + 60000 < now) {
+                    lastRefusedNotice = now;
+                    io.notice("Intiface refused the connection. It takes one app at a time: disconnect the other app (e.g. MultiFunPlayer)");
+                }
+                connError = busy;
+            }
             nextConnect = now + 5000;
         }
         if (bp.connected() && bp.session() != seenSession) {
@@ -285,7 +294,7 @@ int main() {
                 // Intiface may drop its devices with the old connection: look for them again.
                 bp.startScanning();
                 scanUntil = now + 10000;
-                io.notice("Reconnected to Intiface: scanning for devices");
+                io.notice(seenSession > 1 ? "Reconnected to Intiface: scanning for devices" : "Connected to Intiface: scanning for devices");
             } else if (seenSession > 1) {
                 io.notice("Reconnected to Intiface: " + std::to_string(bp.devices().size()) + " devices");
             }

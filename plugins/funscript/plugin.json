@@ -1,7 +1,7 @@
 {
   "id": "org.pixelvr.funscript",
   "name": "Funscript devices",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "api": 1,
   "description": "Plays the .funscript next to a video on devices connected to Intiface Central (Buttplug.io). Untested with real devices: please report results.",
   "author": "Pixel VR Player",
