@@ -88,6 +88,7 @@ public:
         PluginRestart,
         BackToPlugins,
         BackToControls,
+        InstallPluginPackage,  // a .pvrplugin found in Downloads; the app installs pluginPackageToInstall()
     };
 
     // How a row's value is presented: the renderer draws a stepped slider for
@@ -287,6 +288,9 @@ public:
     // Plugins page. The host outlives the menu (both belong to App).
     void setPluginHost(PluginHost* host) { plugins_ = host; }
     bool onPluginPage() const { return section_ == kPluginsSection || section_ == kPluginSection; }  // live status: refresh now and then
+    // The package the last InstallPluginPackage row points at; a message for the page's status line.
+    const std::string& pluginPackageToInstall() const { return pluginPackageToInstall_; }
+    void showStatus(const std::string& s) { status_ = s; }
     void openPluginsPage() {  // after installing a plugin
         section_ = kPluginsSection;
         selected_ = 0;
@@ -300,7 +304,9 @@ public:
 
 private:
     PluginHost* plugins_ = nullptr;
-    int pluginIdx_ = 0;              // plugin shown on the detail page (kPluginSection)
+    int pluginIdx_ = 0;
+    std::vector<std::string> pluginPackages_;  // .pvrplugin files found in the download folders
+    std::string pluginPackageToInstall_;              // plugin shown on the detail page (kPluginSection)
     int editingPluginSetting_ = -1;
     bool open_ = false;
     std::string title_ = "Settings > Display & Cinema";

@@ -7,6 +7,7 @@
 #include "util/logging.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
@@ -327,14 +328,49 @@ void SettingsMenu::refresh() {
     } else if (section_ == kPluginsSection) {
         title_ = "Settings > Controls & Input > Plugins";
         const auto& list = pluginList(plugins_);
-        status_ = list.empty() ? "No plugins installed. Plugins are separate downloads (.pvrplugin)."
-                               : "Plugins are separate programs. Only enable plugins you trust.";
         for (size_t i = 0; i < list.size(); ++i) {
             Row r{list[i].name + (list[i].version.empty() ? "" : " " + list[i].version),
                   list[i].enabled || !list[i].manifestError.empty() ? list[i].status : std::string("Off"), Action::OpenPlugin};
             r.data = static_cast<int>(i);
             rows_.push_back(r);
         }
+        // Plugin packages waiting in the download folders (and their subfolders): one press installs.
+        pluginPackages_.clear();
+        {
+            std::vector<std::string> roots{downloadDir()};
+            if (const char* home = std::getenv("HOME")) roots.push_back(std::string(home) + "/Downloads");
+            auto isPkg = [](const std::filesystem::path& f) {
+                std::string e = f.extension().string();
+                for (char& c : e) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                return e == ".pvrplugin";
+            };
+            for (size_t r = 0; r < roots.size(); ++r) {
+                if (std::find(roots.begin(), roots.begin() + static_cast<long>(r), roots[r]) != roots.begin() + static_cast<long>(r)) continue;
+                std::error_code ec;
+                for (const auto& e : std::filesystem::directory_iterator(roots[r], ec)) {
+                    std::error_code ec2;
+                    if (e.is_regular_file(ec2) && isPkg(e.path())) pluginPackages_.push_back(e.path().string());
+                    if (e.is_directory(ec2)) {
+                        for (const auto& f : std::filesystem::directory_iterator(e.path(), ec2)) {
+                            std::error_code ec3;
+                            if (f.is_regular_file(ec3) && isPkg(f.path())) pluginPackages_.push_back(f.path().string());
+                        }
+                    }
+                }
+            }
+            std::sort(pluginPackages_.begin(), pluginPackages_.end());
+            if (pluginPackages_.size() > 8) pluginPackages_.resize(8);
+        }
+        for (size_t i = 0; i < pluginPackages_.size(); ++i) {
+            const std::filesystem::path f(pluginPackages_[i]);
+            Row r{"Install " + f.filename().string(), "In " + f.parent_path().filename().string(), Action::InstallPluginPackage};
+            r.data = static_cast<int>(i);
+            rows_.push_back(r);
+        }
+        status_ = list.empty() && pluginPackages_.empty()
+                      ? "No plugins installed. Plugins are separate downloads (.pvrplugin) - put them in Downloads."
+                  : list.empty() ? "Plugin packages found in Downloads: install one below (it starts off)."
+                                 : "Plugins are separate programs. Only enable plugins you trust.";
         rows_.push_back({"Back to Controls & Input", "", Action::BackToControls});
     } else if (section_ == kPluginSection) {
         const auto& list = pluginList(plugins_);
@@ -496,6 +532,13 @@ SettingsMenu::Action SettingsMenu::activate() {
             selected_ = 0;
             refresh();
             break;
+        case Action::InstallPluginPackage: {
+            const int i = rows_[static_cast<size_t>(selected_)].data;
+            pluginPackageToInstall_ = (i >= 0 && i < static_cast<int>(pluginPackages_.size()))
+                                          ? pluginPackages_[static_cast<size_t>(i)]
+                                          : std::string();
+            break;  // the app installs it, then reopens this page with the result
+        }
         case Action::EnterButtons:
             section_ = kButtonsSection;
             selected_ = 0;

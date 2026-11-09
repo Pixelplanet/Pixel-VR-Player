@@ -1981,12 +1981,12 @@ int App::freeScreenSlot() const {
 void App::installPlugin(const std::string& file) {
     std::string message;
     const bool ok = plugins_.installPackage(file, message);
-    notice_ = message;
-    noticeUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
-    if (ok) {
-        browser_.setOpen(false);
-        settings_.openPluginsPage();  // the new plugin is listed there, still off
-    }
+    PIXELVR_LOG_INFO("Plugin install: %s", message.c_str());
+    // The result on the Plugins page (no floating text): the new plugin is listed there, still off.
+    browser_.setOpen(false);
+    settings_.openPluginsPage();
+    settings_.showStatus(message);
+    (void)ok;
 }
 
 void App::updatePlugins() {
@@ -5288,6 +5288,8 @@ int App::run() {
                                                                                                          : std::string();
                             openKeyboard("Shortcut address (e.g. 192.168.1.10:8096 or https://...)", cur, false, in,
                                          [this, idx](const std::string& t) { settings_.setShortcutUrl(idx, t); });
+                        } else if (act == SettingsMenu::Action::InstallPluginPackage) {
+                            if (!settings_.pluginPackageToInstall().empty()) installPlugin(settings_.pluginPackageToInstall());
                         } else if (act == SettingsMenu::Action::EditPluginText) {
                             openKeyboard("Plugin setting", settings_.editingPluginText(), false, in,
                                          [this](const std::string& t) { settings_.submitPluginText(t); });
