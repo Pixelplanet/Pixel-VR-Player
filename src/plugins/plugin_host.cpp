@@ -588,6 +588,8 @@ void PluginHost::reap(Plugin& p) {
     int st = 0;
     const pid_t r = waitpid(p.pid, &st, WNOHANG);
     if (r == 0 || (r < 0 && errno == EINTR)) return;
+    // The plugin is gone: stop whatever it left running in its process group (pgid = its pid).
+    kill(-p.pid, SIGKILL);
     if (p.toFd >= 0) close(p.toFd);
     if (p.fromFd >= 0) close(p.fromFd);
     p.toFd = p.fromFd = -1;
@@ -1090,6 +1092,14 @@ bool PluginHost::installPackage(const std::string& file, std::string& message) {
         }
     }
     if (found != 1) return fail("the package must contain exactly one plugin folder");
+    {
+        int top = 0;  // ... and nothing else (e.g. stripped absolute paths)
+        for (const auto& e : fs::directory_iterator(staging, ec)) {
+            (void)e;
+            ++top;
+        }
+        if (top != 1) return fail("the package must contain only the plugin folder");
+    }
     for (const auto& e : fs::recursive_directory_iterator(staging, ec)) {
         if (e.is_symlink(ec)) return fail("the package contains links");
     }

@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <cctype>
 #include <filesystem>
+#include <unistd.h>
 #include <fnmatch.h>
 #include <fstream>
 #include <iterator>
@@ -138,7 +139,7 @@ bool listFiles(const std::string& dir, std::vector<std::string>& names, std::str
     }
     std::error_code ec;
     for (const auto& e : fs::directory_iterator(dir, ec)) {
-        if (e.is_regular_file(ec)) names.push_back(e.path().filename().string());
+        if (e.symlink_status(ec).type() == fs::file_type::regular) names.push_back(e.path().filename().string());  // links are never sidecars
     }
     if (ec) err = ec.message();
     return !ec;
@@ -214,17 +215,30 @@ bool readFile(const std::string& uri, std::size_t maxBytes, std::string& out, st
         err = "unsupported location";
         return false;
     }
+    // Only an ordinary file: a link next to the video could point anywhere (e.g. at login data).
     std::error_code ec;
+    if (fs::symlink_status(uri, ec).type() != fs::file_type::regular || ec) {
+        err = "not a regular file";
+        return false;
+    }
     if (fs::file_size(uri, ec) > maxBytes || ec) {
         err = ec ? ec.message() : "file too large";
         return false;
     }
-    std::ifstream f(uri, std::ios::binary);
-    if (!f) {
+    const int fd = ::open(uri.c_str(), O_RDONLY | O_NOFOLLOW | O_CLOEXEC);  // no link swapped in meanwhile
+    if (fd < 0) {
         err = "cannot open the file";
         return false;
     }
-    out.assign(std::istreambuf_iterator<char>(f), std::istreambuf_iterator<char>());
+    out.clear();
+    char buf[65536];
+    ssize_t n;
+    while ((n = ::read(fd, buf, sizeof buf)) > 0 && out.size() <= maxBytes) out.append(buf, static_cast<size_t>(n));
+    ::close(fd);
+    if (out.size() > maxBytes) {
+        err = "file too large";
+        return false;
+    }
     return true;
 }
 

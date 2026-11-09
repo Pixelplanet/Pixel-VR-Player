@@ -7,6 +7,8 @@
 #include <sys/wait.h>
 #include <unistd.h>
 
+#include <algorithm>
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
@@ -49,6 +51,7 @@ std::string fetch(const std::string& url, std::string* body, FILE* file) {
     } else {
         curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, toFile);
         curl_easy_setopt(c, CURLOPT_WRITEDATA, file);
+        curl_easy_setopt(c, CURLOPT_MAXFILESIZE_LARGE, static_cast<curl_off_t>(64) << 20);  // plugins are small
     }
     const CURLcode rc = curl_easy_perform(c);
     curl_easy_cleanup(c);
@@ -116,7 +119,15 @@ void PluginRepo::refresh(bool force) {
                     // Only packages from GitHub, with a checksum.
                     const bool trusted = e.url.rfind("https://github.com/", 0) == 0 ||
                                          e.url.rfind("https://raw.githubusercontent.com/", 0) == 0;
-                    if (!e.id.empty() && !e.version.empty() && e.sha256.size() == 64 && trusted) list.push_back(e);
+                    // id / version become a file name: plain characters only.
+                    auto plain = [](const std::string& v) {
+                        return !v.empty() && v.size() <= 96 && v[0] != '.' &&
+                               std::all_of(v.begin(), v.end(), [](char c) {
+                                   return std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '-' || c == '_';
+                               });
+                    };
+                    const bool hex = std::all_of(e.sha256.begin(), e.sha256.end(), [](char c) { return std::isxdigit(static_cast<unsigned char>(c)); });
+                    if (plain(e.id) && plain(e.version) && e.sha256.size() == 64 && hex && trusted) list.push_back(e);
                 }
             }
         }

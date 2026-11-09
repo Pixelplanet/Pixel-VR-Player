@@ -43,7 +43,10 @@ inline Script parse(const std::string& text) {
         const pvrjson::Value* at = a.get("at");
         const pvrjson::Value* pos = a.get("pos");
         if (!at || !pos || at->type != pvrjson::Value::Type::Number || pos->type != pvrjson::Value::Type::Number) continue;
-        if (at->number < 0.0) continue;
+        // Finite, not negative, within ~4 months (1e10 ms): "1e999" parses as infinity and would turn
+        // positions into NaN on the device.
+        if (!std::isfinite(at->number) || !std::isfinite(pos->number) || at->number < 0.0 || at->number > 1e10) continue;
+        if (s.actions.size() >= 4000000) break;  // far beyond any real script; bounds the memory
         double p = std::clamp(pos->number, 0.0, 100.0);
         if (inverted) p = 100.0 - p;
         s.actions.push_back({at->number, p});
