@@ -93,7 +93,9 @@ int main() {
     };
     auto report = [&]() -> std::string {
         const pvrplugin::MediaClock* c = screens.focus();
-        if (!c || c->fileName.empty()) return std::string();  // nothing, or a private (vault) video: ping only
+        // Nothing, a private (vault) video, or no position from the player yet (it would read 0:00 and make
+        // sync apps jump): ping only.
+        if (!c || c->fileName.empty() || c->clock == 0) return std::string();
         return "{\"path\":" + pvrjson::quote(c->fileName) + ",\"duration\":" + pvrplugin::num(c->duration) +
                ",\"currentTime\":" + pvrplugin::num(c->now()) + ",\"playbackSpeed\":" + pvrplugin::num(c->rate) +
                ",\"playerState\":" + (c->playing ? "0" : "1") + "}";
