@@ -6257,29 +6257,55 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 out[3] = played ? alpha * 0.45f : alpha;
             };
             if (heatStyle_ == 1) {
-                // Smooth line graph: Catmull-Rom through the bins, a soft filled area under a bright line.
+                // Line graph: a Catmull-Rom curve through the bins, drawn as a continuous line of
+                // overlapping round dots (more of them where it is steep, so there are no steps), its
+                // colour changing smoothly with the intensity, over a faint fill.
                 auto bin = [&](int i) {
                     return std::clamp(transportHeat_[static_cast<size_t>(std::clamp(i, 0, n - 1))], 0.0f, 1.0f);
                 };
-                const int samples = std::min(n * 2, 320);
-                const float sw = 2.0f * trackHalfW / static_cast<float>(samples);
-                for (int k = 0; k < samples; ++k) {
-                    const float u = (static_cast<float>(k) + 0.5f) / static_cast<float>(samples) * static_cast<float>(n) - 0.5f;
+                auto curve = [&](float u) {  // u in bins
                     const int i = static_cast<int>(std::floor(u));
                     const float f = u - static_cast<float>(i);
                     const float p0 = bin(i - 1), p1 = bin(i), p2 = bin(i + 1), p3 = bin(i + 2);
-                    const float t = std::clamp(
-                        0.5f * (2.0f * p1 + (p2 - p0) * f + (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * f * f +
-                                (3.0f * p1 - p0 - 3.0f * p2 + p3) * f * f * f),
-                        0.0f, 1.0f);
-                    const float x = -trackHalfW + sw * (static_cast<float>(k) + 0.5f);
-                    const bool played = x < playedX;
-                    const float top = 0.0030f + 0.0190f * t;
-                    float area[4], line[4];
-                    heatColour(t, played, 0.30f, area);
-                    heatColour(t, played, 0.98f, line);
-                    drawUiElement(vpPanel, x, baseY + 0.5f * top, 0.5f * sw + 0.0002f, 0.5f * top, UiShape::FlatBox, area, 0.0f);
-                    drawUiElement(vpPanel, x, baseY + top, 0.5f * sw + 0.0004f, 0.0011f, UiShape::RoundedBox, line, 1.0f);
+                    return std::clamp(0.5f * (2.0f * p1 + (p2 - p0) * f + (2.0f * p0 - 5.0f * p1 + 4.0f * p2 - p3) * f * f +
+                                              (3.0f * p1 - p0 - 3.0f * p2 + p3) * f * f * f),
+                                      0.0f, 1.0f);
+                };
+                const float graphH = 0.0215f;  // full intensity above the baseline
+                const float r = 0.00135f;      // line half-thickness
+                const int fills = std::min(n, 240);
+                const float fw = 2.0f * trackHalfW / static_cast<float>(fills);
+                for (int k = 0; k < fills; ++k) {  // faint fill under the line
+                    const float u = (static_cast<float>(k) + 0.5f) / static_cast<float>(fills) * static_cast<float>(n) - 0.5f;
+                    const float t = curve(u);
+                    const float x = -trackHalfW + fw * (static_cast<float>(k) + 0.5f);
+                    float area[4];
+                    heatColour(t, x < playedX, 0.16f, area);
+                    const float h = graphH * t + 0.0006f;
+                    drawUiElement(vpPanel, x, baseY + 0.5f * h, 0.5f * fw + 0.0003f, 0.5f * h, UiShape::FlatBox, area, 0.0f);
+                }
+                // The line: step along the curve so neighbouring dots overlap by about half.
+                const float spanX = 2.0f * trackHalfW;
+                float prevX = -trackHalfW, prevY = baseY + graphH * curve(-0.5f);
+                int dots = 0;
+                const int maxDots = 1400;
+                const int coarse = std::min(n * 3, 480);
+                for (int k = 1; k <= coarse && dots < maxDots; ++k) {
+                    const float u0 = (static_cast<float>(k) / static_cast<float>(coarse)) * static_cast<float>(n) - 0.5f;
+                    const float x1 = -trackHalfW + spanX * static_cast<float>(k) / static_cast<float>(coarse);
+                    const float y1 = baseY + graphH * curve(u0);
+                    const float len = std::hypot(x1 - prevX, y1 - prevY);
+                    const int steps = std::max(1, static_cast<int>(std::ceil(len / (r * 0.9f))));
+                    for (int j = 1; j <= steps && dots < maxDots; ++j, ++dots) {
+                        const float f = static_cast<float>(j) / static_cast<float>(steps);
+                        const float x = prevX + (x1 - prevX) * f;
+                        const float y = prevY + (y1 - prevY) * f;
+                        float col[4];
+                        heatColour((y - baseY) / graphH, x < playedX, 0.95f, col);
+                        drawUiElement(vpPanel, x, y, r, r, UiShape::RoundedBox, col, 1.0f);
+                    }
+                    prevX = x1;
+                    prevY = y1;
                 }
             }
             for (int i = 0; i < n && heatStyle_ != 1; ++i) {
