@@ -212,7 +212,8 @@ int main() {
                     if (bp.connected()) {
                         bp.startScanning();
                         scanUntil = pvrplugin::monoMs() + 10000;
-                        io.notice("Scanning for devices for 10 s");
+                        io.notice("Scanning for devices for 10 s: switch them on / into pairing mode now");
+                        nextStatus = 0;  // show "Scanning" at once
                     } else {
                         io.notice("Not connected to Intiface");
                     }
@@ -268,6 +269,9 @@ int main() {
         if (scanUntil && now > scanUntil) {
             bp.stopScanning();
             scanUntil = 0;
+            const size_t n = bp.devices().size();
+            io.notice("Scan finished: " + std::to_string(n) + (n == 1 ? " device" : " devices") + " connected");
+            lastStatus.clear();  // the status line drops "Scanning"
         }
 
         // Follow the screen being heard.
@@ -377,6 +381,7 @@ int main() {
             s += !cfg.useIntiface ? "  |  Intiface off"
                  : bp.connected() ? "  |  Intiface: " + std::to_string(n) + (n == 1 ? " device" : " devices")
                  : "  |  Intiface not connected" + (connError.empty() ? std::string() : " (" + connError + ")");
+            if (scanUntil) s += "  |  Scanning for devices (" + std::to_string(std::max(0LL, (scanUntil - now + 999) / 1000)) + " s)";
             if (s != lastStatus) {
                 lastStatus = s;
                 io.status(s, script.ok() && (!bp.connected() || n == 0) ? "warn" : "ok");

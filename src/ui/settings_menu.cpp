@@ -357,11 +357,25 @@ void SettingsMenu::refresh() {
             std::sort(pluginPackages_.begin(), pluginPackages_.end());
             if (pluginPackages_.size() > 8) pluginPackages_.resize(8);
         }
-        for (size_t i = 0; i < pluginPackages_.size(); ++i) {
-            const std::filesystem::path f(pluginPackages_[i]);
-            Row r{"Install " + f.filename().string(), "In " + f.parent_path().filename().string(), Action::InstallPluginPackage};
-            r.data = static_cast<int>(i);
-            rows_.push_back(r);
+        {
+            std::vector<std::string> offered;
+            for (const std::string& file : pluginPackages_) {
+                PluginHost::PackageInfo info;
+                if (!plugins_ || !plugins_->probePackage(file, info)) continue;  // not a readable package
+                const PluginHost::Plugin* have = nullptr;
+                for (const auto& pl : list) {
+                    if (pl.id == info.id) have = &pl;
+                }
+                if (have && PluginHost::compareVersions(info.version, have->version) <= 0) continue;  // installed
+                const std::filesystem::path f(file);
+                Row r{have ? "Update " + info.name + " " + have->version + " to " + info.version
+                           : "Install " + info.name + " " + info.version,
+                      "From " + f.parent_path().filename().string(), Action::InstallPluginPackage};
+                r.data = static_cast<int>(offered.size());
+                offered.push_back(file);
+                rows_.push_back(r);
+            }
+            pluginPackages_ = std::move(offered);
         }
         if (!list.empty()) {
             rows_.push_back({"Timeline graph", heatStyle_ % 2 ? "Line" : "Bars", Action::CycleHeatStyle});
@@ -378,43 +392,40 @@ void SettingsMenu::refresh() {
             return;
         }
         const PluginHost::Plugin& p = list[static_cast<size_t>(pluginIdx_)];
-        title_ = "Settings > Plugins > " + p.name;
+        title_ = "Settings > Plugins > " + p.name + (p.version.empty() ? "" : " " + p.version);
         status_ = p.status + (p.description.empty() ? "" : "  |  " + p.description);
+        std::vector<Row> lines;
         if (!p.manifestError.empty()) {
-            rows_.push_back({"Cannot run: " + p.manifestError, "", Action::None, false});
+            lines.push_back({"Cannot run: " + p.manifestError, "", Action::None, false});
         } else {
-            toggle("Enabled", p.enabled, Action::TogglePluginEnabled);
+            Row en{"Enabled", p.enabled ? "On" : "Off", Action::TogglePluginEnabled};
+            lines.push_back(en);
             for (size_t si = 0; si < p.settings.size(); ++si) {
-                const PluginHost::Setting& s = p.settings[si];
-                const std::string value = plugins_->settingValueLabel(pluginIdx_, static_cast<int>(si));
-                Row r{s.label, value, s.type == "text" ? Action::EditPluginText : Action::PluginSetting};
+                const PluginHost::Setting& st = p.settings[si];
+                std::string value = plugins_->settingValueLabel(pluginIdx_, static_cast<int>(si));
+                if (st.type == "action") value = p.enabled ? "Press to run" : "Turn the plugin on first";
+                Row r{st.label, value, st.type == "text" ? Action::EditPluginText : Action::PluginSetting,
+                      st.type != "action" || p.enabled};
                 r.data = static_cast<int>(si);
-                const auto it = p.values.find(s.key);
-                const int cur = std::atoi((it == p.values.end() ? s.def : it->second).c_str());
-                if (s.type == "toggle") {
-                    r.kind = Kind::Toggle;
-                    r.stepIdx = value == "On" ? 1 : 0;
-                } else if (s.type == "choice") {
-                    r.kind = Kind::Choice;
-                    r.steps = static_cast<int>(s.options.size());
-                    r.stepIdx = cur;
-                } else if (s.type == "segmented") {
-                    r.kind = Kind::Segmented;
-                    r.steps = static_cast<int>(s.options.size());
-                    r.stepIdx = cur;
-                    r.options = s.options;
-                }
-                rows_.push_back(r);
+                lines.push_back(r);  // plain lines: a press cycles the value / runs the action / edits the text
             }
             if (VaultManager::instance().isUnlocked() && p.hasPermission("playback")) {
-                toggle("Use with vault videos", p.vaultGrant, Action::PluginVaultGrant);
+                lines.push_back({"Use with vault videos", p.vaultGrant ? "On" : "Off", Action::PluginVaultGrant});
             }
-            rows_.push_back({"Restart", p.pid > 0 ? "" : "not running", Action::PluginRestart, p.pid > 0});
+            lines.push_back({"Restart plugin", p.pid > 0 ? "" : "not running", Action::PluginRestart, p.pid > 0});
         }
         std::string perms;
         for (const std::string& perm : p.permissions) perms += (perms.empty() ? "" : ", ") + perm;
-        rows_.push_back({"Permissions", perms.empty() ? "none" : perms, Action::None, false});
+        lines.push_back({"Permissions", perms.empty() ? "none" : perms, Action::None, false});
+        constexpr int kPerPage = 11;  // + "Back to Plugins" = the 12 compact lines
+        pluginPages_ = std::max(1, (static_cast<int>(lines.size()) + kPerPage - 1) / kPerPage);
+        pluginPage_ = std::clamp(pluginPage_, 0, pluginPages_ - 1);
+        for (int i = pluginPage_ * kPerPage; i < std::min(static_cast<int>(lines.size()), (pluginPage_ + 1) * kPerPage); ++i) {
+            rows_.push_back(lines[static_cast<size_t>(i)]);
+        }
         rows_.push_back({"Back to Plugins", "", Action::BackToPlugins});
+        if (!pluginNotice_.empty() && std::chrono::steady_clock::now() < pluginNoticeUntil_) status_ = pluginNotice_;
+        else if (pluginPages_ > 1) status_ = "Page " + std::to_string(pluginPage_ + 1) + " of " + std::to_string(pluginPages_) + ": " + status_;
     } else if (section_ == 4) {
         title_ = "Settings > Vault & Privacy";
         toggle("Auto-Lock on Headset Removal", VaultManager::instance().autoLockHeadsetOff(),
@@ -831,6 +842,7 @@ SettingsMenu::Action SettingsMenu::activate() {
             break;
         case Action::OpenPlugin:
             pluginIdx_ = rows_[static_cast<size_t>(selected_)].data;
+            pluginPage_ = 0;
             section_ = kPluginSection;
             selected_ = 0;
             refresh();
@@ -941,6 +953,15 @@ void SettingsMenu::setControlsInfo(std::vector<std::pair<std::string, std::strin
 }
 
 bool SettingsMenu::turnButtonsPage(int delta, bool wrap) {
+    if (section_ == kPluginSection && pluginPages_ > 1 && delta != 0) {
+        int page = pluginPage_ + delta;
+        if (wrap) page = ((page % pluginPages_) + pluginPages_) % pluginPages_;
+        else if (page < 0 || page >= pluginPages_) return false;
+        pluginPage_ = page;
+        selected_ = 0;
+        refresh();
+        return true;
+    }
     if (!showingButtons() || delta == 0) return false;
     const int n = buttonsPages();
     int page = section_ - kButtonsSection + delta;
@@ -1068,6 +1089,12 @@ void SettingsMenu::shortcutEdit(int idx) {
     refresh();
 }
 
+void SettingsMenu::showPluginNotice(const std::string& n) {
+    pluginNotice_ = n;
+    pluginNoticeUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(6);
+    if (open_ && (section_ == kPluginsSection || section_ == kPluginSection)) refresh();
+}
+
 void SettingsMenu::pluginToggle(int i) {
     if (!plugins_ || i < 0 || i >= static_cast<int>(plugins_->plugins().size())) return;
     plugins_->setEnabled(i, !plugins_->plugins()[static_cast<size_t>(i)].enabled);
@@ -1077,6 +1104,7 @@ void SettingsMenu::pluginToggle(int i) {
 void SettingsMenu::pluginEdit(int i) {
     if (!plugins_ || i < 0 || i >= static_cast<int>(plugins_->plugins().size())) return;
     pluginIdx_ = i;
+    pluginPage_ = 0;
     pluginRemoveArmed_ = -1;
     section_ = kPluginSection;
     selected_ = 0;

@@ -2051,8 +2051,9 @@ void App::updatePlugins() {
     const auto now = std::chrono::steady_clock::now();
     std::string n;
     while (plugins_.takeNotice(n)) {
-        notice_ = n;
-        noticeUntil_ = now + std::chrono::seconds(4);
+        // On the plugin pages' status line, and above the control panel (no floating text).
+        settings_.showPluginNotice(n);
+        if (!(settings_.isOpen() && settings_.onPluginPage())) renderer_.setDockHint(n, 5.0f);
     }
     static std::chrono::steady_clock::time_point nextPageRefresh{};
     if (settings_.isOpen() && settings_.onPluginPage() && now >= nextPageRefresh) {
@@ -4367,8 +4368,9 @@ int App::run() {
                     lastControlsReadT_ = nowT;
                 }
                 buttonsPageShown_ = shown;
-                renderer_.setSettingsPager(shown ? settings_.buttonsPage() : -1,
-                                           shown ? settings_.buttonsPages() : 0);
+                const bool plugPager = settings_.isOpen() && settings_.pluginPages() > 1;
+                renderer_.setSettingsPager(shown ? settings_.buttonsPage() : (plugPager ? settings_.pluginPage() : -1),
+                                           shown ? settings_.buttonsPages() : (plugPager ? settings_.pluginPages() : 0));
                 renderer_.setSettingsStatusWarn(shown && controlsWarn_);
             }
             // Settings panel overlay

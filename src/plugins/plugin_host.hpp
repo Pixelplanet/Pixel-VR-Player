@@ -106,6 +106,14 @@ public:
     bool installPackage(const std::string& file, std::string& message);
     // Stops the plugin (as on install) and deletes its folder.
     bool uninstall(int idx, std::string& message);
+    // Reads a package's plugin.json (id, name, version) without installing it; cached per file.
+    struct PackageInfo {
+        std::string id, name, version;
+        long long size = 0, mtime = 0;
+    };
+    bool probePackage(const std::string& file, PackageInfo& out);
+    // Dotted version compare: <0 a older, 0 same, >0 a newer.
+    static int compareVersions(const std::string& a, const std::string& b);
 
     std::vector<Plugin>& plugins() { return plugins_; }
     const std::vector<Plugin>& plugins() const { return plugins_; }
@@ -191,6 +199,7 @@ private:
     std::string settingsJson(const Plugin& p) const;
 
     std::vector<Plugin> plugins_;
+    std::map<std::string, PackageInfo> packageCache_;
     std::vector<ScreenTrack> tracks_;
     PluginAppSnapshot app_;
     bool appKnown_ = false;

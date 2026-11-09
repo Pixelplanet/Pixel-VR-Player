@@ -1127,6 +1127,60 @@ bool PluginHost::installPackage(const std::string& file, std::string& message) {
     return true;
 }
 
+bool PluginHost::probePackage(const std::string& file, PackageInfo& out) {
+    std::error_code ec;
+    const long long size = static_cast<long long>(fs::file_size(file, ec));
+    if (ec) return false;
+    const long long mtime = static_cast<long long>(fs::last_write_time(file, ec).time_since_epoch().count());
+    auto it = packageCache_.find(file);
+    if (it != packageCache_.end() && it->second.size == size && it->second.mtime == mtime) {
+        out = it->second;
+        return !out.id.empty();
+    }
+    PackageInfo info;
+    info.size = size;
+    info.mtime = mtime;
+    char tmpl[] = "/tmp/pvrprobe.XXXXXX";
+    if (mkdtemp(tmpl)) {
+        const std::string staging = tmpl;
+        std::vector<std::string> argStore = {"tar", "-xzf", file, "-C", staging, "--no-same-owner", "--wildcards", "*/plugin.json"};
+        std::vector<char*> argv;
+        for (auto& a : argStore) argv.push_back(a.data());
+        argv.push_back(nullptr);
+        pid_t pid = 0;
+        if (posix_spawnp(&pid, "tar", nullptr, nullptr, argv.data(), environ) == 0) {
+            int st = 0;
+            waitpid(pid, &st, 0);
+            for (const auto& e : fs::directory_iterator(staging, ec)) {
+                if (!e.is_directory()) continue;
+                Plugin probe;
+                loadManifest(e.path().string(), probe);  // (the binary is not unpacked: only the fields matter)
+                info.id = probe.id;
+                info.name = probe.name;
+                info.version = probe.version;
+                break;
+            }
+        }
+        fs::remove_all(staging, ec);
+    }
+    packageCache_[file] = info;
+    out = info;
+    return !info.id.empty();
+}
+
+int PluginHost::compareVersions(const std::string& a, const std::string& b) {
+    size_t i = 0, j = 0;
+    while (i < a.size() || j < b.size()) {
+        long long x = 0, y = 0;
+        while (i < a.size() && a[i] != '.') x = x * 10 + (std::isdigit(static_cast<unsigned char>(a[i])) ? a[i] - '0' : 0), ++i;
+        while (j < b.size() && b[j] != '.') y = y * 10 + (std::isdigit(static_cast<unsigned char>(b[j])) ? b[j] - '0' : 0), ++j;
+        if (x != y) return x < y ? -1 : 1;
+        ++i;
+        ++j;
+    }
+    return 0;
+}
+
 bool PluginHost::uninstall(int idx, std::string& message) {
     if (idx < 0 || idx >= static_cast<int>(plugins_.size())) return false;
     Plugin& p = plugins_[static_cast<size_t>(idx)];

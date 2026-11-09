@@ -1,7 +1,7 @@
 {
   "id": "org.pixelvr.deovr-remote",
   "name": "DeoVR-compatible sync",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "api": 1,
   "description": "Lets sync apps that follow DeoVR (MultiFunPlayer, FunFlixDroid, ScriptPlayer, XBVR) follow Pixel VR Player over your network. Reports the file name and position of the screen you hear.",
   "author": "Pixel VR Player",

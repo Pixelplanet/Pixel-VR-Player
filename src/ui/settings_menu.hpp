@@ -195,7 +195,12 @@ public:
     void shortcutEdit(int idx);           // the shortcut's own page (name, address, ...)
     void tickShortcuts();                 // per frame: an unconfirmed Delete times out
     // Dense line lists: the shortcut list and the plugin list.
-    bool compactPage() const { return section_ == 22 || section_ == kPluginsSection; }
+    bool compactPage() const { return section_ == 22 || section_ == kPluginsSection || section_ == kPluginSection; }
+    // A plugin's page turns pages with the header pager when its lines do not fit.
+    int pluginPage() const { return section_ == kPluginSection ? pluginPage_ : -1; }
+    int pluginPages() const { return section_ == kPluginSection ? pluginPages_ : 0; }
+    // A plugin's message (e.g. a device scan): on the plugin pages' status line for a few seconds.
+    void showPluginNotice(const std::string& s);
     // Plugin list lines (index into the installed plugins): switch, Edit, Remove (asks once more).
     void pluginToggle(int i);
     void pluginEdit(int i);
@@ -317,6 +322,9 @@ private:
     std::string pluginPackageToInstall_;
     int heatStyle_ = 0;
     int pluginRemoveArmed_ = -1;
+    int pluginPage_ = 0, pluginPages_ = 1;
+    std::string pluginNotice_;
+    std::chrono::steady_clock::time_point pluginNoticeUntil_{};
     std::chrono::steady_clock::time_point pluginRemoveUntil_{};              // plugin shown on the detail page (kPluginSection)
     int editingPluginSetting_ = -1;
     bool open_ = false;
