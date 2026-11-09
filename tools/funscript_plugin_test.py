@@ -160,6 +160,21 @@ def main():
     # (A command for the old position may still be on its way when the seek is sent.)
     check(any(c[2]["Vectors"][0]["Duration"] == 500 for c in after[:2]), "seek: soft start again")
 
+    # Scrubbing: many seeks in a row (dragging the timeline) must not flood the devices.
+    mark = len(server.commands())
+    for k in range(10):
+        clock.update(pos=12.0 + k * 0.7, at=now_ms(), playing=True)
+        state("seek")
+        time.sleep(0.06)
+    during = server.commands()[mark:]
+    moving = [c for c in during if c[1] in ("LinearCmd", "ScalarCmd", "RotateCmd")]
+    check(len(moving) <= 3, "scrubbing: devices held still (%d commands in 0.6 s)" % len(moving))
+    check(any(c[1] == "StopAllDevices" for c in during), "scrubbing: devices stopped")
+    mark = len(server.commands())
+    play(1.0)
+    after = [c for c in server.commands()[mark:] if c[1] == "LinearCmd"]
+    check(after and after[0][2]["Vectors"][0]["Duration"] == 500, "after scrubbing: glides back in (soft start)")
+
     def stops_within(fn, ms):
         mark = len(server.commands())
         t0 = now_ms()

@@ -101,6 +101,7 @@ int main() {
     bool folderTried = false;
     // Device drive state.
     bool active = false;
+    long long holdUntil = 0;  // after a seek while playing: devices held still until then
     double lastT = -1.0;
     long long lastLoop = 0, softUntil = 0, nextVibe = 0, lastVibeSent = 0;
     size_t sentFor = SIZE_MAX;
@@ -275,9 +276,19 @@ int main() {
             const double rate = c->rate > 0.0 ? c->rate : 1.0;
             const double t = c->now() * 1000.0 + cfg.offsetMs * rate;
             const bool jumped = lastT < 0.0 || std::fabs((t - lastT) - static_cast<double>(now - lastLoop) * rate) > 300.0;
+            const bool wasRunning = lastT >= 0.0;
             lastT = t;
             lastLoop = now;
-            if (!active || jumped) {
+            if (jumped && wasRunning) {
+                // A seek while playing (scrubbing sends many in a row): hold the devices still until the
+                // position settles, then glide back in. Without this every seek restarted the soft start,
+                // commands flooded in and everything ran at 100 %.
+                holdUntil = now + 400;
+                if (active) bp.stopAll();
+                active = false;
+            }
+            const bool held = now < holdUntil;
+            if (!held && (!active || jumped)) {
                 // Soft start: glide to where the script will be in half a second.
                 active = true;
                 softUntil = now + 500;
@@ -288,7 +299,7 @@ int main() {
                 }
                 lastSentPos = target;
             }
-            if (now >= softUntil) {
+            if (!held && now >= softUntil) {
                 const size_t k = funscript::nextIndex(script, t);
                 if (k < script.actions.size() && k != sentFor) {
                     double dur = (script.actions[k].at - t) / rate;
@@ -303,7 +314,7 @@ int main() {
                     lastSentPos = target;
                 }
             }
-            if (now >= nextVibe) {
+            if (!held && now >= nextVibe) {
                 nextVibe = now + 100;  // vibrators and rotators: at most 10 updates per second
                 double v = cfg.vibeByPosition ? mapPos(funscript::positionAt(script, t)) / 100.0
                                               : std::clamp(funscript::speedBetween(script, t - 250.0, t + 250.0) / 400.0, 0.0, 1.0);

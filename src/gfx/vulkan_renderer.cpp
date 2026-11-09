@@ -6239,27 +6239,29 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 drawUiElement(vpPanel, cx, trackY, 0.0022f, trackHalfH * 1.5f, UiShape::RoundedBox, gapCol, 0.0f);
             }
         }
-        // Plugin heat strip (e.g. funscript intensity) just above the track:
-        // blue = calm, yellow = busy, red = intense; runs of similar bins merge.
+        // Plugin heat (e.g. funscript intensity) as a small graph just above the track: one rounded
+        // bar per bin, taller and warmer the more intense (teal -> amber -> red), the part already
+        // played dimmed, on a faint baseline.
         if (!transportHeat_.empty() && transportLive_ == 0) {
             const int n = static_cast<int>(transportHeat_.size());
             const float binW = 2.0f * trackHalfW / static_cast<float>(n);
-            for (int i = 0; i < n;) {
+            const float baseY = trackY + 0.011f;
+            const float baseLine[4] = {1.0f, 1.0f, 1.0f, 0.07f};
+            drawUiElement(vpPanel, 0.0f, baseY, trackHalfW, 0.0008f, UiShape::RoundedBox, baseLine, 1.0f);
+            const float playedX = -trackHalfW + 2.0f * trackHalfW * std::clamp(transportProgress_, 0.0f, 1.0f);
+            for (int i = 0; i < n; ++i) {
                 const float h = transportHeat_[static_cast<size_t>(i)];
-                int j = i + 1;
-                while (j < n && std::fabs(transportHeat_[static_cast<size_t>(j)] - h) < 0.04f) ++j;
-                if (h >= 0.0f) {
-                    const float t = std::clamp(h, 0.0f, 1.0f);
-                    const float lo = std::min(t * 2.0f, 1.0f);
-                    const float hi = std::max(t * 2.0f - 1.0f, 0.0f);
-                    const float col[4] = {0.15f + 0.83f * lo - 0.03f * hi, 0.45f + 0.40f * lo - 0.65f * hi,
-                                          0.95f - 0.75f * lo - 0.05f * hi, 0.92f};
-                    const float x0 = -trackHalfW + binW * static_cast<float>(i);
-                    const float x1 = -trackHalfW + binW * static_cast<float>(j);
-                    drawUiElement(vpPanel, 0.5f * (x0 + x1), trackY + 0.019f, 0.5f * (x1 - x0), 0.0035f,
-                                  UiShape::RoundedBox, col, 0.0f);
-                }
-                i = j;
+                if (h < 0.0f) continue;
+                const float t = std::clamp(h, 0.0f, 1.0f);
+                // Gradient: teal (calm) -> amber -> red (intense).
+                const float a = std::min(t * 2.0f, 1.0f), b = std::max(t * 2.0f - 1.0f, 0.0f);
+                const float x = -trackHalfW + binW * (static_cast<float>(i) + 0.5f);
+                const bool played = x < playedX;
+                const float col[4] = {0.18f + 0.82f * a, 0.80f - 0.08f * a - 0.42f * b, 0.85f - 0.65f * a + 0.18f * b,
+                                      played ? 0.42f : 0.95f};
+                const float halfH = 0.5f * (0.0035f + 0.0185f * t);
+                drawUiElement(vpPanel, x, baseY + halfH, std::max(binW * 0.36f, 0.0008f), halfH, UiShape::RoundedBox, col,
+                              1.0f);
             }
         }
         // The scrub bubble grows a second line for the hovered chapter's title.
