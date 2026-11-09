@@ -114,8 +114,23 @@ void PluginRepo::refresh(bool force) {
             if (const pvrjson::Value* arr = root.get("plugins")) {
                 for (const auto& p : arr->array) {
                     Entry e{p.getString("id"), p.getString("name"), p.getString("version"), p.getString("description"),
-                            p.getString("url"), p.getString("sha256"), p.getString("minApp"),
-                            static_cast<long long>(p.getNumber("size"))};
+                            p.getString("url"), p.getString("sha256"), p.getString("minApp")};
+                    e.size = static_cast<long long>(p.getNumber("size"));
+                    e.summary = p.getString("summary");
+                    auto lines = [](const pvrjson::Value* a) {
+                        std::vector<std::string> out;
+                        if (a) {
+                            for (const auto& v : a->array) {
+                                if (v.type == pvrjson::Value::Type::String) out.push_back(v.str.substr(0, 400));
+                            }
+                        }
+                        return out;
+                    };
+                    e.about = lines(p.get("about"));
+                    e.howto = lines(p.get("howto"));
+                    if (const pvrjson::Value* cl = p.get("changelog")) {
+                        for (const auto& kv : cl->object) e.changelog.push_back({kv.first, lines(&kv.second)});
+                    }
                     // Only packages from GitHub, with a checksum.
                     const bool trusted = e.url.rfind("https://github.com/", 0) == 0 ||
                                          e.url.rfind("https://raw.githubusercontent.com/", 0) == 0;

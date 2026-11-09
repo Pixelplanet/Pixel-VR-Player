@@ -19,6 +19,9 @@ public:
 
     struct Entry {
         std::string id, name, version, description, url, sha256, minApp;
+        std::string summary;                                       // one line for the install list
+        std::vector<std::string> about, howto;                     // paragraphs for the details page
+        std::vector<std::pair<std::string, std::vector<std::string>>> changelog;  // version -> changes, newest first
         long long size = 0;
     };
 

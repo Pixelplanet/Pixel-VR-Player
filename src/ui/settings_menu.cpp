@@ -327,6 +327,11 @@ void SettingsMenu::refresh() {
                   list[i].enabled || !list[i].manifestError.empty() ? list[i].status : std::string("Off"), Action::OpenPlugin};
             r.kind = Kind::PluginLine;
             r.data = static_cast<int>(i);
+            if (repo_) {
+                for (const auto& e : repo_->entries()) {
+                    if (e.id == list[i].id && PluginHost::compareVersions(e.version, list[i].version) > 0) r.options = {"update"};
+                }
+            }
             r.stepIdx = list[i].enabled ? 1 : 0;
             r.steps = pluginRemoveArmed_ == static_cast<int>(i) ? 1 : 0;
             rows_.push_back(r);
@@ -381,36 +386,103 @@ void SettingsMenu::refresh() {
             }
             pluginPackages_ = std::move(offered);
         }
-        // The plugin repository: what is not installed yet, and newer versions.
-        repoRows_.clear();
+        if (repo_) repo_->refresh();  // for the update icons and the Install plugins page
+        status_ = list.empty() && pluginPackages_.empty()
+                      ? "No plugins yet: press Install plugins (top right) to add some."
+                  : list.empty() ? "Plugin files found in Downloads: install one below, or press Install plugins."
+                                 : "Switch plugins on and off here. Install plugins (top right) adds more.";
+    } else if (section_ == kStoreSection) {
+        title_ = "Settings > Plugins > Install plugins";
+        const auto& list = pluginList(plugins_);
+        int shown = 0;
         if (repo_) {
             repo_->refresh();
             const auto entries = repo_->entries();
             for (size_t ei = 0; ei < entries.size(); ++ei) {
                 const PluginRepo::Entry& e = entries[ei];
-                const PluginHost::Plugin* have = nullptr;
-                for (const auto& pl : list) {
-                    if (pl.id == e.id) have = &pl;
-                }
-                if (have && PluginHost::compareVersions(e.version, have->version) <= 0) continue;
-                if (std::find(offeredIds.begin(), offeredIds.end(), e.id + "@" + e.version) != offeredIds.end()) continue;  // already offered from Downloads
-                const bool busy = repo_->downloading(e.id);
-                Row r{have ? "Update " + e.name + " " + have->version + " to " + e.version : "Install " + e.name + " " + e.version,
-                      busy ? std::string("Downloading...") : (e.description.empty() ? std::string("Plugin repository") : e.description),
-                      Action::InstallRepoPlugin, !busy};
-                r.data = static_cast<int>(repoRows_.size());
-                repoRows_.push_back(static_cast<int>(ei));
+                bool have = false;
+                for (const auto& pl : list) have = have || pl.id == e.id;
+                if (have) continue;  // installed ones are on the Plugins page (updates: the green arrow)
+                Row r{e.name, repo_->downloading(e.id) ? std::string("Downloading...") : (e.summary.empty() ? e.description : e.summary),
+                      Action::OpenStorePlugin};
+                r.data = static_cast<int>(ei);
                 rows_.push_back(r);
+                ++shown;
             }
-            if (!repo_->state().empty() && entries.empty()) rows_.push_back({repo_->state(), "", Action::None, false});
+            status_ = !repo_->state().empty() && entries.empty() ? repo_->state()
+                      : shown == 0 ? "You have every plugin from the plugin repository."
+                                   : "Pick a plugin to see what it does and install it. New plugins start switched off.";
+        } else {
+            status_ = "The plugin repository is not available in this build.";
         }
-        if (!list.empty()) {
-            rows_.push_back({"Timeline graph", heatStyle_ % 2 ? "Line" : "Bars", Action::CycleHeatStyle});
+        rows_.push_back({"Back to Plugins", "", Action::BackToPlugins});
+    } else if (section_ == kStoreItemSection) {
+        const auto& list = pluginList(plugins_);
+        const PluginRepo::Entry* e = nullptr;
+        std::vector<PluginRepo::Entry> entries = repo_ ? repo_->entries() : std::vector<PluginRepo::Entry>{};
+        int ei = -1;
+        for (size_t i = 0; i < entries.size(); ++i) {
+            if (entries[i].id == storeId_) e = &entries[i], ei = static_cast<int>(i);
         }
-        status_ = list.empty() && pluginPackages_.empty()
-                      ? "No plugins installed. Plugins are separate downloads (.pvrplugin) - put them in Downloads."
-                  : list.empty() ? "Plugin packages found in Downloads: install one below (it starts off)."
-                                 : "Plugins are separate programs. Only enable plugins you trust.";
+        if (!e) {
+            section_ = kPluginsSection;
+            refresh();
+            return;
+        }
+        const PluginHost::Plugin* have = nullptr;
+        for (const auto& pl : list) {
+            if (pl.id == e->id) have = &pl;
+        }
+        // Long texts wrap into lines of ~72 characters.
+        auto wrapped = [&](const std::string& text, std::vector<std::string>& out) {
+            std::string line, word;
+            auto flush = [&] {
+                if (!line.empty()) out.push_back(line);
+                line.clear();
+            };
+            for (size_t i = 0; i <= text.size(); ++i) {
+                const char ch = i < text.size() ? text[i] : ' ';
+                if (ch != ' ') {
+                    word += ch;
+                    continue;
+                }
+                if (word.empty()) continue;
+                if (line.size() + word.size() + 1 > 72) flush();
+                line += (line.empty() ? "" : " ") + word;
+                word.clear();
+            }
+            flush();
+        };
+        std::vector<std::string> text;
+        if (storeUpdate_ && have) {
+            title_ = "Settings > Plugins > Update " + e->name;
+            status_ = "Version " + have->version + " is installed; " + e->version + " is available.";
+            for (const auto& ch : e->changelog) {
+                if (PluginHost::compareVersions(ch.first, have->version) <= 0) continue;
+                text.push_back("What's new in " + ch.first + ":");
+                for (const std::string& l : ch.second) wrapped("- " + l, text);
+            }
+            if (text.empty()) text.push_back("No change notes were published for this update.");
+        } else {
+            title_ = "Settings > Plugins > Install plugins > " + e->name;
+            status_ = e->name + " " + e->version + (e->summary.empty() ? "" : "  |  " + e->summary);
+            for (const std::string& l : e->about) wrapped(l, text);
+            if (!e->howto.empty()) {
+                text.push_back("How to use it:");
+                for (const std::string& l : e->howto) wrapped("- " + l, text);
+            }
+            if (text.empty()) wrapped(e->description, text);
+        }
+        const int maxText = 10;  // + the action + Back = the 12 compact lines
+        for (int i = 0; i < static_cast<int>(text.size()) && i < maxText; ++i) {
+            rows_.push_back({text[static_cast<size_t>(i)], "", Action::None, false});
+        }
+        const bool busy = repo_->downloading(e->id);
+        Row act{busy ? "Downloading..." : (storeUpdate_ && have ? "Update now to " + e->version : "Install " + e->name),
+                "", Action::InstallRepoPlugin, !busy};
+        act.data = ei;
+        rows_.push_back(act);
+        rows_.push_back({storeUpdate_ ? "Back to Plugins" : "Back to Install plugins", "", storeUpdate_ ? Action::BackToPlugins : Action::OpenStore});
     } else if (section_ == kPluginSection) {
         const auto& list = pluginList(plugins_);
         if (pluginIdx_ < 0 || pluginIdx_ >= static_cast<int>(list.size())) {
@@ -573,10 +645,23 @@ SettingsMenu::Action SettingsMenu::activate() {
             saveConfig();
             refresh();
             break;
-        case Action::InstallRepoPlugin: {
-            const int i = rows_[static_cast<size_t>(selected_)].data;
-            repoEntryToInstall_ = (i >= 0 && i < static_cast<int>(repoRows_.size())) ? repoRows_[static_cast<size_t>(i)] : -1;
+        case Action::InstallRepoPlugin:
+            repoEntryToInstall_ = rows_[static_cast<size_t>(selected_)].data;  // index into the repository entries
             break;  // the app downloads and installs it
+        case Action::OpenStore:
+            openPluginStore();
+            break;
+        case Action::OpenStorePlugin: {
+            const int i = rows_[static_cast<size_t>(selected_)].data;
+            const auto entries = repo_ ? repo_->entries() : std::vector<PluginRepo::Entry>{};
+            if (i >= 0 && i < static_cast<int>(entries.size())) {
+                storeId_ = entries[static_cast<size_t>(i)].id;
+                storeUpdate_ = false;
+                section_ = kStoreItemSection;
+                selected_ = 0;
+                refresh();
+            }
+            break;
         }
         case Action::InstallPluginPackage: {
             const int i = rows_[static_cast<size_t>(selected_)].data;
@@ -1125,6 +1210,22 @@ void SettingsMenu::showPluginNotice(const std::string& n) {
     pluginNotice_ = n;
     pluginNoticeUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(6);
     if (open_ && (section_ == kPluginsSection || section_ == kPluginSection)) refresh();
+}
+
+void SettingsMenu::openPluginStore() {
+    section_ = kStoreSection;
+    selected_ = 0;
+    if (repo_) repo_->refresh(true);
+    refresh();
+}
+
+void SettingsMenu::openPluginUpdate(int i) {
+    if (!plugins_ || i < 0 || i >= static_cast<int>(plugins_->plugins().size())) return;
+    storeId_ = plugins_->plugins()[static_cast<size_t>(i)].id;
+    storeUpdate_ = true;
+    section_ = kStoreItemSection;
+    selected_ = 0;
+    refresh();
 }
 
 void SettingsMenu::pluginToggle(int i) {

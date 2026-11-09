@@ -4403,6 +4403,7 @@ int App::run() {
                 }
                 renderer_.setSettingsSection(settings_.section());
                 renderer_.setSettingsCompact(settings_.compactPage());
+                renderer_.setSettingsHeaderButton(settings_.headerButton());
                 renderer_.setSettings(true, settings_.title(), sRows,
                                       settings_.selected(), settings_.status());
                 settingsOpen = true;
@@ -5232,6 +5233,11 @@ int App::run() {
                     renderer_.setSettingsSelected(hovered);
                     settings_.setSelected(hovered);
                 }
+                if (in.select && renderer_.settingsHeaderButtonHovered()) {  // "Install plugins"
+                    settings_.openPluginStore();
+                    xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.02f, 0.0f, 0.4f);
+                    in.select = in.togglePlay = false;
+                }
                 // Shortcut list: a held trigger on a line's handle drags it; the drop point
                 // follows the laser and the list (= rail) order changes on release.
                 settings_.tickShortcuts();
@@ -5261,6 +5267,7 @@ int App::run() {
                     const int idx = setRows[static_cast<size_t>(hovered)].data;
                     switch (renderer_.settingsSegmentHovered()) {
                         case 1: settings_.pluginToggle(idx); break;
+                        case 4: settings_.openPluginUpdate(idx); break;  // the green update icon
                         case 3:
                             if (settings_.pluginRemoveArmed(idx)) {
                                 std::string message;

@@ -149,7 +149,7 @@ def main():
     check(vib and all(0.0 < s["Scalar"] <= 1.0 for _, _, f in vib for s in f["Scalars"]), "vibrator follows the speed")
     check(any(c[1] == "RotateCmd" for c in server.commands()[start_cmds:]), "rotator driven")
     gauges = [m["value"] for _, m in messages("ui.gauge") if m.get("value", -1) >= 0]
-    check(gauges and min(gauges) < 0.1 and max(gauges) > 0.9, "gauge swings with the script (virtual device)")
+    check(not gauges, "no gauge shown (the debug gauge was removed in 0.2.4)")
 
     # Seek to 10 s: a new soft start.
     mark = len(server.commands())

@@ -575,6 +575,7 @@ public:
         AudioFollow = 39,   // speaker with an arrow: audio follows the selection
         FlatBox = 40,       // rounded box in its flat colours (no top light, no rim light)
         HideDock = 41,      // chevron down onto a bar: hide the player controls
+        UpArrow = 42,       // arrow up: an update is available
         GlassPanel = 25, // rounded box with bevel + eye-dependent reflection sheen
     };
 
@@ -759,6 +760,9 @@ public:
     }
     // Pager arrow under the pointer: 0 = previous page, 1 = next page, -1 none.
     int settingsPagerHovered() const { return settingsPagerHovered_; }
+    // A button in the settings header (e.g. "Install plugins"); "" hides it.
+    void setSettingsHeaderButton(const std::string& label) { settingsHeaderButton_ = label; }
+    bool settingsHeaderButtonHovered() const { return settingsHeaderHovered_; }
     // The status line is a warning (drawn in the warning colour).
     void setSettingsStatusWarn(bool warn) { settingsStatusWarn_ = warn; }
 
@@ -1313,6 +1317,8 @@ private:
     int settingsPage_ = -1;
     int settingsPages_ = 0;
     int settingsPagerHovered_ = -1;
+    std::string settingsHeaderButton_;
+    bool settingsHeaderHovered_ = false;
     bool settingsStatusWarn_ = false;
     // Row count the card layout is sized for: paged settings keep the dense
     // layout on a short last page, so cards don't change size when paging.

@@ -523,6 +523,7 @@ inline UiRect shortcutZone(const SettingsCard& L, int z, bool noHandle = false) 
     switch (z) {
         case 0: return {left + 0.032f, L.cy, noHandle ? 0.0f : 0.028f, noHandle ? 0.0f : L.halfH};
         case 1: return {left + (noHandle ? 0.056f : 0.104f), L.cy, 0.036f, L.halfH};
+        case 4: return {right - 0.272f, L.cy, 0.024f, 0.024f};  // plugin lines: the update icon
         case 2: return {right - 0.178f, L.cy, 0.060f, L.halfH - 0.007f};
         default: return {right - 0.062f, L.cy, 0.052f, L.halfH - 0.007f};
     }
@@ -2815,6 +2816,7 @@ void VulkanRenderer::updatePointer() {
     browserSidebarHovered_ = -1;
     browserPageBtnHovered_ = -1;
     settingsPagerHovered_ = -1;
+    settingsHeaderHovered_ = false;
     settingsHovered_ = -1;
     settingsRow_ = -1;
     settingsSegmentHovered_ = -1;
@@ -3139,6 +3141,11 @@ void VulkanRenderer::updatePointer() {
                     }
                 }
             } else if (settingsVisible_) {
+                if (!settingsHeaderButton_.empty() && settingsPages_ <= 1 &&
+                    UiRect{0.64f, hub::kHeaderY, 0.13f, 0.028f}.contains(hx, hyy, hub::kHitPad)) {
+                    settingsHeaderHovered_ = true;
+                    break;
+                }
                 if (settingsPages_ > 1) {  // header pager (same spots as the file browser's)
                     for (int id : {0, 1}) {
                         if (hub::headerButton(id).contains(hx, hyy, hub::kHitPad)) {
@@ -3160,7 +3167,8 @@ void VulkanRenderer::updatePointer() {
                         const SettingsRowVis& row = settingsRows_[static_cast<std::size_t>(i)];
                         if (row.kind == kSettingsKindShortcut || row.kind == kSettingsKindPluginLine) {
                             const bool noHandle = row.kind == kSettingsKindPluginLine;
-                            for (int z = noHandle ? 1 : 0; z < 4; ++z) {
+                            const bool upd = noHandle && !row.options.empty() && row.options[0] == "update";
+                            for (int z = noHandle ? 1 : 0; z < (upd ? 5 : 4); ++z) {
                                 if (hub::shortcutZone(L, z, noHandle).contains(hx, hyy, 0.002f)) settingsSegmentHovered_ = z;
                             }
                         }
@@ -6669,7 +6677,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         if (activeMainTab == 1) {
             activeSubTab = downloadsFilter_;
         } else if (activeMainTab == 2) {
-            activeSubTab = (settingsSection_ >= 10 && settingsSection_ <= 12) ? 2 : ((settingsSection_ == 21 || settingsSection_ == 22) ? 1 : (settingsSection_ >= 23 && settingsSection_ < 30) ? 3 : (settingsSection_ == 15 || settingsSection_ == 16) ? 4 : settingsSection_ == 4 ? 5 : settingsSection_);
+            activeSubTab = (settingsSection_ >= 10 && settingsSection_ <= 12) ? 2 : ((settingsSection_ == 21 || settingsSection_ == 22) ? 1 : (settingsSection_ >= 23 && settingsSection_ < 30) ? 3 : (settingsSection_ == 15 || settingsSection_ == 16 || settingsSection_ == 18 || settingsSection_ == 19) ? 4 : settingsSection_ == 4 ? 5 : settingsSection_);
         }
         const float subActBg[4] = {0.85f, 0.90f, 1.00f, 0.14f};
         const float slateIconCol[4] = {
@@ -7504,6 +7512,15 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                                       on ? switchOnTrack : switchOffTrack, 1.0f);
                         drawUiElement(vpPanel, t.cx + (on ? 0.0155f : -0.0155f), t.cy, 0.0115f, 0.0115f,
                                       UiShape::RoundedBox, on ? knobOn : switchOffKnob, 1.0f);
+                        if (noHandle && !lr.options.empty() && lr.options[0] == "update") {
+                            // Update available: a green circle with an arrow up.
+                            const UiRect u = hub::shortcutZone(hc, 4, true);
+                            const float green[4] = {0.20f, 0.72f, 0.38f, seg == 4 ? 1.0f : 0.92f};
+                            const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+                            if (seg == 4) drawGlow(vpPanel, u.cx, u.cy, u.hw, u.hh, 0.010f, green, 1.0f);
+                            drawUiElement(vpPanel, u.cx, u.cy, u.hw, u.hh, UiShape::RoundedBox, green, 1.0f);
+                            drawUiElement(vpPanel, u.cx, u.cy, u.hw * 0.55f, u.hh * 0.55f, UiShape::UpArrow, white);
+                        }
                         const float delArmed[4] = {0.72f, 0.20f, 0.20f, 0.95f};
                         for (int z = 2; z <= 3; ++z) {
                             const UiRect bz = hub::shortcutZone(hc, z, noHandle);
@@ -7641,7 +7658,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             drawRailText();
             const char* setSubLabels[6] = {"Display & Cinema", "UI & Appearance", "Audio & Tracks",
                                            "Controls & Input", "Plugins", "Vault & Privacy"};
-            const int effSec = (settingsSection_ >= 10 && settingsSection_ <= 12) ? 2 : ((settingsSection_ == 21 || settingsSection_ == 22) ? 1 : (settingsSection_ >= 23 && settingsSection_ < 30) ? 3 : (settingsSection_ == 15 || settingsSection_ == 16) ? 4 : settingsSection_ == 4 ? 5 : settingsSection_);
+            const int effSec = (settingsSection_ >= 10 && settingsSection_ <= 12) ? 2 : ((settingsSection_ == 21 || settingsSection_ == 22) ? 1 : (settingsSection_ >= 23 && settingsSection_ < 30) ? 3 : (settingsSection_ == 15 || settingsSection_ == 16 || settingsSection_ == 18 || settingsSection_ == 19) ? 4 : settingsSection_ == 4 ? 5 : settingsSection_);
             const int sCount = vaultUnlocked_ ? 6 : 5;
             for (int sub = 0; sub < sCount; ++sub) {
                 drawFit(-0.84f, hub::subY(setSubY[sub]), 0.30f, scSub * 0.92f,
@@ -7652,6 +7669,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             if (pager) {
                 drawFitCentered(0.63f, 0.455f, 0.14f, scSub, themeTextCol,
                                 std::to_string(settingsPage_ + 1) + " / " + std::to_string(settingsPages_));
+            } else if (!settingsHeaderButton_.empty()) {
+                drawFitCentered(0.64f, 0.455f, 0.24f, scSub, settingsHeaderHovered_ ? themeAccentCol : themeTextCol,
+                                "+  " + settingsHeaderButton_);
             } else {
                 drawFitCentered(0.64f, 0.455f, 0.41f, scDetail, slateCol,
                                 std::string("PixelVR ") + PIXELVR_VERSION_STRING + " \xB7 Steam Frame");
@@ -7678,7 +7698,11 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         const float left = hc.cx - hc.halfW;
                         if (lr.kind == kSettingsKindPluginLine) {
                             withHeadingFont([&] { drawFit(left + hub::kPluginNameX, hc.cy, 0.34f, sc, lc, lr.label); });
-                            drawFit(left + hub::kShortcutUrlX, hc.cy, 0.50f, sc * 0.90f, slateCol, lr.value);
+                            const bool updHov = !lr.options.empty() && lr.options[0] == "update" && r == settingsHovered_ &&
+                                                settingsSegmentHovered_ == 4;
+                            const float greenText[4] = {0.45f, 0.92f, 0.58f, 1.0f};
+                            drawFit(left + hub::kShortcutUrlX, hc.cy, 0.42f, sc * 0.90f, updHov ? greenText : slateCol,
+                                    updHov ? std::string("Update available - press to see what's new") : lr.value);
                             const UiRect e = hub::shortcutZone(hc, 2, true);
                             drawFitCentered(e.cx, e.cy, e.hw * 2.0f - 0.012f, sc * 0.88f, themeTextCol, "Edit");
                             const UiRect d = hub::shortcutZone(hc, 3, true);

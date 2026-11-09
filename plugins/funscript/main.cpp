@@ -403,16 +403,10 @@ int main() {
             }
         }
 
-        // Gauge: the script position, device or not (the blind-test "virtual device").
-        if (now >= nextGauge) {
-            nextGauge = now + 50;
-            if (c && script.ok()) {
-                io.gauge("Script", mapPos(funscript::positionAt(script, c->now() * 1000.0 + cfg.offsetMs)) / 100.0);
-                gaugeShown = true;
-            } else if (gaugeShown) {
-                io.gauge("", -1.0);
-                gaugeShown = false;
-            }
+        (void)nextGauge;  // (the debug "Script" gauge is gone)
+        if (gaugeShown) {
+            io.gauge("", -1.0);
+            gaugeShown = false;
         }
         if (now >= nextStatus) {
             nextStatus = now + 500;

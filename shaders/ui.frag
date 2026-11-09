@@ -332,6 +332,11 @@ void main() {
         float c2 = sdSegment(p, vec2(0.0, -0.02), vec2(0.36, 0.30)) - 0.075;
         float bar = sdRoundedBox(p - vec2(0.0, -0.36), vec2(0.42, 0.065), 0.05);
         d = min(min(c1, c2), bar);
+    } else if (shape == 42) {
+        // Shape 42: Update available (an arrow pointing up)
+        float shaft = sdRoundedBox(p - vec2(0.0, -0.16), vec2(0.10, 0.40), 0.05);
+        float head = sdTriangle(p - vec2(0.0, 0.18), vec2(-0.40, -0.26), vec2(0.40, -0.26), vec2(0.0, 0.36)) - 0.03;
+        d = min(shaft, head);
     } else {
         d = sdRoundedBox(p, vec2(1.0), 0.0);
     }

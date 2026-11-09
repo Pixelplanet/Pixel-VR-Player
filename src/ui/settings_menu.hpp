@@ -91,6 +91,8 @@ public:
         BackToControls,
         InstallPluginPackage,
         InstallRepoPlugin,  // from the plugin repository; the app downloads repoEntryToInstall()
+        OpenStore,          // the Install plugins page
+        OpenStorePlugin,    // one repository plugin's details
         CycleHeatStyle,  // plugins' timeline graph: bars / line  // a .pvrplugin found in Downloads; the app installs pluginPackageToInstall()
     };
 
@@ -197,7 +199,10 @@ public:
     void shortcutEdit(int idx);           // the shortcut's own page (name, address, ...)
     void tickShortcuts();                 // per frame: an unconfirmed Delete times out
     // Dense line lists: the shortcut list and the plugin list.
-    bool compactPage() const { return section_ == 22 || section_ == kPluginsSection || section_ == kPluginSection; }
+    bool compactPage() const {
+        return section_ == 22 || section_ == kPluginsSection || section_ == kPluginSection || section_ == kStoreSection ||
+               section_ == kStoreItemSection;
+    }
     // A plugin's page turns pages with the header pager when its lines do not fit.
     int pluginPage() const { return section_ == kPluginSection ? pluginPage_ : -1; }
     int pluginPages() const { return section_ == kPluginSection ? pluginPages_ : 0; }
@@ -304,10 +309,16 @@ public:
     void setPluginRepo(PluginRepo* repo) { repo_ = repo; }
     // The repository entry the last InstallRepoPlugin row points at (index into repo entries).
     int repoEntryToInstall() const { return repoEntryToInstall_; }
-    bool onPluginPage() const { return section_ == kPluginsSection || section_ == kPluginSection; }  // live status: refresh now and then
+    bool onPluginPage() const {
+        return section_ == kPluginsSection || section_ == kPluginSection || section_ == kStoreSection || section_ == kStoreItemSection;
+    }  // live status: refresh now and then
     // The package the last InstallPluginPackage row points at; a message for the page's status line.
     const std::string& pluginPackageToInstall() const { return pluginPackageToInstall_; }
-    int heatStyle() const { return heatStyle_; }  // 0 = bars, 1 = line
+    int heatStyle() const { return 1; }  // always the line graph
+    // The Plugins page header button ("Install plugins"); "" = none.
+    std::string headerButton() const { return section_ == kPluginsSection && repo_ ? "Install plugins" : std::string(); }
+    void openPluginStore();               // the header button
+    void openPluginUpdate(int pluginIdx);  // the green update icon on a plugin line
     void showStatus(const std::string& s) { status_ = s; }
     void openPluginsPage() {  // after installing a plugin
         section_ = kPluginsSection;
@@ -331,6 +342,8 @@ private:
     int heatStyle_ = 0;
     int pluginRemoveArmed_ = -1;
     int pluginPage_ = 0, pluginPages_ = 1;
+    std::string storeId_;      // the repository plugin shown on the details page
+    bool storeUpdate_ = false;  // details page in update mode (changelog)
     std::string pluginNotice_;
     std::chrono::steady_clock::time_point pluginNoticeUntil_{};
     std::chrono::steady_clock::time_point pluginRemoveUntil_{};              // plugin shown on the detail page (kPluginSection)
@@ -351,6 +364,8 @@ private:
 
     static constexpr int kPluginsSection = 15;  // Controls & Input > Plugins (list)
     static constexpr int kPluginSection = 16;   // one plugin's page
+    static constexpr int kStoreSection = 18;    // Install plugins (from the repository)
+    static constexpr int kStoreItemSection = 19;  // one repository plugin: about, how to use, install / update
     static constexpr int kButtonsSection = 23;  // 23.. one section per Buttons page
     static constexpr int kButtonsPerPage = 10;  // all bindings; the header pager turns pages
     std::vector<std::pair<std::string, std::string>> controlsInfo_;  // (action label, bound buttons)
