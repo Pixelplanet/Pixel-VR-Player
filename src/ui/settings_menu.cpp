@@ -331,6 +331,7 @@ void SettingsMenu::refresh() {
             r.steps = pluginRemoveArmed_ == static_cast<int>(i) ? 1 : 0;
             rows_.push_back(r);
         }
+        std::vector<std::string> offeredIds;  // id@version offered from Downloads
         // Plugin packages waiting in the download folders (and their subfolders): one press installs.
         pluginPackages_.clear();
         {
@@ -360,6 +361,7 @@ void SettingsMenu::refresh() {
         }
         {
             std::vector<std::string> offered;
+            offeredIds.clear();
             for (const std::string& file : pluginPackages_) {
                 PluginHost::PackageInfo info;
                 if (!plugins_ || !plugins_->probePackage(file, info)) continue;  // not a readable package
@@ -374,6 +376,7 @@ void SettingsMenu::refresh() {
                       "From " + f.parent_path().filename().string(), Action::InstallPluginPackage};
                 r.data = static_cast<int>(offered.size());
                 offered.push_back(file);
+                offeredIds.push_back(info.id + "@" + info.version);
                 rows_.push_back(r);
             }
             pluginPackages_ = std::move(offered);
@@ -390,6 +393,7 @@ void SettingsMenu::refresh() {
                     if (pl.id == e.id) have = &pl;
                 }
                 if (have && PluginHost::compareVersions(e.version, have->version) <= 0) continue;
+                if (std::find(offeredIds.begin(), offeredIds.end(), e.id + "@" + e.version) != offeredIds.end()) continue;  // already offered from Downloads
                 const bool busy = repo_->downloading(e.id);
                 Row r{have ? "Update " + e.name + " " + have->version + " to " + e.version : "Install " + e.name + " " + e.version,
                       busy ? std::string("Downloading...") : (e.description.empty() ? std::string("Plugin repository") : e.description),
