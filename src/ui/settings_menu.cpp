@@ -318,20 +318,16 @@ void SettingsMenu::refresh() {
         choice("Rumble Strength", hoverHapticsStrengthStr(), kHoverHapticsStrengthCount,
                hoverHapticsStrengthIdx_ % kHoverHapticsStrengthCount,
                Action::CycleHoverHapticsStrength, hoverHapticsEnabled_);
-        if (plugins_) {
-            int on = 0;
-            for (const auto& p : plugins_->plugins()) on += p.enabled ? 1 : 0;
-            const size_t n = plugins_->plugins().size();
-            rows_.push_back({"Plugins", n == 0 ? std::string("None installed") : std::to_string(on) + " of " + std::to_string(n) + " on",
-                             Action::EnterPlugins});
-        }
     } else if (section_ == kPluginsSection) {
-        title_ = "Settings > Controls & Input > Plugins";
+        title_ = "Settings > Plugins";
         const auto& list = pluginList(plugins_);
         for (size_t i = 0; i < list.size(); ++i) {
             Row r{list[i].name + (list[i].version.empty() ? "" : " " + list[i].version),
                   list[i].enabled || !list[i].manifestError.empty() ? list[i].status : std::string("Off"), Action::OpenPlugin};
+            r.kind = Kind::PluginLine;
             r.data = static_cast<int>(i);
+            r.stepIdx = list[i].enabled ? 1 : 0;
+            r.steps = pluginRemoveArmed_ == static_cast<int>(i) ? 1 : 0;
             rows_.push_back(r);
         }
         // Plugin packages waiting in the download folders (and their subfolders): one press installs.
@@ -368,13 +364,12 @@ void SettingsMenu::refresh() {
             rows_.push_back(r);
         }
         if (!list.empty()) {
-            segmented("Timeline Graph", {"Bars", "Line"}, heatStyle_ % 2, Action::CycleHeatStyle);
+            rows_.push_back({"Timeline graph", heatStyle_ % 2 ? "Line" : "Bars", Action::CycleHeatStyle});
         }
         status_ = list.empty() && pluginPackages_.empty()
                       ? "No plugins installed. Plugins are separate downloads (.pvrplugin) - put them in Downloads."
                   : list.empty() ? "Plugin packages found in Downloads: install one below (it starts off)."
                                  : "Plugins are separate programs. Only enable plugins you trust.";
-        rows_.push_back({"Back to Controls & Input", "", Action::BackToControls});
     } else if (section_ == kPluginSection) {
         const auto& list = pluginList(plugins_);
         if (pluginIdx_ < 0 || pluginIdx_ >= static_cast<int>(list.size())) {
@@ -1071,6 +1066,39 @@ void SettingsMenu::shortcutEdit(int idx) {
     section_ = 17;
     selected_ = 0;
     refresh();
+}
+
+void SettingsMenu::pluginToggle(int i) {
+    if (!plugins_ || i < 0 || i >= static_cast<int>(plugins_->plugins().size())) return;
+    plugins_->setEnabled(i, !plugins_->plugins()[static_cast<size_t>(i)].enabled);
+    refresh();
+}
+
+void SettingsMenu::pluginEdit(int i) {
+    if (!plugins_ || i < 0 || i >= static_cast<int>(plugins_->plugins().size())) return;
+    pluginIdx_ = i;
+    pluginRemoveArmed_ = -1;
+    section_ = kPluginSection;
+    selected_ = 0;
+    refresh();
+}
+
+bool SettingsMenu::pluginRemoveArmed(int i) {
+    if (pluginRemoveArmed_ == i && std::chrono::steady_clock::now() < pluginRemoveUntil_) {
+        pluginRemoveArmed_ = -1;
+        return true;
+    }
+    pluginRemoveArmed_ = i;
+    pluginRemoveUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(4);
+    refresh();
+    return false;
+}
+
+void SettingsMenu::tickPlugins() {
+    if (pluginRemoveArmed_ >= 0 && std::chrono::steady_clock::now() >= pluginRemoveUntil_) {
+        pluginRemoveArmed_ = -1;
+        if (section_ == kPluginsSection) refresh();
+    }
 }
 
 void SettingsMenu::tickShortcuts() {

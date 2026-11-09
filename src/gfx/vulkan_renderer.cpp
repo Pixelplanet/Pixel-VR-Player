@@ -366,7 +366,8 @@ inline float subHalfH(float resting) { return resting * std::min(1.0f, railSubSq
 // Rail hover ids: 0..2 the fixed tabs, 3..8 section tabs, 9 lock, 10.. shortcuts.
 constexpr int kShortcutHoverBase = 10;
 inline int mainTabHoverId(int s) { return s < kFixedTabCount ? s : kShortcutHoverBase + (s - kFixedTabCount); }
-constexpr float kSettingsSubY[5] = {-0.01f, -0.10f, -0.19f, -0.28f, -0.37f};
+// Display, UI, Audio, Controls, Plugins, Vault (when unlocked).
+constexpr float kSettingsSubY[6] = {-0.01f, -0.088f, -0.166f, -0.244f, -0.322f, -0.400f};
 constexpr float kDownloadsSubY[3] = {-0.05f, -0.14f, -0.23f};
 constexpr float kFilesSubY[6] = {-0.04f, -0.11f, -0.18f, -0.25f, -0.32f, -0.39f};
 constexpr float kHitPad = 0.004f;  // laser targets are slightly larger than drawn
@@ -379,7 +380,7 @@ inline UiRect subTab(int page, int sub) {
     return {kRailCx, subY(kFilesSubY[sub]), kRailItemHalfW, subHalfH(0.032f)};
 }
 inline UiRect lockVaultButton(int page) {
-    return {kRailCx, subY(page == 2 ? -0.46f : -0.47f), kRailItemHalfW, subHalfH(0.030f)};
+    return {kRailCx, subY(page == 2 ? -0.478f : -0.47f), kRailItemHalfW, subHalfH(0.030f)};
 }
 
 // File browser header: 0 = prev page, 1 = next page, 2 = view mode,
@@ -516,16 +517,18 @@ inline int settingsMaxVisible(int total, bool compact = false) { return compact 
 // Segment `s` of `n` inside a settings control well (segmented choices).
 // A shortcut line (list pages): 0 = grab handle (drag to reorder), 1 = on / off switch,
 // 2 = Edit, 3 = Delete. Name and address sit between the switch and Edit.
-inline UiRect shortcutZone(const SettingsCard& L, int z) {
+// Plugin lines (noHandle) have no grab handle: the switch moves to the left edge.
+inline UiRect shortcutZone(const SettingsCard& L, int z, bool noHandle = false) {
     const float left = L.cx - L.halfW, right = L.cx + L.halfW;
     switch (z) {
-        case 0: return {left + 0.032f, L.cy, 0.028f, L.halfH};
-        case 1: return {left + 0.104f, L.cy, 0.036f, L.halfH};
+        case 0: return {left + 0.032f, L.cy, noHandle ? 0.0f : 0.028f, noHandle ? 0.0f : L.halfH};
+        case 1: return {left + (noHandle ? 0.056f : 0.104f), L.cy, 0.036f, L.halfH};
         case 2: return {right - 0.178f, L.cy, 0.060f, L.halfH - 0.007f};
         default: return {right - 0.062f, L.cy, 0.052f, L.halfH - 0.007f};
     }
 }
 constexpr float kShortcutNameX = 0.160f;  // from the line's left edge
+constexpr float kPluginNameX = 0.112f;
 constexpr float kShortcutUrlX = 0.480f;
 inline UiRect settingsSegment(const SettingsCard& L, int s, int n) {
     const float left = L.cx - L.ctrlHalfW + 0.006f;
@@ -2747,7 +2750,7 @@ void VulkanRenderer::advanceListAnim(int total, int layoutN) {
     dt = std::clamp(dt, 0.0f, 0.1f);
     if (static_cast<int>(listAnimY_.size()) != total) listAnimY_.assign(static_cast<size_t>(std::max(0, total)), 0.0f);
     int lines = 0;  // shortcut lines come first
-    while (lines < total && settingsRows_[static_cast<size_t>(lines)].kind == kSettingsKindShortcut) ++lines;
+    while (lines < total && settingsRows_[static_cast<size_t>(lines)].kind == kSettingsKindShortcut) ++lines;  // (plugin lines do not move)
     auto base = [&](int r) { return hub::settingsCard(r, layoutN, true).cy; };
     if (listLandPending_) {
         // Dropped: the shortcut now sits at its new slot; start it from where it was held so it slides in.
@@ -3061,7 +3064,7 @@ void VulkanRenderer::updatePointer() {
                     }
                 }
                 if (browserSidebarHovered_ < 0) {
-                    const int numSub = (page == 1) ? 3 : (page == 2 ? (vaultUnlocked_ ? 5 : 4)
+                    const int numSub = (page == 1) ? 3 : (page == 2 ? (vaultUnlocked_ ? 6 : 5)
                                                                     : (vaultUnlocked_ ? 6 : 5));
                     for (int sub = 0; sub < numSub; ++sub) {
                         if (hub::subTab(page, sub).contains(hx, hyy, hub::kHitPad)) {
@@ -3155,9 +3158,10 @@ void VulkanRenderer::updatePointer() {
                         settingsRow_ = i;
                         settingsHovered_ = i;
                         const SettingsRowVis& row = settingsRows_[static_cast<std::size_t>(i)];
-                        if (row.kind == kSettingsKindShortcut) {
-                            for (int z = 0; z < 4; ++z) {
-                                if (hub::shortcutZone(L, z).contains(hx, hyy, 0.002f)) settingsSegmentHovered_ = z;
+                        if (row.kind == kSettingsKindShortcut || row.kind == kSettingsKindPluginLine) {
+                            const bool noHandle = row.kind == kSettingsKindPluginLine;
+                            for (int z = noHandle ? 1 : 0; z < 4; ++z) {
+                                if (hub::shortcutZone(L, z, noHandle).contains(hx, hyy, 0.002f)) settingsSegmentHovered_ = z;
                             }
                         }
                         if (row.kind == kSettingsKindSegmented && !row.options.empty()) {
@@ -6660,12 +6664,12 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         const float* fileSubY = hub::kFilesSubY;
         const bool isSet = (activeMainTab == 2);
         const bool isDl = (activeMainTab == 1);
-        const int subCount = isDl ? 3 : (isSet ? (vaultUnlocked_ ? 5 : 4) : (vaultUnlocked_ ? 6 : 5));
+        const int subCount = isDl ? 3 : (isSet ? (vaultUnlocked_ ? 6 : 5) : (vaultUnlocked_ ? 6 : 5));
         int activeSubTab = browserQuickFilter_;
         if (activeMainTab == 1) {
             activeSubTab = downloadsFilter_;
         } else if (activeMainTab == 2) {
-            activeSubTab = (settingsSection_ >= 10 && settingsSection_ <= 12) ? 2 : ((settingsSection_ == 21 || settingsSection_ == 22) ? 1 : (settingsSection_ >= 23 && settingsSection_ < 30) ? 3 : settingsSection_);
+            activeSubTab = (settingsSection_ >= 10 && settingsSection_ <= 12) ? 2 : ((settingsSection_ == 21 || settingsSection_ == 22) ? 1 : (settingsSection_ >= 23 && settingsSection_ < 30) ? 3 : (settingsSection_ == 15 || settingsSection_ == 16) ? 4 : settingsSection_ == 4 ? 5 : settingsSection_);
         }
         const float subActBg[4] = {0.85f, 0.90f, 1.00f, 0.14f};
         const float slateIconCol[4] = {
@@ -7482,15 +7486,18 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         const float* lineBord = dragged ? selBord : (lhov ? tabActiveBord : kGlassRimFaint);
                         drawUiElement(vpPanel, hc.cx, hc.cy, hw, hh, UiShape::RoundedBox, lineBg, 0.014f / hh,
                                       (lhov || dragged ? 0.0019f : 0.0012f) / hh, lineBord);
-                        if (lr.kind != kSettingsKindShortcut) return;
+                        if (lr.kind != kSettingsKindShortcut && lr.kind != kSettingsKindPluginLine) return;
+                        const bool noHandle = lr.kind == kSettingsKindPluginLine;
                         const int seg = lhov ? settingsSegmentHovered_ : -1;
-                        const UiRect g = hub::shortcutZone(hc, 0);
-                        const float* gripCol = (seg == 0 || dragged) ? themeAccentCol : switchOffKnob;
-                        for (int b = -1; b <= 1; ++b) {
-                            drawUiElement(vpPanel, g.cx, g.cy + 0.0085f * static_cast<float>(b), 0.013f, 0.0016f,
-                                          UiShape::RoundedBox, gripCol, 1.0f);
+                        if (!noHandle) {
+                            const UiRect g = hub::shortcutZone(hc, 0);
+                            const float* gripCol = (seg == 0 || dragged) ? themeAccentCol : switchOffKnob;
+                            for (int b = -1; b <= 1; ++b) {
+                                drawUiElement(vpPanel, g.cx, g.cy + 0.0085f * static_cast<float>(b), 0.013f, 0.0016f,
+                                              UiShape::RoundedBox, gripCol, 1.0f);
+                            }
                         }
-                        const UiRect t = hub::shortcutZone(hc, 1);
+                        const UiRect t = hub::shortcutZone(hc, 1, noHandle);
                         const bool on = lr.stepIdx != 0;
                         if (seg == 1) drawGlow(vpPanel, t.cx, t.cy, 0.030f, 0.0145f, 0.008f, hovGlow);
                         drawUiElement(vpPanel, t.cx, t.cy, 0.030f, 0.0145f, UiShape::RoundedBox,
@@ -7499,7 +7506,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                                       UiShape::RoundedBox, on ? knobOn : switchOffKnob, 1.0f);
                         const float delArmed[4] = {0.72f, 0.20f, 0.20f, 0.95f};
                         for (int z = 2; z <= 3; ++z) {
-                            const UiRect bz = hub::shortcutZone(hc, z);
+                            const UiRect bz = hub::shortcutZone(hc, z, noHandle);
                             const bool armed = (z == 3 && lr.steps != 0);
                             const float* bBg = armed ? delArmed : (seg == z ? glassCardHoverT.data() : kGlassVeil);
                             drawUiElement(vpPanel, bz.cx, bz.cy, bz.hw, bz.hh, UiShape::RoundedBox, bBg, 0.012f / bz.hh,
@@ -7632,10 +7639,10 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                                     textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
 
             drawRailText();
-            const char* setSubLabels[5] = {"Display & Cinema", "UI & Appearance",
-                                           "Audio & Tracks", "Controls & Input", "Vault & Privacy"};
-            const int effSec = (settingsSection_ >= 10 && settingsSection_ <= 12) ? 2 : ((settingsSection_ == 21 || settingsSection_ == 22) ? 1 : (settingsSection_ >= 23 && settingsSection_ < 30) ? 3 : settingsSection_);
-            const int sCount = vaultUnlocked_ ? 5 : 4;
+            const char* setSubLabels[6] = {"Display & Cinema", "UI & Appearance", "Audio & Tracks",
+                                           "Controls & Input", "Plugins", "Vault & Privacy"};
+            const int effSec = (settingsSection_ >= 10 && settingsSection_ <= 12) ? 2 : ((settingsSection_ == 21 || settingsSection_ == 22) ? 1 : (settingsSection_ >= 23 && settingsSection_ < 30) ? 3 : (settingsSection_ == 15 || settingsSection_ == 16) ? 4 : settingsSection_ == 4 ? 5 : settingsSection_);
+            const int sCount = vaultUnlocked_ ? 6 : 5;
             for (int sub = 0; sub < sCount; ++sub) {
                 drawFit(-0.84f, hub::subY(setSubY[sub]), 0.30f, scSub * 0.92f,
                         (effSec == sub) ? themeTextCol : slateCol, setSubLabels[sub]);
@@ -7669,7 +7676,15 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         const float sc = setCard(r).textSc;
                         const float* lc = lr.enabled ? themeTextCol : dimCol;
                         const float left = hc.cx - hc.halfW;
-                        if (lr.kind == kSettingsKindShortcut) {
+                        if (lr.kind == kSettingsKindPluginLine) {
+                            withHeadingFont([&] { drawFit(left + hub::kPluginNameX, hc.cy, 0.34f, sc, lc, lr.label); });
+                            drawFit(left + hub::kShortcutUrlX, hc.cy, 0.50f, sc * 0.90f, slateCol, lr.value);
+                            const UiRect e = hub::shortcutZone(hc, 2, true);
+                            drawFitCentered(e.cx, e.cy, e.hw * 2.0f - 0.012f, sc * 0.88f, themeTextCol, "Edit");
+                            const UiRect d = hub::shortcutZone(hc, 3, true);
+                            drawFitCentered(d.cx, d.cy, d.hw * 2.0f - 0.012f, sc * 0.88f, themeTextCol,
+                                            lr.steps != 0 ? "Sure?" : "Remove");
+                        } else if (lr.kind == kSettingsKindShortcut) {
                             withHeadingFont([&] { drawFit(left + hub::kShortcutNameX, hc.cy, 0.30f, sc, lc, lr.label); });
                             drawFit(left + hub::kShortcutUrlX, hc.cy, 0.50f, sc * 0.90f, lr.value.empty() ? dimCol : slateCol,
                                     lr.value.empty() ? std::string("Address asked on first use") : lr.value);

@@ -104,6 +104,8 @@ public:
     // folder, replacing an older version (stopped first; it restarts if it was
     // on). Never runs the plugin: a new one stays off until the user enables it.
     bool installPackage(const std::string& file, std::string& message);
+    // Stops the plugin (as on install) and deletes its folder.
+    bool uninstall(int idx, std::string& message);
 
     std::vector<Plugin>& plugins() { return plugins_; }
     const std::vector<Plugin>& plugins() const { return plugins_; }

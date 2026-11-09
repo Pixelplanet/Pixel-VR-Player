@@ -1122,8 +1122,42 @@ bool PluginHost::installPackage(const std::string& file, std::string& message) {
     bool enabled = false;
     for (const Plugin& p : plugins_) enabled = enabled || (p.id == probe.id && p.enabled);
     message = "Installed " + probe.name + " " + probe.version +
-              (enabled ? ". It restarts with the new version." : ". Turn it on under Settings > Controls & Input > Plugins.");
+              (enabled ? ". It restarts with the new version." : ". Turn it on with its switch.");
     PIXELVR_LOG_INFO("Plugin %s %s installed from %s", probe.id.c_str(), probe.version.c_str(), file.c_str());
+    return true;
+}
+
+bool PluginHost::uninstall(int idx, std::string& message) {
+    if (idx < 0 || idx >= static_cast<int>(plugins_.size())) return false;
+    Plugin& p = plugins_[static_cast<size_t>(idx)];
+    const std::string name = p.name, dir = p.dir, id = p.id;
+    p.enabled = false;
+    if (p.pid > 0) {
+        stop(p, false);  // lets it stop its devices first
+        const auto t0 = Clock::now();
+        while (p.pid > 0) {
+            flush(p);
+            readFrom(p);
+            const auto waited = Clock::now() - t0;
+            if (waited > std::chrono::seconds(2)) kill(-p.pid, SIGTERM);
+            if (waited > std::chrono::seconds(3)) {
+                kill(-p.pid, SIGKILL);
+                waitpid(p.pid, nullptr, 0);
+            }
+            reap(p);
+            std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        }
+    }
+    std::error_code ec;
+    fs::remove_all(dir, ec);
+    rescan();
+    saveConfig();
+    if (ec) {
+        message = "Could not remove " + name + ": " + ec.message();
+        return false;
+    }
+    message = "Removed " + name + ".";
+    PIXELVR_LOG_INFO("Plugin %s removed (%s)", id.c_str(), dir.c_str());
     return true;
 }
 

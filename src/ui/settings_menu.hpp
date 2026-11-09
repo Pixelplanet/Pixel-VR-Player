@@ -98,7 +98,7 @@ public:
     // option for small unordered choices (Segmented).
     // Shortcut: a line of the shortcut list (stepIdx = on the rail; steps = 1 while Delete waits
     // for its confirming second press; data = the shortcut index).
-    enum class Kind { Choice, Toggle, Action, Binding, Color, Option, Segmented, Shortcut };
+    enum class Kind { Choice, Toggle, Action, Binding, Color, Option, Segmented, Shortcut, PluginLine };
 
     struct Row {
         std::string label;
@@ -194,7 +194,13 @@ public:
     bool shortcutDelete(int idx);         // first press asks ("Sure?"), a second one within 4 s deletes
     void shortcutEdit(int idx);           // the shortcut's own page (name, address, ...)
     void tickShortcuts();                 // per frame: an unconfirmed Delete times out
-    bool compactPage() const { return section_ == 22; }  // dense cards: the shortcut list
+    // Dense line lists: the shortcut list and the plugin list.
+    bool compactPage() const { return section_ == 22 || section_ == kPluginsSection; }
+    // Plugin list lines (index into the installed plugins): switch, Edit, Remove (asks once more).
+    void pluginToggle(int i);
+    void pluginEdit(int i);
+    bool pluginRemoveArmed(int i);  // true: confirmed, the app removes it now
+    void tickPlugins();
     float screenDistance() const { return screenDistance_; }
     void setScreenDistance(float d) { screenDistance_ = d; refresh(); }
     float screenCurvature() const;
@@ -309,7 +315,9 @@ private:
     int pluginIdx_ = 0;
     std::vector<std::string> pluginPackages_;  // .pvrplugin files found in the download folders
     std::string pluginPackageToInstall_;
-    int heatStyle_ = 0;              // plugin shown on the detail page (kPluginSection)
+    int heatStyle_ = 0;
+    int pluginRemoveArmed_ = -1;
+    std::chrono::steady_clock::time_point pluginRemoveUntil_{};              // plugin shown on the detail page (kPluginSection)
     int editingPluginSetting_ = -1;
     bool open_ = false;
     std::string title_ = "Settings > Display & Cinema";

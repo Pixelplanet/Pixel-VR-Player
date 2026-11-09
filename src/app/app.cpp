@@ -4559,8 +4559,12 @@ int App::run() {
                 } else if (sbHover >= 3 && sbHover <= 8) {
                     const int sub = sbHover - 3;
                     if (settings_.isOpen()) {
-                        if (sub <= 3 || (sub == 4 && VaultManager::instance().isUnlocked())) {
+                        if (sub <= 3) {
                             settings_.setSection(sub);
+                        } else if (sub == 4) {
+                            settings_.openPluginsPage();
+                        } else if (sub == 5 && VaultManager::instance().isUnlocked()) {
+                            settings_.setSection(4);
                         }
                     } else if (downloadsWindow_) {
                         if (sub <= 2) renderer_.setDownloadsFilter(sub);
@@ -5216,6 +5220,7 @@ int App::run() {
                 // Shortcut list: a held trigger on a line's handle drags it; the drop point
                 // follows the laser and the list (= rail) order changes on release.
                 settings_.tickShortcuts();
+                settings_.tickPlugins();
                 const auto& setRows = settings_.rows();
                 auto shortcutRowAt = [&](int r) {
                     return settings_.compactPage() && r >= 0 && r < static_cast<int>(setRows.size()) &&
@@ -5236,6 +5241,24 @@ int App::run() {
                     in.select = in.togglePlay = false;  // the drag owns the trigger
                 }
                 renderer_.setSettingsDrag(shortcutDragFrom_, shortcutDragTo_);
+                if (in.select && settings_.compactPage() && hovered >= 0 && hovered < static_cast<int>(setRows.size()) &&
+                    setRows[static_cast<size_t>(hovered)].kind == SettingsMenu::Kind::PluginLine) {
+                    const int idx = setRows[static_cast<size_t>(hovered)].data;
+                    switch (renderer_.settingsSegmentHovered()) {
+                        case 1: settings_.pluginToggle(idx); break;
+                        case 3:
+                            if (settings_.pluginRemoveArmed(idx)) {
+                                std::string message;
+                                plugins_.uninstall(idx, message);
+                                settings_.openPluginsPage();
+                                settings_.showStatus(message);
+                            }
+                            break;
+                        default: settings_.pluginEdit(idx); break;  // Edit, or the name / status
+                    }
+                    xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.02f, 0.0f, 0.4f);
+                    in.select = in.togglePlay = false;
+                }
                 if (in.select && shortcutRowAt(hovered)) {
                     const int idx = setRows[static_cast<size_t>(hovered)].data;
                     switch (renderer_.settingsSegmentHovered()) {

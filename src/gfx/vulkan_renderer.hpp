@@ -727,6 +727,7 @@ public:
         std::vector<std::string> options;
     };
     static constexpr int kSettingsKindSegmented = 6;
+    static constexpr int kSettingsKindPluginLine = 8;  // a plugin list line (stepIdx: on; steps: remove armed)
     static constexpr int kSettingsKindShortcut = 7;  // a shortcut list line (stepIdx: on; steps: delete armed)
 
     // Settings overlay panel (re-uses panel & pointer interaction)
