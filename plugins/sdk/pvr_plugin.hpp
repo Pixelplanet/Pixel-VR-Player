@@ -238,7 +238,7 @@ public:
     // The screen a plugin should follow: the one heard, else the selected one,
     // else any screen with something open.
     const MediaClock* focus() const {
-        for (int want : {audio_, selected_}) {
+        for (int want : {selected_, audio_}) {  // the selected screen drives outputs (user decision)
             const auto it = clocks_.find(want);
             if (it != clocks_.end() && it->second.open()) return &it->second;
         }
