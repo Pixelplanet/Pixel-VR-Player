@@ -2455,7 +2455,7 @@ float App::screenEyeAspect(int slot) const {
     const ScreenState& sc = screens_[slot];
     if (sc.open && sc.engine.width() > 0 && sc.engine.height() > 0) {
         aspect = static_cast<float>(sc.engine.width()) / static_cast<float>(sc.engine.height());
-        if (sc.stereo == 1 && aspect >= 2.6f) aspect *= 0.5f;       // full SBS
+        if ((sc.stereo == 1 || sc.stereo == 3) && aspect >= 2.6f) aspect *= 0.5f;  // full SBS (FS3D arrives as full SBS)
         else if (sc.stereo == 2 && aspect <= 1.2f) aspect *= 2.0f;  // full TB
     }
 #else
