@@ -1,7 +1,7 @@
 {
   "id": "org.pixelvr.funscript",
   "name": "Funscript devices",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "api": 1,
   "description": "Plays the .funscript next to a video on devices connected to Intiface Central (Buttplug.io). Untested with real devices: please report results.",
   "author": "Pixel VR Player",
@@ -26,6 +26,6 @@
     { "key": "vibeMax", "type": "choice", "label": "Vibration strength", "options": ["100%", "75%", "50%", "25%"], "default": 0 },
     { "key": "invert", "type": "toggle", "label": "Invert script", "default": false },
     { "key": "scrub", "type": "segmented", "label": "While scrubbing", "options": ["Stop", "Keep running"], "default": 0 },
-    { "key": "folders", "type": "text", "label": "Script folders (; between)", "default": "~/.local/share/pixelvr/Funscripts" }
+    { "key": "folders", "type": "text", "label": "Script folders (; between)", "default": "$PIXELVR_APP_DIR/Funscripts" }
   ]
 }

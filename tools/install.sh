@@ -20,12 +20,14 @@
 # outside the install directory, so reinstalling or upgrading never loses them.
 set -eu
 
-# Everything this script prints is also appended to ~/.local/state/pixelvr/install.log (the
+# Everything this script prints is also appended to logs/install.log in the player folder (the
 # desktop icons point users there). Run from a file we re-run ourselves through
 # tee; when piped from curl the message helpers below write the log instead.
-LOG_FILE="${XDG_STATE_HOME:-$HOME/.local/state}/pixelvr/install.log"
+LOG_FILE="${PIXELVR_INSTALL_DIR:-$HOME/PixelVRPlayer}/logs/install.log"
 mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
-[ -f "$HOME/pixelvr-install.log" ] && mv -f "$HOME/pixelvr-install.log" "$LOG_FILE" 2>/dev/null || true
+for old in "$HOME/pixelvr-install.log" "$HOME/.local/state/pixelvr/install.log"; do
+    [ -f "$old" ] && [ ! -f "$LOG_FILE" ] && mv -f "$old" "$LOG_FILE" 2>/dev/null || true
+done
 if [ -z "${PIXELVR_INSTALL_LOGGING:-}" ] && [ -f "$0" ] && command -v tee >/dev/null 2>&1; then
     status_file=$(mktemp 2>/dev/null) || status_file=""
     if [ -n "$status_file" ]; then
@@ -630,9 +632,15 @@ if [ "$UNINSTALL" -eq 1 ]; then
             fi
         fi
     fi
-    rm -rf "$INSTALL_DIR"
+    if [ -d "$INSTALL_DIR/Funscripts" ] && [ -n "$(ls -A "$INSTALL_DIR/Funscripts" 2>/dev/null)" ]; then
+        # The user's scripts stay; everything else goes.
+        find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 ! -name Funscripts -exec rm -rf {} +
+        ok "removed $INSTALL_DIR (your Funscripts folder was kept)"
+    else
+        rm -rf "$INSTALL_DIR"
+        ok "removed $INSTALL_DIR"
+    fi
     rm -f "$HOME/Desktop/Update Pixel VR Player.desktop"
-    ok "removed $INSTALL_DIR"
     printf '\nSettings (%s/.config/pixelvr) and cached thumbnails were kept.\n' "$HOME"
     printf 'Delete them too with: rm -rf ~/.config/pixelvr ~/.cache/pixelvr\n'
     exit 0
@@ -809,7 +817,7 @@ write_update_icon() {
 [Desktop Entry]
 Name=Update Pixel VR Player
 Comment=Update Pixel VR Player to the latest version on Valve Steam Frame
-Exec=bash -c 'export PIXELVR_GUI=1; if [ -f "$HOME/PixelVRPlayer/update.sh" ]; then bash "$HOME/PixelVRPlayer/update.sh"; else curl -fsSL https://raw.githubusercontent.com/Pixelplanet/Pixel-VR-Player/main/tools/install.sh | bash -s -- --update; fi; rc=$?; if [ $rc -ne 0 ]; then command -v kdialog >/dev/null && kdialog --title "Pixel VR Player" --detailederror "Update failed. Details:" "$(tail -n 15 "$HOME/.local/state/pixelvr/install.log" 2>/dev/null)"; fi'
+Exec=bash -c 'export PIXELVR_GUI=1; if [ -f "$HOME/PixelVRPlayer/update.sh" ]; then bash "$HOME/PixelVRPlayer/update.sh"; else curl -fsSL https://raw.githubusercontent.com/Pixelplanet/Pixel-VR-Player/main/tools/install.sh | bash -s -- --update; fi; rc=$?; if [ $rc -ne 0 ]; then command -v kdialog >/dev/null && kdialog --title "Pixel VR Player" --detailederror "Update failed. Details:" "$(tail -n 15 "$HOME/PixelVRPlayer/logs/install.log" 2>/dev/null)"; fi'
 Icon=steam
 Terminal=true
 Type=Application
@@ -864,7 +872,7 @@ fi
 printf '\n  Launch now  : %s/run.sh\n' "$INSTALL_DIR"
 printf '  From Steam  : Library > Non-Steam > %s\n' "$APP_NAME"
 printf '  Play a clip : %s/run.sh /path/to/clip.mp4\n' "$INSTALL_DIR"
-printf '  Logs        : ~/.local/state/pixelvr/run.log\n'
+printf '  Logs        : %s/logs\n' "$INSTALL_DIR"
 printf '  1-Click Upd : %s/update.sh (or "Update Pixel VR Player" icon on Desktop)\n' "$INSTALL_DIR"
 if [ "$INSTALLED_SCRIPT" -eq 1 ]; then
     printf '  Remove      : %s/install.sh --uninstall\n\n' "$INSTALL_DIR"

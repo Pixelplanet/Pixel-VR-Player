@@ -514,6 +514,13 @@ void PluginHost::start(Plugin& p) {
     envStore.push_back("PIXELVR_PLUGIN_ID=" + p.id);
     envStore.push_back("PIXELVR_PLUGIN_DIR=" + p.dir);
     envStore.push_back("PIXELVR_PLUGIN_DATA=" + dataDir(p.id));
+    {
+        char exe[4096];
+        const ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+        const std::string self = n > 0 ? std::string(exe, static_cast<size_t>(n)) : std::string();
+        // The player's folder (e.g. ~/PixelVRPlayer): plugins keep user-visible files there.
+        if (!self.empty()) envStore.push_back("PIXELVR_APP_DIR=" + self.substr(0, self.find_last_of('/')));
+    }
     std::vector<char*> envp;
     for (std::string& e : envStore) envp.push_back(e.data());
     envp.push_back(nullptr);
@@ -1314,7 +1321,13 @@ std::string PluginHost::settingValueLabel(int idx, int si) const {
     const auto it = p.values.find(s.key);
     const std::string v = it == p.values.end() ? s.def : it->second;
     if (s.type == "toggle") return v == "1" ? "On" : "Off";
-    if (s.type == "text") return v.empty() ? "(empty)" : v;
+    if (s.type == "text") {
+        if (v.empty()) return "(empty)";
+        std::string shown = v;  // "$PIXELVR_APP_DIR/Funscripts" reads "PixelVRPlayer/Funscripts"
+        for (size_t at = shown.find("$PIXELVR_APP_DIR"); at != std::string::npos; at = shown.find("$PIXELVR_APP_DIR"))
+            shown.replace(at, 16, "PixelVRPlayer");
+        return shown;
+    }
     if (s.type == "action") return {};
     const int i = std::atoi(v.c_str());
     return (i >= 0 && i < static_cast<int>(s.options.size())) ? s.options[static_cast<size_t>(i)] : std::string();

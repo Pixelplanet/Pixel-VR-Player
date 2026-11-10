@@ -77,7 +77,13 @@ void readSettings(const pvrjson::Value* s, Settings& c) {
         for (;;) {
             const size_t semi = v->str.find(';', start);
             const std::string part = trim(v->str.substr(start, semi == std::string::npos ? std::string::npos : semi - start));
-            if (!part.empty()) c.folders.push_back(part[0] == '~' && std::getenv("HOME") ? std::getenv("HOME") + part.substr(1) : part);
+            std::string f = part;
+            // "$PIXELVR_APP_DIR/..." = inside the player's folder (the default); "~/..." = home.
+            const char* app = std::getenv("PIXELVR_APP_DIR");
+            const char* home = std::getenv("HOME");
+            if (f.rfind("$PIXELVR_APP_DIR", 0) == 0) f = std::string(app ? app : (std::string(home ? home : "") + "/PixelVRPlayer").c_str()) + f.substr(16);
+            else if (!f.empty() && f[0] == '~' && home) f = home + f.substr(1);
+            if (!f.empty()) c.folders.push_back(f);
             if (semi == std::string::npos) break;
             start = semi + 1;
         }
@@ -204,14 +210,17 @@ int main() {
             const std::string type = m.getString("type");
             if (type == "hello") {
                 readSettings(m.get("settings"), cfg);
-                if (const char* home = std::getenv("HOME")) {  // the default script folder, ready to fill
-                    const std::string def = std::string(home) + "/.local/share/pixelvr/Funscripts";
-                    const std::string old = std::string(home) + "/Funscripts";  // where 0.2.5 kept it
+                if (const char* app = std::getenv("PIXELVR_APP_DIR")) {  // the default script folder, ready to fill
+                    const std::string def = std::string(app) + "/Funscripts";
+                    const char* home = std::getenv("HOME");
                     for (const std::string& f : cfg.folders) {
                         if (f != def) continue;
                         std::error_code ec;
                         std::filesystem::create_directories(f, ec);
-                        if (std::filesystem::is_directory(old, ec)) {
+                        // Earlier versions kept it in ~/Funscripts (0.2.5) and ~/.local/share/pixelvr/Funscripts (0.2.6).
+                        for (const std::string old : {std::string(home ? home : "") + "/Funscripts",
+                                                      std::string(home ? home : "") + "/.local/share/pixelvr/Funscripts"}) {
+                            if (!home || !std::filesystem::is_directory(old, ec)) continue;
                             for (const auto& e : std::filesystem::directory_iterator(old, ec)) {
                                 std::error_code ec2;
                                 const auto to = std::filesystem::path(f) / e.path().filename();
@@ -438,7 +447,7 @@ int main() {
             std::string s = !c ? "Waiting for a video"
                             : script.ok() ? "Script: " + scriptName + " (" + std::to_string(script.actions.size()) + " points)"
                             : pendingRead >= 0 ? "Reading " + pendingName
-                            : "No funscript: put one next to the video or in ~/.local/share/pixelvr/Funscripts";
+                            : "No funscript: put one next to the video or in PixelVRPlayer/Funscripts";
             const size_t n = bp.devices().size();
             s += !cfg.useIntiface ? "  |  Intiface off"
                  : bp.connected() ? "  |  Intiface: " + std::to_string(n) + (n == 1 ? " device" : " devices")
