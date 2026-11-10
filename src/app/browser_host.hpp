@@ -117,6 +117,7 @@ public:
     struct PlexPlay {
         std::string url;
         std::string title;
+        std::string file;              // the server's file name (no path): scripts, plugins
         double offset = 0.0;
         double duration = 0.0;
         std::string service = "plex";  // plex | jellyfin (same hand-off, docs/concepts/JELLYFIN_PLAN.md)

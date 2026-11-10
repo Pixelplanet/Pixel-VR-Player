@@ -410,8 +410,26 @@ void SettingsMenu::refresh() {
             r.data = data;
             rows_.push_back(r);
         };
+        // Wraps at ~84 characters (** markers don't count). Lines after the first of a "- " or "1. " item
+        // start with two spaces (drawn indented); a bold run split by the wrap is closed and reopened.
         auto wrapped = [&](const std::string& text, std::vector<std::string>& out) {
+            const bool item = text.rfind("- ", 0) == 0 ||
+                              (text.size() > 2 && std::isdigit(static_cast<unsigned char>(text[0])) && text.find(". ") < 3);
             std::string line, word;
+            size_t visible = 0;
+            bool bold = false;
+            auto vis = [](const std::string& w) {
+                size_t n = w.size();
+                for (size_t at = w.find("**"); at != std::string::npos; at = w.find("**", at + 2)) n -= 2;
+                return n;
+            };
+            auto flush = [&] {
+                if (line.empty()) return;
+                if (bold) line += "**";
+                out.push_back(line);
+                line = (item ? "  " : "") + std::string(bold ? "**" : "");
+                visible = item ? 2 : 0;
+            };
             for (size_t i = 0; i <= text.size(); ++i) {
                 const char ch = i < text.size() ? text[i] : ' ';
                 if (ch != ' ') {
@@ -419,14 +437,17 @@ void SettingsMenu::refresh() {
                     continue;
                 }
                 if (word.empty()) continue;
-                if (line.size() + word.size() + 1 > 78) {
-                    out.push_back(line);
-                    line.clear();
-                }
-                line += (line.empty() ? "" : " ") + word;
+                const size_t wv = vis(word);
+                if (visible + wv + 1 > 84 && visible > (item ? 2u : 0u)) flush();
+                const bool lead = line.empty() || line == "  " || line == "**" || line == "  **";
+                line += (lead ? "" : " ") + word;
+                visible += wv + (lead ? 0 : 1);
+                for (size_t at = word.find("**"); at != std::string::npos; at = word.find("**", at + 2)) bold = !bold;
                 word.clear();
             }
-            if (!line.empty()) out.push_back(line);
+            if (!line.empty() && line != "  " && line != "**" && line != "  **") {
+                out.push_back(line);
+            }
         };
         const auto& list = pluginList(plugins_);
         const std::vector<PluginRepo::Entry> entries = repo_ ? repo_->entries() : std::vector<PluginRepo::Entry>{};
@@ -451,10 +472,11 @@ void SettingsMenu::refresh() {
                     para(st, true);
                     para("Check that the headset is online. The list is loaded again in a minute.");
                 } else {
-                    para("You have every available plugin installed.", true);
-                    para("New plugins show up here as soon as they are published, and updates for your");
-                    para("plugins appear as a green arrow on the Plugins page.");
-                    para("Missing a plugin? Request it at github.com/Pixelplanet/Pixel-VR-Player-Plugins");
+                    para("You have every available plugin installed", true);
+                    para("New plugins show up here as soon as they are published. Updates for your plugins");
+                    para("appear as a **green arrow** on the Plugins page.");
+                    para("");
+                    para("Missing a plugin? Request it at **github.com/Pixelplanet/Pixel-VR-Player-Plugins**");
                 }
             }
             status_ = shown ? "Pick a plugin to see what it does. New plugins start switched off." : "";
@@ -486,6 +508,7 @@ void SettingsMenu::refresh() {
                 status_ = "Installed: " + have->version + "   |   Available: " + e->version;
                 for (const auto& ch : e->changelog) {
                     if (PluginHost::compareVersions(ch.first, have->version) <= 0) continue;
+                    if (!text.empty()) text.push_back({"", false});
                     add("What's new in " + ch.first, true);
                     for (const std::string& l : ch.second) add("- " + l, false);
                 }
@@ -497,12 +520,13 @@ void SettingsMenu::refresh() {
                 for (const std::string& l : e->about) add(l, false);
                 if (e->about.empty()) add(e->description, false);
                 if (!e->howto.empty()) {
+                    text.push_back({"", false});
                     add("How to use it", true);
                     int n = 1;
                     for (const std::string& l : e->howto) add(std::to_string(n++) + ". " + l, false);
                 }
             }
-            for (size_t i = 0; i < text.size() && i < 10; ++i) para(text[i].first, text[i].second);
+            for (size_t i = 0; i < text.size() && i < 15; ++i) para(text[i].first, text[i].second);
             const bool busy = repo_->downloading(e->id);
             button(busy ? "Downloading..." : (update ? "Update to " + e->version : "Install"), Action::InstallRepoPlugin, true, ei, !busy);
             button("Back", update ? Action::BackToPlugins : Action::OpenStore, false);

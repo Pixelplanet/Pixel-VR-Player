@@ -513,7 +513,7 @@ inline SettingsCard settingsCard(int i, int total, bool compact = false) {
     }
     return L;
 }
-inline int settingsMaxVisible(int total, bool compact = false) { return compact ? 12 : (total > 8 ? 10 : 8); }
+inline int settingsMaxVisible(int total, bool compact = false) { return compact ? 18 : (total > 8 ? 10 : 8); }
 // Segment `s` of `n` inside a settings control well (segmented choices).
 // A shortcut line (list pages): 0 = grab handle (drag to reorder), 1 = on / off switch,
 // 2 = Edit, 3 = Delete. Name and address sit between the switch and Edit.
@@ -2737,6 +2737,30 @@ std::string VulkanRenderer::keyboardKeyText(int index, bool shift, bool symbols)
     return symbols ? k.sym : (shift ? k.upper : k.lower);
 }
 
+bool VulkanRenderer::paragraphLine(int r, int layoutN, float& y, float& top, float& bottom) const {
+    const int total = static_cast<int>(settingsRows_.size());
+    auto para = [&](int i) { return i >= 0 && i < total && settingsRows_[static_cast<size_t>(i)].kind == kSettingsKindParagraph; };
+    if (!para(r)) return false;
+    int first = r;
+    while (para(first - 1)) --first;
+    // Line heights: text 0.036, a heading 0.044, an empty row a small gap.
+    auto lineH = [&](int i) {
+        const SettingsRowVis& row = settingsRows_[static_cast<size_t>(i)];
+        return row.label.empty() ? 0.014f : (row.stepIdx == 1 ? 0.044f : 0.036f);
+    };
+    const hub::SettingsCard L = hub::settingsCard(first, layoutN, true);
+    top = L.cy + L.halfH;
+    float cur = top - 0.020f;
+    y = cur;
+    for (int i = first; para(i); ++i) {
+        const float h = lineH(i);
+        if (i == r) y = cur - h * 0.5f;
+        cur -= h;
+    }
+    bottom = cur - 0.016f;
+    return true;
+}
+
 bool VulkanRenderer::dialogButtonRect(int r, int layoutN, float& cx, float& cy, float& hw, float& hh) const {
     const int total = static_cast<int>(settingsRows_.size());
     if (r < 0 || r >= total || settingsRows_[static_cast<size_t>(r)].kind != kSettingsKindButton) return false;
@@ -2753,6 +2777,8 @@ bool VulkanRenderer::dialogButtonRect(int r, int layoutN, float& cx, float& cy, 
     const float span = hw * 2.0f * static_cast<float>(n) + gap * static_cast<float>(n - 1);
     cx = L.cx - span * 0.5f + hw + static_cast<float>(k) * (hw * 2.0f + gap);
     cy = L.cy - 0.012f;
+    float py, ptop, pbottom;
+    if (paragraphLine(first - 1, layoutN, py, ptop, pbottom)) cy = pbottom - 0.030f - hh;  // right below the text panel
     return true;
 }
 
@@ -7505,10 +7531,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         if (lr.kind == kSettingsKindParagraph) {
                             // The first line of a run draws the one panel behind the whole run.
                             if (r > 0 && settingsRows_[static_cast<std::size_t>(r - 1)].kind == kSettingsKindParagraph) return;
-                            int last = r;
-                            while (last + 1 < total && settingsRows_[static_cast<std::size_t>(last + 1)].kind == kSettingsKindParagraph) ++last;
-                            const hub::SettingsCard lc = hub::settingsCard(last, layoutN, true);
-                            const float top = hc.cy + hc.halfH, bottom = lc.cy - lc.halfH;
+                            float py, top, bottom;
+                            paragraphLine(r, layoutN, py, top, bottom);
                             const float ph = (top - bottom) * 0.5f;
                             drawUiElement(vpPanel, hc.cx, (top + bottom) * 0.5f, hc.halfW, ph, UiShape::RoundedBox,
                                           glassCardT.data(), 0.018f / ph, 0.0012f / ph, kGlassRimFaint);
@@ -7745,10 +7769,43 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         const float* lc = lr.enabled ? themeTextCol : dimCol;
                         const float left = hc.cx - hc.halfW;
                         if (lr.kind == kSettingsKindParagraph) {
+                            float py, ptop, pbottom;
+                            paragraphLine(r, layoutN, py, ptop, pbottom);
+                            if (lr.label.empty()) return;
+                            const float maxW = hc.halfW * 2.0f - 0.09f;
                             if (lr.stepIdx == 1) {
-                                withHeadingFont([&] { drawFit(left + 0.045f, hc.cy, hc.halfW * 2.0f - 0.09f, sc, themeTextCol, lr.label); });
-                            } else {
-                                drawFit(left + 0.045f, hc.cy, hc.halfW * 2.0f - 0.09f, sc * 0.95f, slateCol, lr.label);
+                                withHeadingFont([&] { drawFit(left + 0.045f, py, maxW, sc * 1.05f, themeTextCol, lr.label); });
+                                return;
+                            }
+                            // "- item" -> a dot and a hanging indent; "1. step" keeps its number; a line starting
+                            // with two spaces continues the item above; **text** is bold.
+                            std::string t = lr.label;
+                            float x = left + 0.045f;
+                            const float ts = sc * 0.95f;
+                            if (t.rfind("- ", 0) == 0) {
+                                drawFit(x + 0.004f, py, 0.03f, ts, themeAccentCol, "\xB7");
+                                t = t.substr(2);
+                                x += 0.028f;
+                            } else if (t.rfind("  ", 0) == 0) {
+                                t = t.substr(2);
+                                x += 0.028f;
+                            }
+                            bool bold = false;
+                            float cx = x;
+                            for (size_t i = 0; i <= t.size();) {
+                                const size_t j = t.find("**", i);
+                                const std::string seg = t.substr(i, j == std::string::npos ? std::string::npos : j - i);
+                                if (!seg.empty()) {
+                                    auto part = [&] {
+                                        drawFit(cx, py, std::max(0.0f, maxW - (cx - left - 0.045f)), ts, bold ? themeTextCol : slateCol, seg);
+                                        cx += measureString(ts, seg);
+                                    };
+                                    if (bold) withHeadingFont(part);
+                                    else part();
+                                }
+                                if (j == std::string::npos) break;
+                                bold = !bold;
+                                i = j + 2;
                             }
                             return;
                         }

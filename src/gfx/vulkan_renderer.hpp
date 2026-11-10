@@ -1315,6 +1315,8 @@ private:
     float listLineY(int r, int layoutN) const;
     // A dialog button's rectangle (buttons share one row), or false for other rows.
     bool dialogButtonRect(int r, int layoutN, float& cx, float& cy, float& hw, float& hh) const;
+    // A paragraph row's text line (tight spacing) and the panel around its run, or false for other rows.
+    bool paragraphLine(int r, int layoutN, float& y, float& top, float& bottom) const;
     void advanceListAnim(int total, int layoutN);
     int settingsSelected_ = 0;
     int settingsHovered_ = -1;

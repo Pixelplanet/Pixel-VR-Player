@@ -174,13 +174,21 @@ int main() {
             }
         }
         if (folderTried) return;
-        folderTried = true;  // script folders on the headset, matched by file name (covers Plex)
+        folderTried = true;
+        // Script folders on the headset (default ~/Funscripts, subfolders included), matched by the
+        // file name or the title. This is how Plex / Jellyfin / web-share videos get their scripts.
+        const std::string byTitle = lower(c->title + ".funscript");
         for (const std::string& folder : cfg.folders) {
             std::error_code ec;
-            for (const auto& e : std::filesystem::directory_iterator(folder, ec)) {
-                if (lower(e.path().filename().string()) != want) continue;
-                std::ifstream f(e.path());
-                loadText(*c, e.path().filename().string(),
+            std::filesystem::recursive_directory_iterator it(folder, std::filesystem::directory_options::skip_permission_denied, ec), end;
+            int seen = 0;
+            for (; !ec && it != end && seen < 20000; it.increment(ec), ++seen) {
+                if (it.depth() > 4) it.disable_recursion_pending();
+                if (!it->is_regular_file(ec)) continue;
+                const std::string n = lower(it->path().filename().string());
+                if (n != want && (c->title.empty() || n != byTitle)) continue;
+                std::ifstream f(it->path());
+                loadText(*c, it->path().filename().string(),
                          std::string((std::istreambuf_iterator<char>(f)), std::istreambuf_iterator<char>()));
                 return;
             }
@@ -196,6 +204,12 @@ int main() {
             const std::string type = m.getString("type");
             if (type == "hello") {
                 readSettings(m.get("settings"), cfg);
+                if (const char* home = std::getenv("HOME")) {  // the default script folder, ready to fill
+                    for (const std::string& f : cfg.folders) {
+                        std::error_code ec;
+                        if (f == std::string(home) + "/Funscripts") std::filesystem::create_directories(f, ec);
+                    }
+                }
                 io.hello("Funscript devices", "0.1.0");
             } else if (type == "settings") {
                 const bool wasInvert = cfg.invert;
@@ -413,7 +427,7 @@ int main() {
             std::string s = !c ? "Waiting for a video"
                             : script.ok() ? "Script: " + scriptName + " (" + std::to_string(script.actions.size()) + " points)"
                             : pendingRead >= 0 ? "Reading " + pendingName
-                            : "No funscript for this video";
+                            : "No funscript: put one next to the video or in ~/Funscripts";
             const size_t n = bp.devices().size();
             s += !cfg.useIntiface ? "  |  Intiface off"
                  : bp.connected() ? "  |  Intiface: " + std::to_string(n) + (n == 1 ? " device" : " devices")

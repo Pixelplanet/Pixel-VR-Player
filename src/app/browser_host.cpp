@@ -438,6 +438,7 @@ void BrowserHost::handleLine(const std::string& line) {
             PlexPlay p;
             p.url = v.getString("url");
             p.title = v.getString("title");
+            p.file = v.getString("file");
             p.offset = v.getNumber("offset");
             p.duration = v.getNumber("duration");
             if (!v.getString("service").empty()) p.service = v.getString("service");

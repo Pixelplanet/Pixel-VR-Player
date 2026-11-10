@@ -1151,6 +1151,7 @@ int runScreen(const ScreenOptions& opt) {
             "{method:'POST',headers:h,body:" + pvrjson::quote(kProfile) + "})).json();"
             "const m=pi.MediaSources[0],v=(m.MediaStreams||[]).find(s=>s.Type==='Video')||{};"
             "return JSON.stringify({title:it.SeriesName?it.SeriesName+' - '+it.Name:it.Name,"
+            "file:(m.Path||'').split(/[\\\\/]/).pop(),"
             "ticks:it.RunTimeTicks||m.RunTimeTicks||0,msid:m.Id,session:pi.PlaySessionId||'',user:u,"
             "series:it.Type==='Episode'?(it.SeriesId||''):'',aud:(m.DefaultAudioStreamIndex??-1),"
             "info:it.Type==='Episode'?[it.SeriesName,((it.ParentIndexNumber!=null?'S'+it.ParentIndexNumber:'')+"
@@ -1202,7 +1203,7 @@ int runScreen(const ScreenOptions& opt) {
             std::fprintf(stderr, "jellyfin: %s %s/%s audio %d%s\n", plex.jfMethod.c_str(), ct.c_str(), vc.c_str(), audio,
                          plex.jfSeries.empty() ? "" : " (episode)");
             emitLine("plex {\"url\":" + pvrjson::quote(playUrl) + ",\"title\":" + pvrjson::quote(info.getString("title")) +
-                     ",\"info\":" + pvrjson::quote(info.getString("info")) + ",\"offset\":" + nums);
+                     ",\"file\":" + pvrjson::quote(info.getString("file")) + ",\"info\":" + pvrjson::quote(info.getString("info")) + ",\"offset\":" + nums);
         }, true);
     };
     // Plex: the part, title, duration and the audio track chosen in Plex for a metadata item.
@@ -1216,12 +1217,14 @@ int runScreen(const ScreenOptions& opt) {
                       info.getString("type") == "episode" ? "true" : "false");
         emitLine("plex {\"url\":" + pvrjson::quote(plex.base + info.getString("part") + "?X-Plex-Token=" + plex.token +
                                                   "&download=0") +
-                 ",\"title\":" + pvrjson::quote(info.getString("title")) + ",\"info\":" +
+                 ",\"title\":" + pvrjson::quote(info.getString("title")) + ",\"file\":" + pvrjson::quote(info.getString("file")) +
+                 ",\"info\":" +
                  pvrjson::quote(info.getString("info")) + ",\"offset\":" + nums);
     };
     // JS returning that info for the metadata object `m` (part `p`).
     const std::string kPlexInfoJs =
         "JSON.stringify({part:p.key,title:m.grandparentTitle?m.grandparentTitle+' - '+m.title:m.title,"
+        "file:(p.file||'').split(/[\\\\/]/).pop(),"
         "dur:m.duration||0,off:m.viewOffset||0,rk:m.ratingKey,key:m.key,type:m.type||'',"
         "aud:((p.Stream||[]).find(s=>s.streamType===2&&s.selected)||{index:-1}).index,"
         "info:m.type==='episode'?[m.grandparentTitle,((m.parentIndex!=null?'S'+m.parentIndex:'')+"

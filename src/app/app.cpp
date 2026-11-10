@@ -1174,6 +1174,7 @@ void App::startPlexPlay(int slot, const BrowserHost::PlexPlay& play) {
     sc.plexNavManual = false;
     webHosts_[slot].takePlexNextNone();  // a stale answer must not end this one
     plexTitles_[slot] = play.title;
+    plexFiles_[slot] = play.file;
     plexLoading_ = true;
     plexAudioStream_ = play.audioStream;
     loadMedia(play.url, slot);
@@ -2009,7 +2010,7 @@ void App::updatePlugins() {
         const bool plex = sc.webSuspended;
         const std::string clean = PluginHost::sanitizePath(sc.path);
         const std::string base = clean.substr(clean.find_last_of('/') + 1);
-        s.fileName = plex ? plexTitles_[slot] : base;
+        s.fileName = plex ? (plexFiles_[slot].empty() ? plexTitles_[slot] : plexFiles_[slot]) : base;
         s.title = plex ? plexTitles_[slot] : base.substr(0, base.find_last_of('.'));
         if (plex) s.source = sc.plexService.empty() ? "plex" : sc.plexService;
         else if (sc.path.rfind("smb://", 0) == 0) s.source = "smb";

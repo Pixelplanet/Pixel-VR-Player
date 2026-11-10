@@ -359,6 +359,7 @@ private:
     PluginHost plugins_;
     PluginRepo pluginRepo_;
     std::string plexTitles_[VulkanRenderer::kMaxVideoSlots];
+    std::string plexFiles_[VulkanRenderer::kMaxVideoSlots];  // server file names (plugins match scripts by them)
     void updatePlugins();
     void installPlugin(const std::string& file);  // a .pvrplugin chosen in the file browser
     int webMouseSlot_ = -1;      // browser screen the press / hover belongs to
