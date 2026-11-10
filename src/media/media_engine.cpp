@@ -24,6 +24,7 @@
 #include <unistd.h>
 
 extern "C" {
+#include <libavutil/stereo3d.h>
 #include <libavcodec/avcodec.h>
 #include <libavformat/avformat.h>
 #include <libavformat/avio.h>
@@ -361,6 +362,13 @@ struct MediaEngine::Impl {
     std::string hwBlockedBy;  // who else held the hardware decoder when it was refused
     const AVCodec* videoDecoder = nullptr;  // retained for reopen-on-seek
     bool decoderDrm = false;                // apply drm_prime opts on reopen
+    // Frame-sequential 3D (FS3D): left and right views alternate frame by frame (e.g. 48 fps = 24 per
+    // eye). The decode thread pairs them into one full side-by-side frame, so the rest of the player
+    // sees a 2x-wide SBS video at half the frame rate.
+    bool frameSeq = false;
+    bool frameSeqRightFirst = false;  // Matroska block_rl / inverted side data
+    double frameSeqFps = 0.0;         // the file's frame rate (both views)
+    double frameSeqStart = 0.0;       // stream start: frame parity is counted from here
     int captureBuffers = 0;                 // num_capture_buffers for reopen
     std::atomic<uint64_t> decodedCount{0};
 
@@ -613,6 +621,10 @@ void MediaEngine::Impl::decodeLoop() {
     // dropped (-1 = not discarding). The caps bound the frozen wait on a very
     // long GOP at 8K, where the hardware decoder is only about real time.
     double videoDiscardUntil = -1.0;
+    // FS3D: the first view of the current pair, waiting for its partner (index -10 = none).
+    std::vector<uint8_t> fsY, fsUV;
+    long long fsIdx = -10;
+    double fsPts = 0.0;
     [[maybe_unused]] double audioDiscardUntil = -1.0;  // read by process_audio (Pulse builds)
     int discardCount = 0;
     constexpr int kMaxDiscardFrames = 600;
@@ -772,20 +784,56 @@ void MediaEngine::Impl::decodeLoop() {
             }
         }
 
+        int outW = w;
+        double outPts = pts;
+        if (frameSeq && !isDrm) {
+            // FS3D: frames alternate views. Even frames (counted from the stream start) are the first
+            // view of a pair, odd ones the second; a complete pair becomes one 2w x h SBS frame (left
+            // view left) shown at the first frame's time. A lone second view (after a seek) is dropped.
+            long long idx = std::llround((pts - frameSeqStart) * frameSeqFps);
+            const bool firstOfPair = ((idx % 2) + 2) % 2 == 0;
+            if (firstOfPair) {
+                fsY = std::move(y);
+                fsUV = std::move(uv);
+                fsIdx = idx;
+                fsPts = pts;
+                return;
+            }
+            if (fsIdx != idx - 1 || fsY.size() != static_cast<std::size_t>(w) * h) return;
+            const std::vector<uint8_t>& lY = frameSeqRightFirst ? y : fsY;
+            const std::vector<uint8_t>& rY = frameSeqRightFirst ? fsY : y;
+            const std::vector<uint8_t>& lUV = frameSeqRightFirst ? uv : fsUV;
+            const std::vector<uint8_t>& rUV = frameSeqRightFirst ? fsUV : uv;
+            std::vector<uint8_t> sy(static_cast<std::size_t>(w) * 2 * h), suv(static_cast<std::size_t>(w) * 2 * (h / 2));
+            for (int row = 0; row < h; ++row) {
+                std::memcpy(sy.data() + static_cast<std::size_t>(row) * 2 * w, lY.data() + static_cast<std::size_t>(row) * w, w);
+                std::memcpy(sy.data() + static_cast<std::size_t>(row) * 2 * w + w, rY.data() + static_cast<std::size_t>(row) * w, w);
+            }
+            for (int row = 0; row < h / 2; ++row) {
+                std::memcpy(suv.data() + static_cast<std::size_t>(row) * 2 * w, lUV.data() + static_cast<std::size_t>(row) * w, w);
+                std::memcpy(suv.data() + static_cast<std::size_t>(row) * 2 * w + w, rUV.data() + static_cast<std::size_t>(row) * w, w);
+            }
+            y = std::move(sy);
+            uv = std::move(suv);
+            outW = 2 * w;
+            outPts = fsPts;
+            fsIdx = -10;
+        }
+
         // With audio, the blocking audio writes pace the loop and provide the
         // master clock; without audio, pace video to its own PTS via wall clock.
         if (!audioEnabled) {
             if (!haveClock) {
                 startTime = clock::now();
-                startPts = pts;
+                startPts = outPts;
                 haveClock = true;
             } else {
                 const auto target =
                     startTime + std::chrono::duration_cast<clock::duration>(
-                                    std::chrono::duration<double>(pts - startPts));
+                                    std::chrono::duration<double>(outPts - startPts));
                 std::this_thread::sleep_until(target);
             }
-            masterClock.store(pts);
+            masterClock.store(outPts);
         }
 
         if (!running.load()) {
@@ -797,7 +845,7 @@ void MediaEngine::Impl::decodeLoop() {
         if (isDrm) {
             pushDrm(drm);
         } else {
-            pushFrame(w, h, std::move(y), std::move(uv), colorspace, fullRange, pts);
+            pushFrame(outW, h, std::move(y), std::move(uv), colorspace, fullRange, outPts);
         }
     };
 
@@ -983,6 +1031,7 @@ void MediaEngine::Impl::decodeLoop() {
             masterClock.store(seekTo);
             playClock.reset();  // the next presented frame re-anchors the clock
             videoDiscardUntil = audioOnly ? -1.0 : seekTo;
+            fsIdx = -10;  // FS3D: a pair never spans a seek
             audioDiscardUntil = seekTo;
             discardCount = 0;
             eofFlushed = false;
@@ -1398,6 +1447,40 @@ bool MediaEngine::open(const std::string& path) {
         impl_->timeBase = stream->time_base;
         impl_->frameRate = av_q2d(av_guess_frame_rate(impl_->format, stream, nullptr));
         PIXELVR_LOG_INFO("MediaEngine: source frame rate %.3f fps", impl_->frameRate);
+        {
+            // FS3D: the Matroska StereoMode (block_lr / block_rl), FFmpeg's stereo side data, or the name.
+            bool fs = false, rightFirst = false;
+            if (const AVDictionaryEntry* sm = av_dict_get(stream->metadata, "stereo_mode", nullptr, 0)) {
+                fs = std::strcmp(sm->value, "block_lr") == 0 || std::strcmp(sm->value, "block_rl") == 0;
+                rightFirst = std::strcmp(sm->value, "block_rl") == 0;
+            }
+            for (int k = 0; k < stream->codecpar->nb_coded_side_data; ++k) {
+                const AVPacketSideData& sd = stream->codecpar->coded_side_data[k];
+                if (sd.type == AV_PKT_DATA_STEREO3D && sd.size >= static_cast<int>(sizeof(AVStereo3D))) {
+                    const AVStereo3D* st = reinterpret_cast<const AVStereo3D*>(sd.data);
+                    if (st->type == AV_STEREO3D_FRAMESEQUENCE) {
+                        fs = true;
+                        rightFirst = rightFirst || (st->flags & AV_STEREO3D_FLAG_INVERT) != 0;
+                    }
+                }
+            }
+            std::string lname = path;
+            for (char& ch : lname) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            if (lname.find("fs3d") != std::string::npos || lname.find("frame sequential") != std::string::npos ||
+                lname.find("frame-sequential") != std::string::npos || lname.find("framesequential") != std::string::npos) {
+                fs = true;
+            }
+            // Only plausible with a doubled frame rate (both views: 47.952 / 48 / 50 / 59.94 / 60 ...).
+            impl_->frameSeq = fs && impl_->frameRate >= 40.0;
+            impl_->frameSeqRightFirst = rightFirst;
+            impl_->frameSeqFps = impl_->frameRate;
+            impl_->frameSeqStart = stream->start_time != AV_NOPTS_VALUE ? stream->start_time * av_q2d(stream->time_base) : 0.0;
+            if (fs) {
+                PIXELVR_LOG_INFO("MediaEngine: frame-sequential 3D%s (%s first, %.3f fps -> %.3f per eye)",
+                                 impl_->frameSeq ? "" : " tagged, but the frame rate is too low: played as 2D",
+                                 rightFirst ? "right" : "left", impl_->frameRate, impl_->frameRate / 2.0);
+            }
+        }
         const AVCodecID codecId = stream->codecpar->codec_id;
 
         // The Iris V4L2-M2M hardware path (H.264/HEVC/VP9) handles 8-bit here; route
@@ -1451,7 +1534,8 @@ bool MediaEngine::open(const std::string& path) {
             if (std::strstr(dec->name, "v4l2m2m") != nullptr) {
                 av_opt_set_int(impl_->codec->priv_data, "num_output_buffers", 4, 0);
             }
-            impl_->decoderDrm = drmPrime && std::strstr(dec->name, "v4l2m2m") != nullptr;
+            // (FS3D pairs two frames into one on the CPU, so it takes the NV12 copy path.)
+            impl_->decoderDrm = drmPrime && std::strstr(dec->name, "v4l2m2m") != nullptr && !impl_->frameSeq;
             if (impl_->decoderDrm) {
                 // Export decoder output as DMA-BUF (AV_PIX_FMT_DRM_PRIME) for zero-copy
                 // Vulkan import; requires the dmabuf-patched libavcodec. Bound the
@@ -1516,7 +1600,7 @@ bool MediaEngine::open(const std::string& path) {
             }
         }
 
-        impl_->width = impl_->codec->width;
+        impl_->width = impl_->codec->width * (impl_->frameSeq ? 2 : 1);  // FS3D: delivered as full SBS
         impl_->height = impl_->codec->height;
         impl_->duration = (impl_->format->duration > 0)
                               ? impl_->format->duration / static_cast<double>(AV_TIME_BASE)
@@ -1666,7 +1750,9 @@ uint64_t MediaEngine::decodedFrames() const {
 uint64_t MediaEngine::lateFrames() const { return impl_->lateCount.load(std::memory_order_relaxed); }
 uint64_t MediaEngine::clockWaits() const { return impl_->clockWaitCount.load(std::memory_order_relaxed); }
 double MediaEngine::duration() const { return impl_->duration; }
-double MediaEngine::frameRate() const { return impl_ ? impl_->frameRate : 0.0; }
+double MediaEngine::frameRate() const {
+    return impl_ ? (impl_->frameSeq ? impl_->frameRate / 2.0 : impl_->frameRate) : 0.0;  // FS3D: per eye
+}
 bool MediaEngine::eof() const { return impl_->eof.load(); }
 
 void MediaEngine::setPaused(bool paused) {

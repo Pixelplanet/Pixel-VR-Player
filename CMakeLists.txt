@@ -336,6 +336,8 @@ if(PIXELVR_BUILD_TOOLS)
     target_link_libraries(plugin_host_test PRIVATE pixelvr_core)
     add_executable(plugin_pentest tools/plugin_pentest.cpp)
     target_link_libraries(plugin_pentest PRIVATE pixelvr_core)
+    add_executable(fs3d_test tools/fs3d_test.cpp)
+    target_link_libraries(fs3d_test PRIVATE pixelvr_core)
 endif()
 
 # First-party plugins (docs/concepts/PLUGIN_SYSTEM_SPEC.md). Each lands in
