@@ -8586,7 +8586,15 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             for (int i = 0; i < menuOptCount; ++i) {
                 const float cy = hub::actionMenuOption(i, menuOptCount).cy;
                 const bool hov = (actionMenuBtnHovered_ == i) || (actionMenu_.selectedOption == i);
-                drawFitCentered(0.0f, cy, 0.38f * 1.85f, sc, hov ? themeTextCol : slateCol, actionMenu_.options[i]);
+                const std::string& o = actionMenu_.options[static_cast<std::size_t>(i)];
+                const size_t bar = o.find('|');
+                if (bar != std::string::npos) {
+                    // "short|full": the short name in bold on the left, what it stands for beside it.
+                    withHeadingFont([&] { drawFit(-0.335f, cy, 0.20f, sc, hov ? themeTextCol : slateCol, o.substr(0, bar)); });
+                    drawFit(-0.115f, cy, 0.44f, sc * 0.92f, hov ? themeTextCol : slateCol, o.substr(bar + 1));
+                } else {
+                    drawFitCentered(0.0f, cy, 0.38f * 1.85f, sc, hov ? themeTextCol : slateCol, o);
+                }
             }
         } else if (actionMenu_.page == 2) {
             drawFitCentered(0.0f, 0.035f, (mHalfW - 0.06f) * 2.0f, sc, themeTextCol, actionMenu_.subtitle);

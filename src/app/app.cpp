@@ -1418,14 +1418,15 @@ void App::openFormatMenu() {
     actionMenu_.title = "Playback Format";
     actionMenu_.subtitle = "Select 3D / VR Projection";
     actionMenu_.options.clear();
-    actionMenu_.options.push_back("2D Flat (Standard)");
-    actionMenu_.options.push_back("3D Side-by-Side (SBS)");
-    actionMenu_.options.push_back("3D Top-Bottom (Over-Under)");
-    actionMenu_.options.push_back("3D Frame Sequential (FS3D)");
+    // "short|full": the menu shows the short name and, beside it, what it stands for.
+    actionMenu_.options.push_back("2D|Flat, standard video");
+    actionMenu_.options.push_back("3D SBS|Side-by-side 3D");
+    actionMenu_.options.push_back("3D TB|Top-bottom 3D (over-under)");
+    actionMenu_.options.push_back("3D FS|Frame-sequential 3D (FS3D)");
     if (selectedScreen_ == 0) {  // immersive only on the main screen
-        actionMenu_.options.push_back("VR 180° (Side-by-Side)");
-        actionMenu_.options.push_back("VR 360° (Mono)");
-        actionMenu_.options.push_back("VR 360° 3D (Top-Bottom)");
+        actionMenu_.options.push_back("VR180|180° side-by-side 3D");
+        actionMenu_.options.push_back("VR360|360° mono");
+        actionMenu_.options.push_back("VR360 3D|360° top-bottom 3D");
     }
     actionMenu_.options.push_back("Cancel");
     actionMenu_.selectedOption = 0;
@@ -4242,7 +4243,7 @@ int App::run() {
                             return (isSbs || isTb) ? "VR360 3D" : "VR360";
                         }
 
-                        if (contains(lower, "fs3d") || contains(lower, "frame sequential")) return "3D FS3D";
+                        if (contains(lower, "fs3d") || contains(lower, "frame sequential")) return "3D FS";
                         if (isTb)  return "3D TB";
                         if (isSbs) return "3D SBS";
 
@@ -4791,12 +4792,13 @@ int App::run() {
                                         actionMenu_.title = "3D & VR Format";
                                         actionMenu_.subtitle = fe ? fe->label : "";
                                         actionMenu_.options.clear();
-                                        actionMenu_.options.push_back("2D Flat (Standard)");
-                                        actionMenu_.options.push_back("3D Side-by-Side (SBS)");
-                                        actionMenu_.options.push_back("3D Top-Bottom (Over-Under)");
-                                        actionMenu_.options.push_back("3D Frame Sequential (FS3D)");
-                                        actionMenu_.options.push_back("VR 180° (Side-by-Side)");
-                                        actionMenu_.options.push_back("VR 360° (Equirectangular)");
+                                        actionMenu_.options.push_back("2D|Flat, standard video");
+                                        actionMenu_.options.push_back("3D SBS|Side-by-side 3D");
+                                        actionMenu_.options.push_back("3D TB|Top-bottom 3D (over-under)");
+                                        actionMenu_.options.push_back("3D FS|Frame-sequential 3D (FS3D)");
+                                        actionMenu_.options.push_back("VR180|180° side-by-side 3D");
+                                        actionMenu_.options.push_back("VR360|360° mono");
+                                        actionMenu_.options.push_back("VR360 3D|360° top-bottom 3D");
                                         actionMenu_.options.push_back("Cancel");
                                         actionMenu_.selectedOption = 0;
                                     } else if (opt == "Move To...") {
@@ -4908,19 +4910,19 @@ int App::run() {
                                         actionMenu_.visible = false;
                                     }
                                 } else if (actionMenu_.page == 5) {
-                                    if (opt == "2D Flat (Standard)") {
+                                    if (opt == "2D|Flat, standard video") {
                                         applyFormat(0, 0);
-                                    } else if (opt == "3D Side-by-Side (SBS)") {
+                                    } else if (opt == "3D SBS|Side-by-side 3D") {
                                         applyFormat(0, 1);
-                                    } else if (opt == "3D Top-Bottom (Over-Under)") {
+                                    } else if (opt == "3D TB|Top-bottom 3D (over-under)") {
                                         applyFormat(0, 2);
-                                    } else if (opt == "3D Frame Sequential (FS3D)") {
+                                    } else if (opt == "3D FS|Frame-sequential 3D (FS3D)") {
                                         applyFormat(0, 3);
-                                    } else if (opt == "VR 180° (Side-by-Side)") {
+                                    } else if (opt == "VR180|180° side-by-side 3D") {
                                         applyFormat(2, 1);
-                                    } else if (opt == "VR 360° (Mono)") {
+                                    } else if (opt == "VR360|360° mono") {
                                         applyFormat(1, 0);
-                                    } else if (opt == "VR 360° 3D (Top-Bottom)") {
+                                    } else if (opt == "VR360 3D|360° top-bottom 3D") {
                                         applyFormat(1, 2);
                                     }
 #ifdef PIXELVR_HAVE_MEDIA
@@ -5778,7 +5780,7 @@ int App::run() {
                 if (settings_.projectionMode() == 0) {
                     fLabel = (settings_.stereoMode() == 0) ? "2D Flat" :
                              (settings_.stereoMode() == 1) ? "3D SBS" :
-                             (settings_.stereoMode() == 3) ? "3D FS3D" : "3D TB";
+                             (settings_.stereoMode() == 3) ? "3D FS" : "3D TB";
                 } else if (settings_.projectionMode() == 2) {
                     fLabel = (settings_.stereoMode() == 1) ? "VR180 SBS" :
                              (settings_.stereoMode() == 2) ? "VR180 TB" : "180 Mono";
