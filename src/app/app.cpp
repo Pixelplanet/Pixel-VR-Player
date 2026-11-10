@@ -1424,9 +1424,11 @@ void App::openFormatMenu() {
     actionMenu_.options.push_back("3D TB|Top-bottom 3D (over-under)");
     actionMenu_.options.push_back("3D FS|Frame-sequential 3D (FS3D)");
     if (selectedScreen_ == 0) {  // immersive only on the main screen
-        actionMenu_.options.push_back("VR180|180° side-by-side 3D");
-        actionMenu_.options.push_back("VR360|360° mono");
+        actionMenu_.options.push_back("VR180|180° 2D (mono)");
+        actionMenu_.options.push_back("VR180 3D|180° side-by-side 3D");
+        actionMenu_.options.push_back("VR360|360° 2D (mono)");
         actionMenu_.options.push_back("VR360 3D|360° top-bottom 3D");
+        actionMenu_.options.push_back("VR360 SBS|360° side-by-side 3D");
     }
     actionMenu_.options.push_back("Cancel");
     actionMenu_.selectedOption = 0;
@@ -4796,9 +4798,11 @@ int App::run() {
                                         actionMenu_.options.push_back("3D SBS|Side-by-side 3D");
                                         actionMenu_.options.push_back("3D TB|Top-bottom 3D (over-under)");
                                         actionMenu_.options.push_back("3D FS|Frame-sequential 3D (FS3D)");
-                                        actionMenu_.options.push_back("VR180|180° side-by-side 3D");
-                                        actionMenu_.options.push_back("VR360|360° mono");
+                                        actionMenu_.options.push_back("VR180|180° 2D (mono)");
+                                        actionMenu_.options.push_back("VR180 3D|180° side-by-side 3D");
+                                        actionMenu_.options.push_back("VR360|360° 2D (mono)");
                                         actionMenu_.options.push_back("VR360 3D|360° top-bottom 3D");
+                                        actionMenu_.options.push_back("VR360 SBS|360° side-by-side 3D");
                                         actionMenu_.options.push_back("Cancel");
                                         actionMenu_.selectedOption = 0;
                                     } else if (opt == "Move To...") {
@@ -4918,12 +4922,16 @@ int App::run() {
                                         applyFormat(0, 2);
                                     } else if (opt == "3D FS|Frame-sequential 3D (FS3D)") {
                                         applyFormat(0, 3);
-                                    } else if (opt == "VR180|180° side-by-side 3D") {
+                                    } else if (opt == "VR180|180° 2D (mono)") {
+                                        applyFormat(2, 0);
+                                    } else if (opt == "VR180 3D|180° side-by-side 3D") {
                                         applyFormat(2, 1);
-                                    } else if (opt == "VR360|360° mono") {
+                                    } else if (opt == "VR360|360° 2D (mono)") {
                                         applyFormat(1, 0);
                                     } else if (opt == "VR360 3D|360° top-bottom 3D") {
                                         applyFormat(1, 2);
+                                    } else if (opt == "VR360 SBS|360° side-by-side 3D") {
+                                        applyFormat(1, 1);
                                     }
 #ifdef PIXELVR_HAVE_MEDIA
                                     if (opt != "Cancel" && cur().open &&
@@ -5781,11 +5789,12 @@ int App::run() {
                     fLabel = (settings_.stereoMode() == 0) ? "2D Flat" :
                              (settings_.stereoMode() == 1) ? "3D SBS" :
                              (settings_.stereoMode() == 3) ? "3D FS" : "3D TB";
-                } else if (settings_.projectionMode() == 2) {
-                    fLabel = (settings_.stereoMode() == 1) ? "VR180 SBS" :
-                             (settings_.stereoMode() == 2) ? "VR180 TB" : "180 Mono";
+                } else if (settings_.projectionMode() == 2) {  // the menu's short names
+                    fLabel = (settings_.stereoMode() == 1) ? "VR180 3D" :
+                             (settings_.stereoMode() == 2) ? "VR180 TB" : "VR180";
                 } else {
-                    fLabel = (settings_.stereoMode() == 1) ? "360 SBS" : "360 Mono";
+                    fLabel = (settings_.stereoMode() == 2) ? "VR360 3D" :
+                             (settings_.stereoMode() == 1) ? "VR360 SBS" : "VR360";
                 }
 
                 std::string aLabel = "Audio";

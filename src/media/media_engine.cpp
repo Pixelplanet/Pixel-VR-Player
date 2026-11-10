@@ -343,6 +343,121 @@ struct PlaybackClock {
     }
 };
 
+
+// ---- Frame-packing SEI (H.264 / H.265 payload 45) -------------------------------------------------
+// Frame-sequential 3D can be marked only inside the video stream: a "frame packing arrangement" SEI with
+// type 5 (temporal interleaving). Hardware decoders don't report it, so the first packets are read here.
+namespace fpsei {
+
+struct Bits {
+    const std::vector<uint8_t>& d;
+    size_t pos = 0;  // in bits
+    explicit Bits(const std::vector<uint8_t>& data) : d(data) {}
+    bool more() const { return pos < d.size() * 8; }
+    uint32_t bit() {
+        if (!more()) return 0;
+        const uint32_t b = (d[pos >> 3] >> (7 - (pos & 7))) & 1u;
+        ++pos;
+        return b;
+    }
+    uint32_t bits(int n) {
+        uint32_t v = 0;
+        while (n-- > 0) v = (v << 1) | bit();
+        return v;
+    }
+    uint32_t ue() {
+        int zeros = 0;
+        while (more() && bit() == 0 && zeros < 31) ++zeros;
+        return (1u << zeros) - 1u + bits(zeros);
+    }
+};
+
+// NAL payload without emulation-prevention bytes (00 00 03 -> 00 00).
+inline std::vector<uint8_t> rbsp(const uint8_t* p, size_t n) {
+    std::vector<uint8_t> out;
+    out.reserve(n);
+    int zeros = 0;
+    for (size_t i = 0; i < n; ++i) {
+        if (zeros >= 2 && p[i] == 3) {
+            zeros = 0;
+            continue;
+        }
+        zeros = p[i] == 0 ? zeros + 1 : 0;
+        out.push_back(p[i]);
+    }
+    return out;
+}
+
+// One SEI NAL (header removed): 1 = frame-sequential (rightFirst set), 0 = another packing, -1 = none.
+inline int scanSei(const std::vector<uint8_t>& r, bool& rightFirst) {
+    size_t i = 0;
+    while (i + 2 <= r.size() && r[i] != 0x80) {
+        uint32_t type = 0, size = 0;
+        while (i < r.size() && r[i] == 0xFF) type += 255, ++i;
+        if (i >= r.size()) break;
+        type += r[i++];
+        while (i < r.size() && r[i] == 0xFF) size += 255, ++i;
+        if (i >= r.size()) break;
+        size += r[i++];
+        if (i + size > r.size()) break;
+        if (type == 45) {
+            std::vector<uint8_t> payload(r.begin() + static_cast<long>(i), r.begin() + static_cast<long>(i + size));
+            Bits b(payload);
+            b.ue();                       // frame_packing_arrangement_id
+            if (b.bit()) return -1;       // cancel flag
+            const uint32_t arrangement = b.bits(7);
+            b.bit();                      // quincunx_sampling_flag
+            const uint32_t interp = b.bits(6);  // 1: frame 0 is left, 2: frame 0 is right
+            if (arrangement != 5) return 0;
+            rightFirst = interp == 2;
+            return 1;
+        }
+        i += size;
+    }
+    return -1;
+}
+
+// A packet (length-prefixed when lenSize > 0, else Annex B start codes).
+inline int scanPacket(const uint8_t* d, size_t n, int lenSize, bool hevc, bool& rightFirst) {
+    auto nal = [&](const uint8_t* p, size_t len) {
+        if (len < 3) return -1;
+        const int hdr = hevc ? 2 : 1;
+        const int t = hevc ? (p[0] >> 1) & 0x3f : p[0] & 0x1f;
+        const bool sei = hevc ? (t == 39 || t == 40) : t == 6;
+        if (!sei) return -1;
+        return scanSei(rbsp(p + hdr, len - static_cast<size_t>(hdr)), rightFirst);
+    };
+    if (lenSize > 0) {
+        size_t i = 0;
+        while (i + static_cast<size_t>(lenSize) <= n) {
+            size_t len = 0;
+            for (int k = 0; k < lenSize; ++k) len = (len << 8) | d[i + static_cast<size_t>(k)];
+            i += static_cast<size_t>(lenSize);
+            if (len == 0 || i + len > n) break;
+            const int r = nal(d + i, len);
+            if (r >= 0) return r;
+            i += len;
+        }
+        return -1;
+    }
+    size_t i = 0;
+    auto start = [&](size_t at) { return at + 3 <= n && d[at] == 0 && d[at + 1] == 0 && d[at + 2] == 1; };
+    while (i + 3 <= n && !start(i)) ++i;
+    while (i + 3 <= n) {
+        const size_t b = i + 3;
+        size_t e = b;
+        while (e + 3 <= n && !start(e)) ++e;
+        size_t end = e + 3 <= n ? e : n;
+        while (end > b && d[end - 1] == 0) --end;  // trailing zero of a 4-byte start code
+        const int r = nal(d + b, end - b);
+        if (r >= 0) return r;
+        i = e;
+    }
+    return -1;
+}
+
+}  // namespace fpsei
+
 struct MediaEngine::Impl {
     AVFormatContext* format = nullptr;
     AVCodecContext* codec = nullptr;
@@ -1472,6 +1587,38 @@ bool MediaEngine::open(const std::string& path) {
                 fs = true;
             }
             // Only plausible with a doubled frame rate (both views: 47.952 / 48 / 50 / 59.94 / 60 ...).
+            // Marked only inside the H.264 / H.265 stream (SEI 45, temporal interleaving): read the first
+            // video packets, then go back to the start. Seekable sources only (local files, shares).
+            const AVCodecID cid = stream->codecpar->codec_id;
+            if (!fs && impl_->frameSeqMode != 0 && impl_->frameRate >= 40.0 &&
+                (cid == AV_CODEC_ID_H264 || cid == AV_CODEC_ID_HEVC) && impl_->format->pb &&
+                (impl_->format->pb->seekable & AVIO_SEEKABLE_NORMAL)) {
+                const bool hevc = cid == AV_CODEC_ID_HEVC;
+                const uint8_t* ex = stream->codecpar->extradata;
+                const int exn = stream->codecpar->extradata_size;
+                int lenSize = 0;  // avcC / hvcC: length-prefixed NALs; else Annex B
+                if (ex && exn > 22 && ex[0] == 1) lenSize = hevc ? (ex[21] & 3) + 1 : (ex[4] & 3) + 1;
+                else if (ex && exn > 5 && !hevc && ex[0] == 1) lenSize = (ex[4] & 3) + 1;
+                AVPacket* pk = av_packet_alloc();
+                int videoPackets = 0, found = -1;
+                bool rf = false;
+                for (int k = 0; k < 120 && videoPackets < 12 && found < 0 && pk; ++k) {
+                    if (av_read_frame(impl_->format, pk) < 0) break;
+                    if (pk->stream_index == impl_->videoStream) {
+                        ++videoPackets;
+                        found = fpsei::scanPacket(pk->data, static_cast<size_t>(pk->size), lenSize, hevc, rf);
+                    }
+                    av_packet_unref(pk);
+                }
+                av_packet_free(&pk);
+                const int64_t back = stream->start_time != AV_NOPTS_VALUE ? stream->start_time : 0;
+                av_seek_frame(impl_->format, impl_->videoStream, back, AVSEEK_FLAG_BACKWARD);
+                if (found == 1) {
+                    fs = true;
+                    rightFirst = rf;
+                    PIXELVR_LOG_INFO("MediaEngine: frame-sequential 3D marked in the %s stream (SEI)", hevc ? "H.265" : "H.264");
+                }
+            }
             if (impl_->frameSeqMode == 0) fs = false;
             if (impl_->frameSeqMode == 1) fs = true;  // chosen by hand
             impl_->frameSeq = fs && impl_->frameRate >= 40.0;
