@@ -69,7 +69,11 @@ public:
     int width() const;
     int height() const;
     double duration() const;  // seconds; 0 if unknown
-    double frameRate() const;  // source frames per second; 0 if unknown
+    double frameRate() const;  // source frames per second; 0 if unknown (FS3D: per eye)
+    // Frame-sequential 3D: -1 = detect (default), 0 = never, 1 = always (needs >= 40 fps); applies at
+    // the next open(). frameSequential(): the open file is paired into SBS frames.
+    void setFrameSequentialMode(int mode);
+    bool frameSequential() const;
     std::string codecName() const;   // decoder name + (hw)/(sw)
     // Non-empty when the hardware decoder was refused while another process
     // held it ("steamwebhelper (3079)"): playback is in software because of it.

@@ -1404,7 +1404,7 @@ void SettingsMenu::loadConfig() {
         // skip that key and keep its default.
         try {
             if (key == "projection") projectionMode_ = std::clamp(std::stoi(val), 0, 2);
-            else if (key == "stereo") stereoMode_ = std::clamp(std::stoi(val), 0, 2);
+            else if (key == "stereo") stereoMode_ = std::clamp(std::stoi(val), 0, 3);
             else if (key == "swap_eyes") swapEyes_ = (val == "1");
             else if (key == "draw_models") drawModels_ = (val == "1");
             else if (key == "button_labels") buttonLabels_ = (val == "1");

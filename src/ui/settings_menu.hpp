@@ -140,7 +140,7 @@ public:
     // Settings values
     int projectionMode() const { return projectionMode_; } // 0=Flat, 1=360, 2=180
     void setProjectionMode(int m) { projectionMode_ = m; refresh(); }
-    int stereoMode() const { return stereoMode_; }         // 0=Mono, 1=SBS, 2=TB
+    int stereoMode() const { return stereoMode_; }         // 0=Mono, 1=SBS, 2=TB, 3=FS3D
     void setStereoMode(int s) { stereoMode_ = s; refresh(); }
     bool swapEyes() const { return swapEyes_; }
     void setSwapEyes(bool s) { swapEyes_ = s; refresh(); }

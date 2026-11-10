@@ -235,6 +235,12 @@ void detect_format(const std::string& path, VulkanRenderer::ProjectionMode& proj
     }
 }
 
+// The app's stereo values: 0 mono, 1 SBS, 2 TB, 3 frame-sequential (FS3D). FS3D frames reach the
+// renderer already paired into full side-by-side frames, so it draws them as SBS.
+VulkanRenderer::StereoMode rendererStereo(int s) {
+    return s == 3 ? VulkanRenderer::StereoMode::SideBySide : static_cast<VulkanRenderer::StereoMode>(std::clamp(s, 0, 2));
+}
+
 constexpr float kArrangeGap = 0.04f;  // metres between arranged screens when not snapped
 
 // Size of a screen as quad.vert draws it: the 3.2 x 1.8 quad bent into an arc of
@@ -486,6 +492,8 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
         sc.engine.setPreferredAudioLanguage("");
         sc.engine.setPreferredAudioStream(plexAudioStream_);
     }
+    // Frame-sequential 3D: a format picked by hand for this file decides; otherwise detect it.
+    sc.engine.setFrameSequentialMode(remembered == nullptr || remembered->stereo < 0 ? -1 : (remembered->stereo == 3 ? 1 : 0));
     sc.open = sc.engine.open(path);
     if (!sc.open) {
         // Clear stale video from the previous clip so the renderer shows black
@@ -583,7 +591,7 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
     sc.formatByHand = false;
     if (remembered != nullptr && remembered->projection >= 0 && remembered->stereo >= 0) {
         proj = static_cast<VulkanRenderer::ProjectionMode>(remembered->projection);
-        stereo = static_cast<VulkanRenderer::StereoMode>(remembered->stereo);
+        stereo = rendererStereo(remembered->stereo);
         sc.formatByHand = true;
         sc.formatPending = false;
     }
@@ -604,7 +612,7 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
         return;
     }
     sc.projection = static_cast<int>(proj);
-    sc.stereo = static_cast<int>(stereo);
+    sc.stereo = sc.engine.frameSequential() ? 3 : static_cast<int>(stereo);  // FS3D shows as its own format
     if (slot == 0) {
         renderer_.setProjectionMode(proj);
         renderer_.setStereoMode(stereo);
@@ -1413,6 +1421,7 @@ void App::openFormatMenu() {
     actionMenu_.options.push_back("2D Flat (Standard)");
     actionMenu_.options.push_back("3D Side-by-Side (SBS)");
     actionMenu_.options.push_back("3D Top-Bottom (Over-Under)");
+    actionMenu_.options.push_back("3D Frame Sequential (FS3D)");
     if (selectedScreen_ == 0) {  // immersive only on the main screen
         actionMenu_.options.push_back("VR 180° (Side-by-Side)");
         actionMenu_.options.push_back("VR 360° (Mono)");
@@ -2105,13 +2114,30 @@ void App::selectScreen(int slot) {
 bool App::applyFormat(int projection, int stereo) {
     if (selectedScreen_ > 0 && projection != 0) return false;  // extra screens are flat
     ScreenState& sc = cur();
+#ifdef PIXELVR_HAVE_MEDIA
+    // Frame-sequential on / off changes how the file is decoded: re-open it where it was.
+    if (sc.open && !sc.web && (stereo == 3) != sc.engine.frameSequential()) {
+        const double pos = sc.engine.position();
+        const bool paused = sc.engine.paused();
+        renderer_.releaseVideoFrame(selectedScreen_);
+        sc.engine.setFrameSequentialMode(stereo == 3 ? 1 : 0);
+        if (sc.engine.open(sc.path)) {
+            sc.engine.seek(pos);
+            sc.engine.setPaused(paused);
+        }
+        if (stereo == 3 && !sc.engine.frameSequential()) {
+            renderer_.setScreenTitle(selectedScreen_, "Not frame-sequential: needs a doubled frame rate (48 / 50 / 60 fps)", 6.0f);
+            stereo = 0;
+        }
+    }
+#endif
     sc.projection = projection;
     sc.stereo = stereo;
     settings_.setProjectionMode(projection);
     settings_.setStereoMode(stereo);
     if (selectedScreen_ == 0) {
         renderer_.setProjectionMode(static_cast<VulkanRenderer::ProjectionMode>(projection));
-        renderer_.setStereoMode(static_cast<VulkanRenderer::StereoMode>(stereo));
+        renderer_.setStereoMode(rendererStereo(stereo));
 #ifdef PIXELVR_HAVE_MEDIA
         if (projection != 0) {  // immersive plays alone
             for (int i = 1; i < VulkanRenderer::kMaxVideoSlots; ++i) {
@@ -2121,7 +2147,7 @@ bool App::applyFormat(int projection, int stereo) {
 #endif
     } else {
         VulkanRenderer::ScreenPlacement pl = renderer_.screenPlacement(selectedScreen_);
-        pl.stereo = static_cast<VulkanRenderer::StereoMode>(stereo);
+        pl.stereo = rendererStereo(stereo);
         renderer_.setScreenPlacement(selectedScreen_, pl);
     }
     return true;
@@ -2180,7 +2206,7 @@ VulkanRenderer::ScreenPlacement App::newScreenPlacement(int slot) const {
     pl.center[2] = pivot[2] - std::cos(yaw) * std::cos(pitch) * dist;
     pl.scale = kScale;
     pl.curvature = curv;
-    pl.stereo = static_cast<VulkanRenderer::StereoMode>(screens_[slot].stereo);
+    pl.stereo = rendererStereo(screens_[slot].stereo);
     return pl;
 }
 
@@ -2278,7 +2304,7 @@ void App::openPlayTargetMenu(const std::string& path) {
             pl.pitch = renderer_.recenterPitch();
             pl.scale = 1.0f;
             pl.curvature = renderer_.screenCurvature();
-            pl.stereo = static_cast<VulkanRenderer::StereoMode>(screens_[slot].stereo);
+            pl.stereo = rendererStereo(screens_[slot].stereo);
             pl.active = true;
         }
         const float dx = pl.center[0] - pivot[0];
@@ -2395,7 +2421,7 @@ void App::ensureScreenPlacement(int slot) {
     pl.pitch = renderer_.recenterPitch();
     pl.scale = 1.0f;
     pl.curvature = renderer_.screenCurvature();
-    pl.stereo = static_cast<VulkanRenderer::StereoMode>(screens_[slot].stereo);
+    pl.stereo = rendererStereo(screens_[slot].stereo);
     pl.active = true;
     renderer_.setScreenPlacement(slot, pl);
 }
@@ -2524,7 +2550,7 @@ void App::computeArrangement(const Arrangement& a,
         pl.roll = roll;
         pl.scale = scale[pos] * a.scale;
         pl.curvature = curv[pos];
-        pl.stereo = static_cast<VulkanRenderer::StereoMode>(screens_[slot].stereo);
+        pl.stereo = rendererStereo(screens_[slot].stereo);
     };
 
     if (!a.flat) {
@@ -4216,6 +4242,7 @@ int App::run() {
                             return (isSbs || isTb) ? "VR360 3D" : "VR360";
                         }
 
+                        if (contains(lower, "fs3d") || contains(lower, "frame sequential")) return "3D FS3D";
                         if (isTb)  return "3D TB";
                         if (isSbs) return "3D SBS";
 
@@ -4767,6 +4794,7 @@ int App::run() {
                                         actionMenu_.options.push_back("2D Flat (Standard)");
                                         actionMenu_.options.push_back("3D Side-by-Side (SBS)");
                                         actionMenu_.options.push_back("3D Top-Bottom (Over-Under)");
+                                        actionMenu_.options.push_back("3D Frame Sequential (FS3D)");
                                         actionMenu_.options.push_back("VR 180° (Side-by-Side)");
                                         actionMenu_.options.push_back("VR 360° (Equirectangular)");
                                         actionMenu_.options.push_back("Cancel");
@@ -4886,6 +4914,8 @@ int App::run() {
                                         applyFormat(0, 1);
                                     } else if (opt == "3D Top-Bottom (Over-Under)") {
                                         applyFormat(0, 2);
+                                    } else if (opt == "3D Frame Sequential (FS3D)") {
+                                        applyFormat(0, 3);
                                     } else if (opt == "VR 180° (Side-by-Side)") {
                                         applyFormat(2, 1);
                                     } else if (opt == "VR 360° (Mono)") {
@@ -5747,7 +5777,8 @@ int App::run() {
                 std::string fLabel = "2D Flat";
                 if (settings_.projectionMode() == 0) {
                     fLabel = (settings_.stereoMode() == 0) ? "2D Flat" :
-                             (settings_.stereoMode() == 1) ? "3D SBS" : "3D TB";
+                             (settings_.stereoMode() == 1) ? "3D SBS" :
+                             (settings_.stereoMode() == 3) ? "3D FS3D" : "3D TB";
                 } else if (settings_.projectionMode() == 2) {
                     fLabel = (settings_.stereoMode() == 1) ? "VR180 SBS" :
                              (settings_.stereoMode() == 2) ? "VR180 TB" : "180 Mono";
@@ -5819,7 +5850,7 @@ int App::run() {
                                             !isRemotePath(cur().path)
                                         ? cur().path
                                         : std::string(),
-                                    settings_.stereoMode());
+                                    settings_.stereoMode() == 3 ? 0 : settings_.stereoMode());  // FS3D: one full view
             if (cur().open && renderer_.pointerOnTimeline() && cur().engine.duration() > 0.0) {
                 scrubPreview_.request(renderer_.pointerScrub() * cur().engine.duration());
             }

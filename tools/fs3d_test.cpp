@@ -18,6 +18,7 @@ using pixelvr::VideoFrame;
 int main(int argc, char** argv) {
     if (argc < 3) return 2;
     MediaEngine e;
+    if (argc > 4) e.setFrameSequentialMode(std::atoi(argv[4]));  // -1 detect, 0 off, 1 on
     if (!e.open(argv[1])) {
         std::printf("FAIL open: %s\n", e.lastError().c_str());
         return 1;

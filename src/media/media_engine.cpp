@@ -367,6 +367,7 @@ struct MediaEngine::Impl {
     // sees a 2x-wide SBS video at half the frame rate.
     bool frameSeq = false;
     bool frameSeqRightFirst = false;  // Matroska block_rl / inverted side data
+    int frameSeqMode = -1;            // -1 detect, 0 off, 1 on (manual choice)
     double frameSeqFps = 0.0;         // the file's frame rate (both views)
     double frameSeqStart = 0.0;       // stream start: frame parity is counted from here
     int captureBuffers = 0;                 // num_capture_buffers for reopen
@@ -1471,6 +1472,8 @@ bool MediaEngine::open(const std::string& path) {
                 fs = true;
             }
             // Only plausible with a doubled frame rate (both views: 47.952 / 48 / 50 / 59.94 / 60 ...).
+            if (impl_->frameSeqMode == 0) fs = false;
+            if (impl_->frameSeqMode == 1) fs = true;  // chosen by hand
             impl_->frameSeq = fs && impl_->frameRate >= 40.0;
             impl_->frameSeqRightFirst = rightFirst;
             impl_->frameSeqFps = impl_->frameRate;
@@ -1750,6 +1753,9 @@ uint64_t MediaEngine::decodedFrames() const {
 uint64_t MediaEngine::lateFrames() const { return impl_->lateCount.load(std::memory_order_relaxed); }
 uint64_t MediaEngine::clockWaits() const { return impl_->clockWaitCount.load(std::memory_order_relaxed); }
 double MediaEngine::duration() const { return impl_->duration; }
+void MediaEngine::setFrameSequentialMode(int mode) { impl_->frameSeqMode = mode; }
+bool MediaEngine::frameSequential() const { return impl_ && impl_->frameSeq; }
+
 double MediaEngine::frameRate() const {
     return impl_ ? (impl_->frameSeq ? impl_->frameRate / 2.0 : impl_->frameRate) : 0.0;  // FS3D: per eye
 }

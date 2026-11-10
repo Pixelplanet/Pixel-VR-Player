@@ -49,7 +49,7 @@ void PlaybackMemory::load() {
             Entry e;
             e.position = std::stod(f[1]);
             e.projection = std::clamp(std::stoi(f[2]), -1, 2);
-            e.stereo = std::clamp(std::stoi(f[3]), -1, 2);
+            e.stereo = std::clamp(std::stoi(f[3]), -1, 3);  // 3 = frame-sequential
             e.touched = std::stoll(f[4]);
             if (f.size() == 6) e.fingerprint = f[5];
             entries_[f[0]] = e;
