@@ -21,6 +21,7 @@
 #include "app/music_queue.hpp"
 #include "plugins/plugin_host.hpp"
 #include "plugins/plugin_repo.hpp"
+#include "media/letterbox.hpp"
 #include "util/one_euro.hpp"
 #include "xr/vr_app_manifest.hpp"
 
@@ -274,6 +275,8 @@ private:
         int musicFirst = 0;  // first queue row shown in the music view
         std::string fingerprint;     // file identity for the playback memory
         bool formatPending = false;  // 3D layout still to come from the picture check
+        float letterbox = 0.0f;      // black bars left out (share of the height, top and bottom each)
+        bool letterboxPending = false;  // the measurement is still running
         bool formatByHand = false;   // the viewer's remembered choice applies
     };
     ScreenState screens_[VulkanRenderer::kMaxVideoSlots];
@@ -358,6 +361,8 @@ private:
     // screens per frame; the Plex title stands in for the tokenised URL.
     PluginHost plugins_;
     PluginRepo pluginRepo_;
+    LetterboxDetector letterboxDetector_;
+    void applyLetterbox(int slot);
     std::string plexTitles_[VulkanRenderer::kMaxVideoSlots];
     std::string plexFiles_[VulkanRenderer::kMaxVideoSlots];  // server file names (plugins match scripts by them)
     void updatePlugins();

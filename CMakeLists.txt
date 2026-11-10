@@ -202,7 +202,7 @@ if(PIXELVR_ENABLE_MEDIA)
     pkg_check_modules(FFMPEG REQUIRED IMPORTED_TARGET
         libavcodec libavformat libavutil libswscale libswresample)
     target_sources(pixelvr_core PRIVATE src/media/media_engine.cpp src/media/scrub_preview.cpp
-                                        src/media/cover_art.cpp src/media/stereo_detect.cpp
+                                        src/media/cover_art.cpp src/media/stereo_detect.cpp src/media/letterbox.cpp
                                         src/app/music_queue.cpp)
     target_link_libraries(pixelvr_core PUBLIC PkgConfig::FFMPEG)
     target_compile_definitions(pixelvr_core PUBLIC PIXELVR_HAVE_MEDIA=1)
@@ -338,6 +338,8 @@ if(PIXELVR_BUILD_TOOLS)
     target_link_libraries(plugin_pentest PRIVATE pixelvr_core)
     add_executable(fs3d_test tools/fs3d_test.cpp)
     target_link_libraries(fs3d_test PRIVATE pixelvr_core)
+    add_executable(letterbox_test tools/letterbox_test.cpp)
+    target_link_libraries(letterbox_test PRIVATE pixelvr_core)
 endif()
 
 # First-party plugins (docs/concepts/PLUGIN_SYSTEM_SPEC.md). Each lands in

@@ -631,6 +631,17 @@ public:
     // head-locked floating text): a title pill at the top that fades after `seconds`, and
     // previous / next arrows at the screen's edges while the laser is on an episode screen.
     void setScreenTitle(int slot, const std::string& text, float seconds);
+    // Letterbox bars to leave out (share of the picture height at the top and at the bottom each, per
+    // eye view). Applied to flat screens shown as compositor layers: the layer shows only the picture
+    // and the screen takes its shape.
+    void setLetterbox(int slot, float frac) {
+        if (slot >= 0 && slot < kMaxVideoSlots) letterbox_[slot] = std::clamp(frac, 0.0f, 0.3f);
+    }
+    float letterboxFor(int slot) const {
+        if (slot < 0 || slot >= kMaxVideoSlots || !screenLayerLive_[slot]) return 0.0f;
+        if (slot == 0 && projectionMode_ != ProjectionMode::Flat) return 0.0f;
+        return letterbox_[slot];
+    }
     void setScreenNav(int slot, bool on) {
         if (slot >= 0 && slot < kMaxVideoSlots) screenOverlay_[slot].nav = on;
     }
@@ -893,6 +904,7 @@ private:
     };
     ScreenLayer screenLayers_[kMaxVideoSlots];
     bool screenLayerLive_[kMaxVideoSlots] = {};   // eye passes skip these screens
+    float letterbox_[kMaxVideoSlots] = {};        // setLetterbox()
     uint64_t frameSerial_[kMaxVideoSlots] = {};   // bumps with every new video / page frame
     ViewSwapchain cursorSwapchain_;                // pointer cursor over layer screens
     ViewTargets cursorTargets_;

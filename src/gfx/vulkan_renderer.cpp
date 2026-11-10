@@ -4093,8 +4093,18 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
         cl.pose.position = {poseMat.m[12], poseMat.m[13], poseMat.m[14]};
         // One layer per eye for 3D content: each eye sees its half of the frame.
         const int32_t fullW = L.sc.width, fullH = L.sc.height;
+        // Letterbox: each eye's view loses the same share of rows at its top and bottom.
+        const float lb = web ? 0.0f : letterboxFor(slot);
+        auto cropRows = [&](XrRect2Di r) {
+            const int32_t cut = static_cast<int32_t>(std::lround(lb * static_cast<float>(r.extent.height)));
+            if (cut > 0 && 2 * cut < r.extent.height) {
+                r.offset.y += cut;
+                r.extent.height -= 2 * cut;
+            }
+            return r;
+        };
         if (st == StereoMode::Mono) {
-            cl.imageRect = {{0, 0}, {fullW, fullH}};
+            cl.imageRect = cropRows({{0, 0}, {fullW, fullH}});
             out.push_back(cl);
         } else {
             for (int eye = 0; eye < 2; ++eye) {
@@ -4102,9 +4112,9 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
                 CompositionLayer e = cl;
                 e.eye = (eye == 0) ? XR_EYE_VISIBILITY_LEFT : XR_EYE_VISIBILITY_RIGHT;
                 if (st == StereoMode::SideBySide) {
-                    e.imageRect = {{half * (fullW / 2), 0}, {fullW / 2, fullH}};
+                    e.imageRect = cropRows({{half * (fullW / 2), 0}, {fullW / 2, fullH}});
                 } else {
-                    e.imageRect = {{0, half * (fullH / 2)}, {fullW, fullH / 2}};
+                    e.imageRect = cropRows({{0, half * (fullH / 2)}, {fullW, fullH / 2}});
                 }
                 out.push_back(e);
             }
@@ -4650,6 +4660,11 @@ void VulkanRenderer::recordScreenCopy(int slot, const ScreenLayer& L, uint32_t i
                 hv.y = 1.0f + e * std::floor(h * 0.5f);
                 hv.height = std::floor(h * 0.5f) - 2.0f;
             }
+            if (!L.web && letterboxFor(slot) > 0.0f) {  // keep it on the visible picture
+                const float cut = std::floor(letterboxFor(slot) * hv.height);
+                hv.y += cut;
+                hv.height -= 2.0f * cut;
+            }
             if (hv.width < 8.0f || hv.height < 8.0f) continue;
             vkCmdSetViewport(commandBuffer_, 0, 1, &hv);
             // The ortho spans 3.2 x 1.8 model units over this view, which is
@@ -4720,6 +4735,11 @@ void VulkanRenderer::recordScreenCopy(int slot, const ScreenLayer& L, uint32_t i
             } else if (st == StereoMode::TopBottom) {
                 hv.y = 1.0f + e * std::floor(h * 0.5f);
                 hv.height = std::floor(h * 0.5f) - 2.0f;
+            }
+            if (!L.web && letterboxFor(slot) > 0.0f) {  // keep it on the visible picture
+                const float cut = std::floor(letterboxFor(slot) * hv.height);
+                hv.y += cut;
+                hv.height -= 2.0f * cut;
             }
             if (hv.width < 8.0f || hv.height < 8.0f) continue;
             vkCmdSetViewport(commandBuffer_, 0, 1, &hv);
@@ -5758,6 +5778,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 } else if (stereo == StereoMode::TopBottom) {
                     if (v.videoAspect <= 1.2f) eyeAspect = v.videoAspect * 2.0f;
                 }
+                if (!webHere) eyeAspect /= std::max(0.4f, 1.0f - 2.0f * letterboxFor(slot));  // bars left out
                 const float widthScale = eyeAspect / (16.0f / 9.0f);
 
                 // Cinema Screen Ambilight Glow: around every screen (or only the
@@ -8109,6 +8130,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 float eyeAspect = (v.hasVideo && v.videoAspect > 0.0f) ? v.videoAspect : 16.0f / 9.0f;
                 if (st == StereoMode::SideBySide && eyeAspect >= 2.6f) eyeAspect *= 0.5f;
                 else if (st == StereoMode::TopBottom && eyeAspect <= 1.2f) eyeAspect *= 2.0f;
+                eyeAspect /= std::max(0.4f, 1.0f - 2.0f * letterboxFor(slot));  // bars left out
                 const float ws = eyeAspect / (16.0f / 9.0f);
                 // Every tile is shown face-on (only a sideways tilt is kept), at
                 // the spot the screen takes from where the user stands: a screen

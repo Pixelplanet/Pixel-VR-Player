@@ -256,6 +256,7 @@ void SettingsMenu::refresh() {
                Action::CycleDistance);
         toggle("Swap Left/Right Eye", swapEyes_, Action::ToggleSwapEyes);
         toggle("Multiple Screens", multiScreen_, Action::ToggleMultiScreen);
+        toggle("Remove Black Bars", removeBlackBars_, Action::ToggleRemoveBlackBars);
         toggle("Pause When Headset Is Removed", pauseOnRemoval_, Action::TogglePauseOnRemoval);
         toggle("Pause Livestreams Too", pauseLivestreams_, Action::TogglePauseLivestreams, pauseOnRemoval_);
         toggle("Debug Statistics", showStats_, Action::ToggleStats);
@@ -711,6 +712,11 @@ SettingsMenu::Action SettingsMenu::activate() {
             }
             break;
         }
+        case Action::ToggleRemoveBlackBars:
+            removeBlackBars_ = !removeBlackBars_;
+            saveConfig();
+            refresh();
+            break;
         case Action::InstallPluginPackage: {
             const int i = rows_[static_cast<size_t>(selected_)].data;
             pluginPackageToInstall_ = (i >= 0 && i < static_cast<int>(pluginPackages_.size()))
@@ -1405,6 +1411,7 @@ void SettingsMenu::loadConfig() {
         try {
             if (key == "projection") projectionMode_ = std::clamp(std::stoi(val), 0, 2);
             else if (key == "stereo") stereoMode_ = std::clamp(std::stoi(val), 0, 3);
+            else if (key == "remove_bars") removeBlackBars_ = val != "0";
             else if (key == "swap_eyes") swapEyes_ = (val == "1");
             else if (key == "draw_models") drawModels_ = (val == "1");
             else if (key == "button_labels") buttonLabels_ = (val == "1");
@@ -1486,6 +1493,7 @@ void SettingsMenu::saveConfig() const {
         if (file.is_open()) {
             file << "projection=" << projectionMode_ << "\n";
             file << "stereo=" << stereoMode_ << "\n";
+            file << "remove_bars=" << (removeBlackBars_ ? 1 : 0) << "\n";
             file << "swap_eyes=" << (swapEyes_ ? 1 : 0) << "\n";
             file << "draw_models=" << (drawModels_ ? 1 : 0) << "\n";
             file << "button_labels=" << (buttonLabels_ ? 1 : 0) << "\n";

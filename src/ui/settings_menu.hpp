@@ -90,6 +90,7 @@ public:
         BackToPlugins,
         BackToControls,
         InstallPluginPackage,
+        ToggleRemoveBlackBars,
         InstallRepoPlugin,  // from the plugin repository; the app downloads repoEntryToInstall()
         OpenStore,          // the Install plugins page
         OpenStorePlugin,    // one repository plugin's details
@@ -141,6 +142,7 @@ public:
     int projectionMode() const { return projectionMode_; } // 0=Flat, 1=360, 2=180
     void setProjectionMode(int m) { projectionMode_ = m; refresh(); }
     int stereoMode() const { return stereoMode_; }         // 0=Mono, 1=SBS, 2=TB, 3=FS3D
+    bool removeBlackBars() const { return removeBlackBars_; }  // leave letterbox bars out of screens
     void setStereoMode(int s) { stereoMode_ = s; refresh(); }
     bool swapEyes() const { return swapEyes_; }
     void setSwapEyes(bool s) { swapEyes_ = s; refresh(); }
@@ -357,6 +359,7 @@ private:
 
     int projectionMode_ = 0;
     int stereoMode_ = 0;
+    bool removeBlackBars_ = true;
     bool swapEyes_ = false;
     bool drawModels_ = true;   // our models (off: SteamVR draws its own controllers); laser stays
     bool buttonLabels_ = true; // floating button labels (on for new installs: shows what the buttons do)

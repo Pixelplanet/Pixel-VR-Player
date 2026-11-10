@@ -613,6 +613,12 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
     }
     sc.projection = static_cast<int>(proj);
     sc.stereo = sc.engine.frameSequential() ? 3 : static_cast<int>(stereo);  // FS3D shows as its own format
+    // Letterbox bars: measured in the background (not for the vault: the results are kept on disk).
+    sc.letterbox = 0.0f;
+    renderer_.setLetterbox(slot, 0.0f);
+    sc.letterboxPending = !privatePath || sc.webSuspended;
+    if (VaultManager::instance().isVaultPath(path)) sc.letterboxPending = false;
+    if (sc.letterboxPending) letterboxDetector_.request(path);
     if (slot == 0) {
         renderer_.setProjectionMode(proj);
         renderer_.setStereoMode(stereo);
@@ -1074,6 +1080,9 @@ void App::clearSlotKeepLayout(int slot) {
 void App::closeMedia(int slot) {
     if (slot < 0) slot = selectedScreen_;
     ScreenState& sc = screens_[slot];
+    sc.letterbox = 0.0f;
+    sc.letterboxPending = false;
+    renderer_.setLetterbox(slot, 0.0f);
     if (sc.webSuspended) {
 #ifdef PIXELVR_HAVE_MEDIA
         webHosts_[slot].plexTimeline("stopped", static_cast<int64_t>(sc.engine.position() * 1000.0));
@@ -2138,6 +2147,7 @@ bool App::applyFormat(int projection, int stereo) {
     sc.stereo = stereo;
     settings_.setProjectionMode(projection);
     settings_.setStereoMode(stereo);
+    applyLetterbox(selectedScreen_);  // top-bottom 3D: no letterbox crop
     if (selectedScreen_ == 0) {
         renderer_.setProjectionMode(static_cast<VulkanRenderer::ProjectionMode>(projection));
         renderer_.setStereoMode(rendererStereo(stereo));
@@ -2449,6 +2459,16 @@ void App::startGrabbingScreen(int slot, const XrInputState& in) {
     movingScreen_ = slot;
 }
 
+void App::applyLetterbox(int slot) {
+    if (slot < 0 || slot >= VulkanRenderer::kMaxVideoSlots) return;
+    ScreenState& sc = screens_[slot];
+    // Top-bottom 3D has bars inside each half: the whole-frame measurement does not fit it.
+    const float lb = (settings_.removeBlackBars() && sc.open && sc.stereo != 2) ? sc.letterbox : 0.0f;
+    renderer_.setLetterbox(slot, lb);
+    if (lb > 0.0f) PIXELVR_LOG_INFO("Letterbox: screen %d leaves out %.1f %% top and bottom", slot + 1, lb * 100.0f);
+    if (arrangementActive_ && inArrangement(slot)) applyArrangement(arrangement_);
+}
+
 float App::screenEyeAspect(int slot) const {
     float aspect = 16.0f / 9.0f;
 #ifdef PIXELVR_HAVE_MEDIA
@@ -2457,6 +2477,7 @@ float App::screenEyeAspect(int slot) const {
         aspect = static_cast<float>(sc.engine.width()) / static_cast<float>(sc.engine.height());
         if ((sc.stereo == 1 || sc.stereo == 3) && aspect >= 2.6f) aspect *= 0.5f;  // full SBS (FS3D arrives as full SBS)
         else if (sc.stereo == 2 && aspect <= 1.2f) aspect *= 2.0f;  // full TB
+        aspect /= std::max(0.4f, 1.0f - 2.0f * renderer_.letterboxFor(slot));  // black bars left out
     }
 #else
     (void)slot;
@@ -3792,6 +3813,14 @@ int App::run() {
             for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
                 updateMusicView(slot);
                 ScreenState& sc = screens_[slot];
+                if (sc.letterboxPending && sc.open) {
+                    float lb = 0.0f;
+                    if (letterboxDetector_.result(sc.path, lb)) {
+                        sc.letterboxPending = false;
+                        sc.letterbox = lb;
+                        applyLetterbox(slot);
+                    }
+                }
                 ThumbnailCache::MediaMeta tm;
                 if (sc.formatPending && sc.open && thumbnailCache_.getMeta(sc.path, tm)) {
                     // The picture check finished after the file opened.
@@ -5376,6 +5405,8 @@ int App::run() {
                                                                                                          : std::string();
                             openKeyboard("Shortcut address (e.g. 192.168.1.10:8096 or https://...)", cur, false, in,
                                          [this, idx](const std::string& t) { settings_.setShortcutUrl(idx, t); });
+                        } else if (act == SettingsMenu::Action::ToggleRemoveBlackBars) {
+                            for (int s = 0; s < VulkanRenderer::kMaxVideoSlots; ++s) applyLetterbox(s);
                         } else if (act == SettingsMenu::Action::InstallRepoPlugin) {
                             const auto entries = pluginRepo_.entries();
                             const int ei = settings_.repoEntryToInstall();
