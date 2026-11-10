@@ -1,4 +1,5 @@
 #include "ui/settings_menu.hpp"
+#include "util/sdcard.hpp"
 #include "app/vault_manager.hpp"
 #include "net/smb_credentials.hpp"
 #include "plugins/plugin_host.hpp"
@@ -26,8 +27,8 @@ const char* const kButtonsStatus =
     "Change buttons in SteamOS: SteamVR Settings > Controllers > Manage Controller Bindings";
 const char* const kButtonsPagesStatus =
     "< > or Bumpers: Page  |  Change buttons: SteamVR > Controllers > Manage Controller Bindings";
-const char* kDownloadDirs[] = {"~/media", "~/Downloads", "~/Videos"};
-constexpr int kDownloadDirCount = 3;
+const char* kDownloadDirs[] = {"~/media", "~/Downloads", "~/Videos", "SD card"};  // SD card: <card>/Downloads
+constexpr int kDownloadDirCount = 4;
 
 // Web destinations the two lower rail tabs can open. Streaming services open
 // as a kiosk screen (just the page); "Browser" is the full browser.
@@ -278,8 +279,18 @@ void SettingsMenu::refresh() {
                   uiOpacityIdx_ % kUiOpacityCount, Action::CycleUiOpacity);
         segmented("UI in 360/180 Videos", {"Fixed", "Follow Gaze"}, uiFollowMode_ % 2,
                   Action::CycleUiFollowMode);
-        segmented("Download Folder", {kDownloadDirs[0], kDownloadDirs[1], kDownloadDirs[2]},
-                  downloadDirIdx_ % kDownloadDirCount, Action::CycleDownloadDir);
+        {
+            // The SD card is offered while one is inserted; the label shows the free space where files go.
+            const bool card = !sdCardMount().empty();
+            std::vector<std::string> opts{kDownloadDirs[0], kDownloadDirs[1], kDownloadDirs[2]};
+            if (card || downloadDirIdx_ % kDownloadDirCount == 3) opts.push_back(kDownloadDirs[3]);
+            const std::string dir = downloadDir();
+            const uint64_t freeB = freeBytes(std::filesystem::exists(dir) ? dir : std::filesystem::path(dir).parent_path().string());
+            const std::string label = (downloadDirIdx_ % kDownloadDirCount == 3 && !card)
+                                          ? "Download Folder (no SD card: saving to ~/Downloads)"
+                                          : "Download Folder" + (freeB ? " (" + gigabytes(freeB) + " free)" : std::string());
+            segmented(label, opts, downloadDirIdx_ % kDownloadDirCount, Action::CycleDownloadDir);
+        }
         {
             std::string on;
             for (const RailShortcut& r : railShortcuts()) on += (on.empty() ? "" : ", ") + r.name;
@@ -794,6 +805,7 @@ SettingsMenu::Action SettingsMenu::activate() {
             break;
         case Action::CycleDownloadDir:
             downloadDirIdx_ = (downloadDirIdx_ + 1) % kDownloadDirCount;
+            if (downloadDirIdx_ == 3 && sdCardMount().empty()) downloadDirIdx_ = 0;  // no card: skip it
             saveConfig();
             refresh();
             break;
@@ -1343,6 +1355,10 @@ std::vector<SettingsMenu::RailShortcut> SettingsMenu::railShortcuts() const {
 std::string SettingsMenu::downloadDir() const {
     const char* home = std::getenv("HOME");
     const std::string base = home ? home : ".";
+    if (downloadDirIdx_ % kDownloadDirCount == 3) {
+        const std::string card = sdCardMount();
+        return card.empty() ? base + "/Downloads" : card + "/Downloads";  // card removed: the home Downloads
+    }
     const char* d = kDownloadDirs[downloadDirIdx_ % kDownloadDirCount];
     return d[0] == '~' ? base + (d + 1) : std::string(d);
 }

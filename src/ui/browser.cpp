@@ -1,5 +1,6 @@
 #include "ui/browser.hpp"
 
+#include "util/sdcard.hpp"
 #include "app/vault_manager.hpp"
 #include "net/remote_fs.hpp"
 #include "net/smb_credentials.hpp"
@@ -228,6 +229,13 @@ void Browser::scanLocalInto(const std::string& dir, ScanResult& out) {
 
     if (dir == homeDir_) {
         out.entries.push_back({"[ Network ]", "", false, false, false, true});
+        // The SD card, while one is inserted, right below Network.
+        const std::string card = sdCardMount();
+        if (!card.empty()) {
+            const uint64_t freeB = freeBytes(card);
+            out.entries.push_back({"SD card/", card, true, false, false, false,
+                                   "SD card" + (freeB ? "  \xB7  " + gigabytes(freeB) + " free" : std::string())});
+        }
     }
     if (dir != "/") {
         out.entries.push_back({".. (up)", "", false, false, true, false});
