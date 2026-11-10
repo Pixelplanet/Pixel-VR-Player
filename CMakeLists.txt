@@ -145,6 +145,7 @@ add_library(pixelvr_core STATIC
     src/plugins/plugin_host.cpp
     src/plugins/plugin_files.cpp
     src/plugins/plugin_repo.cpp
+    src/app/vault_crypto.cpp
     src/app/chromium_installer.cpp
     src/app/app.cpp)
 
@@ -240,6 +241,9 @@ if(PkgConfig_FOUND)
         target_link_libraries(pixelvr_core PUBLIC PkgConfig::LIBSSH)
         target_compile_definitions(pixelvr_core PUBLIC PIXELVR_HAVE_LIBSSH=1)
     endif()
+    # Vault encryption (AES with the CPU's AES instructions).
+    pkg_check_modules(LIBCRYPTO REQUIRED IMPORTED_TARGET libcrypto)
+    target_link_libraries(pixelvr_core PUBLIC PkgConfig::LIBCRYPTO)
     pkg_check_modules(LIBCURL IMPORTED_TARGET libcurl)
     if(LIBCURL_FOUND)
         target_link_libraries(pixelvr_core PUBLIC PkgConfig::LIBCURL)
@@ -340,6 +344,8 @@ if(PIXELVR_BUILD_TOOLS)
     target_link_libraries(fs3d_test PRIVATE pixelvr_core)
     add_executable(letterbox_test tools/letterbox_test.cpp)
     target_link_libraries(letterbox_test PRIVATE pixelvr_core)
+    add_executable(vault_crypto_test tools/vault_crypto_test.cpp)
+    target_link_libraries(vault_crypto_test PRIVATE pixelvr_core)
 endif()
 
 # First-party plugins (docs/concepts/PLUGIN_SYSTEM_SPEC.md). Each lands in
