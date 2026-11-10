@@ -4002,6 +4002,10 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
             srcH = static_cast<int>(std::lround(srcH * v.drmUvScaleY));
         }
         if (srcW <= 0 || srcH <= 0) continue;
+        // Letterbox: the copy leaves the bars out, so the image is only as tall as the picture.
+        if (!web && letterboxFor(slot) > 0.0f) {
+            srcH = std::max(2, static_cast<int>(std::lround(srcH * (1.0f - 2.0f * letterboxFor(slot)))));
+        }
         const StereoMode st = web ? StereoMode::Mono
                                   : ((slot == 0) ? stereoMode_ : screenPlacements_[slot].stereo);
         // Texels wanted across the frame, from the screen's angular size.
@@ -4094,7 +4098,7 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
         // One layer per eye for 3D content: each eye sees its half of the frame.
         const int32_t fullW = L.sc.width, fullH = L.sc.height;
         // Letterbox: each eye's view loses the same share of rows at its top and bottom.
-        const float lb = web ? 0.0f : letterboxFor(slot);
+        const float lb = 0.0f;  // (letterbox: cropped in the copy, the image holds only the picture)
         auto cropRows = [&](XrRect2Di r) {
             const int32_t cut = static_cast<int32_t>(std::lround(lb * static_cast<float>(r.extent.height)));
             if (cut > 0 && 2 * cut < r.extent.height) {
@@ -4618,7 +4622,11 @@ void VulkanRenderer::recordScreenCopy(int slot, const ScreenLayer& L, uint32_t i
             vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
             vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, layout, 0, 1, &set, 0, nullptr);
             PushConstants push{};
-            std::memcpy(push.mvp, ortho.m, sizeof(push.mvp));
+            // Letterbox: a narrower vertical range puts the black rows (each eye view's top and bottom
+            // share, the same share of the whole frame) outside the image.
+            const float keep = 1.0f - 2.0f * letterboxFor(slot);
+            const Mat4 videoOrtho = keep < 0.999f ? orthographicVulkan(-1.6f, 1.6f, -0.9f * keep, 0.9f * keep) : ortho;
+            std::memcpy(push.mvp, videoOrtho.m, sizeof(push.mvp));
             std::memcpy(push.conversion, v.conversion, sizeof(push.conversion));
             std::memcpy(push.range, v.range, sizeof(push.range));
             if (ycbcr) {
@@ -4659,11 +4667,6 @@ void VulkanRenderer::recordScreenCopy(int slot, const ScreenLayer& L, uint32_t i
             } else if (st == StereoMode::TopBottom) {
                 hv.y = 1.0f + e * std::floor(h * 0.5f);
                 hv.height = std::floor(h * 0.5f) - 2.0f;
-            }
-            if (!L.web && letterboxFor(slot) > 0.0f) {  // keep it on the visible picture
-                const float cut = std::floor(letterboxFor(slot) * hv.height);
-                hv.y += cut;
-                hv.height -= 2.0f * cut;
             }
             if (hv.width < 8.0f || hv.height < 8.0f) continue;
             vkCmdSetViewport(commandBuffer_, 0, 1, &hv);
@@ -4735,11 +4738,6 @@ void VulkanRenderer::recordScreenCopy(int slot, const ScreenLayer& L, uint32_t i
             } else if (st == StereoMode::TopBottom) {
                 hv.y = 1.0f + e * std::floor(h * 0.5f);
                 hv.height = std::floor(h * 0.5f) - 2.0f;
-            }
-            if (!L.web && letterboxFor(slot) > 0.0f) {  // keep it on the visible picture
-                const float cut = std::floor(letterboxFor(slot) * hv.height);
-                hv.y += cut;
-                hv.height -= 2.0f * cut;
             }
             if (hv.width < 8.0f || hv.height < 8.0f) continue;
             vkCmdSetViewport(commandBuffer_, 0, 1, &hv);
