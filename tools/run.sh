@@ -20,15 +20,16 @@ logdir="$here/logs"
 mkdir -p "$logdir"
 # Logs used to sit in the home folder (and briefly in ~/.local/state/pixelvr): move them once.
 for old in "$HOME/pixelvr-run.log" "$HOME/.local/state/pixelvr/run.log"; do
-    [ -f "$old" ] && mv -f "$old" "$logdir/run.log.old" 2>/dev/null
+    if [ -f "$old" ]; then mv -f "$old" "$logdir/run.log.old" 2>/dev/null || true; fi
 done
 for old in "$HOME/.local/state/pixelvr/install.log" "$HOME/pixelvr-install.log"; do
-    [ -f "$old" ] && [ ! -f "$logdir/install.log" ] && mv -f "$old" "$logdir/install.log" 2>/dev/null
+    if [ -f "$old" ] && [ ! -f "$logdir/install.log" ]; then mv -f "$old" "$logdir/install.log" 2>/dev/null || true; fi
 done
-rm -f "$HOME/pixelvr-run.log.old" "$HOME/.local/state/pixelvr/run.log.old" 2>/dev/null
-rmdir "$HOME/.local/state/pixelvr" 2>/dev/null
+# (set -eu above: every tidy-up step must be allowed to fail, or the player never starts)
+rm -f "$HOME/pixelvr-run.log.old" "$HOME/.local/state/pixelvr/run.log.old" 2>/dev/null || true
+rmdir "$HOME/.local/state/pixelvr" 2>/dev/null || true
 # Start a fresh log once it passes 20 MB (the previous one is kept as run.log.old).
 if [ -f "$logdir/run.log" ] && [ "$(stat -c %s "$logdir/run.log" 2>/dev/null || echo 0)" -gt 20000000 ]; then
-    mv -f "$logdir/run.log" "$logdir/run.log.old"
+    mv -f "$logdir/run.log" "$logdir/run.log.old" || true
 fi
 exec "$here/pixelvr" "$@" >>"$logdir/run.log" 2>&1
