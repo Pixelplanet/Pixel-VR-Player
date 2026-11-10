@@ -23,7 +23,7 @@ for old in "$HOME/pixelvr-run.log" "$HOME/.local/state/pixelvr/run.log"; do
     if [ -f "$old" ]; then mv -f "$old" "$logdir/run.log.old" 2>/dev/null || true; fi
 done
 for old in "$HOME/.local/state/pixelvr/install.log" "$HOME/pixelvr-install.log"; do
-    if [ -f "$old" ] && [ ! -f "$logdir/install.log" ]; then mv -f "$old" "$logdir/install.log" 2>/dev/null || true; fi
+    if [ -f "$old" ]; then { cat "$old" >> "$logdir/install.log" && rm -f "$old"; } 2>/dev/null || true; fi
 done
 # (set -eu above: every tidy-up step must be allowed to fail, or the player never starts)
 rm -f "$HOME/pixelvr-run.log.old" "$HOME/.local/state/pixelvr/run.log.old" 2>/dev/null || true

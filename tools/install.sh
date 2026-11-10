@@ -25,8 +25,9 @@ set -eu
 # tee; when piped from curl the message helpers below write the log instead.
 LOG_FILE="${PIXELVR_INSTALL_DIR:-$HOME/PixelVRPlayer}/logs/install.log"
 mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
+# Old logs from the home folder: appended to this one (an older version may have written there again).
 for old in "$HOME/pixelvr-install.log" "$HOME/.local/state/pixelvr/install.log"; do
-    [ -f "$old" ] && [ ! -f "$LOG_FILE" ] && mv -f "$old" "$LOG_FILE" 2>/dev/null || true
+    if [ -f "$old" ]; then cat "$old" >> "$LOG_FILE" 2>/dev/null && rm -f "$old" 2>/dev/null || true; fi
 done
 if [ -z "${PIXELVR_INSTALL_LOGGING:-}" ] && [ -f "$0" ] && command -v tee >/dev/null 2>&1; then
     status_file=$(mktemp 2>/dev/null) || status_file=""
