@@ -4006,14 +4006,6 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
         if (!web && letterboxFor(slot) > 0.0f) {
             srcH = std::max(2, static_cast<int>(std::lround(srcH * (1.0f - 2.0f * letterboxFor(slot)))));
         }
-        {
-            static int lastH[kMaxVideoSlots] = {};
-            if (lastH[slot] != srcH) {
-                lastH[slot] = srcH;
-                PIXELVR_LOG_INFO("Screen layer: slot %d source %dx%d (letterbox %.3f) layer quad %.3f x %.3f bend %.3f",
-                                 slot, srcW, srcH, web ? 0.0f : letterboxFor(slot), 2.0f * sh.halfW, 2.0f * sh.halfH, sh.bendR);
-            }
-        }
         const StereoMode st = web ? StereoMode::Mono
                                   : ((slot == 0) ? stereoMode_ : screenPlacements_[slot].stereo);
         // Texels wanted across the frame, from the screen's angular size.
@@ -5918,18 +5910,6 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     hit.roll = (slot == 0 && !pl.active) ? 0.0f : pl.roll;
                     hit.halfW = 1.6f * widthScale * scale;
                     hit.halfH = 0.9f * scale;
-                    {   // (letterbox diagnosis: log when a screen's shape inputs change)
-                        static float lastLog[kMaxVideoSlots][3] = {};
-                        const float now3[3] = {letterboxFor(slot), widthScale, scale};
-                        if (std::fabs(now3[0] - lastLog[slot][0]) + std::fabs(now3[1] - lastLog[slot][1]) +
-                                std::fabs(now3[2] - lastLog[slot][2]) > 1e-3f) {
-                            std::memcpy(lastLog[slot], now3, sizeof(now3));
-                            PIXELVR_LOG_INFO("Screen shape: slot %d letterbox %.3f (set %.3f, layer %d) videoAspect %.3f "
-                                             "widthScale %.3f scale %.3f halfW %.3f halfH %.3f placed %d",
-                                             slot, now3[0], letterbox_[slot], screenLayerLive_[slot] ? 1 : 0, v.videoAspect,
-                                             widthScale, scale, hit.halfW, hit.halfH, pl.active ? 1 : 0);
-                        }
-                    }
                     // quad.vert's arc radius, in world units (model x and z
                     // are both scaled by widthScale * scale).
                     hit.bendR = (curvature > 0.005f) ? widthScale * scale * 3.2f / (curvature * 1.75f) : 0.0f;
