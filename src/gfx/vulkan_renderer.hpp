@@ -728,6 +728,10 @@ public:
         std::vector<std::string> options;
     };
     static constexpr int kSettingsKindSegmented = 6;
+    // Dialog pages (compact): a run of paragraph rows is one text panel (stepIdx 1 = heading line);
+    // button rows sit side by side below it (stepIdx 1 = the main, accent-coloured button).
+    static constexpr int kSettingsKindParagraph = 9;
+    static constexpr int kSettingsKindButton = 10;
     static constexpr int kSettingsKindPluginLine = 8;  // a plugin list line (stepIdx: on; steps: remove armed)
     static constexpr int kSettingsKindShortcut = 7;  // a shortcut list line (stepIdx: on; steps: delete armed)
 
@@ -1309,6 +1313,8 @@ private:
     int listLandIdx_ = -1;
     std::chrono::steady_clock::time_point listAnimAt_{};
     float listLineY(int r, int layoutN) const;
+    // A dialog button's rectangle (buttons share one row), or false for other rows.
+    bool dialogButtonRect(int r, int layoutN, float& cx, float& cy, float& hw, float& hh) const;
     void advanceListAnim(int total, int layoutN);
     int settingsSelected_ = 0;
     int settingsHovered_ = -1;

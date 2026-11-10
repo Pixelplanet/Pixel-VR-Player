@@ -2737,6 +2737,25 @@ std::string VulkanRenderer::keyboardKeyText(int index, bool shift, bool symbols)
     return symbols ? k.sym : (shift ? k.upper : k.lower);
 }
 
+bool VulkanRenderer::dialogButtonRect(int r, int layoutN, float& cx, float& cy, float& hw, float& hh) const {
+    const int total = static_cast<int>(settingsRows_.size());
+    if (r < 0 || r >= total || settingsRows_[static_cast<size_t>(r)].kind != kSettingsKindButton) return false;
+    int first = r, n = 0, k = 0;
+    while (first > 0 && settingsRows_[static_cast<size_t>(first - 1)].kind == kSettingsKindButton) --first;
+    for (int i = first; i < total && settingsRows_[static_cast<size_t>(i)].kind == kSettingsKindButton; ++i, ++n) {
+        if (i == r) k = n;
+    }
+    // The button row sits one line below the text panel, buttons centred side by side.
+    const hub::SettingsCard L = hub::settingsCard(first, layoutN, true);
+    const float gap = 0.024f;
+    hw = std::min(0.20f, (L.halfW * 2.0f - gap * static_cast<float>(n - 1)) / static_cast<float>(n) * 0.5f);
+    hh = L.halfH + 0.004f;
+    const float span = hw * 2.0f * static_cast<float>(n) + gap * static_cast<float>(n - 1);
+    cx = L.cx - span * 0.5f + hw + static_cast<float>(k) * (hw * 2.0f + gap);
+    cy = L.cy - 0.012f;
+    return true;
+}
+
 float VulkanRenderer::listLineY(int r, int layoutN) const {
     if (r == settingsDragFrom_) return listDragY_;
     const float off = (r >= 0 && r < static_cast<int>(listAnimY_.size())) ? listAnimY_[static_cast<size_t>(r)] : 0.0f;
@@ -3161,7 +3180,11 @@ void VulkanRenderer::updatePointer() {
                 listPointerY_ = hyy;  // a dragged list line follows it
                 for (int i = 0; i < total && i < maxVis; ++i) {
                     const hub::SettingsCard L = hub::settingsCard(i, layoutN, settingsCompact_);
-                    if (UiRect{L.cx, L.cy, L.halfW, L.halfH}.contains(hx, hyy)) {
+                    const int rk = settingsRows_[static_cast<std::size_t>(i)].kind;
+                    if (settingsCompact_ && rk == kSettingsKindParagraph) continue;
+                    float bx, by, bw, bh;
+                    const bool isBtn = settingsCompact_ && dialogButtonRect(i, layoutN, bx, by, bw, bh);
+                    if (isBtn ? UiRect{bx, by, bw, bh}.contains(hx, hyy) : UiRect{L.cx, L.cy, L.halfW, L.halfH}.contains(hx, hyy)) {
                         settingsRow_ = i;
                         settingsHovered_ = i;
                         const SettingsRowVis& row = settingsRows_[static_cast<std::size_t>(i)];
@@ -7479,6 +7502,31 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         const SettingsRowVis& lr = settingsRows_[static_cast<std::size_t>(r)];
                         hub::SettingsCard hc = hub::settingsCard(r, layoutN, true);
                         hc.cy = listLineY(r, layoutN);
+                        if (lr.kind == kSettingsKindParagraph) {
+                            // The first line of a run draws the one panel behind the whole run.
+                            if (r > 0 && settingsRows_[static_cast<std::size_t>(r - 1)].kind == kSettingsKindParagraph) return;
+                            int last = r;
+                            while (last + 1 < total && settingsRows_[static_cast<std::size_t>(last + 1)].kind == kSettingsKindParagraph) ++last;
+                            const hub::SettingsCard lc = hub::settingsCard(last, layoutN, true);
+                            const float top = hc.cy + hc.halfH, bottom = lc.cy - lc.halfH;
+                            const float ph = (top - bottom) * 0.5f;
+                            drawUiElement(vpPanel, hc.cx, (top + bottom) * 0.5f, hc.halfW, ph, UiShape::RoundedBox,
+                                          glassCardT.data(), 0.018f / ph, 0.0012f / ph, kGlassRimFaint);
+                            return;
+                        }
+                        float bx, by, bw, bh;
+                        if (dialogButtonRect(r, layoutN, bx, by, bw, bh)) {
+                            const bool bhov = (r == settingsHovered_) && lr.enabled;
+                            const bool primary = lr.stepIdx == 1;
+                            const float acc[4] = {themeAccentCol[0] * (bhov ? 0.95f : 0.78f), themeAccentCol[1] * (bhov ? 0.95f : 0.78f),
+                                                  themeAccentCol[2] * (bhov ? 0.95f : 0.78f), lr.enabled ? 0.96f : 0.40f};
+                            const float accRim[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 1.0f};
+                            if (bhov) drawGlow(vpPanel, bx, by, bw, bh, 0.012f, primary ? accRim : hovGlow, 0.018f / bh);
+                            drawUiElement(vpPanel, bx, by, bw, bh, UiShape::RoundedBox,
+                                          primary ? acc : (bhov ? glassCardHoverT.data() : glassCardT.data()), 0.018f / bh,
+                                          (bhov ? 0.0022f : 0.0014f) / bh, primary ? accRim : (bhov ? tabActiveBord : kGlassRim));
+                            return;
+                        }
                         const bool dragged = (r == settingsDragFrom_);
                         const bool lhov = (r == settingsHovered_) && lr.enabled && settingsDragFrom_ < 0;
                         const float lift = dragged ? 0.006f : 0.0f;
@@ -7696,6 +7744,22 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         const float sc = setCard(r).textSc;
                         const float* lc = lr.enabled ? themeTextCol : dimCol;
                         const float left = hc.cx - hc.halfW;
+                        if (lr.kind == kSettingsKindParagraph) {
+                            if (lr.stepIdx == 1) {
+                                withHeadingFont([&] { drawFit(left + 0.045f, hc.cy, hc.halfW * 2.0f - 0.09f, sc, themeTextCol, lr.label); });
+                            } else {
+                                drawFit(left + 0.045f, hc.cy, hc.halfW * 2.0f - 0.09f, sc * 0.95f, slateCol, lr.label);
+                            }
+                            return;
+                        }
+                        float bx, by, bw, bh;
+                        if (dialogButtonRect(r, layoutN, bx, by, bw, bh)) {
+                            const float white[4] = {1.0f, 1.0f, 1.0f, lr.enabled ? 1.0f : 0.6f};
+                            withHeadingFont([&] {
+                                drawFitCentered(bx, by, bw * 2.0f - 0.03f, sc, lr.stepIdx == 1 ? white : themeTextCol, lr.label);
+                            });
+                            return;
+                        }
                         if (lr.kind == kSettingsKindPluginLine) {
                             withHeadingFont([&] { drawFit(left + hub::kPluginNameX, hc.cy, 0.34f, sc, lc, lr.label); });
                             const bool updHov = !lr.options.empty() && lr.options[0] == "update" && r == settingsHovered_ &&

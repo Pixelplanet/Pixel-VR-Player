@@ -102,7 +102,7 @@ public:
     // option for small unordered choices (Segmented).
     // Shortcut: a line of the shortcut list (stepIdx = on the rail; steps = 1 while Delete waits
     // for its confirming second press; data = the shortcut index).
-    enum class Kind { Choice, Toggle, Action, Binding, Color, Option, Segmented, Shortcut, PluginLine };
+    enum class Kind { Choice, Toggle, Action, Binding, Color, Option, Segmented, Shortcut, PluginLine, Paragraph, Button };
 
     struct Row {
         std::string label;
@@ -344,6 +344,7 @@ private:
     int pluginPage_ = 0, pluginPages_ = 1;
     std::string storeId_;      // the repository plugin shown on the details page
     bool storeUpdate_ = false;  // details page in update mode (changelog)
+    bool pluginStatusShown_ = false;  // the plugin pages' status text is up (cleared on other pages)
     std::string pluginNotice_;
     std::chrono::steady_clock::time_point pluginNoticeUntil_{};
     std::chrono::steady_clock::time_point pluginRemoveUntil_{};              // plugin shown on the detail page (kPluginSection)
