@@ -205,9 +205,20 @@ int main() {
             if (type == "hello") {
                 readSettings(m.get("settings"), cfg);
                 if (const char* home = std::getenv("HOME")) {  // the default script folder, ready to fill
+                    const std::string def = std::string(home) + "/.local/share/pixelvr/Funscripts";
+                    const std::string old = std::string(home) + "/Funscripts";  // where 0.2.5 kept it
                     for (const std::string& f : cfg.folders) {
+                        if (f != def) continue;
                         std::error_code ec;
-                        if (f == std::string(home) + "/Funscripts") std::filesystem::create_directories(f, ec);
+                        std::filesystem::create_directories(f, ec);
+                        if (std::filesystem::is_directory(old, ec)) {
+                            for (const auto& e : std::filesystem::directory_iterator(old, ec)) {
+                                std::error_code ec2;
+                                const auto to = std::filesystem::path(f) / e.path().filename();
+                                if (!std::filesystem::exists(to, ec2)) std::filesystem::rename(e.path(), to, ec2);
+                            }
+                            std::filesystem::remove(old, ec);  // only if empty now
+                        }
                     }
                 }
                 io.hello("Funscript devices", "0.1.0");
@@ -427,7 +438,7 @@ int main() {
             std::string s = !c ? "Waiting for a video"
                             : script.ok() ? "Script: " + scriptName + " (" + std::to_string(script.actions.size()) + " points)"
                             : pendingRead >= 0 ? "Reading " + pendingName
-                            : "No funscript: put one next to the video or in ~/Funscripts";
+                            : "No funscript: put one next to the video or in ~/.local/share/pixelvr/Funscripts";
             const size_t n = bp.devices().size();
             s += !cfg.useIntiface ? "  |  Intiface off"
                  : bp.connected() ? "  |  Intiface: " + std::to_string(n) + (n == 1 ? " device" : " devices")

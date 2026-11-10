@@ -374,7 +374,7 @@ private:
     std::string pageHint_;        // the page's own hint in status_ (reset on page change)
     bool legacyBindingsSeen_ = false;
     bool legacyBindingsCustom_ = false;
-    int downloadDirIdx_ = 0;   // index into the download-destination presets
+    int downloadDirIdx_ = 1;   // index into the download-destination presets (default ~/Downloads)
     int railShortcutMask_ = (1 << 0) | (1 << 5);  // kRailShortcuts bits: YouTube + Browser
     int curvatureIdx_ = 0;     // 0=Flat (0%), 1=Gentle (25%), 2=Cinema (50%), 3=Deep (75%), 4=IMAX (100%)
     int uiTextScaleIdx_ = 2;   // 0=90%, 1=105%, 2=120% (default), 3=140%, 4=160%

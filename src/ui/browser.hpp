@@ -135,7 +135,7 @@ public:
     // separate process and must not block browsing).
     bool isScanning() const { return scanning_.load(); }
 
-    // Directory the "Download" action copies into (default ~/media).
+    // Directory the "Download" action copies into (default ~/Downloads).
     void setDownloadDir(const std::string& dir) { downloadDir_ = dir; }
 
     // Download state for a background status line shown even when the browser is
@@ -263,7 +263,7 @@ private:
     std::atomic<long long> dlTotal_{0};
     std::string dlLocalPath_;
     std::string dlName_;
-    std::string downloadDir_;  // "" => default ~/media
+    std::string downloadDir_;  // "" => default ~/Downloads
     std::vector<DownloadJob> dlJobs_;
     std::deque<DownloadQueueItem> dlQueue_;
     int dlActiveJob_ = -1;             // index of the job in flight, or -1

@@ -148,7 +148,7 @@ void sort_and_append(std::vector<Browser::Entry>& out,
 Browser::Browser() {
     const char* home = std::getenv("HOME");
     homeDir_ = (home != nullptr) ? home : "/home/steamos";
-    downloadDir_ = homeDir_ + "/media";
+    downloadDir_ = homeDir_ + "/Downloads";
     quickPath_ = homeDir_ + "/Videos";
     loadBookmarks();
 }
@@ -1010,7 +1010,7 @@ void Browser::startDownload(const std::string& uri, const std::string& nameIn,
     }
 
     const std::string destDir =
-        downloadDir_.empty() ? homeDir_ + "/media" : downloadDir_;
+        downloadDir_.empty() ? homeDir_ + "/Downloads" : downloadDir_;
     const std::string targetPath = destDir + "/" + name;
 
     if (dlActive_.load()) {

@@ -3,7 +3,7 @@
 #
 # Contents (extracted to ~/PixelVRPlayer):
 #   PixelVRPlayer/pixelvr          self-contained binary (static OpenXR loader)
-#   PixelVRPlayer/run.sh           launcher (logs to ~/pixelvr-run.log)
+#   PixelVRPlayer/run.sh           launcher (logs to ~/.local/state/pixelvr/run.log)
 #   PixelVRPlayer/install.sh       one-command installer / Steam registration
 #   PixelVRPlayer/shaders/*.spv    SPIR-V shaders
 #   PixelVRPlayer/VERSION          release tag (when given)
