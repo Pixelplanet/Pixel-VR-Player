@@ -638,7 +638,9 @@ public:
         if (slot >= 0 && slot < kMaxVideoSlots) letterbox_[slot] = std::clamp(frac, 0.0f, 0.3f);
     }
     float letterboxFor(int slot) const {
-        if (slot < 0 || slot >= kMaxVideoSlots || !screenLayerLive_[slot]) return 0.0f;
+        // (Not tied to screenLayerLive_: that is reset at the start of each frame, before the screen's
+        // shape is worked out, so the shape and the copy disagreed.)
+        if (slot < 0 || slot >= kMaxVideoSlots || musicViews_[slot].active) return 0.0f;
         if (slot == 0 && projectionMode_ != ProjectionMode::Flat) return 0.0f;
         return letterbox_[slot];
     }
