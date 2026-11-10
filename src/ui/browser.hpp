@@ -89,6 +89,7 @@ public:
     const std::string& title() const { return title_; }
     const std::string& status() const { return status_; }
     void setStatus(const std::string& text) { status_ = text; }
+    void rescan();  // re-reads the current folder (e.g. after a background move)
     const std::vector<Entry>& entries() const { return entries_; }
     int selected() const { return selected_; }
     void move(int delta);

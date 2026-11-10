@@ -3,6 +3,9 @@
 #include "xr/xr_context.hpp"
 
 #include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <mutex>
 #include <chrono>
 #include <thread>
 #include <string>
@@ -85,6 +88,12 @@ public:
     int migrationDone() const { return migDone_.load(); }
     int migrationTotal() const { return migTotal_.load(); }
     std::string recoveryFile() const;  // where the unlock combination is written down (user request)
+    // Moving into / out of the vault encrypts / decrypts whole files: done on a worker thread so the
+    // player keeps running (a frozen frame loop made SteamVR drop focus, which locked the vault).
+    void queueMoveIn(const std::string& src);
+    void queueMoveOut(const std::string& src, const std::string& destDir);
+    bool jobsBusy() const { return jobsBusy_.load(); }
+    bool takeJobResult(std::string& message);  // one finished move (message for the status line)
     void loadConfig();
     void saveConfig() const;
 
@@ -118,6 +127,15 @@ private:
     std::atomic<bool> migrating_{false};
     std::atomic<int> migDone_{0}, migTotal_{0};
     std::thread migThread_;
+    struct Job { bool in; std::string src, destDir; };
+    std::mutex jobMu_;
+    std::condition_variable jobCv_;
+    std::deque<Job> jobs_;
+    std::deque<std::string> jobResults_;
+    std::atomic<bool> jobsBusy_{false};
+    bool jobsStop_ = false;
+    std::thread jobThread_;
+    void jobLoop();
 };
 
 } // namespace pixelvr

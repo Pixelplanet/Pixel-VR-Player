@@ -153,8 +153,77 @@ VaultManager::ComboResult VaultManager::feedInput(int button, bool gripFullPress
 }
 
 VaultManager::~VaultManager() {
+    {
+        std::lock_guard<std::mutex> l(jobMu_);
+        jobsStop_ = true;
+        jobs_.clear();
+    }
+    jobCv_.notify_all();
+    if (jobThread_.joinable()) jobThread_.join();
     vaultcrypto::clearKey();
     if (migThread_.joinable()) migThread_.join();
+}
+
+void VaultManager::queueMoveIn(const std::string& src) {
+    std::lock_guard<std::mutex> l(jobMu_);
+    jobs_.push_back({true, src, {}});
+    jobsBusy_ = true;
+    if (!jobThread_.joinable()) jobThread_ = std::thread([this] { jobLoop(); });
+    jobCv_.notify_all();
+}
+
+void VaultManager::queueMoveOut(const std::string& src, const std::string& destDir) {
+    std::lock_guard<std::mutex> l(jobMu_);
+    jobs_.push_back({false, src, destDir});
+    jobsBusy_ = true;
+    if (!jobThread_.joinable()) jobThread_ = std::thread([this] { jobLoop(); });
+    jobCv_.notify_all();
+}
+
+bool VaultManager::takeJobResult(std::string& message) {
+    std::lock_guard<std::mutex> l(jobMu_);
+    if (jobResults_.empty()) return false;
+    message = jobResults_.front();
+    jobResults_.pop_front();
+    return true;
+}
+
+void VaultManager::jobLoop() {
+    for (;;) {
+        Job j;
+        {
+            std::unique_lock<std::mutex> l(jobMu_);
+            jobCv_.wait(l, [this] { return jobsStop_ || !jobs_.empty(); });
+            if (jobsStop_) return;
+            j = jobs_.front();
+        }
+        std::string msg;
+        std::error_code ec;
+        const std::string name = j.in ? fs::path(j.src).filename().string() : vaultcrypto::storedName(j.src);
+        if (j.in) {
+            std::string out;
+            const std::string err = moveFileToVault(j.src, out);
+            msg = err.empty() ? "Moved " + name + " to the vault" : "Move error: " + err;
+        } else if (name.empty()) {
+            msg = "Move error: the vault is locked";
+        } else {
+            fs::path out = fs::path(j.destDir) / name;
+            for (int n = 1; fs::exists(out, ec); ++n) {
+                out = fs::path(j.destDir) / (fs::path(name).stem().string() + "_" + std::to_string(n) + fs::path(name).extension().string());
+            }
+            std::string err;
+            if (vaultcrypto::decryptFile(j.src, out.string(), err)) {
+                fs::remove(j.src, ec);
+                msg = "Moved " + name + " out of the vault";
+            } else {
+                msg = "Move error: " + err;
+            }
+        }
+        std::lock_guard<std::mutex> l(jobMu_);
+        jobs_.pop_front();
+        jobResults_.push_back(msg);
+        if (jobs_.empty()) jobsBusy_ = false;
+    }
 }
 
 std::string VaultManager::recoveryFile() const {

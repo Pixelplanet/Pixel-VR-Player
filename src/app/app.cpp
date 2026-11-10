@@ -3820,6 +3820,13 @@ int App::run() {
             for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
                 updateMusicView(slot);
                 ScreenState& sc = screens_[slot];
+                if (slot == 0) {
+                    std::string vmsg;
+                    while (VaultManager::instance().takeJobResult(vmsg)) {
+                        browser_.setStatus(vmsg);
+                        browser_.rescan();  // the moved file appears / disappears
+                    }
+                }
                 if (sc.letterboxPending && sc.open) {
                     float lb = 0.0f;
                     if (letterboxDetector_.result(sc.path, lb)) {

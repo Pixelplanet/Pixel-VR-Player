@@ -774,14 +774,10 @@ bool Browser::moveFocusedToVault(std::string& outNewPath) {
     if (!VaultManager::instance().isUnlocked()) return false;
     const Entry* e = focused();
     if (e == nullptr || e->isBack || inSmb_) return false;
-    std::string err = VaultManager::instance().moveFileToVault(e->path, outNewPath);
-    if (!err.empty()) {
-        status_ = "Move error: " + err;
-        return false;
-    }
-    status_ = "Moved " + e->label + " to Vault";
-    saveCurrentFolderState();
-    beginScan(location_, inSmb_, true);
+    // Encrypting takes a while for big files: a worker does it; the result arrives via the app.
+    VaultManager::instance().queueMoveIn(e->path);
+    outNewPath.clear();
+    status_ = "Moving " + e->label + " into the vault...";
     return true;
 }
 
@@ -796,25 +792,9 @@ bool Browser::moveFocusedTo(const std::string& destDir, std::string& outNewPath)
     fs::path src(e->path);
     if (src.extension() == vaultcrypto::kExtension && !VaultManager::instance().isVaultPath(destDir)) {
         // Out of the vault: decrypted under its real name, the encrypted file is removed afterwards.
-        std::string name = vaultcrypto::storedName(src.string());
-        if (name.empty()) {
-            status_ = "Move error: the vault is locked";
-            return false;
-        }
-        fs::path out = fs::path(destDir) / name;
-        for (int n = 1; fs::exists(out, ec); ++n) {
-            out = fs::path(destDir) / (fs::path(name).stem().string() + "_" + std::to_string(n) + fs::path(name).extension().string());
-        }
-        std::string err;
-        if (!vaultcrypto::decryptFile(src.string(), out.string(), err)) {
-            status_ = "Move error: " + err;
-            return false;
-        }
-        fs::remove(src, ec);
-        outNewPath = out.string();
-        status_ = "Moved " + name;
-        saveCurrentFolderState();
-        beginScan(location_, inSmb_, true);
+        VaultManager::instance().queueMoveOut(src.string(), destDir);  // decrypting runs on a worker
+        outNewPath.clear();
+        status_ = "Moving " + e->label + " out of the vault...";
         return true;
     }
     const bool isDir = fs::is_directory(src, ec);
@@ -876,6 +856,11 @@ bool Browser::deleteFocused(std::string& deletedName) {
     saveCurrentFolderState();
     beginScan(location_, inSmb_, true);
     return true;
+}
+
+void Browser::rescan() {
+    saveCurrentFolderState();
+    beginScan(location_, inSmb_, true);
 }
 
 bool Browser::renameFocused(const std::string& newName) {
