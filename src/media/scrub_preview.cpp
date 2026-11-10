@@ -1,5 +1,6 @@
 #include "media/scrub_preview.hpp"
 
+#include "media/vault_avio.hpp"
 #include "util/logging.hpp"
 
 #include <algorithm>
@@ -31,15 +32,18 @@ struct Decoder {
         if (pkt) av_packet_free(&pkt);
         if (ctx) avcodec_free_context(&ctx);
         if (fmt) avformat_close_input(&fmt);
+        vio.reset();  // after the context that read through it
         stream = -1;
     }
 
+    std::unique_ptr<VaultAvio> vio;
     bool open(const std::string& path) {
         close();
         // Plex / Jellyfin streams: a stalled server must not hang the preview worker for good.
         AVDictionary* opts = nullptr;
         if (path.rfind("http://", 0) == 0 || path.rfind("https://", 0) == 0) av_dict_set(&opts, "rw_timeout", "10000000", 0);
-        const int rc = avformat_open_input(&fmt, path.c_str(), nullptr, &opts);
+        const int rc = vaultcrypto::isEncrypted(path) ? (openVaultFormat(path, fmt, vio) ? 0 : -1)  // vault: decrypted
+                                                     : avformat_open_input(&fmt, path.c_str(), nullptr, &opts);
         av_dict_free(&opts);
         if (rc < 0 || !fmt) return false;
         if (avformat_find_stream_info(fmt, nullptr) < 0) return false;

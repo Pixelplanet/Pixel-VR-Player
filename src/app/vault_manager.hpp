@@ -2,7 +2,9 @@
 
 #include "xr/xr_context.hpp"
 
+#include <atomic>
 #include <chrono>
+#include <thread>
 #include <string>
 #include <vector>
 
@@ -77,12 +79,18 @@ public:
     bool feedRecordButton(int button);
     int recordedCount() const { return static_cast<int>(recordingBuffer_.size()); }
 
+    // Encryption (docs: src/app/vault_crypto.hpp). Plain files found in the vault are encrypted in the
+    // background after unlocking; progress for the UI.
+    bool migrating() const { return migrating_.load(); }
+    int migrationDone() const { return migDone_.load(); }
+    int migrationTotal() const { return migTotal_.load(); }
+    std::string recoveryFile() const;  // where the unlock combination is written down (user request)
     void loadConfig();
     void saveConfig() const;
 
 private:
     VaultManager();
-    ~VaultManager() = default;
+    ~VaultManager();  // stops the background encryption after the current file
 
     bool unlocked_ = false;
     std::string vaultDir_;
@@ -105,6 +113,11 @@ private:
 
     std::chrono::steady_clock::time_point lastActivity_{};
     std::chrono::steady_clock::time_point headsetLostTime_{};
+    void startEncryption();      // after unlock: key + migration
+    void writeRecovery() const;
+    std::atomic<bool> migrating_{false};
+    std::atomic<int> migDone_{0}, migTotal_{0};
+    std::thread migThread_;
 };
 
 } // namespace pixelvr

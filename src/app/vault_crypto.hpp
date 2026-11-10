@@ -55,5 +55,7 @@ private:
 
 // The original name stored in an encrypted file's header ("" if unreadable / no key).
 std::string storedName(const std::string& path);
+// Changes that stored name (renaming inside the vault; the file name on disk stays random).
+bool setStoredName(const std::string& path, const std::string& name);
 
 }  // namespace pixelvr::vaultcrypto

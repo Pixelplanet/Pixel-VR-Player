@@ -1,5 +1,6 @@
 #include "media/media_engine.hpp"
 
+#include "media/vault_avio.hpp"
 #include "media/cover_art.hpp"
 
 #include "util/logging.hpp"
@@ -463,6 +464,7 @@ struct MediaEngine::Impl {
     AVCodecContext* codec = nullptr;
     SwsContext* sws = nullptr;
     AVIOContext* avio = nullptr;
+    std::unique_ptr<VaultAvio> vaultIo;  // encrypted vault file (decrypting reader)
     ReadAhead remoteReader;
     int videoStream = -1;
     int width = 0;
@@ -608,6 +610,7 @@ struct MediaEngine::Impl {
             av_freep(&avio->buffer);
             avio_context_free(&avio);
         }
+        vaultIo.reset();  // after the format context that read through it
         remoteReader.shutdown();
         clearQueues();
         maxQueue = kMaxQueue;
@@ -1354,7 +1357,14 @@ bool MediaEngine::open(const std::string& path) {
     impl_->httpSource = false;
     impl_->readRetries = 0;
 
-    if (isRemotePath(path)) {
+    if (vaultcrypto::isEncrypted(path)) {
+        // Encrypted vault file: decrypted while reading (needs the vault unlocked).
+        if (!openVaultFormat(path, impl_->format, impl_->vaultIo)) {
+            impl_->lastError = vaultcrypto::hasKey() ? "the vault file could not be read" : "the vault is locked";
+            close();
+            return false;
+        }
+    } else if (isRemotePath(path)) {
         std::unique_ptr<RemoteFile> remote;
         if (path.rfind("smb://", 0) != 0) {
             std::string err;

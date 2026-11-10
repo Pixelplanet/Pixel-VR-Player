@@ -1,4 +1,5 @@
 #include "app/app.hpp"
+#include "app/vault_crypto.hpp"
 #include "app/vault_manager.hpp"
 #include "net/remote_fs.hpp"
 #include "net/smb_credentials.hpp"
@@ -160,7 +161,13 @@ bool is_vr360_text(const std::string& lower) {
 
 // Format hints come from the file name only, never from an URL's query (token).
 std::string formatName(const std::string& path) {
-    return path.rfind("http", 0) == 0 ? path.substr(0, path.find('?')) : path;
+    if (path.rfind("http", 0) == 0) return path.substr(0, path.find('?'));
+    // Encrypted vault file: the original name (stored inside it) carries the hints.
+    if (path.size() > 5 && path.compare(path.size() - 5, 5, vaultcrypto::kExtension) == 0) {
+        const std::string n = vaultcrypto::storedName(path);
+        if (!n.empty()) return path.substr(0, path.find_last_of('/') + 1) + n;
+    }
+    return path;
 }
 
 bool is_vr180_media(const std::string& pathOrName, int w, int h) {

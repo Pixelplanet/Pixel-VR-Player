@@ -1,5 +1,6 @@
 #include "plugins/plugin_files.hpp"
 
+#include "app/vault_crypto.hpp"
 #include "net/remote_fs.hpp"
 #include "util/smb_lock.hpp"
 
@@ -139,7 +140,13 @@ bool listFiles(const std::string& dir, std::vector<std::string>& names, std::str
     }
     std::error_code ec;
     for (const auto& e : fs::directory_iterator(dir, ec)) {
-        if (e.symlink_status(ec).type() == fs::file_type::regular) names.push_back(e.path().filename().string());  // links are never sidecars
+        if (e.symlink_status(ec).type() != fs::file_type::regular) continue;  // links are never sidecars
+        if (e.path().extension() == vaultcrypto::kExtension) {  // vault: the real name stored inside
+            const std::string n = vaultcrypto::storedName(e.path().string());
+            if (!n.empty()) names.push_back(n);
+            continue;
+        }
+        names.push_back(e.path().filename().string());
     }
     if (ec) err = ec.message();
     return !ec;
@@ -210,6 +217,27 @@ bool readFile(const std::string& uri, std::size_t maxBytes, std::string& out, st
             }
         }
         return true;
+    }
+    // Encrypted vault folder: the name is the real one stored inside a .pvrv file; read it decrypted.
+    if (uri.find("://") == std::string::npos && !std::filesystem::exists(uri)) {
+        const std::filesystem::path want(uri);
+        std::error_code vec;
+        for (const auto& e : std::filesystem::directory_iterator(want.parent_path(), vec)) {
+            if (e.path().extension() != vaultcrypto::kExtension) continue;
+            vaultcrypto::Reader r;
+            if (!r.open(e.path().string()) || r.name() != want.filename().string()) continue;
+            if (r.size() > maxBytes) {
+                err = "file too large";
+                return false;
+            }
+            out.resize(static_cast<size_t>(r.size()));
+            const long n = r.read(0, reinterpret_cast<uint8_t*>(out.data()), out.size());
+            if (n != static_cast<long>(out.size())) {
+                err = "cannot read the file";
+                return false;
+            }
+            return true;
+        }
     }
     if (uri.find("://") != std::string::npos) {
         err = "unsupported location";

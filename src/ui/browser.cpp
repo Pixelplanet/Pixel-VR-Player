@@ -2,6 +2,7 @@
 
 #include "util/sdcard.hpp"
 #include "app/vault_manager.hpp"
+#include "app/vault_crypto.hpp"
 #include "net/remote_fs.hpp"
 #include "net/smb_credentials.hpp"
 
@@ -309,11 +310,23 @@ void Browser::scanLocalInto(const std::string& dir, ScanResult& out) {
             dirs.push_back({name + "/", p.string(), true, false, false, false, detail,
                             bestPreviewSize > 0 ? bestPreviewSize : 0, preview, mtime_of(p)});
         } else {
-            const bool isVid = is_video(name);
+            // Encrypted vault file: shown under its real name (stored inside it) and plain size.
+            std::string shown = name;
+            long long plainSize = -1;
+            if (name.size() > 5 && name.compare(name.size() - 5, 5, vaultcrypto::kExtension) == 0) {
+                vaultcrypto::Reader vr;
+                if (vr.open(p.string())) {
+                    shown = vr.name();
+                    plainSize = static_cast<long long>(vr.size());
+                } else {
+                    shown = "Encrypted file (vault locked)";
+                }
+            }
+            const bool isVid = is_video(shown);
             if (dir == homeDir_ && !isVid) continue;  // hide log/tarball files in home root
             std::error_code sec;
-            const long long sz = static_cast<long long>(fs::file_size(p, sec));
-            files.push_back({name, p.string(), false, isVid, false, false,
+            const long long sz = plainSize >= 0 ? plainSize : static_cast<long long>(fs::file_size(p, sec));
+            files.push_back({shown, p.string(), false, isVid, false, false,
                              format_size(sec ? 0 : sz), sec ? 0 : sz, isVid ? p.string() : "",
                              mtime_of(p)});
         }
@@ -781,6 +794,29 @@ bool Browser::moveFocusedTo(const std::string& destDir, std::string& outNewPath)
         return false;
     }
     fs::path src(e->path);
+    if (src.extension() == vaultcrypto::kExtension && !VaultManager::instance().isVaultPath(destDir)) {
+        // Out of the vault: decrypted under its real name, the encrypted file is removed afterwards.
+        std::string name = vaultcrypto::storedName(src.string());
+        if (name.empty()) {
+            status_ = "Move error: the vault is locked";
+            return false;
+        }
+        fs::path out = fs::path(destDir) / name;
+        for (int n = 1; fs::exists(out, ec); ++n) {
+            out = fs::path(destDir) / (fs::path(name).stem().string() + "_" + std::to_string(n) + fs::path(name).extension().string());
+        }
+        std::string err;
+        if (!vaultcrypto::decryptFile(src.string(), out.string(), err)) {
+            status_ = "Move error: " + err;
+            return false;
+        }
+        fs::remove(src, ec);
+        outNewPath = out.string();
+        status_ = "Moved " + name;
+        saveCurrentFolderState();
+        beginScan(location_, inSmb_, true);
+        return true;
+    }
     const bool isDir = fs::is_directory(src, ec);
     std::string stem = src.stem().string();
     std::string ext = isDir ? "" : src.extension().string();
@@ -847,6 +883,16 @@ bool Browser::renameFocused(const std::string& newName) {
     if (e == nullptr || e->isBack || inSmb_ || newName.empty()) return false;
     std::error_code ec;
     fs::path src(e->path);
+    if (src.extension() == vaultcrypto::kExtension) {
+        // Encrypted vault file: the real name lives inside it.
+        if (!vaultcrypto::setStoredName(src.string(), newName)) {
+            status_ = "Rename failed (vault locked?)";
+            return false;
+        }
+        status_ = "Renamed to " + newName;
+        beginScan(location_, inSmb_, true);
+        return true;
+    }
     fs::path dest = src.parent_path() / newName;
     if (dest == src) return true; // unchanged
     if (fs::exists(dest, ec)) {

@@ -1,4 +1,5 @@
 #include "ui/thumbnail_cache.hpp"
+#include "media/vault_avio.hpp"
 #include "app/vault_manager.hpp"
 #include "util/logging.hpp"
 
@@ -247,8 +248,11 @@ bool ThumbnailCache::extractThumbnailAndMeta(const std::string& videoPath,
                                              std::vector<uint8_t>& outRgba,
                                              MediaMeta& outMeta) {
 #ifdef PIXELVR_HAVE_MEDIA
+    std::unique_ptr<VaultAvio> vaultIo;  // encrypted vault file: decrypted while reading (outlives fmt)
     AVFormatContext* fmt = nullptr;
-    if (avformat_open_input(&fmt, videoPath.c_str(), nullptr, nullptr) < 0 || !fmt) {
+    const bool encrypted = vaultcrypto::isEncrypted(videoPath);
+    if (encrypted ? !openVaultFormat(videoPath, fmt, vaultIo)
+                  : (avformat_open_input(&fmt, videoPath.c_str(), nullptr, nullptr) < 0 || !fmt)) {
         return false;
     }
     if (avformat_find_stream_info(fmt, nullptr) < 0) {
@@ -367,7 +371,7 @@ bool ThumbnailCache::extractThumbnailAndMeta(const std::string& videoPath,
         int srcW = frame->width;
         int srcH = frame->height;
         const float ar = static_cast<float>(srcW) / static_cast<float>(srcH);
-        std::string lowerPath = videoPath;
+        std::string lowerPath = encrypted && vaultIo ? vaultIo->reader.name() : videoPath;
         for (char& c : lowerPath) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         const bool isSbs = (lowerPath.find("sbs") != std::string::npos ||
                             lowerPath.find("vr180") != std::string::npos ||

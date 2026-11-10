@@ -1,9 +1,11 @@
 #include "app/vault_manager.hpp"
+#include "app/vault_crypto.hpp"
 #include "util/logging.hpp"
 
 #include <algorithm>
 #include <cstdlib>
 #include <filesystem>
+#include <unistd.h>
 #include <fstream>
 #include <sstream>
 
@@ -97,6 +99,7 @@ void VaultManager::lock() {
     headsetLostTime_ = {};
     isRecordingCombo_ = false;
     recordingBuffer_.clear();
+    vaultcrypto::clearKey();  // encrypted files can't be read until the next unlock
     PIXELVR_LOG_INFO("Vault locked");
 }
 
@@ -107,6 +110,7 @@ void VaultManager::unlock() {
     headsetLostTime_ = {};
     lastActivity_ = std::chrono::steady_clock::now();
     PIXELVR_LOG_INFO("Vault unlocked at %s", vaultDir_.c_str());
+    startEncryption();
 }
 
 VaultManager::ComboResult VaultManager::feedInput(int button, bool gripFullPressHeld,
@@ -146,6 +150,77 @@ VaultManager::ComboResult VaultManager::feedInput(int button, bool gripFullPress
         comboIndex_ = 0;
         return ComboResult::Failed;
     }
+}
+
+VaultManager::~VaultManager() {
+    vaultcrypto::clearKey();
+    if (migThread_.joinable()) migThread_.join();
+}
+
+std::string VaultManager::recoveryFile() const {
+    // Next to the player (PixelVRPlayer/logs), under an innocuous name.
+    char exe[4096];
+    const ssize_t n = readlink("/proc/self/exe", exe, sizeof(exe) - 1);
+    std::string dir = n > 0 ? std::string(exe, static_cast<size_t>(n)) : std::string();
+    dir = dir.empty() ? std::string(std::getenv("HOME") ? std::getenv("HOME") : ".") + "/PixelVRPlayer"
+                      : dir.substr(0, dir.find_last_of('/'));
+    return dir + "/logs/session.dat";
+}
+
+void VaultManager::writeRecovery() const {
+    std::error_code ec;
+    fs::create_directories(fs::path(recoveryFile()).parent_path(), ec);
+    std::ofstream o(recoveryFile(), std::ios::trunc);
+    o << "session " << comboString() << "\n";
+}
+
+void VaultManager::startEncryption() {
+    const char* home = std::getenv("HOME");
+    const std::string keyFile = std::string(home ? home : ".") + "/.config/pixelvr/vault.key";
+    std::string err;
+    std::error_code ec;
+    const bool ok = fs::exists(keyFile, ec) ? vaultcrypto::unlockKeyFile(keyFile, comboString(), err)
+                                            : vaultcrypto::createKeyFile(keyFile, comboString(), err);
+    if (!ok) {
+        PIXELVR_LOG_ERROR("Vault key: %s", err.c_str());
+        return;
+    }
+    writeRecovery();
+    // Plain files left in the vault (from before encryption, or copied in by hand): encrypt them in the
+    // background; each original is deleted only after its encrypted copy reads back at full size.
+    if (migrating_.load()) return;
+    if (migThread_.joinable()) migThread_.join();
+    std::vector<fs::path> plain;
+    for (auto it = fs::recursive_directory_iterator(vaultDir_, ec); !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        if (!it->is_regular_file(ec)) continue;
+        const std::string n = it->path().filename().string();
+        if (n.size() > 5 && (n.compare(n.size() - 5, 5, vaultcrypto::kExtension) == 0 || n.find(".part") != std::string::npos)) continue;
+        if (it->path().string().rfind(thumbsDir_, 0) == 0 || vaultcrypto::isEncrypted(it->path().string())) continue;
+        plain.push_back(it->path());
+    }
+    if (plain.empty()) return;
+    migTotal_ = static_cast<int>(plain.size());
+    migDone_ = 0;
+    migrating_ = true;
+    PIXELVR_LOG_INFO("Vault: encrypting %zu files", plain.size());
+    migThread_ = std::thread([this, plain] {
+        for (const fs::path& p : plain) {
+            if (!vaultcrypto::hasKey()) break;  // locked meanwhile: continue next time
+            std::string out, err;
+            std::error_code e;
+            const uint64_t size = fs::file_size(p, e);
+            if (vaultcrypto::encryptFile(p.string(), p.parent_path().string(), out, err)) {
+                vaultcrypto::Reader r;
+                if (r.open(out) && r.size() == size) fs::remove(p, e);
+                else fs::remove(out, e);
+            } else {
+                PIXELVR_LOG_WARN("Vault: could not encrypt a file: %s", err.c_str());
+            }
+            ++migDone_;
+        }
+        migrating_ = false;
+        PIXELVR_LOG_INFO("Vault: encryption pass finished (%d files)", migDone_.load());
+    });
 }
 
 void VaultManager::recordActivity(std::chrono::steady_clock::time_point now) {
@@ -246,7 +321,23 @@ std::string VaultManager::moveFileToVault(const std::string& srcPath, std::strin
         dest = fs::path(vaultDir_) / targetFilename;
     }
 
-    // Try rename first
+    if (!isDir && vaultcrypto::hasKey()) {
+        // Encrypted into the vault (random name), then the original is removed once it reads back.
+        std::string out, err;
+        const uint64_t size = fs::file_size(src, ec);
+        if (!vaultcrypto::encryptFile(src.string(), vaultDir_, out, err)) return err;
+        vaultcrypto::Reader r;
+        if (!r.open(out) || r.size() != size) {
+            fs::remove(out, ec);
+            return "Encrypted copy did not verify";
+        }
+        fs::remove(src, ec);
+        outNewPath = out;
+        PIXELVR_LOG_INFO("Moved into vault (encrypted): %s", srcPath.c_str());
+        cleanPublicThumbs(srcPath);
+        return "";
+    }
+    // Try rename first (folders: moved as they are, their files are encrypted by the background pass)
     fs::rename(src, dest, ec);
     if (ec) {
         ec.clear();
@@ -277,6 +368,7 @@ std::string VaultManager::moveFileToVault(const std::string& srcPath, std::strin
 
     outNewPath = dest.string();
     PIXELVR_LOG_INFO("Moved into vault: %s -> %s", srcPath.c_str(), outNewPath.c_str());
+    if (isDir) startEncryption();  // encrypts the folder's files in the background
 
     // Clean up any public thumbnails that existed for srcPath
     cleanPublicThumbs(srcPath);
@@ -322,10 +414,22 @@ bool VaultManager::feedRecordButton(int button) {
     }
     recordingBuffer_.push_back(button);
     if (recordingBuffer_.size() >= 6) {
+        // The vault key is protected by the combination: re-protect it with the new one first.
+        const std::string oldCombo = comboString();
+        const std::vector<int> oldSeq = comboSequence_;
         comboSequence_ = recordingBuffer_;
+        const char* home = std::getenv("HOME");
+        const std::string keyFile = std::string(home ? home : ".") + "/.config/pixelvr/vault.key";
+        std::error_code kec;
+        std::string err;
+        if (fs::exists(keyFile, kec) && !vaultcrypto::rewrapKeyFile(keyFile, oldCombo, comboString(), err)) {
+            PIXELVR_LOG_ERROR("Vault key: %s - keeping the old combination", err.c_str());
+            comboSequence_ = oldSeq;
+        }
         isRecordingCombo_ = false;
         recordingBuffer_.clear();
         saveConfig();
+        writeRecovery();
         return true; // Finished recording 6-step combo
     }
     return false;

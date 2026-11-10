@@ -364,4 +364,26 @@ std::string storedName(const std::string& path) {
     return ok ? h.name : std::string();
 }
 
+bool setStoredName(const std::string& path, const std::string& name) {
+    uint8_t key[32];
+    if (!currentKey(key) || name.empty() || name.size() > kHeaderSize - 64) return false;
+    const int fd = ::open(path.c_str(), O_RDWR | O_CLOEXEC);
+    if (fd < 0) return false;
+    RawHeader h;
+    bool ok = readHeader(fd, h, nullptr);
+    if (ok) {
+        std::vector<uint8_t> field(kHeaderSize - 30, 0);  // length + name + zero padding up to the header end
+        field[0] = static_cast<uint8_t>(name.size());
+        field[1] = static_cast<uint8_t>(name.size() >> 8);
+        std::memcpy(field.data() + 2, name.data(), name.size());
+        uint8_t nn[16];
+        nameNonce(h.nonce, nn);
+        ctrXor(key, nn, 0, field.data() + 2, name.size());
+        ok = ::pwrite(fd, field.data(), field.size(), 30) == static_cast<ssize_t>(field.size()) && ::fsync(fd) == 0;
+    }
+    ::close(fd);
+    OPENSSL_cleanse(key, 32);
+    return ok;
+}
+
 }  // namespace pixelvr::vaultcrypto
