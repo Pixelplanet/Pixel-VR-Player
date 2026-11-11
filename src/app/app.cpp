@@ -4288,13 +4288,13 @@ int App::run() {
                             if (!b.empty()) return b;
                         }
                         auto flatBadge = [&]() -> std::string {
-                            if (w >= 7000 || h >= 3500 || contains(lower, "8k") || contains(lower, "4320p")) return "FLAT 8K";
+                            if (w >= 7000 || h >= 3500 || contains(lower, "8k") || contains(lower, "4320p")) return "8K";
                             if (w >= 3600 || h >= 2000 || contains(lower, "4k") ||
-                                contains(lower, "2160p") || contains(lower, "uhd")) return "FLAT 4K";
-                            if (w >= 2500 || h >= 1400 || contains(lower, "1440p") || contains(lower, "2k")) return "FLAT 1440P";
-                            if (w >= 1800 || h >= 1000 || contains(lower, "1080p") || contains(lower, "fhd")) return "FLAT 1080P";
-                            if (w >= 1200 || h >= 700 || contains(lower, "720p")) return "FLAT 720P";
-                            return "FLAT 2D";
+                                contains(lower, "2160p") || contains(lower, "uhd")) return "4K";
+                            if (w >= 2500 || h >= 1400 || contains(lower, "1440p") || contains(lower, "2k")) return "1440p";
+                            if (w >= 1800 || h >= 1000 || contains(lower, "1080p") || contains(lower, "fhd")) return "1080p";
+                            if (w >= 1200 || h >= 700 || contains(lower, "720p")) return "720p";
+                            return "2D";
                         };
                         if (manual) return flatBadge();
                         const bool is180 = is_vr180_media(pathOrName, w, h);
