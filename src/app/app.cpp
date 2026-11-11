@@ -4268,8 +4268,35 @@ int App::run() {
                         hasMeta = thumbnailCache_.getMeta(thumbTarget, meta);
                     }
 
+                    // Same order as opening the file: a format picked by hand, a layout in
+                    // the name, the file's 3D tag / picture check, else flat by resolution.
+                    auto layoutBadge = [](int proj, int st) -> std::string {
+                        if (proj == 2) return st > 0 ? "VR180 3D" : "VR180";
+                        if (proj == 1) return st > 0 ? "VR360 3D" : "VR360";
+                        if (st == 1) return "3D SBS";
+                        if (st == 2) return "3D TB";
+                        if (st == 3) return "3D FS";
+                        return {};  // flat 2D: resolution badge
+                    };
                     auto classifyMediaBadge = [&](const std::string& pathOrName, int w, int h) -> std::string {
                         const std::string lower = to_lower(pathOrName);
+                        const PlaybackMemory::Entry* byHand =
+                            VaultManager::instance().isVaultPath(pathOrName) ? nullptr : playbackMemory_.find(pathOrName);
+                        const bool manual = byHand != nullptr && byHand->projection >= 0 && byHand->stereo >= 0;
+                        if (manual) {
+                            const std::string b = layoutBadge(byHand->projection, byHand->stereo);
+                            if (!b.empty()) return b;
+                        }
+                        auto flatBadge = [&]() -> std::string {
+                            if (w >= 7000 || h >= 3500 || contains(lower, "8k") || contains(lower, "4320p")) return "FLAT 8K";
+                            if (w >= 3600 || h >= 2000 || contains(lower, "4k") ||
+                                contains(lower, "2160p") || contains(lower, "uhd")) return "FLAT 4K";
+                            if (w >= 2500 || h >= 1400 || contains(lower, "1440p") || contains(lower, "2k")) return "FLAT 1440P";
+                            if (w >= 1800 || h >= 1000 || contains(lower, "1080p") || contains(lower, "fhd")) return "FLAT 1080P";
+                            if (w >= 1200 || h >= 700 || contains(lower, "720p")) return "FLAT 720P";
+                            return "FLAT 2D";
+                        };
+                        if (manual) return flatBadge();
                         const bool is180 = is_vr180_media(pathOrName, w, h);
                         const bool is360 = !is180 && is_vr360_media(pathOrName, w, h);
                         const bool isTb  = contains(lower, "_tb") || contains(lower, "-tb") ||
@@ -4308,24 +4335,11 @@ int App::run() {
                         if (contains(lower, "fs3d") || contains(lower, "frame sequential")) return "3D FS";
                         if (isTb)  return "3D TB";
                         if (isSbs) return "3D SBS";
-
-                        if (w >= 7000 || h >= 3500 || contains(lower, "8k") || contains(lower, "4320p")) {
-                            return "FLAT 8K";
+                        if (hasMeta) {  // 3D tag in the file, else the picture check
+                            const std::string b = layoutBadge(std::max(0, meta.projectionHint), meta.stereoHint);
+                            if (!b.empty()) return b;
                         }
-                        if (w >= 3600 || h >= 2000 || contains(lower, "4k") ||
-                            contains(lower, "2160p") || contains(lower, "uhd")) {
-                            return "FLAT 4K";
-                        }
-                        if (w >= 2500 || h >= 1400 || contains(lower, "1440p") || contains(lower, "2k")) {
-                            return "FLAT 1440P";
-                        }
-                        if (w >= 1800 || h >= 1000 || contains(lower, "1080p") || contains(lower, "fhd")) {
-                            return "FLAT 1080P";
-                        }
-                        if (w >= 1200 || h >= 700 || contains(lower, "720p")) {
-                            return "FLAT 720P";
-                        }
-                        return "FLAT 2D";
+                        return flatBadge();
                     };
 
                     if (e.isBack) {
