@@ -57,6 +57,9 @@ jobs:
           PKG_CONFIG_PATH: ${{ github.workspace }}/ffbuild/prefix/lib/pkgconfig
         run: |
           set -eux
+          # project(VERSION) in CMakeLists.txt is the fallback for builds without git; keep it at the tag.
+          pv="v$(sed -n 's/^ *VERSION \([0-9.]*\).*/\1/p' CMakeLists.txt | head -1)"
+          [ "$pv" = "$PIXELVR_VERSION" ] || echo "::warning::CMakeLists.txt project VERSION ($pv) differs from the tag ($PIXELVR_VERSION); bump it"
           bash tools/build.sh -DPIXELVR_EMBED_FFMPEG_DIR="$PWD/ffbuild/prefix"
           # The binary must want exactly the SONAMEs it ships.
           readelf -d build/bin/pixelvr | grep -E 'libav|libsw'

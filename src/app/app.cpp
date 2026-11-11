@@ -2038,7 +2038,14 @@ void App::updatePlugins() {
         s.kind = PluginScreenSnapshot::Kind::Video;
         s.path = sc.path;
         const bool plex = sc.webSuspended;
-        const std::string clean = PluginHost::sanitizePath(sc.path);
+        // Encrypted vault file: report its real name (stored inside it, read once per file),
+        // so scripts next to it ("8 Mile.funscript") match by name.
+        static std::string sNamePath[VulkanRenderer::kMaxVideoSlots], sNameReal[VulkanRenderer::kMaxVideoSlots];
+        if (sNamePath[slot] != sc.path) {
+            sNamePath[slot] = sc.path;
+            sNameReal[slot] = PluginHost::sanitizePath(formatName(sc.path));
+        }
+        const std::string& clean = sNameReal[slot];
         const std::string base = clean.substr(clean.find_last_of('/') + 1);
         s.fileName = plex ? (plexFiles_[slot].empty() ? plexTitles_[slot] : plexFiles_[slot]) : base;
         s.title = plex ? plexTitles_[slot] : base.substr(0, base.find_last_of('.'));

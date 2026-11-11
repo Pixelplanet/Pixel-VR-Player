@@ -955,7 +955,8 @@ void PluginHost::update(const std::vector<PluginScreenSnapshot>& screens, const 
             t.last = s;
             t.sidecarsKnown = false;
             t.sidecars.clear();
-            t.base = pluginfiles::baseNameOf(s.path);
+            // The reported name: for an encrypted vault file the real one, not the random .pvrv name.
+            t.base = pluginfiles::baseNameOf(s.fileName.empty() ? s.path : s.fileName);
             const bool listable = s.source == "local" || s.source == "smb" || s.source == "sftp" || s.source == "webdav";
             const bool wanted = std::any_of(plugins_.begin(), plugins_.end(), [](const Plugin& p) {
                 return p.hasPermission("files.sidecar") && !p.sidecars.empty();
