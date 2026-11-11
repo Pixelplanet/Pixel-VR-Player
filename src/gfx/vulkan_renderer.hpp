@@ -385,6 +385,7 @@ public:
     void setBrowserQuickPath(bool isCurrentQuickPath) { browserIsQuickPath_ = isCurrentQuickPath; }
     void setBrowserBookmarked(bool isCurrentBookmarked) { browserIsQuickPath_ = isCurrentBookmarked; }
     bool browserIsQuickPath() const { return browserIsQuickPath_; }
+    void setBrowserCanCreateFolder(bool can) { browserCanCreateFolder_ = can; }
     bool browserIsBookmarked() const { return browserIsQuickPath_; }
     void setListColumnVisibility(bool showFormat, bool showRes, bool showSize, bool showDuration) {
         listShowFormat_ = showFormat;
@@ -1252,6 +1253,7 @@ private:
     VkDescriptorPool thumbPool_ = VK_NULL_HANDLE;
     BrowserViewMode browserViewMode_ = BrowserViewMode::BigCards;
     bool browserIsQuickPath_ = false;
+    bool browserCanCreateFolder_ = false;  // header "New folder" button shown
     KeyboardModalData keyboardModal_{};
     int uiFollowMode_ = 0; // 0 = World Lock (Default, zero drift/tilt), 1 = Smooth Gaze Follow
     float panelCurve_ = 0.0f;

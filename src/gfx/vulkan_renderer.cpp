@@ -384,7 +384,7 @@ inline UiRect lockVaultButton(int page) {
 }
 
 // File browser header: 0 = prev page, 1 = next page, 2 = view mode,
-// 3 = bookmark, 4 = up to parent, 5 = sort order.
+// 3 = bookmark, 4 = up to parent, 5 = sort order, 6 = new folder.
 constexpr float kHeaderY = 0.455f;
 inline UiRect headerButton(int id) {
     switch (id) {
@@ -393,6 +393,7 @@ inline UiRect headerButton(int id) {
         case 2: return {0.355f, kHeaderY, 0.075f, 0.028f};
         case 3: return {0.175f, kHeaderY, 0.090f, 0.028f};
         case 5: return {-0.005f, kHeaderY, 0.075f, 0.028f};
+        case 6: return {-0.157f, kHeaderY, 0.065f, 0.028f};
         default: return {-0.43f, kHeaderY, 0.038f, 0.028f};
     }
 }
@@ -3129,8 +3130,9 @@ void VulkanRenderer::updatePointer() {
 
             if (browserVisible_) {
                 const bool canGoUp = (!browserItems_.empty() && browserItems_[0].isBack);
-                for (int id : {4, 0, 1, 2, 3, 5}) {
+                for (int id : {4, 0, 1, 2, 3, 5, 6}) {
                     if (id == 4 && !canGoUp) continue;
+                    if (id == 6 && !browserCanCreateFolder_) continue;
                     if (hub::headerButton(id).contains(hx, hyy, hub::kHitPad)) {
                         browserPageBtnHovered_ = id;
                         break;
@@ -6972,6 +6974,10 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const UiRect r = headerBtn(5, false);  // sort order
                 drawUiElement(vpPanel, headerIconX(r), r.cy, 0.012f, 0.012f, UiShape::Sort, slateIconCol);
             }
+            if (browserCanCreateFolder_) {
+                const UiRect r = headerBtn(6, false);  // new folder
+                drawUiElement(vpPanel, headerIconX(r), r.cy, 0.012f, 0.012f, UiShape::Files, slateIconCol);
+            }
             const bool canGoUp = (!browserItems_.empty() && browserItems_[0].isBack);
             if (canGoUp) {
                 const UiRect r = headerBtn(4, false);
@@ -7161,7 +7167,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
 
             // Breadcrumb trail (chevrons drawn now, segment text in the text pass)
             const float breadX = canGoUp ? -0.375f : -0.460f;
-            const float breadRight = hub::headerButton(5).cx - hub::headerButton(5).hw - 0.012f;  // clear of Sort
+            const int breadStop = browserCanCreateFolder_ ? 6 : 5;  // clear of New folder / Sort
+            const float breadRight = hub::headerButton(breadStop).cx - hub::headerButton(breadStop).hw - 0.012f;
             const float breadSc = scHeader * 0.90f;
             const Crumbs crumbs = layoutCrumbs(
                 splitCrumbs(formatBreadcrumbs(browserTitle_.empty() ? "Local Storage" : browserTitle_)),
@@ -7208,6 +7215,11 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             const UiRect sortR = hub::headerButton(5);
             drawFitCentered(sortR.cx + 0.014f, sortR.cy, sortR.hw * 2.0f - 0.05f, scSub * 0.90f,
                             themeTextCol, browserSortLabel_);
+            if (browserCanCreateFolder_) {
+                const UiRect nfR = hub::headerButton(6);
+                drawFitCentered(nfR.cx + 0.014f, nfR.cy, nfR.hw * 2.0f - 0.05f, scSub * 0.90f,
+                                themeTextCol, "+ Folder");
+            }
 
             if (browserViewMode_ == BrowserViewMode::CompactList) {
                 drawFit(-0.315f, 0.380f, listCols.nameMaxW, scBadge * 0.95f, dimCol, "NAME");

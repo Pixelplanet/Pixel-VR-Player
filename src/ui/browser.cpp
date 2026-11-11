@@ -735,14 +735,20 @@ void Browser::scanBookmarksInto(ScanResult& out) {
     out.entries.clear();
     out.entries.push_back({".. (Home)", homeDir_, true, false, true, false});
 
-    if (bookmarks_.empty()) {
+    std::size_t visible = 0;  // vault bookmarks only count while the vault is open
+    for (const auto& bm : bookmarks_) {
+        if (!VaultManager::instance().isVaultPath(bm.path) || VaultManager::instance().isUnlocked()) ++visible;
+    }
+    if (visible == 0) {
         out.status = "No bookmarks yet. Click [+ Bookmark] in any folder to add one.";
         return;
     }
 
-    out.status = std::to_string(bookmarks_.size()) + (bookmarks_.size() == 1 ? " bookmark" : " bookmarks");
+    out.status = std::to_string(visible) + (visible == 1 ? " bookmark" : " bookmarks");
 
     for (const auto& bm : bookmarks_) {
+        // Bookmarks into the vault stay invisible while it is locked.
+        if (VaultManager::instance().isVaultPath(bm.path) && !VaultManager::instance().isUnlocked()) continue;
         if (bm.path.empty()) continue;
         const bool isSmb = isRemotePath(bm.path);
         std::error_code ec;
@@ -861,6 +867,33 @@ bool Browser::deleteFocused(std::string& deletedName) {
 void Browser::rescan() {
     saveCurrentFolderState();
     beginScan(location_, inSmb_, true);
+}
+
+bool Browser::canCreateFolder() const {
+    return !inSmb_ && !location_.empty() && location_[0] == '/' && !isRemotePath(location_);
+}
+
+bool Browser::createFolder(const std::string& name) {
+    if (!canCreateFolder() || name.empty()) return false;
+    if (name == "." || name == ".." || name.find_first_of("/\\") != std::string::npos) {
+        status_ = "Folder names can't contain / or \\";
+        return false;
+    }
+    std::error_code ec;
+    const fs::path dest = fs::path(location_) / name;
+    if (fs::exists(dest, ec)) {
+        status_ = "An item with that name already exists";
+        return false;
+    }
+    if (!fs::create_directory(dest, ec) || ec) {
+        status_ = "Could not create folder: " + (ec ? ec.message() : std::string("unknown error"));
+        return false;
+    }
+    status_ = "Created folder " + name;
+    saveCurrentFolderState();
+    folderHistory_[location_].selectedPath = dest.string();
+    beginScan(location_, inSmb_, true);
+    return true;
 }
 
 bool Browser::renameFocused(const std::string& newName) {

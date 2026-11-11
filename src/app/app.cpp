@@ -1325,6 +1325,8 @@ void App::performVaultLock() {
 #ifdef PIXELVR_HAVE_FREETYPE
     if (browser_.inVault()) {
         browser_.openHome();
+    } else if (browser_.currentLocation() == "bookmarks://") {
+        browser_.openBookmarks();  // drop the vault bookmarks from the list
     }
     browser_.clearFinished();
     downloadToast_ = {};
@@ -3864,6 +3866,7 @@ int App::run() {
                                         cur().muted, screensUnlocked_, settings_.screenNumbers());
             renderer_.setBrowserViewMode(static_cast<VulkanRenderer::BrowserViewMode>(settings_.browserViewMode()));
             renderer_.setBrowserQuickPath(browser_.isCurrentBookmarked());
+            renderer_.setBrowserCanCreateFolder(browser_.canCreateFolder());
 #ifdef PIXELVR_HAVE_FREETYPE
             {
                 static const char* kSortLabels[3] = {"Name", "Newest", "Largest"};
@@ -5234,6 +5237,13 @@ int App::run() {
                         renderer_.setBrowserFirst(0);
                         renderer_.scrollBrowser(0);
                         xr_.triggerHaptic(1, 0.025f, 0.0f, 0.5f);
+                    } else if (pbHover == 6) {
+                        openKeyboard("New Folder", "", false, in, [this](const std::string& text) {
+                            std::string name = text;
+                            while (!name.empty() && std::isspace(static_cast<unsigned char>(name.front()))) name.erase(name.begin());
+                            while (!name.empty() && std::isspace(static_cast<unsigned char>(name.back()))) name.pop_back();
+                            if (!name.empty() && browser_.createFolder(name)) xr_.triggerHaptic(1, 0.040f, 0.0f, 0.6f);
+                        });
                     } else if (pbHover == 3) {
                         const std::string cur = browser_.currentPath();
                         if (cur != "bookmarks://") {

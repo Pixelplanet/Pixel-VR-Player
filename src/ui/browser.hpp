@@ -72,6 +72,9 @@ public:
     bool moveFocusedTo(const std::string& destDir, std::string& outNewPath);
     bool deleteFocused(std::string& deletedName);
     bool renameFocused(const std::string& newName);
+    // New folder inside the current local folder (not on network shares).
+    bool canCreateFolder() const;
+    bool createFolder(const std::string& name);
     const std::string& currentLocation() const { return location_; }
     const std::string& currentPath() const { return location_; }
     std::string parentDir() const;
