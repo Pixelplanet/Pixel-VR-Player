@@ -4,6 +4,7 @@
 //   vault_crypto_test <some video file> <scratch dir>
 
 #include "app/vault_crypto.hpp"
+#include "plugins/plugin_files.hpp"
 
 #include <chrono>
 #include <cstdio>
@@ -78,6 +79,33 @@ int main(int argc, char** argv) {
         for (auto& t : th) t.join();
         const double s = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         std::printf("INFO  3 readers x %.0f MB in %.2f s = %.0f MB/s total (incl. disk)\n", r.size() / 1e6, s, 3 * r.size() / 1e6 / s);
+    }
+    // Scripts next to vault films: an encrypted "<name>.funscript" sibling is listed / read under its real
+    // name only for a vault item (vault=true); for anything else it stays invisible (no grant was checked).
+    {
+        const std::string side = dir + "/sidecar-src";
+        fs::create_directories(side);
+        const std::string plainScript = side + "/Clip.funscript";
+        { std::ofstream(plainScript, std::ios::binary) << "{\"actions\":[]}"; }
+        const std::string sdir = dir + "/sidecar-enc";
+        fs::create_directories(sdir);
+        std::string encScript;
+        err.clear();
+        check(vc::encryptFile(plainScript, sdir, encScript, err), "script encrypted " + err);
+        namespace pf = pixelvr::pluginfiles;
+        std::vector<std::string> names;
+        check(pf::listFiles(sdir, names, err, true) && names.size() == 1 && names[0] == "Clip.funscript",
+              "vault item: encrypted script listed under its real name");
+        check(pf::listFiles(sdir, names, err, false) && names.empty(),
+              "not a vault item: encrypted script not listed (and not decrypted)");
+        std::string data;
+        check(pf::readFile(sdir + "/Clip.funscript", 1 << 20, data, err, true) && data == "{\"actions\":[]}",
+              "vault item: script read decrypted");
+        data.clear();
+        check(!pf::readFile(sdir + "/Clip.funscript", 1 << 20, data, err, false) && data.empty(),
+              "not a vault item: script not readable (" + err + ")");
+        fs::remove_all(side);
+        fs::remove_all(sdir);
     }
     const std::string back = dir + "/back.bin";
     check(vc::decryptFile(enc, back, err) && fs::file_size(back) == fs::file_size(src), "decrypted back " + err);

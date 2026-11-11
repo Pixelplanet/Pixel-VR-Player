@@ -477,6 +477,7 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
         sc.webSuspended = false;
     }
     sc.path = path;
+    pluginNamePath_[slot].clear();  // re-read the reported name (a vault file may have been renamed)
     const bool privatePath = VaultManager::instance().isVaultPath(path) || sc.webSuspended;
     if (!sameFile) sc.fingerprint = privatePath ? std::string() : PlaybackMemory::fingerprintOf(path);
     const PlaybackMemory::Entry* remembered = privatePath ? nullptr : playbackMemory_.find(path, sc.fingerprint);
@@ -2027,6 +2028,10 @@ void App::updatePlugins() {
     for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
         const ScreenState& sc = screens_[slot];
         PluginScreenSnapshot& s = snap[static_cast<size_t>(slot)];
+        if (!sc.open || sc.path.empty()) {
+            pluginNamePath_[slot].clear();
+            pluginNameReal_[slot].clear();
+        }
         s.selected = slot == selectedScreen_;
         s.audio = !sc.muted;
         if (sc.web && !sc.webSuspended) {
@@ -2038,14 +2043,17 @@ void App::updatePlugins() {
         s.kind = PluginScreenSnapshot::Kind::Video;
         s.path = sc.path;
         const bool plex = sc.webSuspended;
-        // Encrypted vault file: report its real name (stored inside it, read once per file),
-        // so scripts next to it ("8 Mile.funscript") match by name.
-        static std::string sNamePath[VulkanRenderer::kMaxVideoSlots], sNameReal[VulkanRenderer::kMaxVideoSlots];
-        if (sNamePath[slot] != sc.path) {
-            sNamePath[slot] = sc.path;
-            sNameReal[slot] = PluginHost::sanitizePath(formatName(sc.path));
+        // Any encrypted file is a vault item, also one outside the vault folder (e.g. in a
+        // folder moved out of the vault): plugins see it only with the vault grant.
+        const bool encrypted = sc.path.size() > 5 &&
+            sc.path.compare(sc.path.size() - 5, 5, vaultcrypto::kExtension) == 0;
+        // Encrypted vault file: its real name (stored inside it), so scripts next to it
+        // ("8 Mile.funscript") match by name. Read once per load, not every frame.
+        if (pluginNamePath_[slot] != sc.path) {
+            pluginNamePath_[slot] = sc.path;
+            pluginNameReal_[slot] = PluginHost::sanitizePath(formatName(sc.path));
         }
-        const std::string& clean = sNameReal[slot];
+        const std::string& clean = pluginNameReal_[slot];
         const std::string base = clean.substr(clean.find_last_of('/') + 1);
         s.fileName = plex ? (plexFiles_[slot].empty() ? plexTitles_[slot] : plexFiles_[slot]) : base;
         s.title = plex ? plexTitles_[slot] : base.substr(0, base.find_last_of('.'));
@@ -2055,7 +2063,7 @@ void App::updatePlugins() {
         else if (sc.path.rfind("dav://", 0) == 0 || sc.path.rfind("davs://", 0) == 0) s.source = "webdav";
         else if (sc.path.find("://") != std::string::npos) s.source = "http";
         else s.source = "local";
-        s.isPrivate = VaultManager::instance().isVaultPath(sc.path);
+        s.isPrivate = encrypted || VaultManager::instance().isVaultPath(sc.path);
         s.duration = sc.engine.duration();
         s.position = sc.engine.position();
         s.playing = !sc.engine.paused() && !sc.engine.eof();

@@ -139,6 +139,10 @@ private:
     };
     std::vector<PendingWebPlay> pendingWebPlays_;
     bool pluginScrubbing_ = false;  // scrubbing right now (told to plugins)
+    // Per screen: the name reported to plugins (an encrypted vault file's real name, read once per
+    // load from inside the file). Cleared on every load and close, so a renamed file is read afresh.
+    std::string pluginNamePath_[VulkanRenderer::kMaxVideoSlots];
+    std::string pluginNameReal_[VulkanRenderer::kMaxVideoSlots];
     int plexAudioStream_ = -1;  // the page's audio track for the hand-off being loaded
     int shortcutDragFrom_ = -1;  // settings row of the shortcut being dragged (list page)
     int shortcutDragTo_ = -1;    // the row it would land on

@@ -15,10 +15,13 @@ std::string parentOf(const std::string& path);
 std::string baseNameOf(const std::string& path);
 std::string join(const std::string& dir, const std::string& name);
 
-// Regular files directly inside `dir` (names only).
-bool listFiles(const std::string& dir, std::vector<std::string>& names, std::string& err);
-// Whole file, at most `maxBytes` (larger files fail).
-bool readFile(const std::string& uri, std::size_t maxBytes, std::string& out, std::string& err);
+// Regular files directly inside `dir` (names only). Encrypted vault files (.pvrv) are listed under
+// their real (stored) name only when `vault` is set (the video is a private vault item); otherwise
+// they are skipped, so a plugin without the vault grant never learns a decrypted name.
+bool listFiles(const std::string& dir, std::vector<std::string>& names, std::string& err, bool vault);
+// Whole file, at most `maxBytes` (larger files fail). With `vault`, a name that only exists as the
+// stored name of a .pvrv file in that folder is read decrypted.
+bool readFile(const std::string& uri, std::size_t maxBytes, std::string& out, std::string& err, bool vault);
 
 // Sidecar patterns start with "{base}", the rest is a glob ("{base}.*.funscript");
 // matching ignores case.

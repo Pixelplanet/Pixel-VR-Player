@@ -161,6 +161,7 @@ private:
     // Sidecar listing and reading run on a worker thread (network shares are slow).
     struct FileJob {
         bool list = false;
+        bool vault = false;  // the media is a private vault item: .pvrv siblings may be decrypted
         int screen = 0;
         std::string media, uri, pluginId, reqId, name;
     };

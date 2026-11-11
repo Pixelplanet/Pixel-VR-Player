@@ -98,7 +98,7 @@ std::string join(const std::string& dir, const std::string& name) {
     return dir.empty() || dir.back() == '/' ? dir + name : dir + "/" + name;
 }
 
-bool listFiles(const std::string& dir, std::vector<std::string>& names, std::string& err) {
+bool listFiles(const std::string& dir, std::vector<std::string>& names, std::string& err, bool vault) {
     names.clear();
     if (dir.rfind("smb://", 0) == 0) {
 #ifdef PIXELVR_HAVE_SMB
@@ -142,6 +142,7 @@ bool listFiles(const std::string& dir, std::vector<std::string>& names, std::str
     for (const auto& e : fs::directory_iterator(dir, ec)) {
         if (e.symlink_status(ec).type() != fs::file_type::regular) continue;  // links are never sidecars
         if (e.path().extension() == vaultcrypto::kExtension) {  // vault: the real name stored inside
+            if (!vault) continue;  // not a vault item: never decrypt (no grant was checked for it)
             const std::string n = vaultcrypto::storedName(e.path().string());
             if (!n.empty()) names.push_back(n);
             continue;
@@ -152,7 +153,7 @@ bool listFiles(const std::string& dir, std::vector<std::string>& names, std::str
     return !ec;
 }
 
-bool readFile(const std::string& uri, std::size_t maxBytes, std::string& out, std::string& err) {
+bool readFile(const std::string& uri, std::size_t maxBytes, std::string& out, std::string& err, bool vault) {
     out.clear();
     if (uri.rfind("smb://", 0) == 0) {
 #ifdef PIXELVR_HAVE_SMB
@@ -219,7 +220,7 @@ bool readFile(const std::string& uri, std::size_t maxBytes, std::string& out, st
         return true;
     }
     // Encrypted vault folder: the name is the real one stored inside a .pvrv file; read it decrypted.
-    if (uri.find("://") == std::string::npos && !std::filesystem::exists(uri)) {
+    if (vault && uri.find("://") == std::string::npos && !std::filesystem::exists(uri)) {
         const std::filesystem::path want(uri);
         std::error_code vec;
         for (const auto& e : std::filesystem::directory_iterator(want.parent_path(), vec)) {

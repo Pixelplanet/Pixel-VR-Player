@@ -199,8 +199,8 @@ void PluginHost::workerLoop() {
         }
         FileResult r;
         r.job = job;
-        r.ok = job.list ? pluginfiles::listFiles(job.uri, r.names, r.err)
-                        : pluginfiles::readFile(job.uri, kMaxSidecarBytes, r.data, r.err);
+        r.ok = job.list ? pluginfiles::listFiles(job.uri, r.names, r.err, job.vault)
+                        : pluginfiles::readFile(job.uri, kMaxSidecarBytes, r.data, r.err, job.vault);
         std::lock_guard<std::mutex> lk(jobMutex_);
         results_.push_back(std::move(r));
     }
@@ -271,6 +271,12 @@ void PluginHost::deliverFileResults() {
         }
         for (Plugin& p : plugins_) {
             if (p.id != j.pluginId || !p.helloDone) continue;
+            // Checked again on delivery: the file may have closed, the vault locked or the vault
+            // grant been taken away while the read waited on the worker.
+            if (t.mediaId != j.media || !canSee(p, j.screen)) {
+                reply(p, j.reqId, false, "that media is not open");
+                continue;
+            }
             if (!r.ok) {
                 reply(p, j.reqId, false, r.err);
             } else if (pluginfiles::isUtf8(r.data)) {
@@ -770,6 +776,7 @@ void PluginHost::handleLine(Plugin& p, const std::string& line) {
                 job.screen = screen;
                 job.media = tracks_[static_cast<size_t>(screen)].mediaId;
                 job.uri = pluginfiles::join(pluginfiles::parentOf(tracks_[static_cast<size_t>(screen)].last.path), name);
+                job.vault = tracks_[static_cast<size_t>(screen)].last.isPrivate;
                 job.pluginId = p.id;
                 job.reqId = rid;
                 job.name = name;
@@ -941,7 +948,9 @@ void PluginHost::update(const std::vector<PluginScreenSnapshot>& screens, const 
         const PluginScreenSnapshot& s = screens[static_cast<size_t>(i)];
         ScreenTrack& t = tracks_[static_cast<size_t>(i)];
         const bool isVideo = s.kind == PluginScreenSnapshot::Kind::Video && !s.path.empty();
-        if (!t.mediaId.empty() && (!isVideo || s.path != t.last.path)) {
+        // A vault file renamed and played again keeps its path: the new real name counts as a new file.
+        if (!t.mediaId.empty() &&
+            (!isVideo || s.path != t.last.path || (s.isPrivate && s.fileName != t.last.fileName))) {
             const char* reason = !isVideo ? (t.last.ended ? "eof" : "stop") : "replaced";
             for (Plugin& p : plugins_) sendClose(p, i, t.mediaId, reason);
             t.mediaId.clear();
@@ -967,6 +976,7 @@ void PluginHost::update(const std::vector<PluginScreenSnapshot>& screens, const 
                 job.screen = i;
                 job.media = t.mediaId;
                 job.uri = pluginfiles::parentOf(s.path);
+                job.vault = s.isPrivate;
                 queueJob(std::move(job));
             }
             for (Plugin& p : plugins_) {
