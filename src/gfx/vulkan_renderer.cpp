@@ -384,22 +384,19 @@ inline UiRect lockVaultButton(int page) {
 }
 
 constexpr float kHeaderY = 0.455f;
-// File browser header, two slim rows: the folder path on top (full width),
-// the buttons below. 0 = prev page, 1 = next page, 2 = view mode,
-// 3 = bookmark, 4 = up to parent, 5 = sort order, 6 = new folder.
+// File browser header, two slim rows: the folder path on top (full width, each
+// level clickable), the buttons below, left-aligned: 5 = sort order,
+// 2 = view mode, 3 = bookmark, 6 = new folder (last: hidden on network shares).
 constexpr float kBrowserPathY = 0.470f;
 constexpr float kBrowserBtnY = 0.410f;
 constexpr float kBrowserBtnHH = 0.022f;
-constexpr float kBrowserPageTextX = 0.705f;
 inline UiRect headerButton(int id) {
     switch (id) {
-        case 0: return {0.600f, kBrowserBtnY, 0.035f, kBrowserBtnHH};
-        case 1: return {0.810f, kBrowserBtnY, 0.035f, kBrowserBtnHH};
-        case 2: return {0.015f, kBrowserBtnY, 0.075f, kBrowserBtnHH};
-        case 3: return {0.200f, kBrowserBtnY, 0.090f, kBrowserBtnHH};
-        case 5: return {-0.145f, kBrowserBtnY, 0.075f, kBrowserBtnHH};
-        case 6: return {-0.300f, kBrowserBtnY, 0.065f, kBrowserBtnHH};
-        default: return {-0.430f, kBrowserBtnY, 0.038f, kBrowserBtnHH};
+        case 5: return {-0.380f, kBrowserBtnY, 0.080f, kBrowserBtnHH};
+        case 2: return {-0.205f, kBrowserBtnY, 0.080f, kBrowserBtnHH};
+        case 3: return {-0.010f, kBrowserBtnY, 0.100f, kBrowserBtnHH};
+        case 6: return {0.200f, kBrowserBtnY, 0.095f, kBrowserBtnHH};
+        default: return {0.0f, -10.0f, 0.0f, 0.0f};  // removed buttons (pager, Up)
     }
 }
 // Settings header pager (keeps the classic single-row header spots).
@@ -2872,6 +2869,7 @@ void VulkanRenderer::updatePointer() {
     browserHovered_ = -1;
     browserSidebarHovered_ = -1;
     browserPageBtnHovered_ = -1;
+    browserCrumbHovered_ = -1;
     settingsPagerHovered_ = -1;
     settingsHeaderHovered_ = false;
     settingsHovered_ = -1;
@@ -3144,9 +3142,16 @@ void VulkanRenderer::updatePointer() {
             }
 
             if (browserVisible_) {
-                const bool canGoUp = (!browserItems_.empty() && browserItems_[0].isBack);
-                for (int id : {4, 0, 1, 2, 3, 5, 6}) {
-                    if (id == 4 && !canGoUp) continue;
+                if (std::fabs(hyy - hub::kBrowserPathY) <= hub::kBrowserBtnHH + hub::kHitPad) {
+                    for (const CrumbHit& c : browserCrumbHits_) {
+                        if (hx >= c.x0 - 0.006f && hx <= c.x1 + 0.006f) {
+                            browserCrumbHovered_ = c.index;
+                            break;
+                        }
+                    }
+                    if (browserCrumbHovered_ >= 0) break;
+                }
+                for (int id : {2, 3, 5, 6}) {
                     if (id == 6 && !browserCanCreateFolder_) continue;
                     if (hub::headerButton(id).contains(hx, hyy, hub::kHitPad)) {
                         browserPageBtnHovered_ = id;
@@ -6969,13 +6974,6 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 return r;
             };
             auto headerIconX = [](const UiRect& r) { return r.cx - r.hw + 0.026f; };
-            for (int pb = 0; pb < 2; ++pb) {
-                const UiRect r = headerBtn(pb, false);
-                // Chevron icon (mirrored for "previous page")
-                const float chw = (pb == 0) ? -0.011f : 0.011f;
-                drawUiElement(vpPanel, r.cx, r.cy, chw, 0.011f, UiShape::Chevron,
-                              browserPageBtnHovered_ == pb ? themeAccentCol : themeTextCol);
-            }
             {
                 const UiRect r = headerBtn(2, false);  // view mode
                 drawUiElement(vpPanel, headerIconX(r), r.cy, 0.012f, 0.012f, UiShape::List, slateIconCol);
@@ -6992,12 +6990,6 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             if (browserCanCreateFolder_) {
                 const UiRect r = headerBtn(6, false);  // new folder
                 drawUiElement(vpPanel, headerIconX(r), r.cy, 0.012f, 0.012f, UiShape::Files, slateIconCol);
-            }
-            const bool canGoUp = (!browserItems_.empty() && browserItems_[0].isBack);
-            if (canGoUp) {
-                const UiRect r = headerBtn(4, false);
-                drawUiElement(vpPanel, r.cx - 0.019f, r.cy, -0.009f, 0.009f, UiShape::Chevron,
-                              browserPageBtnHovered_ == 4 ? themeAccentCol : themeTextCol);
             }
 
             const float* normCardBg = glassCardT.data();
@@ -7184,10 +7176,23 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             const float breadX = -0.460f;  // the path has the whole top row
             const float breadRight = 0.855f;
             const float breadSc = scHeader * 0.90f;
-            const Crumbs crumbs = layoutCrumbs(
-                splitCrumbs(formatBreadcrumbs(browserTitle_.empty() ? "Local Storage" : browserTitle_)),
-                breadX, breadRight - breadX, breadSc);
+            const std::vector<std::string> crumbSegs = !browserCrumbs_.empty() ? browserCrumbs_
+                : splitCrumbs(formatBreadcrumbs(browserTitle_.empty() ? "Local Storage" : browserTitle_));
+            const Crumbs crumbs = layoutCrumbs(crumbSegs, breadX, breadRight - breadX, breadSc);
             drawCrumbChevrons(crumbs, hub::kBrowserPathY);
+            if (viewIndex == 0 || layerPass) {
+                // Clickable levels: a collapsed "..." stands for the level before the first shown.
+                browserCrumbHits_.clear();
+                if (!browserCrumbs_.empty()) {
+                    const int shownStart = static_cast<int>(crumbSegs.size()) - static_cast<int>(crumbs.parts.size());
+                    for (std::size_t i = 0; i + 1 < crumbs.parts.size(); ++i) {
+                        const int idx = shownStart + static_cast<int>(i);
+                        if (idx < 0) continue;
+                        browserCrumbHits_.push_back({crumbs.partX[i],
+                                                     crumbs.partX[i] + measureString(breadSc, crumbs.parts[i]), idx});
+                    }
+                }
+            }
 
             // Text pass for Hub rail + Files content
             bindPipe(textPipeline_);
@@ -7203,19 +7208,17 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 drawFit(-0.790f, hub::subY(fileSubY[sub]), 0.28f, scSub, col, qLabels[sub]);
             }
 
-            // Content header: Breadcrumb + Page switcher
-            if (canGoUp) {
-                const bool phov = (browserPageBtnHovered_ == 4);
-                drawFit(-0.436f, hub::kBrowserBtnY, 0.042f, scSub * 0.90f,
-                        phov ? themeAccentCol : themeTextCol, "Up");
-            }
+            // Content header: folder path (hovered level in the accent colour)
             drawCrumbText(crumbs, hub::kBrowserPathY, breadSc, breadRight);
-
-            const int totalPages = std::max(1, (total + perPage - 1) / perPage);
-            const int curPage = (first / perPage) + 1;
-            char pageBuf[32];
-            std::snprintf(pageBuf, sizeof(pageBuf), "%d / %d", curPage, totalPages);
-            drawFitCentered(hub::kBrowserPageTextX, hub::kBrowserBtnY, 0.14f, scSub, slateCol, pageBuf);
+            for (const CrumbHit& c : browserCrumbHits_) {
+                if (c.index != browserCrumbHovered_) continue;
+                const std::size_t vi = static_cast<std::size_t>(
+                    c.index - (static_cast<int>(crumbSegs.size()) - static_cast<int>(crumbs.parts.size())));
+                if (vi < crumbs.parts.size()) {
+                    drawFit(crumbs.partX[vi], hub::kBrowserPathY, breadRight - crumbs.partX[vi], breadSc,
+                            themeAccentCol, crumbs.parts[vi]);
+                }
+            }
 
             // Header button labels (icons sit at the left edge of each pill)
             const char* vModeLabels[3] = {"Large", "Grid", "List"};

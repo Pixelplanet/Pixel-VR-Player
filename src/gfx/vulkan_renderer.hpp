@@ -329,6 +329,9 @@ public:
     void setBrowserFirst(int first) { browserFirst_ = first < 0 ? 0 : first; }
     int browserSidebarHovered() const { return browserSidebarHovered_; }
     int browserPageBtnHovered() const { return browserPageBtnHovered_; }
+    // Folder path levels (root first); the pointer reports which level it is on.
+    void setBrowserCrumbs(std::vector<std::string> labels) { browserCrumbs_ = std::move(labels); }
+    int browserCrumbHovered() const { return browserCrumbHovered_; }
     int pointerHand() const { return pointerHand_; }
     void setBrowserQuickFilter(int f) { browserQuickFilter_ = f; }
     int browserQuickFilter() const { return browserQuickFilter_; }
@@ -1312,6 +1315,10 @@ private:
     std::vector<BrowserItem> browserItems_;
     int browserSidebarHovered_ = -1;
     int browserPageBtnHovered_ = -1;
+    std::vector<std::string> browserCrumbs_;
+    int browserCrumbHovered_ = -1;
+    struct CrumbHit { float x0, x1; int index; };
+    std::vector<CrumbHit> browserCrumbHits_;  // from the last drawn frame
     int browserQuickFilter_ = 0;  // 0=Local, 1=Videos, 2=SMB, 3=Downloads, 4=Bookmarks, 5=Vault
     int downloadsFilter_ = 0;  // 0=All, 1=Active, 2=Completed
     int activeDownloadCount_ = 0;

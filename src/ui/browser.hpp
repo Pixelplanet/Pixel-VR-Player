@@ -72,6 +72,14 @@ public:
     bool moveFocusedTo(const std::string& destDir, std::string& outNewPath);
     bool deleteFocused(std::string& deletedName);
     bool renameFocused(const std::string& newName);
+    // Folder path as clickable levels, root first (the last one is the current folder).
+    struct Crumb {
+        std::string label;
+        std::string path;
+        bool smb = false;
+    };
+    std::vector<Crumb> crumbs() const;
+    void openCrumb(int index);
     // New folder inside the current local folder (not on network shares).
     bool canCreateFolder() const;
     bool createFolder(const std::string& name);

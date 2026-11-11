@@ -869,6 +869,53 @@ void Browser::rescan() {
     beginScan(location_, inSmb_, true);
 }
 
+std::vector<Browser::Crumb> Browser::crumbs() const {
+    std::vector<Crumb> out;
+    if (location_.empty()) return out;
+    if (location_ == "bookmarks://") return {{"Bookmarks", location_, false}};
+    auto lastPart = [](const std::string& p) {
+        std::string s = p;
+        while (s.size() > 1 && s.back() == '/') s.pop_back();
+        const std::size_t slash = s.find_last_of('/');
+        return slash == std::string::npos ? s : s.substr(slash + 1);
+    };
+    if (inSmb_) {
+        // Same steps as "..": folder -> share -> server -> network list.
+        for (std::string p = location_; !p.empty() && out.size() < 64; p = smb_parent(p)) {
+            out.push_back({p == "smb://" ? "Network" : lastPart(without_scheme(p)), p, true});
+        }
+    } else {
+        const std::string vault = VaultManager::instance().vaultDir();
+        const bool inVaultDir = VaultManager::instance().isVaultPath(location_);
+        for (fs::path p(location_); out.size() < 64; p = p.parent_path()) {
+            const std::string ps = p.string();
+            if (inVaultDir && ps == vault) {
+                out.push_back({"Vault (Private)", ps, false});
+                break;
+            }
+            if (ps == homeDir_) {
+                out.push_back({"Home", ps, false});
+                break;
+            }
+            if (ps.empty() || ps == "/" || !p.has_parent_path() || p.parent_path() == p) {
+                if (ps == "/") out.push_back({"/", ps, false});
+                break;
+            }
+            out.push_back({lastPart(ps), ps, false});
+        }
+    }
+    std::reverse(out.begin(), out.end());
+    return out;
+}
+
+void Browser::openCrumb(int index) {
+    const std::vector<Crumb> c = crumbs();
+    if (index < 0 || index + 1 >= static_cast<int>(c.size())) return;  // the current folder: nothing to do
+    const Crumb& to = c[static_cast<std::size_t>(index)];
+    // Coming back up keeps the folder we came from selected, like "..".
+    beginScan(to.path, to.smb, true, c[static_cast<std::size_t>(index) + 1].path);
+}
+
 bool Browser::canCreateFolder() const {
     return !inSmb_ && !location_.empty() && location_[0] == '/' && !isRemotePath(location_);
 }

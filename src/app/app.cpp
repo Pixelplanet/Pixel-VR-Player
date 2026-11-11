@@ -3872,6 +3872,15 @@ int App::run() {
             renderer_.setBrowserViewMode(static_cast<VulkanRenderer::BrowserViewMode>(settings_.browserViewMode()));
             renderer_.setBrowserQuickPath(browser_.isCurrentBookmarked());
             renderer_.setBrowserCanCreateFolder(browser_.canCreateFolder());
+            {
+                static std::string sCrumbLoc;
+                if (browser_.currentLocation() != sCrumbLoc) {  // path levels only change with the folder
+                    sCrumbLoc = browser_.currentLocation();
+                    std::vector<std::string> labels;
+                    for (const Browser::Crumb& c : browser_.crumbs()) labels.push_back(c.label);
+                    renderer_.setBrowserCrumbs(std::move(labels));
+                }
+            }
 #ifdef PIXELVR_HAVE_FREETYPE
             {
                 static const char* kSortLabels[3] = {"Name", "Newest", "Largest"};
@@ -5215,18 +5224,13 @@ int App::run() {
 
                 // Check header pagination & action buttons
                 const int pbHover = renderer_.browserPageBtnHovered();
-                if ((in.togglePlay || in.select) && pbHover >= 0 && sbHover < 0) {
-                    const int pageStep = (renderer_.browserViewMode() == VulkanRenderer::BrowserViewMode::BigCards) ? 2 :
-                                         (renderer_.browserViewMode() == VulkanRenderer::BrowserViewMode::MiniCards ? 3 : 8);
-                    if (pbHover == 0) {
-                        renderer_.scrollBrowser(-pageStep);
-                        browser_.setFirst(renderer_.browserFirst());
-                        browser_.setSelected(renderer_.browserFirst());
-                    } else if (pbHover == 1) {
-                        renderer_.scrollBrowser(pageStep);
-                        browser_.setFirst(renderer_.browserFirst());
-                        browser_.setSelected(renderer_.browserFirst());
-                    } else if (pbHover == 2) {
+                const int crumbHover = renderer_.browserCrumbHovered();
+                if ((in.togglePlay || in.select) && crumbHover >= 0 && sbHover < 0) {
+                    browser_.openCrumb(crumbHover);  // jump to that level of the folder path
+                    xr_.triggerHaptic(1, 0.025f, 0.0f, 0.5f);
+                    interacted = true;
+                } else if ((in.togglePlay || in.select) && pbHover >= 0 && sbHover < 0) {
+                    if (pbHover == 2) {
                         // Cycle View Mode: BigCards (0) -> MiniCards (1) -> CompactList (2)
                         int curMode = settings_.browserViewMode();
                         curMode = (curMode + 1) % 3;
@@ -5261,14 +5265,6 @@ int App::run() {
                                 renderer_.setBrowserQuickPath(true);
                                 xr_.triggerHaptic(1, 0.040f, 0.0f, 0.7f);
                             }
-                        }
-                    } else if (pbHover == 4) {
-                        // Dedicated Up button in header: activate parent navigation
-                        if (!browser_.entries().empty() && browser_.entries()[0].isBack) {
-                            browser_.setSelected(0);
-                            std::string playPath;
-                            browser_.activate(playPath);
-                            xr_.triggerHaptic(1, 0.025f, 0.0f, 0.5f);
                         }
                     }
                     interacted = true;
