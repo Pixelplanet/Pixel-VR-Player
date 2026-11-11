@@ -29,7 +29,7 @@ jobs:
             build-essential cmake ninja-build git ca-certificates pkg-config file \
             glslang-tools libvulkan-dev \
             libpulse-dev libfreetype-dev libsmbclient-dev libturbojpeg0-dev \
-            libssh-dev libcurl4-openssl-dev \
+            libssh-dev libcurl4-openssl-dev libssl-dev \
             libdav1d-dev libgnutls28-dev zlib1g-dev curl xz-utils patch \
             libx11-dev libxrandr-dev libxxf86vm-dev libgl-dev
 
