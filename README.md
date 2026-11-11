@@ -197,6 +197,11 @@ This cleanly removes:
 * The Non-Steam Game shortcut from Steam's library (`shortcuts.vdf`)
 * All custom Steam grid artwork from `~/.steam/steam/userdata/*/config/grid/`
 
+**If you have files in the vault**, the uninstaller says so and (from a terminal) asks whether to keep the
+vault encrypted or to **decrypt it into `~/PixelVR Vault`** first. A kept vault stays encrypted: it opens again
+only with `~/.config/pixelvr/vault.key` and your unlock combination, which stays written down in
+`~/PixelVRPlayer/logs/session.dat`.
+
 ### From your PC over Wi-Fi
 
 - **Windows:** Double-click [`tools/uninstall-from-pc.bat`](tools/uninstall-from-pc.bat) and enter your headset's IP.
@@ -206,7 +211,11 @@ This cleanly removes:
 
 By default, user settings (`~/.config/pixelvr`), cached video thumbnails (`~/.cache/pixelvr`), and hidden vault media (`~/.pixelvr_vault`) are kept intact so upgrading or reinstalling never loses your library state.
 
-To completely erase all application data and settings from the headset, run:
+> [!WARNING]
+> `~/.config/pixelvr` holds `vault.key`. Without it the encrypted vault can never be opened again, not even
+> with the right combination. Decrypt the vault first (uninstall offers it) or move its files out in the player.
+
+To completely erase all application data, settings **and the vault** from the headset, run:
 
 ```bash
 rm -rf ~/.config/pixelvr ~/.cache/pixelvr ~/.pixelvr_vault
@@ -297,8 +306,14 @@ Hold **Full Grip Click** and press:
 
 - **Instant Auto-Lock:** Re-locks automatically and immediately purges in-memory textures when the headset proximity sensor detects removal, or when clicking **[ 🔒 Lock Vault ]** in the sidebar.
 - **Custom Combinations:** You can record your own custom button sequence anytime in **Settings ▸ Vault & Privacy**.
-- **Move to Vault:** While unlocked, local videos can be moved directly into the vault from the browser.
-- **Safe Persistence:** Media inside `~/.pixelvr_vault` is never deleted when updating or uninstalling the app.
+- **Encrypted:** vault files are encrypted (AES-256) under random names; thumbnails of vault files are encrypted too.
+- **Move / Copy:** while unlocked, **Move**, **Copy** and **Move to Vault** in the browser's File Actions put files into
+  any vault folder (encrypted on the way in) and take them out again (decrypted). Matching scripts and subtitles
+  travel with a video.
+- **On the SD card:** Settings ▸ Vault & Privacy ▸ Vault Location moves the vault to the SD card and back (the key
+  and the combination stay on the headset). Without the card the vault shows "Insert the SD card with your vault";
+  pulling the card while it is unlocked locks it.
+- **Safe Persistence:** Media inside the vault is never deleted when updating or uninstalling the app.
 
 For full architecture and security details, see the [Hidden Vault Technical Specification](docs/HIDDEN_VAULT_SPEC.md).
 </details>
