@@ -149,6 +149,20 @@ void PlaybackMemory::setPosition(const std::string& path, double position, doubl
     if (!fingerprint.empty()) e.fingerprint = fingerprint;
 }
 
+void PlaybackMemory::forgetUnder(const std::string& path) {
+    if (path.empty()) return;
+    for (auto it = entries_.begin(); it != entries_.end();) {
+        const std::string& p = it->first;
+        const bool under = p == path || (p.size() > path.size() && p.compare(0, path.size(), path) == 0 && p[path.size()] == '/');
+        if (under) {
+            it = entries_.erase(it);
+            dirty_ = true;
+        } else {
+            ++it;
+        }
+    }
+}
+
 void PlaybackMemory::setFormat(const std::string& path, int projection, int stereo, const std::string& fingerprint) {
     if (path.empty()) return;
     Entry& e = touch(path);

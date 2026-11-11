@@ -146,6 +146,7 @@ add_library(pixelvr_core STATIC
     src/plugins/plugin_files.cpp
     src/plugins/plugin_repo.cpp
     src/app/vault_crypto.cpp
+    src/app/file_ops.cpp
     src/app/chromium_installer.cpp
     src/app/app.cpp)
 
@@ -346,6 +347,8 @@ if(PIXELVR_BUILD_TOOLS)
     target_link_libraries(letterbox_test PRIVATE pixelvr_core)
     add_executable(vault_crypto_test tools/vault_crypto_test.cpp)
     target_link_libraries(vault_crypto_test PRIVATE pixelvr_core)
+    add_executable(fileops_test tools/fileops_test.cpp)
+    target_link_libraries(fileops_test PRIVATE pixelvr_core)
 endif()
 
 # First-party plugins (docs/concepts/PLUGIN_SYSTEM_SPEC.md). Each lands in

@@ -4,6 +4,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <cerrno>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -217,41 +218,62 @@ bool isEncrypted(const std::string& path) {
     return ok;
 }
 
-bool encryptFile(const std::string& src, const std::string& dstDir, std::string& outPath, std::string& err,
-                 const std::function<void(uint64_t, uint64_t)>& progress) {
+bool hasExtension(const std::string& path) {
+    const size_t n = std::strlen(kExtension);
+    return path.size() > n && path.compare(path.size() - n, n, kExtension) == 0;
+}
+
+void fsyncDir(const std::string& dir) {
+    const int fd = ::open(dir.empty() ? "." : dir.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (fd < 0) return;
+    ::fsync(fd);
+    ::close(fd);
+}
+
+namespace {
+
+bool writeAll(int fd, const uint8_t* p, size_t n) {
+    while (n > 0) {
+        const ssize_t w = ::write(fd, p, n);
+        if (w < 0 && errno == EINTR) continue;
+        if (w <= 0) return false;
+        p += w;
+        n -= static_cast<size_t>(w);
+    }
+    return true;
+}
+
+// Writes an encrypted file into dstDir from `readChunk(offset, buf, n)` (bytes read, 0 = end, -1 = error).
+bool encryptStream(const std::function<long(uint64_t, uint8_t*, size_t)>& readChunk, uint64_t total,
+                   std::string name, const std::string& dstDir, const std::string& diskName, std::string& outPath,
+                   std::string& err, const Progress& progress, const Cancelled& cancelled) {
     uint8_t key[32];
     if (!currentKey(key)) {
-        err = "vault locked";
+        err = "the vault is locked";
         return false;
     }
-    const int in = ::open(src.c_str(), O_RDONLY | O_CLOEXEC);
-    if (in < 0) {
-        err = "cannot open " + src;
-        return false;
-    }
-    struct stat st {};
-    ::fstat(in, &st);
-    const uint64_t total = static_cast<uint64_t>(st.st_size);
     uint8_t rnd[8], nonce[16];
     RAND_bytes(rnd, 8);
     RAND_bytes(nonce, 16);
     nonce[8] = nonce[9] = 0;  // headroom so the counter never wraps into the name range
-    char hex[17];
-    for (int i = 0; i < 8; ++i) std::snprintf(hex + 2 * i, 3, "%02x", rnd[i]);
-    outPath = (fs::path(dstDir) / (std::string(hex) + kExtension)).string();
+    std::string file = diskName;
+    if (file.empty()) {
+        char hex[17];
+        for (int i = 0; i < 8; ++i) std::snprintf(hex + 2 * i, 3, "%02x", rnd[i]);
+        file = std::string(hex) + kExtension;
+    }
+    outPath = (fs::path(dstDir) / file).string();
     const std::string tmp = outPath + ".part";
     const int out = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
     if (out < 0) {
-        ::close(in);
-        err = "cannot write into the vault";
+        OPENSSL_cleanse(key, 32);
+        err = "cannot write into the folder";
         return false;
     }
-    // header
     std::vector<uint8_t> hdr(kHeaderSize, 0);
     std::memcpy(hdr.data(), kMagic, 6);
     std::memcpy(hdr.data() + 6, nonce, 16);
     for (int i = 0; i < 8; ++i) hdr[22 + i] = static_cast<uint8_t>(total >> (8 * i));
-    std::string name = fs::path(src).filename().string();
     if (name.size() > kHeaderSize - 64) name.resize(kHeaderSize - 64);
     hdr[30] = static_cast<uint8_t>(name.size());
     hdr[31] = static_cast<uint8_t>(name.size() >> 8);
@@ -259,58 +281,146 @@ bool encryptFile(const std::string& src, const std::string& dstDir, std::string&
     uint8_t nn[16];
     nameNonce(nonce, nn);
     ctrXor(key, nn, 0, hdr.data() + 32, name.size());
-    bool ok = ::write(out, hdr.data(), kHeaderSize) == kHeaderSize;
+    bool ok = writeAll(out, hdr.data(), kHeaderSize);
+    bool stopped = false;
     std::vector<uint8_t> buf(4u << 20);
     uint64_t done = 0;
     while (ok) {
-        const ssize_t r = ::read(in, buf.data(), buf.size());
+        if (cancelled && cancelled()) {
+            ok = false;
+            stopped = true;
+            break;
+        }
+        const long r = readChunk(done, buf.data(), buf.size());
         if (r < 0) ok = false;
         if (r <= 0) break;
         ok = ctrXor(key, nonce, done, buf.data(), static_cast<size_t>(r)) &&
-             ::write(out, buf.data(), static_cast<size_t>(r)) == r;
+             writeAll(out, buf.data(), static_cast<size_t>(r));
         done += static_cast<uint64_t>(r);
         if (progress) progress(done, total);
     }
     ok = ok && done == total && ::fsync(out) == 0;
-    ::close(in);
     ::close(out);
     OPENSSL_cleanse(key, 32);
     std::error_code ec;
     if (ok) fs::rename(tmp, outPath, ec);
     if (!ok || ec) {
         fs::remove(tmp, ec);
-        err = "encrypting failed (disk full?)";
+        err = stopped ? "stopped" : (hasKey() ? "encrypting failed (disk full?)" : "the vault was locked");
         return false;
     }
+    fsyncDir(dstDir);
     return true;
 }
 
-bool decryptFile(const std::string& src, const std::string& dstPath, std::string& err) {
+}  // namespace
+
+bool encryptFile(const std::string& src, const std::string& dstDir, std::string& outPath, std::string& err,
+                 const Progress& progress, const std::string& storedName, const Cancelled& cancelled,
+                 const std::string& diskName) {
+    const int in = ::open(src.c_str(), O_RDONLY | O_CLOEXEC);
+    if (in < 0) {
+        err = "cannot open " + fs::path(src).filename().string();
+        return false;
+    }
+    struct stat st {};
+    ::fstat(in, &st);
+    const uint64_t total = static_cast<uint64_t>(st.st_size);
+    auto readChunk = [in](uint64_t, uint8_t* b, size_t n) -> long {
+        for (;;) {
+            const ssize_t r = ::read(in, b, n);
+            if (r < 0 && errno == EINTR) continue;
+            return static_cast<long>(r);
+        }
+    };
+    const bool ok = encryptStream(readChunk, total, storedName.empty() ? fs::path(src).filename().string() : storedName,
+                                  dstDir, diskName, outPath, err, progress, cancelled);
+    ::close(in);
+    return ok;
+}
+
+bool reencryptFile(const std::string& src, const std::string& dstDir, std::string& outPath, std::string& err,
+                   const Progress& progress, const std::string& storedName, const Cancelled& cancelled,
+                   const std::string& diskName) {
     Reader r;
     if (!r.open(src)) {
-        err = "cannot read the vault file";
+        err = "cannot read the vault file (vault locked?)";
+        return false;
+    }
+    auto readChunk = [&r](uint64_t off, uint8_t* b, size_t n) -> long { return r.read(off, b, n); };
+    return encryptStream(readChunk, r.size(), storedName.empty() ? r.name() : storedName, dstDir, diskName, outPath,
+                         err, progress, cancelled);
+}
+
+bool decryptFile(const std::string& src, const std::string& dstPath, std::string& err, const Progress& progress,
+                 const Cancelled& cancelled) {
+    Reader r;
+    if (!r.open(src)) {
+        err = "cannot read the vault file (vault locked?)";
         return false;
     }
     const std::string tmp = dstPath + ".part";
-    std::ofstream o(tmp, std::ios::binary | std::ios::trunc);
+    const int out = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (out < 0) {
+        err = "cannot write " + fs::path(dstPath).filename().string();
+        return false;
+    }
     std::vector<uint8_t> buf(4u << 20);
     uint64_t off = 0;
-    while (off < r.size()) {
+    bool ok = true, stopped = false;
+    while (ok && off < r.size()) {
+        if (cancelled && cancelled()) {
+            ok = false;
+            stopped = true;
+            break;
+        }
         const long n = r.read(off, buf.data(), buf.size());
-        if (n <= 0) break;
-        o.write(reinterpret_cast<char*>(buf.data()), n);
+        if (n <= 0) {
+            ok = false;  // read error, or locked meanwhile
+            break;
+        }
+        ok = writeAll(out, buf.data(), static_cast<size_t>(n));
         off += static_cast<uint64_t>(n);
+        if (progress) progress(off, r.size());
     }
-    o.close();
+    ok = ok && off == r.size() && ::fsync(out) == 0;
+    ::close(out);
     std::error_code ec;
-    if (off != r.size() || !o) {
+    if (!ok) {
         fs::remove(tmp, ec);
-        err = "decrypting failed (disk full?)";
+        err = stopped ? "stopped" : (hasKey() ? "decrypting failed (disk full?)" : "the vault was locked");
         return false;
     }
     fs::rename(tmp, dstPath, ec);
-    if (ec) err = ec.message();
-    return !ec;
+    if (ec) {
+        err = ec.message();
+        fs::remove(tmp, ec);
+        return false;
+    }
+    fsyncDir(fs::path(dstPath).parent_path().string());
+    return true;
+}
+
+bool encryptBlob(const std::string& plain, std::string& out) {
+    uint8_t key[32], nonce[16];
+    if (!currentKey(key)) return false;
+    RAND_bytes(nonce, 16);
+    nonce[8] = nonce[9] = 0;
+    out.assign(reinterpret_cast<const char*>(nonce), 16);
+    out += plain;
+    const bool ok = ctrXor(key, nonce, 0, reinterpret_cast<uint8_t*>(out.data()) + 16, plain.size());
+    OPENSSL_cleanse(key, 32);
+    return ok;
+}
+
+bool decryptBlob(const std::string& blob, std::string& out) {
+    uint8_t key[32], nonce[16];
+    if (blob.size() < 16 || !currentKey(key)) return false;
+    std::memcpy(nonce, blob.data(), 16);
+    out.assign(blob, 16, std::string::npos);
+    const bool ok = ctrXor(key, nonce, 0, reinterpret_cast<uint8_t*>(out.data()), out.size());
+    OPENSSL_cleanse(key, 32);
+    return ok;
 }
 
 Reader::~Reader() { close(); }

@@ -68,9 +68,16 @@ public:
     const std::string& quickPath() const { return quickPath_; }
     bool isCurrentQuickPath() const { return isCurrentBookmarked(); }
     bool inVault() const;
-    bool moveFocusedToVault(std::string& outNewPath);
-    bool moveFocusedTo(const std::string& destDir, std::string& outNewPath);
+    // Shown instead of the vault while it lives on an SD card that is not inserted.
+    static constexpr const char* kVaultMissing = "vault://missing";
+    // A row that Move / Copy / Rename / Delete may act on (not "..", Network, placeholders, the SD card
+    // itself, files still being written).
+    bool isFileActionTarget(const Entry& e) const;
     bool deleteFocused(std::string& deletedName);
+    // After a move: bookmarks follow the file / folder; into the vault they are dropped (a public
+    // bookmark must not keep a name that is now private).
+    void retargetBookmarks(const std::string& from, const std::string& to);
+    void dropBookmarksUnder(const std::string& path);
     bool renameFocused(const std::string& newName);
     // Folder path as clickable levels, root first (the last one is the current folder).
     struct Crumb {
@@ -168,6 +175,7 @@ public:
         long long bytes = 0;
         long long total = 0;
         bool isDir = false;
+        std::string error;  // why it failed ("SD card removed"), shown in the Downloads list
     };
     struct DownloadQueueItem {
         std::string uri;
@@ -176,6 +184,8 @@ public:
         bool isDir = false;
     };
     const std::vector<DownloadJob>& downloadJobs() const { return dlJobs_; }
+    // A failed or stopped job again, to the same place. False (reason in status) if that is not possible.
+    bool retryJob(int index);
     bool hasDownloads() const { return !dlJobs_.empty(); }
     bool hasQueuedDownloads() const { return !dlQueue_.empty(); }
     void cancelQueued(const std::string& uri);
@@ -282,6 +292,8 @@ private:
     std::atomic<bool> dlPaused_{false};
     std::atomic<bool> dlAbort_{false};
     std::atomic<bool> dlStopped_{false};
+    std::atomic<bool> dlCardGone_{false};  // the drive under the target was pulled (not a user stop)
+    std::chrono::steady_clock::time_point dlNextDriveCheck_{};
     std::atomic<bool> browseOpen_{false};  // worker yields while the panel is open
     // Downloads run as a CHILD PROCESS (curl) so they use their own SMB
     // connection and never contend with the browser's libsmbclient.

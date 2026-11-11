@@ -1,5 +1,6 @@
 #include "app/app.hpp"
 #include "app/bundled_ffmpeg.hpp"
+#include "app/vault_manager.hpp"
 #include "util/logging.hpp"
 #include "xr/vr_app_manifest.hpp"
 #include "xr/openxr_headers.hpp"
@@ -112,6 +113,9 @@ int main(int argc, char** argv) {
     // Short-lived helper started by App::init (see vr_app_manifest.hpp).
     if (first == "--steamvr-prelaunch") return pixelvr::runSteamVrPrelaunchHelper();
     if (first == "--steamvr-unregister") return pixelvr::runSteamVrUnregister();
+    // install.sh --uninstall: where the vault is and how big; decrypting it into a normal folder.
+    if (first == "--vault-info") return pixelvr::VaultManager::runCli("info", "");
+    if (first == "--vault-export") return pixelvr::VaultManager::runCli("export", argc > 2 ? argv[2] : "");
     // Release builds: restart on the bundled, patched FFmpeg (zero-copy decode).
     pixelvr::useBundledFfmpeg(argv);
 

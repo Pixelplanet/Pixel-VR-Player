@@ -25,7 +25,7 @@ public:
 
     static VaultManager& instance();
 
-    bool isUnlocked() const { return unlocked_; }
+    bool isUnlocked() const { return unlocked_.load(); }
     void lock();
     void unlock();
 
@@ -47,18 +47,40 @@ public:
     // Returns true if the vault was locked as a result of the tick.
     bool tick(std::chrono::steady_clock::time_point now, bool headsetFocused);
 
-    // Storage paths
-    const std::string& vaultDir() const { return vaultDir_; }
-    const std::string& thumbsDir() const { return thumbsDir_; }
+    // Where the vault lives: the internal ~/.pixelvr_vault, or <SD card>/.pixelvr_vault (SD2). The key
+    // (vault.key), the written-down combination and the thumbnails always stay internal.
+    enum class Location { Internal, SdCard };
+    Location location() const;
+    // The vault folder (thread-safe copy). On the SD card: the card's folder, or where it was last seen
+    // while the card is out, so paths there still count as vault paths.
+    std::string vaultDir() const;
+    std::string internalVaultDir() const;
+    // The vault folder can be used: internal always; SD card only while the card with THIS vault is in
+    // (recognised by the id in <vault>/.pixelvr_vault_id).
+    bool available() const;
+    // Folder for a vault on the inserted SD card ("" without a card).
+    static std::string cardVaultDirFor(const std::string& cardMount);
+    // Encrypted thumbnails of vault files (internal, 0700).
+    std::string thumbsDir() const;
+    // path is the vault folder or inside it ('/' boundary).
     bool isVaultPath(const std::string& path) const;
-    void ensureDirectories();
-
-    // Move file or directory into vault (local paths only).
-    // Returns empty string on success, or error message on failure.
-    std::string moveFileToVault(const std::string& srcPath, std::string& outNewPath);
+    // A vault item: inside the vault folder, or ANY encrypted (.pvrv) file wherever it is (e.g. in a
+    // folder moved out of the vault). Nothing about such paths may be remembered or shown while locked.
+    static bool isPrivatePath(const std::string& path);
+    // Creates the vault folder (0700) when available(); false if it can't be used (card missing).
+    bool ensureDirectories();
+    std::string keyFilePath() const;
+    // After a relocation job copied everything (FileOps): switch to the new place and save it.
+    void switchLocation(Location loc, const std::string& newDir, const std::string& cardId);
+    std::string cardId() const;
 
     // Clean up cached public thumbnails for a file or directory
     void cleanPublicThumbs(const std::string& path);
+
+    // Command line (install.sh --uninstall): "--vault-info" prints the vault's place and size;
+    // "--vault-export <dir>" decrypts every file into <dir> (keeping folders), deleting each encrypted
+    // file once its plain copy is complete. Returns the process exit code.
+    static int runCli(const std::string& mode, const std::string& dest);
 
     // Settings
     bool autoLockHeadsetOff() const { return autoLockHeadsetOff_; }
@@ -88,12 +110,7 @@ public:
     int migrationDone() const { return migDone_.load(); }
     int migrationTotal() const { return migTotal_.load(); }
     std::string recoveryFile() const;  // where the unlock combination is written down (user request)
-    // Moving into / out of the vault encrypts / decrypts whole files: done on a worker thread so the
-    // player keeps running (a frozen frame loop made SteamVR drop focus, which locked the vault).
-    void queueMoveIn(const std::string& src);
-    void queueMoveOut(const std::string& src, const std::string& destDir);
-    bool jobsBusy() const { return jobsBusy_.load(); }
-    bool takeJobResult(std::string& message);  // one finished move (message for the status line)
+    // Moving files into / out of the vault: FileOps (src/app/file_ops.hpp), on its worker thread.
     void loadConfig();
     void saveConfig() const;
 
@@ -101,9 +118,14 @@ private:
     VaultManager();
     ~VaultManager();  // stops the background encryption after the current file
 
-    bool unlocked_ = false;
-    std::string vaultDir_;
-    std::string thumbsDir_;
+    std::atomic<bool> unlocked_{false};
+    mutable std::mutex dirMu_;     // guards the location fields (read from the scan / thumbnail / file threads)
+    Location location_ = Location::Internal;
+    std::string internalDir_;      // ~/.pixelvr_vault
+    std::string cardDir_;          // <card>/.pixelvr_vault, last seen
+    std::string cardId_;           // id written into the card vault's marker file
+    std::string thumbsDir_;        // ~/.cache/pixelvr/vault-thumbs
+    void writeInternalMarker() const;
 
     // Combo state machine
     std::vector<int> comboSequence_;
@@ -127,15 +149,6 @@ private:
     std::atomic<bool> migrating_{false};
     std::atomic<int> migDone_{0}, migTotal_{0};
     std::thread migThread_;
-    struct Job { bool in; std::string src, destDir; };
-    std::mutex jobMu_;
-    std::condition_variable jobCv_;
-    std::deque<Job> jobs_;
-    std::deque<std::string> jobResults_;
-    std::atomic<bool> jobsBusy_{false};
-    bool jobsStop_ = false;
-    std::thread jobThread_;
-    void jobLoop();
 };
 
 } // namespace pixelvr

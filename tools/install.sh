@@ -594,6 +594,49 @@ unregister_steam_shortcut() {
 # ---------------------------------------------------------------------------
 if [ "$UNINSTALL" -eq 1 ]; then
     info "Removing Pixel VR Player from $INSTALL_DIR"
+    # The vault: encrypted files can only be opened with ~/.config/pixelvr/vault.key and the unlock
+    # combination. Offer to decrypt it into a normal folder first (only with a terminal to answer in).
+    VAULT_KEPT=0
+    VAULT_DIR="$HOME/.pixelvr_vault"
+    if [ -x "$INSTALL_DIR/pixelvr" ]; then
+        vinfo=$(timeout 60 "$INSTALL_DIR/pixelvr" --vault-info 2>/dev/null || true)
+        vget() { printf '%s\n' "$vinfo" | sed -n "s/^$1=//p" | head -n 1; }
+        vfiles=$(vget files); venc=$(vget encrypted); vbytes=$(vget bytes); vloc=$(vget location); vavail=$(vget available)
+        [ -n "$(vget dir)" ] && VAULT_DIR=$(vget dir)
+        case "$vfiles" in ''|*[!0-9]*) vfiles=0 ;; esac
+        case "$venc" in ''|*[!0-9]*) venc=0 ;; esac
+        if [ "$vloc" = "sdcard" ] && [ "$vavail" != "1" ]; then
+            warn "Your vault is on an SD card that is not inserted: it stays encrypted there."
+            VAULT_KEPT=1
+        elif [ "$vfiles" -gt 0 ]; then
+            vgb=$(awk "BEGIN { printf \"%.1f\", ${vbytes:-0} / 1e9 }")
+            warn "Your vault holds $vfiles file(s), $vgb GB ($venc encrypted)."
+            export_dir="$HOME/PixelVR Vault"
+            choice=k
+            if has_tty; then
+                printf '  K  keep it encrypted (install the player again later to open it)\n' > /dev/tty
+                printf '  D  decrypt it into "%s" now\n' "$export_dir" > /dev/tty
+                printf 'Keep or decrypt? [K/d] ' > /dev/tty
+                read -r choice < /dev/tty || choice=k
+            else
+                info "No terminal to ask in: the vault stays encrypted."
+            fi
+            case "$choice" in
+                d|D)
+                    info "Decrypting the vault into $export_dir ..."
+                    if "$INSTALL_DIR/pixelvr" --vault-export "$export_dir"; then
+                        ok "vault decrypted into $export_dir"
+                    else
+                        warn "not everything could be decrypted: the rest stays in the vault"
+                        VAULT_KEPT=1
+                    fi
+                    ;;
+                *) VAULT_KEPT=1 ;;
+            esac
+        fi
+    elif [ -d "$VAULT_DIR" ] && [ -n "$(ls -A "$VAULT_DIR" 2>/dev/null)" ]; then
+        VAULT_KEPT=1
+    fi
     # Take the player out of SteamVR's app list (it registers itself on launch).
     if [ -x "$INSTALL_DIR/pixelvr" ]; then
         timeout 20 "$INSTALL_DIR/pixelvr" --steamvr-unregister 2>/dev/null || true
@@ -633,17 +676,43 @@ if [ "$UNINSTALL" -eq 1 ]; then
             fi
         fi
     fi
+    keep_scripts=0
+    keep_combo=0
     if [ -d "$INSTALL_DIR/Funscripts" ] && [ -n "$(ls -A "$INSTALL_DIR/Funscripts" 2>/dev/null)" ]; then
-        # The user's scripts stay; everything else goes.
-        find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 ! -name Funscripts -exec rm -rf {} +
-        ok "removed $INSTALL_DIR (your Funscripts folder was kept)"
+        keep_scripts=1
+    fi
+    # While the vault stays, the written-down combination stays too (logs/session.dat).
+    if [ "$VAULT_KEPT" -eq 1 ] && [ -f "$INSTALL_DIR/logs/session.dat" ]; then
+        keep_combo=1
+    fi
+    if [ "$keep_scripts" -eq 1 ] || [ "$keep_combo" -eq 1 ]; then
+        find "$INSTALL_DIR" -mindepth 1 -maxdepth 1 ! -name Funscripts ! -name logs -exec rm -rf {} +
+        [ "$keep_scripts" -eq 1 ] || rm -rf "$INSTALL_DIR/Funscripts"
+        if [ "$keep_combo" -eq 1 ]; then
+            find "$INSTALL_DIR/logs" -mindepth 1 -maxdepth 1 ! -name session.dat -exec rm -rf {} +
+        else
+            rm -rf "$INSTALL_DIR/logs"
+        fi
+        kept=""
+        [ "$keep_scripts" -eq 1 ] && kept="your Funscripts folder"
+        [ "$keep_combo" -eq 1 ] && kept="${kept:+$kept and }logs/session.dat (your vault combination)"
+        ok "removed $INSTALL_DIR (kept $kept)"
     else
         rm -rf "$INSTALL_DIR"
         ok "removed $INSTALL_DIR"
     fi
     rm -f "$HOME/Desktop/Update Pixel VR Player.desktop"
     printf '\nSettings (%s/.config/pixelvr) and cached thumbnails were kept.\n' "$HOME"
-    printf 'Delete them too with: rm -rf ~/.config/pixelvr ~/.cache/pixelvr\n'
+    if [ "$VAULT_KEPT" -eq 1 ]; then
+        printf 'Your vault stays encrypted in %s.\n' "$VAULT_DIR"
+        printf 'Only %s/.config/pixelvr/vault.key and your unlock combination open it again\n' "$HOME"
+        if [ "$keep_combo" -eq 1 ]; then
+            printf '(the combination is written down in %s/logs/session.dat).\n' "$INSTALL_DIR"
+        fi
+        printf 'Keep ~/.config/pixelvr as long as you want the vault. Thumbnails: rm -rf ~/.cache/pixelvr\n'
+    else
+        printf 'Delete them too with: rm -rf ~/.config/pixelvr ~/.cache/pixelvr\n'
+    fi
     exit 0
 fi
 

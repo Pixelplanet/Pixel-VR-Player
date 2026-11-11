@@ -389,6 +389,21 @@ public:
     void setBrowserBookmarked(bool isCurrentBookmarked) { browserIsQuickPath_ = isCurrentBookmarked; }
     bool browserIsQuickPath() const { return browserIsQuickPath_; }
     void setBrowserCanCreateFolder(bool can) { browserCanCreateFolder_ = can; }
+    // Move / Copy: choosing the target folder. Replaces Sort / View / Bookmark in the header row with
+    // "Moving X..." and [Move here] [Cancel] (ids 7 / 8 of browserPageBtnHovered()).
+    struct BrowserPickBar {
+        bool active = false;
+        std::string text;          // "Moving 8 Mile.mkv..."
+        std::string confirmLabel;  // "Move here" / "Copy here" / "Use this folder"
+        bool canConfirm = false;
+        std::string hint;          // footer hint instead of the usual one
+    };
+    void setBrowserPickBar(const BrowserPickBar& b) { browserPick_ = b; }
+    // Footer message that outlives folder scans (progress, results, warnings); empty = browser status.
+    void setBrowserNotice(const std::string& text, bool warn) {
+        browserNotice_ = text;
+        browserNoticeWarn_ = warn;
+    }
     bool browserIsBookmarked() const { return browserIsQuickPath_; }
     void setListColumnVisibility(bool showFormat, bool showRes, bool showSize, bool showDuration) {
         listShowFormat_ = showFormat;
@@ -1266,6 +1281,9 @@ private:
     BrowserViewMode browserViewMode_ = BrowserViewMode::BigCards;
     bool browserIsQuickPath_ = false;
     bool browserCanCreateFolder_ = false;
+    BrowserPickBar browserPick_;
+    std::string browserNotice_;
+    bool browserNoticeWarn_ = false;
     bool keyboardRevealHovered_ = false;  // header "New folder" button shown
     KeyboardModalData keyboardModal_{};
     int uiFollowMode_ = 0; // 0 = World Lock (Default, zero drift/tilt), 1 = Smooth Gaze Follow

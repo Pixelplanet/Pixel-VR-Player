@@ -24,6 +24,8 @@ public:
     // True once measured: `frac` = share of the picture height cut at the top and at the bottom each
     // (0 = no bars).
     bool result(const std::string& path, float& frac);
+    // Drops results for `path` and everything under it (e.g. moved into the vault).
+    void forgetUnder(const std::string& path);
 
     // The measurement itself (also used by tools/letterbox_test).
     static float measure(const std::string& path, int* framesJudged = nullptr);

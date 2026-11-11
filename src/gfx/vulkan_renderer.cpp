@@ -393,6 +393,7 @@ constexpr float kBrowserBtnHH = 0.021f;
 constexpr float kBrowserDividerY = 0.385f;  // under the button row
 constexpr float kBrowserContentTop = 0.372f;
 // Captions in front of Sort and View ("Sort by", "View").
+constexpr float kPickDarkText[4] = {0.03f, 0.05f, 0.09f, 1.0f};  // on the accent-filled confirm pill
 constexpr float kBrowserSortCaptionX = -0.455f;
 constexpr float kBrowserViewCaptionX = -0.195f;
 constexpr float kBrowserCaptionMaxW = 0.085f;
@@ -402,6 +403,8 @@ inline UiRect headerButton(int id) {
         case 2: return {-0.030f, kBrowserBtnY, 0.075f, kBrowserBtnHH};
         case 3: return {0.160f, kBrowserBtnY, 0.100f, kBrowserBtnHH};
         case 6: return {0.375f, kBrowserBtnY, 0.095f, kBrowserBtnHH};
+        case 7: return {0.600f, kBrowserBtnY, 0.115f, kBrowserBtnHH};  // pick mode: Move / Copy here
+        case 8: return {0.790f, kBrowserBtnY, 0.065f, kBrowserBtnHH};  // pick mode: Cancel
         default: return {0.0f, -10.0f, 0.0f, 0.0f};  // removed buttons (pager, Up)
     }
 }
@@ -3160,8 +3163,14 @@ void VulkanRenderer::updatePointer() {
                     }
                     if (browserCrumbHovered_ >= 0) break;
                 }
-                for (int id : {2, 3, 5, 6}) {
+                static const int kNormalBtns[] = {2, 3, 5, 6};
+                static const int kPickBtns[] = {6, 7, 8};
+                const int* btns = browserPick_.active ? kPickBtns : kNormalBtns;
+                const int nBtns = browserPick_.active ? 3 : 4;
+                for (int bi = 0; bi < nBtns; ++bi) {
+                    const int id = btns[bi];
                     if (id == 6 && !browserCanCreateFolder_) continue;
+                    if (id == 7 && !browserPick_.canConfirm) continue;
                     if (hub::headerButton(id).contains(hx, hyy, hub::kHitPad)) {
                         browserPageBtnHovered_ = id;
                         break;
@@ -6983,6 +6992,28 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 return r;
             };
             auto headerIconX = [](const UiRect& r) { return r.cx - r.hw + 0.026f; };
+            if (browserPick_.active) {
+                // Move / Copy target: a tinted bar behind the row, the confirm and cancel pills.
+                const float barCol[4] = {themeAccentCol[0] * 0.22f, themeAccentCol[1] * 0.22f, themeAccentCol[2] * 0.22f, 0.92f};
+                drawUiElement(vpPanel, 0.195f, hub::kBrowserBtnY, 0.665f, 0.027f, UiShape::RoundedBox, barCol, 1.0f,
+                              0.06f, tabActiveBord);
+                if (browserCanCreateFolder_) {
+                    const UiRect r = headerBtn(6, false);
+                    drawUiElement(vpPanel, headerIconX(r), r.cy, 0.012f, 0.012f, UiShape::Files, slateIconCol);
+                }
+                if (browserPick_.canConfirm) {
+                    const UiRect r = headerBtn(7, true);
+                    drawUiElement(vpPanel, headerIconX(r), r.cy, 0.012f, 0.012f, UiShape::Checkmark, hub::kPickDarkText);
+                } else {
+                    const UiRect r = hub::headerButton(7);
+                    drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox, glassControlT.data(), 1.0f, 0.06f,
+                                  kGlassRimFaint);
+                }
+                {
+                    const UiRect r = headerBtn(8, false);
+                    drawUiElement(vpPanel, headerIconX(r), r.cy, 0.010f, 0.010f, UiShape::Close, slateIconCol);
+                }
+            } else {
             {
                 const UiRect r = headerBtn(2, false);  // view mode
                 drawUiElement(vpPanel, headerIconX(r), r.cy, 0.012f, 0.012f, UiShape::List, slateIconCol);
@@ -7000,6 +7031,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const UiRect r = headerBtn(6, false);  // new folder
                 drawUiElement(vpPanel, headerIconX(r), r.cy, 0.012f, 0.012f, UiShape::Files, slateIconCol);
             }
+            }  // not picking
 
             const float* normCardBg = glassCardT.data();
             const float* normCardBorder = kGlassRimFaint;
@@ -7230,6 +7262,21 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
 
             // Header button labels (icons sit at the left edge of each pill)
+            if (browserPick_.active) {
+                withHeadingFont([&] {
+                    drawFit(-0.455f, hub::kBrowserBtnY, browserCanCreateFolder_ ? 0.72f : 0.92f, scSub, themeAccentCol,
+                            browserPick_.text);
+                });
+                if (browserCanCreateFolder_) {
+                    const UiRect nfR = hub::headerButton(6);
+                    drawFitCentered(nfR.cx + 0.014f, nfR.cy, nfR.hw * 2.0f - 0.05f, scSub * 0.90f, themeTextCol, "+ Folder");
+                }
+                const UiRect okR = hub::headerButton(7);
+                drawFitCentered(okR.cx + 0.014f, okR.cy, okR.hw * 2.0f - 0.05f, scSub * 0.90f,
+                                browserPick_.canConfirm ? hub::kPickDarkText : dimCol, browserPick_.confirmLabel);
+                const UiRect noR = hub::headerButton(8);
+                drawFitCentered(noR.cx + 0.012f, noR.cy, noR.hw * 2.0f - 0.04f, scSub * 0.90f, themeTextCol, "Cancel");
+            } else {
             drawFit(hub::kBrowserSortCaptionX, hub::kBrowserBtnY, hub::kBrowserCaptionMaxW, scSub * 0.90f, dimCol, "Sort by");
             drawFit(hub::kBrowserViewCaptionX, hub::kBrowserBtnY, hub::kBrowserCaptionMaxW, scSub * 0.90f, dimCol, "View");
             const char* vModeLabels[3] = {"Large", "Grid", "List"};
@@ -7248,6 +7295,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 drawFitCentered(nfR.cx + 0.014f, nfR.cy, nfR.hw * 2.0f - 0.05f, scSub * 0.90f,
                                 themeTextCol, "+ Folder");
             }
+            }  // not picking
 
             if (browserViewMode_ == BrowserViewMode::CompactList) {
                 drawFit(-0.315f, 0.364f, listCols.nameMaxW, scBadge * 0.95f, dimCol, "NAME");
@@ -7340,11 +7388,15 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 curTextVp = &vpPanel;
             }
 
-            // Bottom status bar
-            if (!browserStatus_.empty()) {
+            // Bottom status bar: a notice (progress, results, warnings) wins over the browser's status.
+            static const float kWarnCol[4] = {1.0f, 0.72f, 0.36f, 1.0f};
+            if (!browserNotice_.empty()) {
+                drawFit(-0.45f, -0.490f, 0.62f, scDetail, browserNoticeWarn_ ? kWarnCol : themeAccentCol, browserNotice_);
+            } else if (!browserStatus_.empty()) {
                 drawFit(-0.45f, -0.490f, 0.62f, scDetail, themeAccentCol, browserStatus_);
             }
-            const std::string hintText = browserOnNetwork_
+            const std::string hintText = browserPick_.active && !browserPick_.hint.empty() ? browserPick_.hint
+                : browserOnNetwork_
                 ? "Stick: Scroll  |  Trigger: Stream  |  Y: Download"
                 : "Stick: Scroll  |  Trigger: Play  |  Y: Actions";
             drawFit(0.18f, -0.490f, 0.68f, scDetail, dimCol, hintText);
@@ -7379,7 +7431,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
             // Which per-job buttons a job shows: 0 = pause/resume or Play, 1 = X.
             auto jobHasButton = [](int state, int which) {
-                return which == 1 || state == 0 || state == 1;
+                return which == 1 || state == 0 || state == 1 || state == 2 || state == 3;  // 2/3: Retry
             };
 
             for (int v = 0; v < static_cast<int>(visJobs.size()); ++v) {
@@ -7437,6 +7489,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                                   (bHov && b == 1) ? dangerHov : (bHov ? glassCardHoverT.data() : glassControlT.data()),
                                   1.0f, 0.06f, bHov ? tabActiveBord : kGlassRim);
                     const UiShape icon = (b == 1) ? UiShape::Close
+                                       : (state == 2 || state == 3) ? UiShape::Repeat
                                        : (downloadJobs_[i].paused ? UiShape::Play : UiShape::Pause);
                     drawUiElement(vpPanel, r.cx, cy, kJobBtnR * 0.45f, kJobBtnR * 0.45f, icon,
                                   themeTextCol);
@@ -7511,6 +7564,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     }
                     const char* caption = (b == 1)
                         ? (state == 0 ? "Cancel" : (state == 4 ? "Unqueue" : "Remove"))
+                        : (state == 2 || state == 3) ? "Retry"
                         : (downloadJobs_[i].paused ? "Resume" : "Pause");
                     drawFitCentered(r.cx, r.cy - 0.040f, r.hw * 2.0f + 0.02f, scBadge * 0.95f,
                                     slateCol, caption);

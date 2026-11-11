@@ -153,6 +153,33 @@ private:
     void rememberPlaybackPosition(int slot = -1);
     VulkanRenderer::ActionMenuData actionMenu_{};
     void openActionMenu();
+    // Move / Copy: the user opens the target folder in the normal browser and confirms there ("Move
+    // here"). Also used to choose the download folder from Settings ("Other...").
+    struct PickState {
+        enum class Kind { None, Move, Copy, DownloadDir };
+        Kind kind = Kind::None;
+        std::string srcPath, srcLabel;
+        bool srcIsDir = false;
+        std::vector<std::string> sidecars;  // matching files that travel with a video
+    } pick_;
+    bool picking() const { return pick_.kind != PickState::Kind::None; }
+    void startPick(PickState::Kind kind, const Browser::Entry& e);
+    void startDownloadDirPick();
+    void startVaultMove();  // Settings > Vault location: to / from the SD card (FileOps relocation)
+    void cancelPick(bool backToSettings = true);
+    void confirmPick();
+    std::string pickReason() const;  // why the open folder can't take it ("" = it can)
+    std::vector<std::string> sidecarPatterns() const;
+    // Footer notices in the browser (results, warnings): they outlive the folder rescans that follow.
+    std::string hubNotice_;
+    bool hubNoticeWarn_ = false;
+    bool hubNoticePrivate_ = false;  // names a vault item: dropped when the vault locks
+    std::chrono::steady_clock::time_point hubNoticeUntil_{};
+    void showNotice(const std::string& text, bool warn = false, bool priv = false, double seconds = 6.0);
+    void updateBrowserFooter(std::chrono::steady_clock::time_point now);
+    void drainFileOps();
+    std::string pendingActionPath_;  // the row Rename / Delete was opened for (the list may change meanwhile)
+    bool vaultCardSeen_ = false;     // the SD card with the vault was in while unlocked
 
     struct SmbModalState {
         bool active = false;

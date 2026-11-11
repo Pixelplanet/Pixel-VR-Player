@@ -180,6 +180,24 @@ void LetterboxDetector::load() {
     }
 }
 
+void LetterboxDetector::forgetUnder(const std::string& path) {
+    if (path.empty()) return;
+    std::lock_guard<std::mutex> lk(mu_);
+    bool changed = false;
+    for (auto it = results_.begin(); it != results_.end();) {
+        const std::string& k = it->first;  // "<path>|size|mtime"
+        const bool under = k.size() > path.size() && k.compare(0, path.size(), path) == 0 &&
+                           (k[path.size()] == '|' || k[path.size()] == '/');
+        if (under) {
+            it = results_.erase(it);
+            changed = true;
+        } else {
+            ++it;
+        }
+    }
+    if (changed) save();
+}
+
 void LetterboxDetector::save() {
     std::error_code ec;
     fs::create_directories(fs::path(file_).parent_path(), ec);

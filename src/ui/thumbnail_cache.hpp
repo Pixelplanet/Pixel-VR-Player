@@ -44,11 +44,15 @@ public:
     // Returns true and populates MediaMeta if probed.
     bool getMeta(const std::string& videoPath, MediaMeta& outMeta);
 
-    // Clears cached thumbnails and metadata whose paths start with vaultDir.
-    void clearVaultThumbs(const std::string& vaultDir);
+    // Forgets (in memory) every vault item: vault paths and any encrypted file. On lock.
+    void clearPrivateThumbs();
+    // Forgets (in memory) a path and everything under it (a file / folder that was moved or deleted).
+    void forgetUnder(const std::string& path);
 
 private:
     void workerLoop();
+    void handlePrivate(const std::string& path);  // vault items: encrypted thumbnails, internal folder
+    template <class Pred> void forgetIf(Pred pred);
     bool extractThumbnailAndMeta(const std::string& videoPath,
                                  std::vector<uint8_t>& outRgba,
                                  MediaMeta& outMeta);

@@ -1,5 +1,6 @@
 #include "ui/thumbnail_cache.hpp"
 #include "media/vault_avio.hpp"
+#include "app/vault_crypto.hpp"
 #include "app/vault_manager.hpp"
 #include "util/logging.hpp"
 
@@ -215,33 +216,26 @@ bool ThumbnailCache::getMeta(const std::string& videoPath, MediaMeta& outMeta) {
     return false;
 }
 
-void ThumbnailCache::clearVaultThumbs(const std::string& vaultDir) {
-    if (vaultDir.empty()) return;
+template <class Pred>
+void ThumbnailCache::forgetIf(Pred pred) {
     std::lock_guard<std::mutex> lk(mutex_);
-    cacheOrder_.erase(std::remove_if(cacheOrder_.begin(), cacheOrder_.end(),
-                                     [&](const std::string& p) { return p.rfind(vaultDir, 0) == 0; }),
-                      cacheOrder_.end());
-    for (auto it = cache_.begin(); it != cache_.end(); ) {
-        if (it->first.rfind(vaultDir, 0) == 0) {
-            it = cache_.erase(it);
-        } else {
-            ++it;
-        }
-    }
-    for (auto it = metaCache_.begin(); it != metaCache_.end(); ) {
-        if (it->first.rfind(vaultDir, 0) == 0) {
-            it = metaCache_.erase(it);
-        } else {
-            ++it;
-        }
-    }
-    for (auto it = queuedPaths_.begin(); it != queuedPaths_.end(); ) {
-        if (it->first.rfind(vaultDir, 0) == 0) {
-            it = queuedPaths_.erase(it);
-        } else {
-            ++it;
-        }
-    }
+    cacheOrder_.erase(std::remove_if(cacheOrder_.begin(), cacheOrder_.end(), pred), cacheOrder_.end());
+    for (auto it = cache_.begin(); it != cache_.end();) it = pred(it->first) ? cache_.erase(it) : std::next(it);
+    for (auto it = metaCache_.begin(); it != metaCache_.end();) it = pred(it->first) ? metaCache_.erase(it) : std::next(it);
+    for (auto it = queuedPaths_.begin(); it != queuedPaths_.end();) it = pred(it->first) ? queuedPaths_.erase(it) : std::next(it);
+    for (auto it = failed_.begin(); it != failed_.end();) it = pred(it->first) ? failed_.erase(it) : std::next(it);
+    queue_.erase(std::remove_if(queue_.begin(), queue_.end(), pred), queue_.end());
+}
+
+void ThumbnailCache::clearPrivateThumbs() {
+    forgetIf([](const std::string& p) { return VaultManager::isPrivatePath(p); });
+}
+
+void ThumbnailCache::forgetUnder(const std::string& path) {
+    if (path.empty()) return;
+    forgetIf([&](const std::string& p) {
+        return p == path || (p.size() > path.size() && p.compare(0, path.size(), path) == 0 && p[path.size()] == '/');
+    });
 }
 
 bool ThumbnailCache::extractThumbnailAndMeta(const std::string& videoPath,
@@ -414,10 +408,120 @@ bool ThumbnailCache::extractThumbnailAndMeta(const std::string& videoPath,
 #endif
 }
 
+namespace {
+
+bool readBytes(const std::string& file, std::string& out) {
+    std::ifstream in(file, std::ios::binary);
+    if (!in) return false;
+    out.assign(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+    return true;
+}
+
+void writeBytes(const std::string& file, const std::string& data) {
+    {
+        std::ofstream out(file, std::ios::binary | std::ios::trunc);
+        out.write(data.data(), static_cast<std::streamsize>(data.size()));
+    }
+    std::error_code ec;
+    fs::permissions(file, fs::perms::owner_read | fs::perms::owner_write, fs::perm_options::replace, ec);
+}
+
+// Vault thumbnails can't name their source (that would be readable without the key): they go after
+// half a year without being shown.
+void pruneVaultThumbs(const std::string& dir) {
+    std::error_code ec;
+    if (dir.empty() || !fs::is_directory(dir, ec)) return;
+    using namespace std::chrono_literals;
+    const auto now = fs::file_time_type::clock::now();
+    std::vector<fs::path> files;
+    for (const auto& e : fs::directory_iterator(dir, ec)) files.push_back(e.path());
+    for (const fs::path& p : files) {
+        if (p.extension() != ".rgba") continue;
+        std::error_code te;
+        if (now - fs::last_write_time(p, te) > 180 * 24h) {
+            fs::remove(p, te);
+            fs::remove(fs::path(p).replace_extension(".meta"), te);
+        }
+    }
+}
+
+}  // namespace
+
+void ThumbnailCache::handlePrivate(const std::string& path) {
+    if (!vaultcrypto::hasKey()) return;  // locked: nothing is read or made
+    VaultManager& vm = VaultManager::instance();
+    const std::string dir = vm.thumbsDir();
+    std::error_code ec;
+    fs::create_directories(dir, ec);
+    fs::permissions(dir, fs::perms::owner_all, fs::perm_options::replace, ec);
+    // Encrypted files: keyed by their random name (stays the same when moved inside the vault or to the
+    // SD card); plain leftovers in the vault by path.
+    const std::string key = vaultcrypto::hasExtension(path) ? fs::path(path).filename().string() : path;
+    const std::string base = dir + "/" + std::to_string(fnv1a64(key));
+    MediaMeta meta{};
+    auto parseMeta = [&](const std::string& plain) {
+        if (plain.size() < sizeof(DiskMetaHeader) + sizeof(DiskMetaHints)) return;
+        DiskMetaHeader hdr{};
+        DiskMetaHints hints{};
+        std::memcpy(&hdr, plain.data(), sizeof(hdr));
+        std::memcpy(&hints, plain.data() + sizeof(hdr), sizeof(hints));
+        if (hdr.magic != kMetaMagicV2) return;
+        meta.width = hdr.width;
+        meta.height = hdr.height;
+        meta.fps = hdr.fps;
+        meta.durationSec = hdr.durationSec;
+        meta.projectionHint = hints.projection;
+        meta.stereoHint = hints.stereo;
+        meta.ready = true;
+    };
+    auto saveMeta = [&] {
+        const DiskMetaHeader hdr{kMetaMagicV2, meta.width, meta.height, meta.fps, meta.durationSec};
+        const DiskMetaHints hints{meta.projectionHint, meta.stereoHint};
+        std::string plain(reinterpret_cast<const char*>(&hdr), sizeof(hdr));
+        plain.append(reinterpret_cast<const char*>(&hints), sizeof(hints));
+        std::string blob;
+        if (vaultcrypto::encryptBlob(plain, blob)) writeBytes(base + ".meta", blob);
+    };
+    std::string blob, plain;
+    if (readBytes(base + ".rgba", blob) && vaultcrypto::decryptBlob(blob, plain) && plain.size() == kThumbBytes) {
+        std::string mb, mp;
+        if (readBytes(base + ".meta", mb) && vaultcrypto::decryptBlob(mb, mp)) parseMeta(mp);
+        if (!meta.ready) {
+            std::vector<uint8_t> dummy;
+            extractThumbnailAndMeta(path, dummy, meta);
+            if (meta.ready) saveMeta();
+        }
+        fs::last_write_time(base + ".rgba", fs::file_time_type::clock::now(), ec);
+        std::vector<uint8_t> data(plain.begin(), plain.end());
+        std::lock_guard<std::mutex> lk(mutex_);
+        if (!vaultcrypto::hasKey()) return;  // locked while reading
+        remember(path, std::move(data));
+        if (meta.ready) metaCache_[path] = meta;
+        return;
+    }
+    std::vector<uint8_t> rgba;
+    const bool ok = extractThumbnailAndMeta(path, rgba, meta);
+    if (meta.ready) saveMeta();
+    if (ok && rgba.size() == kThumbBytes) {
+        std::string enc;
+        if (vaultcrypto::encryptBlob(std::string(rgba.begin(), rgba.end()), enc)) writeBytes(base + ".rgba", enc);
+    }
+    std::lock_guard<std::mutex> lk(mutex_);
+    if (!vaultcrypto::hasKey()) return;
+    if (meta.ready) metaCache_[path] = meta;
+    if (ok && rgba.size() == kThumbBytes) remember(path, std::move(rgba));
+    else failed_[path] = fileStamp(path);
+}
+
 void ThumbnailCache::workerLoop() {
     // Once per start, before any thumbnails are made.
     pruneThumbnails(cacheDir_);
-    pruneThumbnails(VaultManager::instance().thumbsDir());
+    pruneVaultThumbs(VaultManager::instance().thumbsDir());
+    {
+        // Before v1.19 vault thumbnails were plain pictures inside the vault folder: gone for good.
+        std::error_code ec;
+        fs::remove_all(VaultManager::instance().internalVaultDir() + "/.thumbs", ec);
+    }
     while (!stop_.load()) {
         std::string path;
         {
@@ -433,8 +537,11 @@ void ThumbnailCache::workerLoop() {
             continue;
         }
 
-        const bool inVault = VaultManager::instance().isVaultPath(path);
-        const std::string targetCacheDir = inVault ? VaultManager::instance().thumbsDir() : cacheDir_;
+        if (VaultManager::isPrivatePath(path)) {
+            handlePrivate(path);
+            continue;
+        }
+        const std::string targetCacheDir = cacheDir_;
         const std::string baseHash = std::to_string(fnv1a64(path));
         const std::string cacheFile = targetCacheDir + "/" + baseHash + ".rgba";
         const std::string metaFile = targetCacheDir + "/" + baseHash + ".meta";

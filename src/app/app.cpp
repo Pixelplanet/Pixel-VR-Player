@@ -1,6 +1,8 @@
 #include "app/app.hpp"
+#include "app/file_ops.hpp"
 #include "app/vault_crypto.hpp"
 #include "app/vault_manager.hpp"
+#include "util/sdcard.hpp"
 #include "net/remote_fs.hpp"
 #include "net/smb_credentials.hpp"
 #include "xr/vr_keyboard.hpp"
@@ -9,6 +11,10 @@
 #include "util/logging.hpp"
 #include "util/media_files.hpp"
 
+#include <unistd.h>
+
+#include <algorithm>
+#include <random>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -478,7 +484,7 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
     }
     sc.path = path;
     pluginNamePath_[slot].clear();  // re-read the reported name (a vault file may have been renamed)
-    const bool privatePath = VaultManager::instance().isVaultPath(path) || sc.webSuspended;
+    const bool privatePath = VaultManager::isPrivatePath(path) || sc.webSuspended;
     if (!sameFile) sc.fingerprint = privatePath ? std::string() : PlaybackMemory::fingerprintOf(path);
     const PlaybackMemory::Entry* remembered = privatePath ? nullptr : playbackMemory_.find(path, sc.fingerprint);
     VulkanRenderer::ProjectionMode proj = VulkanRenderer::ProjectionMode::Flat;
@@ -625,7 +631,7 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
     sc.letterbox = 0.0f;
     renderer_.setLetterbox(slot, 0.0f);
     sc.letterboxPending = !privatePath || sc.webSuspended;
-    if (VaultManager::instance().isVaultPath(path)) sc.letterboxPending = false;
+    if (VaultManager::isPrivatePath(path)) sc.letterboxPending = false;
     if (sc.letterboxPending) letterboxDetector_.request(path);
     if (slot == 0) {
         renderer_.setProjectionMode(proj);
@@ -1059,7 +1065,7 @@ void App::rememberPlaybackPosition(int slot) {
 #ifdef PIXELVR_HAVE_MEDIA
     if (slot < 0) slot = selectedScreen_;
     ScreenState& sc = screens_[slot];
-    if (!sc.open || sc.web || sc.webSuspended || sc.path.empty() || VaultManager::instance().isVaultPath(sc.path)) {
+    if (!sc.open || sc.web || sc.webSuspended || sc.path.empty() || VaultManager::isPrivatePath(sc.path)) {
         return;
     }
     // Songs start from the top; long audio (audiobooks, mixes) resumes.
@@ -1317,24 +1323,32 @@ void App::performVaultLock() {
 
 #ifdef PIXELVR_HAVE_MEDIA
     for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
-        if (screens_[slot].open && VaultManager::instance().isVaultPath(screens_[slot].path)) {
+        if (screens_[slot].open && VaultManager::isPrivatePath(screens_[slot].path)) {  // any encrypted file too
             closeMedia(slot);
         }
     }
 #endif
 
 #ifdef PIXELVR_HAVE_FREETYPE
-    if (browser_.inVault()) {
-        browser_.openHome();
-    } else if (browser_.currentLocation() == "bookmarks://") {
-        browser_.openBookmarks();  // drop the vault bookmarks from the list
+    if (picking() && (VaultManager::isPrivatePath(pick_.srcPath) || browser_.inVault())) cancelPick(false);
+    if (hubNoticePrivate_) hubNotice_.clear();  // e.g. "Moved 8 Mile.mkv to the vault"
+    {
+        // Leave the vault without popping the browser open over a video.
+        const bool wasOpen = browser_.isOpen();
+        if (browser_.inVault()) {
+            browser_.openHome();
+        } else if (browser_.currentLocation() == "bookmarks://") {
+            browser_.openBookmarks();  // drop the vault bookmarks from the list
+        }
+        if (!wasOpen) browser_.setOpen(false);
     }
     browser_.clearFinished();
     downloadToast_ = {};
     downloadToastText_.clear();
     renderer_.clearCardThumbnails();
-    thumbnailCache_.clearVaultThumbs(VaultManager::instance().vaultDir());
+    thumbnailCache_.clearPrivateThumbs();
 #endif
+    vaultCardSeen_ = false;
 
     if (settings_.section() == 4) {  // Vault & Privacy is hidden once locked
         settings_.setSection(0);
@@ -1360,6 +1374,7 @@ void App::dismissHud(const XrInputState& in, std::chrono::steady_clock::time_poi
 
 void App::closeHub() {
 #ifdef PIXELVR_HAVE_FREETYPE
+    if (picking()) cancelPick(false);
     browser_.setOpen(false);
 #endif
     settings_.close();
@@ -2063,7 +2078,7 @@ void App::updatePlugins() {
         else if (sc.path.rfind("dav://", 0) == 0 || sc.path.rfind("davs://", 0) == 0) s.source = "webdav";
         else if (sc.path.find("://") != std::string::npos) s.source = "http";
         else s.source = "local";
-        s.isPrivate = encrypted || VaultManager::instance().isVaultPath(sc.path);
+        s.isPrivate = encrypted || VaultManager::isPrivatePath(sc.path);
         s.duration = sc.engine.duration();
         s.position = sc.engine.position();
         s.playing = !sc.engine.paused() && !sc.engine.eof();
@@ -2385,7 +2400,7 @@ void App::openPlayTargetMenu(const std::string& path) {
 bool App::looksImmersive(const std::string& path) {
     // What is known before opening: a format picked by hand, the name, then
     // the thumbnail worker's probe (metadata or picture size).
-    if (!VaultManager::instance().isVaultPath(path)) {
+    if (!VaultManager::isPrivatePath(path)) {
         const PlaybackMemory::Entry* rem = playbackMemory_.find(path, PlaybackMemory::fingerprintOf(path));
         if (rem != nullptr && rem->projection >= 0) return rem->projection != 0;
     }
@@ -2985,7 +3000,8 @@ void App::openActionMenu() {
         return;
     }
 
-    const bool hasFocused = (fe != nullptr && !fe->isBack && fe->path != "smb://__add_share__");
+    const bool hasFocused = (fe != nullptr && !fe->isBack && fe->path != "smb://__add_share__" &&
+                             (!fe->path.empty() || fe->isNetwork));
     if (!hasFocused) {
         actionMenu_.title = "Folder Actions";
         actionMenu_.subtitle = browser_.currentPath();
@@ -3025,19 +3041,292 @@ void App::openActionMenu() {
         } else {
             actionMenu_.options.push_back(fe->isDir ? "Add to Bookmarks" : "Add Folder to Bookmarks");
         }
-        if (!browser_.onNetwork()) {
-            if (VaultManager::instance().isUnlocked() && !browser_.inVault()) {
+        if (!browser_.onNetwork() && browser_.isFileActionTarget(*fe)) {
+            const VaultManager& vm = VaultManager::instance();
+            if (vm.isUnlocked() && vm.available() && !browser_.inVault() && !vaultcrypto::hasExtension(fe->path)) {
                 actionMenu_.options.push_back("Move to Vault");
             }
             if (fe && !fe->isDir && fe->isVideo) {
                 actionMenu_.options.push_back("Change 3D / VR Format");
             }
-            actionMenu_.options.push_back("Move To...");
+            actionMenu_.options.push_back("Move");
+            actionMenu_.options.push_back("Copy");
             actionMenu_.options.push_back("Rename");
             actionMenu_.options.push_back("Delete");
         }
     }
     actionMenu_.options.push_back("Cancel");
+#endif
+}
+
+// ---------------------------------------------------------------------------
+// Move / Copy: choosing the target folder in the browser, and the footer notices.
+// ---------------------------------------------------------------------------
+namespace {
+
+bool pathIsUnder(const std::string& p, const std::string& dir) {
+    return p == dir || (p.size() > dir.size() && p.compare(0, dir.size(), dir) == 0 && p[dir.size()] == '/');
+}
+
+}  // namespace
+
+void App::showNotice(const std::string& text, bool warn, bool priv, double seconds) {
+    hubNotice_ = text;
+    hubNoticeWarn_ = warn;
+    hubNoticePrivate_ = priv;
+    hubNoticeUntil_ = std::chrono::steady_clock::now() +
+                   std::chrono::milliseconds(static_cast<long long>(seconds * 1000.0));
+}
+
+std::vector<std::string> App::sidecarPatterns() const {
+    std::vector<std::string> pats = FileOps::defaultSidecarPatterns();
+    for (const auto& p : plugins_.plugins()) {
+        for (const std::string& s : p.sidecars) {
+            if (std::find(pats.begin(), pats.end(), s) == pats.end()) pats.push_back(s);
+        }
+    }
+    return pats;
+}
+
+void App::startPick(PickState::Kind kind, const Browser::Entry& e) {
+#ifdef PIXELVR_HAVE_FREETYPE
+    pick_ = {};
+    if (kind == PickState::Kind::Move) {
+        // A playing file (or one inside a folder) keeps its reader open: stop it first.
+        for (int i = 0; i < VulkanRenderer::kMaxVideoSlots; ++i) {
+            if (screens_[i].open && !screens_[i].path.empty() && pathIsUnder(screens_[i].path, e.path)) {
+                showNotice("Stop the video first: it is playing", true);
+                return;
+            }
+        }
+    }
+    pick_.kind = kind;
+    pick_.srcPath = e.path;
+    pick_.srcIsDir = e.isDir;
+    pick_.srcLabel = e.label;
+    while (!pick_.srcLabel.empty() && pick_.srcLabel.back() == '/') pick_.srcLabel.pop_back();
+    if (!e.isDir) pick_.sidecars = FileOps::sidecarsOf(e.path, sidecarPatterns());
+    if (kind == PickState::Kind::Move) {
+        for (const std::string& sc : pick_.sidecars) {
+            for (int i = 0; i < VulkanRenderer::kMaxVideoSlots; ++i) {
+                if (screens_[i].open && screens_[i].path == sc) {
+                    pick_ = {};
+                    showNotice("Stop the video first: it is playing", true);
+                    return;
+                }
+            }
+        }
+    }
+    hubNotice_.clear();
+#else
+    (void)kind;
+    (void)e;
+#endif
+}
+
+void App::startDownloadDirPick() {
+#ifdef PIXELVR_HAVE_FREETYPE
+    pick_ = {};
+    pick_.kind = PickState::Kind::DownloadDir;
+    pick_.srcLabel = "downloads";
+    const std::string start = settings_.downloadDir();
+    settings_.close();
+    downloadsWindow_ = false;
+    std::error_code ec;
+    if (!start.empty() && std::filesystem::is_directory(start, ec)) browser_.openPath(start);
+    else browser_.openHome();
+#endif
+}
+
+void App::startVaultMove() {
+#ifdef PIXELVR_HAVE_FREETYPE
+    VaultManager& vm = VaultManager::instance();
+    if (!vm.isUnlocked()) return;
+    if (FileOps::instance().busy()) {
+        settings_.showStatus("Wait for the running move / copy to finish first.");
+        return;
+    }
+    const bool toCard = vm.location() == VaultManager::Location::Internal;
+    const std::string card = sdCardMount();
+    if (toCard && card.empty()) {
+        settings_.showStatus("Insert an SD card first.");
+        return;
+    }
+    if (!vm.available()) {
+        settings_.showStatus("Insert the SD card with your vault first.");
+        return;
+    }
+    // Vault films keep their readers open: close them, the files move.
+    for (int i = 0; i < VulkanRenderer::kMaxVideoSlots; ++i) {
+        if (screens_[i].open && VaultManager::isPrivatePath(screens_[i].path)) closeMedia(i);
+    }
+    if (picking()) cancelPick(false);
+    FileOps::Request r;
+    r.relocateVault = true;
+    r.mode = FileOps::Mode::Copy;
+    r.sources.push_back(vm.vaultDir());
+    r.destDir = toCard ? VaultManager::cardVaultDirFor(card) : vm.internalVaultDir();
+    r.toSdCard = toCard;
+    if (toCard) {
+        std::random_device rd;
+        char id[17];
+        for (int i = 0; i < 8; ++i) std::snprintf(id + 2 * i, 3, "%02x", static_cast<unsigned>(rd() & 0xFF));
+        r.cardId = id;
+    }
+    r.label = "the vault";
+    FileOps::instance().queue(r);
+    settings_.setVaultMoveStatus("Moving the vault...");
+    xr_.triggerHaptic(0, 0.050f, 0.0f, 0.7f);
+    xr_.triggerHaptic(1, 0.050f, 0.0f, 0.7f);
+#endif
+}
+
+void App::cancelPick(bool backToSettings) {
+    const bool wasDownloadDir = pick_.kind == PickState::Kind::DownloadDir;
+    pick_ = {};
+    if (wasDownloadDir && backToSettings) {
+        settings_.open();
+        settings_.setSection(1);
+    }
+}
+
+std::string App::pickReason() const {
+#ifdef PIXELVR_HAVE_FREETYPE
+    if (!picking()) return {};
+    const std::string loc = browser_.currentLocation();
+    if (browser_.isScanning()) return "Opening the folder...";
+    if (!browser_.canCreateFolder()) return "Open a folder on this headset";
+    if (pick_.kind == PickState::Kind::DownloadDir) {
+        if (browser_.inVault() || VaultManager::isPrivatePath(loc)) return "Downloads can't go into the vault";
+        if (removableMissing(loc)) return "The SD card was removed";
+        if (::access(loc.c_str(), W_OK) != 0) return "This folder is read-only";
+        return {};
+    }
+    return FileOps::checkTarget(pick_.kind == PickState::Kind::Copy ? FileOps::Mode::Copy : FileOps::Mode::Move,
+                                pick_.srcPath, pick_.srcIsDir, loc);
+#else
+    return {};
+#endif
+}
+
+void App::confirmPick() {
+#ifdef PIXELVR_HAVE_FREETYPE
+    if (!picking()) return;
+    const std::string why = pickReason();
+    if (!why.empty()) {
+        showNotice(why, true);
+        return;
+    }
+    const std::string loc = browser_.currentLocation();
+    if (pick_.kind == PickState::Kind::DownloadDir) {
+        settings_.setCustomDownloadDir(loc);
+        browser_.setDownloadDir(settings_.downloadDir());
+        showNotice("Downloads go to " + FileOps::placeName(loc) + " now");
+        pick_ = {};
+        settings_.open();
+        settings_.setSection(1);
+        xr_.triggerHaptic(1, 0.040f, 0.0f, 0.7f);
+        return;
+    }
+    FileOps::Request r;
+    r.mode = pick_.kind == PickState::Kind::Copy ? FileOps::Mode::Copy : FileOps::Mode::Move;
+    r.sources.push_back(pick_.srcPath);
+    for (const std::string& s : pick_.sidecars) r.sources.push_back(s);
+    r.destDir = loc;
+    r.label = pick_.srcLabel;
+    FileOps::instance().queue(r);
+    pick_ = {};
+    xr_.triggerHaptic(0, 0.050f, 0.0f, 0.7f);
+    xr_.triggerHaptic(1, 0.050f, 0.0f, 0.7f);
+#endif
+}
+
+void App::drainFileOps() {
+#ifdef PIXELVR_HAVE_FREETYPE
+    FileOps::Result res;
+    bool any = false;
+    while (FileOps::instance().takeResult(res)) {
+        any = true;
+        for (const FileOps::Moved& m : res.moved) {
+            // Nothing about a file that went into the vault may stay in the public records.
+            thumbnailCache_.forgetUnder(m.from);
+            if (res.intoPrivate && !res.relocated) {
+                playbackMemory_.forgetUnder(m.from);
+                letterboxDetector_.forgetUnder(m.from);
+                browser_.dropBookmarksUnder(m.from);
+            } else {
+                browser_.retargetBookmarks(m.from, m.to);
+            }
+        }
+        if (!res.moved.empty()) playbackMemory_.save();
+        const bool hide = res.privateText && !VaultManager::instance().isUnlocked();
+        showNotice(hide ? (res.ok ? "Done" : "Stopped: the vault is locked") : res.message, !res.ok, res.privateText);
+        if (res.relocated) {
+            renderer_.clearCardThumbnails();
+            vaultCardSeen_ = VaultManager::instance().location() == VaultManager::Location::SdCard;
+            // The browser may still show the old vault folder.
+            for (const FileOps::Moved& m : res.moved) {
+                if (browser_.isOpen() && pathIsUnder(browser_.currentLocation(), m.from)) browser_.openVault();
+            }
+            settings_.refresh();
+        } else if (!res.ok && res.relocation) {
+            settings_.showStatus(res.message);
+        }
+    }
+    if (any && browser_.isOpen()) browser_.rescan();  // moved files appear / disappear
+#endif
+}
+
+void App::updateBrowserFooter(std::chrono::steady_clock::time_point now) {
+#ifdef PIXELVR_HAVE_FREETYPE
+    VulkanRenderer::BrowserPickBar bar;
+    std::string text;
+    bool warn = false;
+    if (picking()) {
+        bar.active = true;
+        const bool copy = pick_.kind == PickState::Kind::Copy;
+        if (pick_.kind == PickState::Kind::DownloadDir) {
+            bar.text = "Download folder: open the folder to use";
+            bar.confirmLabel = "Use this folder";
+        } else {
+            const int n = static_cast<int>(pick_.sidecars.size());
+            bar.text = std::string(copy ? "Copying " : "Moving ") + pick_.srcLabel +
+                       (n > 0 ? " (+" + std::to_string(n) + (n == 1 ? " file)" : " files)") : std::string()) + "...";
+            bar.confirmLabel = copy ? "Copy here" : "Move here";
+        }
+        const std::string why = pickReason();
+        bar.canConfirm = why.empty();
+        bar.hint = "Trigger: Open folder  |  Y / B: Cancel";
+        if (!why.empty() && why != "Opening the folder...") {
+            text = why;
+            warn = true;
+        }
+    }
+    const FileOps::Status st = FileOps::instance().status();
+    if (text.empty() && st.busy) {
+        const bool locked = !VaultManager::instance().isUnlocked();
+        const std::string what = (st.privateLabel && locked) ? std::string("vault files") : st.label;
+        const int pct = st.total > 0 ? static_cast<int>(100.0 * static_cast<double>(st.done) / static_cast<double>(st.total)) : 0;
+        text = std::string(st.relocating ? "Moving the vault" : (st.copy ? "Copying " : "Moving ") + what) +
+               "...  " + std::to_string(std::min(pct, 100)) + " %" +
+               (st.waiting > 0 ? "  (" + std::to_string(st.waiting) + " more waiting)" : std::string());
+    }
+    settings_.setVaultMoveStatus(st.busy && st.relocating
+        ? "Moving the vault: " + std::to_string(st.total > 0 ? std::min<int>(100, static_cast<int>(100.0 * static_cast<double>(st.done) / static_cast<double>(st.total))) : 0) +
+              " %. Keep the headset on; the vault stays where it is until everything is copied."
+        : std::string());
+    if (text.empty() && !hubNotice_.empty()) {
+        if (now >= hubNoticeUntil_ || (hubNoticePrivate_ && !VaultManager::instance().isUnlocked())) {
+            hubNotice_.clear();
+        } else {
+            text = hubNotice_;
+            warn = hubNoticeWarn_;
+        }
+    }
+    renderer_.setBrowserPickBar(bar);
+    renderer_.setBrowserNotice(text, warn);
+#else
+    (void)now;
 #endif
 }
 
@@ -3842,13 +4131,6 @@ int App::run() {
             for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
                 updateMusicView(slot);
                 ScreenState& sc = screens_[slot];
-                if (slot == 0) {
-                    std::string vmsg;
-                    while (VaultManager::instance().takeJobResult(vmsg)) {
-                        browser_.setStatus(vmsg);
-                        browser_.rescan();  // the moved file appears / disappears
-                    }
-                }
                 if (sc.letterboxPending && sc.open) {
                     float lb = 0.0f;
                     if (letterboxDetector_.result(sc.path, lb)) {
@@ -3887,6 +4169,27 @@ int App::run() {
             renderer_.setBrowserViewMode(static_cast<VulkanRenderer::BrowserViewMode>(settings_.browserViewMode()));
             renderer_.setBrowserQuickPath(browser_.isCurrentBookmarked());
             renderer_.setBrowserCanCreateFolder(browser_.canCreateFolder());
+#ifdef PIXELVR_HAVE_FREETYPE
+            drainFileOps();
+            updateBrowserFooter(nowT);
+            {
+                // Vault on the SD card: pulled while unlocked -> lock the whole vault (user decision);
+                // put back while its placeholder is shown -> show the vault.
+                VaultManager& vm = VaultManager::instance();
+                static auto sNextCardCheck = nowT;
+                if (vm.isUnlocked() && vm.location() == VaultManager::Location::SdCard && nowT >= sNextCardCheck) {
+                    sNextCardCheck = nowT + std::chrono::milliseconds(700);
+                    const bool here = vm.available();
+                    if (here) {
+                        vaultCardSeen_ = true;
+                        if (browser_.currentLocation() == Browser::kVaultMissing) browser_.openVault();
+                    } else if (vaultCardSeen_) {
+                        performVaultLock();
+                        showNotice("SD card removed: the vault was locked", true);
+                    }
+                }
+            }
+#endif
             {
                 // Vault page: keep the encryption progress current.
                 static int sMigShown = -2;
@@ -4072,6 +4375,8 @@ int App::run() {
                         std::string playPath;
                         browser_.activate(playPath);
                         xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.025f, 0.0f, 0.5f);
+                    } else if (picking()) {  // the root while choosing a folder: stop choosing
+                        cancelPick();
                     } else {  // the root of a location: close the hub
                         closeHub();
                     }
@@ -4182,10 +4487,16 @@ int App::run() {
                     } else if (j.state == 1) {
                         std::snprintf(buf, sizeof(buf), "%s  done", nm.c_str());
                         if (j.total > 0) {
-                            char cdet[96];
-                            std::snprintf(cdet, sizeof(cdet), "Completed \xB7 %.1f MB \xB7 Stored in %s",
-                                          j.total / 1048576.0, settings_.downloadDir().c_str());
-                            di.detail = cdet;
+                            // Where this job went (not the current setting), shortened like a path in the UI.
+                            std::string where = std::filesystem::path(j.localPath).parent_path().string();
+                            if (const char* home = std::getenv("HOME"); home && *home && where.rfind(home, 0) == 0) {
+                                where = "~" + where.substr(std::strlen(home));
+                            }
+                            const std::string card = sdCardMount();
+                            if (!card.empty() && where.rfind(card, 0) == 0) where = "SD card" + where.substr(card.size());
+                            char mb[32];
+                            std::snprintf(mb, sizeof(mb), "%.1f MB", j.total / 1048576.0);
+                            di.detail = std::string("Completed \xB7 ") + mb + " \xB7 Stored in " + where;
                         } else {
                             di.detail = "Completed \xB7 Stored locally";
                         }
@@ -4197,7 +4508,7 @@ int App::run() {
                         di.detail = "Queued in download queue (click to cancel)";
                     } else {
                         std::snprintf(buf, sizeof(buf), "%s  failed", nm.c_str());
-                        di.detail = "Transfer Failed";
+                        di.detail = j.error.empty() ? std::string("Transfer Failed") : "Failed \xB7 " + j.error;
                     }
                     drows.push_back(buf);
                     djList.push_back(std::move(di));
@@ -4306,7 +4617,7 @@ int App::run() {
                     auto classifyMediaBadge = [&](const std::string& pathOrName, int w, int h) -> std::string {
                         const std::string lower = to_lower(pathOrName);
                         const PlaybackMemory::Entry* byHand =
-                            VaultManager::instance().isVaultPath(pathOrName) ? nullptr : playbackMemory_.find(pathOrName);
+                            VaultManager::isPrivatePath(pathOrName) ? nullptr : playbackMemory_.find(pathOrName);
                         const bool manual = byHand != nullptr && byHand->projection >= 0 && byHand->stereo >= 0;
                         if (manual) {
                             const std::string b = layoutBadge(byHand->projection, byHand->stereo);
@@ -4695,11 +5006,13 @@ int App::run() {
                     if (!browser_.isOpen()) browser_.open();
                 } else if (sbHover == 1) {
                     // Main Tab: Downloads
+                    if (picking()) cancelPick(false);
                     settings_.close();
                     browser_.setOpen(true);
                     downloadsWindow_ = true;
                 } else if (sbHover == 2) {
                     // Main Tab: Settings
+                    if (picking()) cancelPick(false);
                     downloadsWindow_ = false;
                     settings_.open();
                 } else if (sbHover >= 3 && sbHover <= 8) {
@@ -4761,6 +5074,11 @@ int App::run() {
                         } else {
                             browser_.removeJob(hov);
                         }
+                        xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.020f, 0.0f, 0.4f);
+                        interacted = true;
+                    } else if (hov >= 0 && hov < static_cast<int>(jobs.size()) && jobBtn == 0 &&
+                               (jobs[static_cast<std::size_t>(hov)].state == 2 || jobs[static_cast<std::size_t>(hov)].state == 3)) {
+                        browser_.retryJob(hov);  // same place as before; refused while its SD card is out
                         xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.020f, 0.0f, 0.4f);
                         interacted = true;
                     } else if (hov >= 0 && hov < static_cast<int>(jobs.size()) && jobBtn == 0 &&
@@ -4871,7 +5189,9 @@ int App::run() {
                                     } else if (opt == "Add to Bookmarks" || opt == "Add Folder to Bookmarks" ||
                                                opt == "Set as Quick Path" || opt == "Set Folder as Quick Path") {
                                         const std::string targetPath = (fe && fe->isDir) ? fe->path : browser_.currentPath();
-                                        browser_.addBookmark(targetPath, fe ? fe->label : "");
+                                        // A file's label would name the FOLDER bookmark after the file (in the
+                                        // vault: its real name, written to the plain bookmarks file).
+                                        browser_.addBookmark(targetPath, (fe && fe->isDir) ? fe->label : "");
                                         xr_.triggerHaptic(0, 0.060f, 0.0f, 0.8f);
                                         xr_.triggerHaptic(1, 0.060f, 0.0f, 0.8f);
                                         actionMenu_.visible = false;
@@ -4882,12 +5202,27 @@ int App::run() {
                                         xr_.triggerHaptic(1, 0.050f, 0.0f, 0.7f);
                                         actionMenu_.visible = false;
                                     } else if (opt == "Move to Vault") {
-                                        std::string newPath;
-                                        if (browser_.moveFocusedToVault(newPath)) {
-                                            xr_.triggerHaptic(0, 0.050f, 0.0f, 0.7f);
-                                            xr_.triggerHaptic(1, 0.050f, 0.0f, 0.7f);
-                                        }
                                         actionMenu_.visible = false;
+                                        if (fe && browser_.isFileActionTarget(*fe)) {
+                                            startPick(PickState::Kind::Move, *fe);  // checks playing files, collects sidecars
+                                            if (picking()) {
+                                                FileOps::Request r;
+                                                r.mode = FileOps::Mode::Move;
+                                                r.sources.push_back(pick_.srcPath);
+                                                for (const std::string& s : pick_.sidecars) r.sources.push_back(s);
+                                                r.destDir = VaultManager::instance().vaultDir();
+                                                r.label = pick_.srcLabel;
+                                                const std::string why = FileOps::checkTarget(r.mode, r.sources[0], pick_.srcIsDir, r.destDir);
+                                                pick_ = {};
+                                                if (why.empty()) {
+                                                    FileOps::instance().queue(r);
+                                                    xr_.triggerHaptic(0, 0.050f, 0.0f, 0.7f);
+                                                    xr_.triggerHaptic(1, 0.050f, 0.0f, 0.7f);
+                                                } else {
+                                                    showNotice(why, true);
+                                                }
+                                            }
+                                        }
                                     } else if (opt == "Change 3D / VR Format") {
                                         actionMenu_.page = 5;
                                         actionMenu_.title = "3D & VR Format";
@@ -4904,22 +5239,16 @@ int App::run() {
                                         actionMenu_.options.push_back("VR360 SBS|360° side-by-side 3D");
                                         actionMenu_.options.push_back("Cancel");
                                         actionMenu_.selectedOption = 0;
-                                    } else if (opt == "Move To...") {
-                                        actionMenu_.page = 1;
-                                        actionMenu_.title = "Move Destination";
-                                        actionMenu_.subtitle = fe ? fe->label : "";
-                                        actionMenu_.options.clear();
-                                        actionMenu_.options.push_back("Videos (~/Videos)");
-                                        actionMenu_.options.push_back("Downloads (~/Downloads)");
-                                        actionMenu_.options.push_back("Home (~/)");
-                                        if (!browser_.parentDir().empty()) {
-                                            actionMenu_.options.push_back("Parent Folder (..)");
+                                    } else if (opt == "Move" || opt == "Copy") {
+                                        actionMenu_.visible = false;
+                                        if (fe && browser_.isFileActionTarget(*fe)) {
+                                            startPick(opt == "Move" ? PickState::Kind::Move : PickState::Kind::Copy, *fe);
+                                            if (picking()) xr_.triggerHaptic(1, 0.040f, 0.0f, 0.6f);
                                         }
-                                        actionMenu_.options.push_back("Cancel");
-                                        actionMenu_.selectedOption = 0;
                                     } else if (opt == "Rename") {
                                         actionMenu_.visible = false;
-                                        if (fe) {
+                                        if (fe && browser_.isFileActionTarget(*fe)) {
+                                            pendingActionPath_ = fe->path;
                                             std::string curName = fe->label;
                                             while (!curName.empty() && (curName.back() == '/' || curName.back() == '\\')) {
                                                 curName.pop_back();
@@ -4938,7 +5267,11 @@ int App::run() {
                                                     while (!clean.empty() && (std::isspace(static_cast<unsigned char>(clean.back())) || clean.back() == '/' || clean.back() == '\\')) {
                                                         clean.pop_back();
                                                     }
-                                                    if (!clean.empty()) {
+                                                    const Browser::Entry* still = browser_.focused();
+                                                    if (!still || still->path != pendingActionPath_) {
+                                                        // The list changed while typing: never rename another file.
+                                                        showNotice("The folder changed meanwhile: nothing was renamed", true);
+                                                    } else if (!clean.empty()) {
                                                         if (browser_.renameFocused(clean)) {
                                                             xr_.triggerHaptic(0, 0.050f, 0.0f, 0.7f);
                                                             xr_.triggerHaptic(1, 0.050f, 0.0f, 0.7f);
@@ -4947,6 +5280,7 @@ int App::run() {
                                                 });
                                         }
                                     } else if (opt == "Delete") {
+                                        pendingActionPath_ = fe ? fe->path : std::string();
                                         actionMenu_.page = 2;
                                         actionMenu_.title = (fe && fe->isDir) ? "Delete Folder?" : "Delete File?";
                                         actionMenu_.subtitle = "Permanently delete \"" + (fe ? fe->label : "") + "\"" +
@@ -4956,25 +5290,6 @@ int App::run() {
                                         actionMenu_.options.push_back("Cancel");
                                         actionMenu_.selectedOption = 1; // Default to Cancel for safety
                                     } else if (opt == "Cancel") {
-                                        actionMenu_.visible = false;
-                                    }
-                                } else if (actionMenu_.page == 1) {
-                                    if (opt == "Cancel") {
-                                        actionMenu_.visible = false;
-                                    } else {
-                                        std::string targetDir;
-                                        if (opt == "Videos (~/Videos)") targetDir = browser_.videosDir();
-                                        else if (opt == "Downloads (~/Downloads)") targetDir = browser_.downloadsDir();
-                                        else if (opt == "Home (~/)") targetDir = browser_.homeDir();
-                                        else if (opt == "Parent Folder (..)") targetDir = browser_.parentDir();
-
-                                        if (!targetDir.empty()) {
-                                            std::string newPath;
-                                            if (browser_.moveFocusedTo(targetDir, newPath)) {
-                                                xr_.triggerHaptic(0, 0.050f, 0.0f, 0.7f);
-                                                xr_.triggerHaptic(1, 0.050f, 0.0f, 0.7f);
-                                            }
-                                        }
                                         actionMenu_.visible = false;
                                     }
                                 } else if (actionMenu_.page == 10) {
@@ -5034,7 +5349,7 @@ int App::run() {
                                     }
 #ifdef PIXELVR_HAVE_MEDIA
                                     if (opt != "Cancel" && cur().open &&
-                                        !VaultManager::instance().isVaultPath(cur().path)) {
+                                        !VaultManager::isPrivatePath(cur().path)) {
                                         playbackMemory_.setFormat(cur().path,
                                                                   settings_.projectionMode(),
                                                                   settings_.stereoMode(), cur().fingerprint);
@@ -5103,7 +5418,11 @@ int App::run() {
 
                         if (in.select || in.togglePlay) {
                             int chosen = (hov >= 0) ? hov : actionMenu_.selectedOption;
-                            if (chosen == 0) {
+                            const Browser::Entry* del = browser_.focused();
+                            if (chosen == 0 && (!del || del->path != pendingActionPath_ || !browser_.isFileActionTarget(*del))) {
+                                showNotice("The folder changed meanwhile: nothing was deleted", true);
+                                actionMenu_.visible = false;
+                            } else if (chosen == 0) {
                                 std::string delName;
                                 if (browser_.deleteFocused(delName)) {
                                     xr_.triggerHaptic(0, 0.050f, 0.0f, 0.7f);
@@ -5246,7 +5565,8 @@ int App::run() {
                 }
             } else if (actionBtnPressed && browser_.isOpen() && !downloadsWindow_ &&
                        !settings_.isOpen() && pendingDl_.empty()) {
-                openActionMenu();
+                if (picking()) cancelPick();
+                else openActionMenu();
                 interacted = true;
             } else if (browser_.isOpen() && !browser_.isScanning() && !downloadsWindow_ &&
                        !settings_.isOpen() && pendingDl_.empty()) {
@@ -5269,7 +5589,12 @@ int App::run() {
                     xr_.triggerHaptic(1, 0.025f, 0.0f, 0.5f);
                     interacted = true;
                 } else if ((in.togglePlay || in.select) && pbHover >= 0 && sbHover < 0) {
-                    if (pbHover == 2) {
+                    if (pbHover == 7) {
+                        confirmPick();
+                    } else if (pbHover == 8) {
+                        cancelPick();
+                        xr_.triggerHaptic(1, 0.025f, 0.0f, 0.5f);
+                    } else if (pbHover == 2) {
                         // Cycle View Mode: BigCards (0) -> MiniCards (1) -> CompactList (2)
                         int curMode = settings_.browserViewMode();
                         curMode = (curMode + 1) % 3;
@@ -5315,11 +5640,19 @@ int App::run() {
                         browser_.setSelected(hovered);
                     }
                     // Open the highlighted entry.
-                    if ((in.togglePlay || in.select) &&
+                    const Browser::Entry* pickRow = browser_.focused();
+                    const bool pickBlocks = picking() && pickRow && !pickRow->isDir && !pickRow->isBack && !pickRow->isNetwork;
+                    if ((in.togglePlay || in.select) && pickBlocks && renderer_.pointerButton() < 0 &&
+                        (hovered >= 0 || stickActive)) {
+                        // Choosing a target folder: files don't open (and nothing plays meanwhile).
+                        xr_.triggerHaptic(1, 0.015f, 0.0f, 0.3f);
+                    } else if ((in.togglePlay || in.select) &&
                         renderer_.pointerButton() < 0 && hovered >= 0) {
                         std::string playPath;
                         Browser::Result res = browser_.activate(playPath);
-                        if (res == Browser::Result::AddSmbShare) {
+                        if (picking() && res != Browser::Result::Navigated) {
+                            // only folders while choosing
+                        } else if (res == Browser::Result::AddSmbShare) {
                             openSmbModal(true);
                         } else if (res == Browser::Result::Play && !playPath.empty()) {
                             playFromBrowser(playPath);
@@ -5330,7 +5663,9 @@ int App::run() {
                                renderer_.pointerButton() < 0 && stickActive) {
                         std::string playPath;
                         Browser::Result res = browser_.activate(playPath);
-                        if (res == Browser::Result::AddSmbShare) {
+                        if (picking() && res != Browser::Result::Navigated) {
+                            // only folders while choosing
+                        } else if (res == Browser::Result::AddSmbShare) {
                             openSmbModal(true);
                         } else if (res == Browser::Result::Play && !playPath.empty()) {
                             playFromBrowser(playPath);
@@ -5431,7 +5766,11 @@ int App::run() {
                 if ((in.select && (hovered >= 0 || std::fabs(in.thumbstickY) > 0.25f)) || in.togglePlay) {
                     const int seg = (hovered >= 0) ? renderer_.settingsSegmentHovered() : -1;
                     auto act = (seg >= 0) ? settings_.activateSegment(seg) : settings_.activate();
-                        if (act == SettingsMenu::Action::CycleDistance) {
+                        if (act == SettingsMenu::Action::PickDownloadFolder) {
+                            startDownloadDirPick();
+                        } else if (act == SettingsMenu::Action::MoveVault) {
+                            startVaultMove();
+                        } else if (act == SettingsMenu::Action::CycleDistance) {
                             renderer_.setScreenDistance(settings_.screenDistance());
                             if (arrangementActive_) {
                                 arrangement_.dist = renderer_.screenDistance();

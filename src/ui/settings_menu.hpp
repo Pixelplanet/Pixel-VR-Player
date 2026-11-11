@@ -17,6 +17,8 @@ public:
         None,
         Back,
         CycleDownloadDir,
+        PickDownloadFolder,   // "Other...": the App lets the user pick a folder in the browser
+        MoveVault,            // Vault location: move the vault to / from the SD card (App, after a 2nd click)
         ToggleRailShortcut0,
         ToggleRailShortcut1,
         ToggleRailShortcut2,
@@ -171,6 +173,15 @@ public:
     bool legacyBindingsSeen() const { return legacyBindingsSeen_; }
     bool legacyBindingsCustom() const { return legacyBindingsCustom_; }
     std::string downloadDir() const;
+    // A folder chosen with "Other..." (overrides the presets; "" = a preset).
+    void setCustomDownloadDir(const std::string& dir);
+    const std::string& customDownloadDir() const { return downloadCustom_; }
+    // Vault page status while the vault moves (App; "" = none).
+    void setVaultMoveStatus(const std::string& text) {
+        if (text == vaultMoveStatus_) return;
+        vaultMoveStatus_ = text;
+        if (section_ == 4) refresh();
+    }
     // Web shortcuts shown as tabs on the hub's rail (in table order).
     // A web shortcut: name + address; on the hub's rail or not; a page only (kiosk) or the
     // full browser. An empty address is asked for on first use (e.g. a Jellyfin server).
@@ -378,6 +389,9 @@ private:
     bool legacyBindingsSeen_ = false;
     bool legacyBindingsCustom_ = false;
     int downloadDirIdx_ = 1;   // index into the download-destination presets (default ~/Downloads)
+    std::string downloadCustom_;  // download_dir_custom: a folder picked with "Other..."
+    std::chrono::steady_clock::time_point vaultMoveArmedUntil_{};
+    std::string vaultMoveStatus_;
     int railShortcutMask_ = (1 << 0) | (1 << 5);  // kRailShortcuts bits: YouTube + Browser
     int curvatureIdx_ = 0;     // 0=Flat (0%), 1=Gentle (25%), 2=Cinema (50%), 3=Deep (75%), 4=IMAX (100%)
     int uiTextScaleIdx_ = 2;   // 0=90%, 1=105%, 2=120% (default), 3=140%, 4=160%

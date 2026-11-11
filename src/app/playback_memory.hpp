@@ -33,6 +33,8 @@ public:
     // cleared so a finished file starts over next time.
     void setPosition(const std::string& path, double position, double duration, const std::string& fingerprint = {});
     void setFormat(const std::string& path, int projection, int stereo, const std::string& fingerprint = {});
+    // Drops what is known about `path` and everything under it (e.g. moved into the vault).
+    void forgetUnder(const std::string& path);
 
 private:
     Entry& touch(const std::string& path);

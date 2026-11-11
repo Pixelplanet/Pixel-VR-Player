@@ -1,5 +1,6 @@
 #include "ui/browser.hpp"
 
+#include "util/file_copy.hpp"
 #include "util/sdcard.hpp"
 #include "app/vault_manager.hpp"
 #include "app/vault_crypto.hpp"
@@ -223,6 +224,8 @@ void Browser::scanLocalInto(const std::string& dir, ScanResult& out) {
     out.location = dir;
     if (VaultManager::instance().isVaultPath(dir)) {
         out.title = "Vault (Private)";
+    } else if (!dir.empty() && dir == sdCardMount()) {
+        out.title = "SD card";
     } else {
         out.title = dir;
     }
@@ -249,6 +252,7 @@ void Browser::scanLocalInto(const std::string& dir, ScanResult& out) {
         const fs::path p = it->path();
         const std::string name = p.filename().string();
         if (name.empty() || name[0] == '.') continue;  // skip hidden
+        if (name.size() > 10 && name.compare(name.size() - 10, 10, ".pvrv.part") == 0) continue;  // being encrypted
         std::error_code dec;
         if (it->is_directory(dec)) {
             if (dir == homeDir_) {
@@ -487,7 +491,7 @@ void Browser::updateActiveFilterFor(const std::string& loc, bool isSmb) {
         activeFilter_ = 4;
     } else if (isSmb || isRemotePath(loc)) {
         activeFilter_ = 2;
-    } else if (VaultManager::instance().isVaultPath(loc)) {
+    } else if (loc == kVaultMissing || VaultManager::instance().isVaultPath(loc)) {
         activeFilter_ = 5;
     } else if (!downloadDir_.empty() && loc.rfind(downloadDir_, 0) == 0) {
         activeFilter_ = 3;
@@ -521,8 +525,10 @@ void Browser::beginScan(const std::string& location, bool isSmb,
     updateActiveFilterFor(location, isSmb);
     location_ = location;
     inSmb_ = isSmb;
-    if (VaultManager::instance().isVaultPath(location)) {
+    if (location == kVaultMissing || VaultManager::instance().isVaultPath(location)) {
         title_ = "Vault (Private)";
+    } else if (!location.empty() && location == sdCardMount()) {
+        title_ = "SD card";
     } else if (location == "bookmarks://") {
         title_ = "Bookmarks";
     } else {
@@ -606,9 +612,17 @@ void Browser::openDrives() {
 }
 
 void Browser::openVault() {
-    if (!VaultManager::instance().isUnlocked()) return;
-    VaultManager::instance().ensureDirectories();
-    openPath(VaultManager::instance().vaultDir());
+    VaultManager& vm = VaultManager::instance();
+    if (!vm.isUnlocked()) return;
+    if (!vm.ensureDirectories()) {  // on an SD card that is not inserted: say so, never make a new vault
+        open_ = true;
+        browseOpen_.store(true);
+        status_.clear();
+        beginScan(kVaultMissing, false);
+        activeFilter_ = 5;
+        return;
+    }
+    openPath(vm.vaultDir());
     activeFilter_ = 5;
 }
 
@@ -737,7 +751,7 @@ void Browser::scanBookmarksInto(ScanResult& out) {
 
     std::size_t visible = 0;  // vault bookmarks only count while the vault is open
     for (const auto& bm : bookmarks_) {
-        if (!VaultManager::instance().isVaultPath(bm.path) || VaultManager::instance().isUnlocked()) ++visible;
+        if (!VaultManager::isPrivatePath(bm.path) || VaultManager::instance().isUnlocked()) ++visible;
     }
     if (visible == 0) {
         out.status = "No bookmarks yet. Click [+ Bookmark] in any folder to add one.";
@@ -748,7 +762,7 @@ void Browser::scanBookmarksInto(ScanResult& out) {
 
     for (const auto& bm : bookmarks_) {
         // Bookmarks into the vault stay invisible while it is locked.
-        if (VaultManager::instance().isVaultPath(bm.path) && !VaultManager::instance().isUnlocked()) continue;
+        if (VaultManager::isPrivatePath(bm.path) && !VaultManager::instance().isUnlocked()) continue;
         if (bm.path.empty()) continue;
         const bool isSmb = isRemotePath(bm.path);
         std::error_code ec;
@@ -773,73 +787,49 @@ void Browser::scanBookmarksInto(ScanResult& out) {
 }
 
 bool Browser::inVault() const {
-    return VaultManager::instance().isVaultPath(location_);
+    return location_ == kVaultMissing || VaultManager::instance().isVaultPath(location_);
 }
 
-bool Browser::moveFocusedToVault(std::string& outNewPath) {
-    if (!VaultManager::instance().isUnlocked()) return false;
-    const Entry* e = focused();
-    if (e == nullptr || e->isBack || inSmb_) return false;
-    // Encrypting takes a while for big files: a worker does it; the result arrives via the app.
-    VaultManager::instance().queueMoveIn(e->path);
-    outNewPath.clear();
-    status_ = "Moving " + e->label + " into the vault...";
+bool Browser::isFileActionTarget(const Entry& e) const {
+    if (e.isBack || e.isNetwork || e.path.empty() || e.path[0] != '/' || inSmb_) return false;
+    if (location_ == kVaultMissing || isRemotePath(e.path)) return false;
+    const std::string card = sdCardMount();
+    if (!card.empty() && e.path == card) return false;  // the card itself (Delete would wipe it)
+    if (e.path.size() > 5 && e.path.compare(e.path.size() - 5, 5, ".part") == 0) return false;  // being written
+    if (!e.isDir && e.label == "Encrypted file (vault locked)") return false;
     return true;
 }
 
-bool Browser::moveFocusedTo(const std::string& destDir, std::string& outNewPath) {
-    const Entry* e = focused();
-    if (e == nullptr || e->isBack || inSmb_) return false;
-    std::error_code ec;
-    if (!fs::exists(destDir, ec) || !fs::is_directory(destDir, ec)) {
-        status_ = "Destination folder does not exist";
-        return false;
-    }
-    fs::path src(e->path);
-    if (src.extension() == vaultcrypto::kExtension && !VaultManager::instance().isVaultPath(destDir)) {
-        // Out of the vault: decrypted under its real name, the encrypted file is removed afterwards.
-        VaultManager::instance().queueMoveOut(src.string(), destDir);  // decrypting runs on a worker
-        outNewPath.clear();
-        status_ = "Moving " + e->label + " out of the vault...";
-        return true;
-    }
-    const bool isDir = fs::is_directory(src, ec);
-    std::string stem = src.stem().string();
-    std::string ext = isDir ? "" : src.extension().string();
-    std::string targetFilename = src.filename().string();
-    fs::path dest = fs::path(destDir) / targetFilename;
+namespace {
+bool pathUnder(const std::string& p, const std::string& dir) {
+    return p == dir || (p.size() > dir.size() && p.compare(0, dir.size(), dir) == 0 && p[dir.size()] == '/');
+}
+}  // namespace
 
-    int counter = 1;
-    while (fs::exists(dest, ec)) {
-        targetFilename = isDir ? (stem + "_" + std::to_string(counter++))
-                               : (stem + "_" + std::to_string(counter++) + ext);
-        dest = fs::path(destDir) / targetFilename;
-    }
-
-    fs::rename(src, dest, ec);
-    if (ec) {
-        ec.clear();
-        if (isDir) {
-            fs::copy(src, dest, fs::copy_options::recursive, ec);
-            if (ec) {
-                status_ = "Move failed: " + ec.message();
-                return false;
-            }
-            fs::remove_all(src, ec);
-        } else {
-            fs::copy_file(src, dest, fs::copy_options::overwrite_existing, ec);
-            if (ec) {
-                status_ = "Move failed: " + ec.message();
-                return false;
-            }
-            fs::remove(src, ec);
+void Browser::retargetBookmarks(const std::string& from, const std::string& to) {
+    bool changed = false;
+    for (Bookmark& b : bookmarks_) {
+        if (!pathUnder(b.path, from)) continue;
+        const bool exact = b.path == from;
+        b.path = to + b.path.substr(from.size());
+        if (exact && !to.empty()) {
+            const std::string leaf = fs::path(to).filename().string();
+            if (!leaf.empty() && !VaultManager::isPrivatePath(to)) b.label = leaf;
         }
+        changed = true;
     }
-    outNewPath = dest.string();
-    status_ = "Moved " + e->label + " to " + fs::path(destDir).filename().string();
-    saveCurrentFolderState();
-    beginScan(location_, inSmb_, true);
-    return true;
+    if (changed) {
+        saveBookmarks();
+        if (location_ == "bookmarks://") beginScan("bookmarks://", false);
+    }
+}
+
+void Browser::dropBookmarksUnder(const std::string& path) {
+    const auto it = std::remove_if(bookmarks_.begin(), bookmarks_.end(), [&](const Bookmark& b) { return pathUnder(b.path, path); });
+    if (it == bookmarks_.end()) return;
+    bookmarks_.erase(it, bookmarks_.end());
+    saveBookmarks();
+    if (location_ == "bookmarks://") beginScan("bookmarks://", false);
 }
 
 bool Browser::deleteFocused(std::string& deletedName) {
@@ -873,6 +863,7 @@ std::vector<Browser::Crumb> Browser::crumbs() const {
     std::vector<Crumb> out;
     if (location_.empty()) return out;
     if (location_ == "bookmarks://") return {{"Bookmarks", location_, false}};
+    if (location_ == kVaultMissing) return {{"Vault (Private)", location_, false}};
     auto lastPart = [](const std::string& p) {
         std::string s = p;
         while (s.size() > 1 && s.back() == '/') s.pop_back();
@@ -887,10 +878,15 @@ std::vector<Browser::Crumb> Browser::crumbs() const {
     } else {
         const std::string vault = VaultManager::instance().vaultDir();
         const bool inVaultDir = VaultManager::instance().isVaultPath(location_);
+        const std::string card = sdCardMount();
         for (fs::path p(location_); out.size() < 64; p = p.parent_path()) {
             const std::string ps = p.string();
             if (inVaultDir && ps == vault) {
                 out.push_back({"Vault (Private)", ps, false});
+                break;
+            }
+            if (!inVaultDir && !card.empty() && ps == card) {  // the card is a root, like Home
+                out.push_back({"SD card", ps, false});
                 break;
             }
             if (ps == homeDir_) {
@@ -945,7 +941,11 @@ bool Browser::createFolder(const std::string& name) {
 
 bool Browser::renameFocused(const std::string& newName) {
     const Entry* e = focused();
-    if (e == nullptr || e->isBack || inSmb_ || newName.empty()) return false;
+    if (e == nullptr || e->isBack || inSmb_ || newName.empty() || !isFileActionTarget(*e)) return false;
+    if (newName == "." || newName == ".." || newName.find_first_of("/\\") != std::string::npos) {
+        status_ = "A name can't contain / or \\";
+        return false;
+    }
     std::error_code ec;
     fs::path src(e->path);
     if (src.extension() == vaultcrypto::kExtension) {
@@ -1002,7 +1002,14 @@ std::string Browser::downloadsDir() const {
 
 void Browser::runScan(std::string location, bool isSmb) {
     ScanResult r;
-    if (location == "bookmarks://") {
+    if (location == kVaultMissing) {
+        r.location = location;
+        r.title = "Vault (Private)";
+        r.status = "Insert the SD card with your vault";
+        r.entries.push_back({".. (up)", "", false, false, true, false});
+        r.entries.push_back({"Insert the SD card with your vault", "", false, false, false, false,
+                             "The vault is on the SD card"});
+    } else if (location == "bookmarks://") {
         scanBookmarksInto(r);
     } else if (isSmb) {
         scanSmbInto(location, r);
@@ -1027,7 +1034,11 @@ Browser::Result Browser::activate(std::string& playPath) {
 
     if (e.isBack) {
         const std::string prevChild = location_;
-        if (location_ == "bookmarks://") {
+        if (location_ == "bookmarks://" || location_ == kVaultMissing) {
+            beginScan(homeDir_, false, true, location_ == kVaultMissing ? std::string() : prevChild);
+            return Result::Navigated;
+        }
+        if (!inSmb_ && !location_.empty() && location_ == sdCardMount()) {  // up from the card: home
             beginScan(homeDir_, false, true, prevChild);
             return Result::Navigated;
         }
@@ -1132,7 +1143,15 @@ void Browser::startDownload(const std::string& uri, const std::string& nameIn,
         downloadDir_.empty() ? homeDir_ + "/Downloads" : downloadDir_;
     const std::string targetPath = destDir + "/" + name;
 
-    if (dlActive_.load()) {
+    if (removableMissing(destDir)) {  // the chosen folder is on a drive that is not inserted
+        DownloadJob j{name, targetPath, uri, 2, 0, 0, isDir};
+        j.error = "SD card removed";
+        dlJobs_.push_back(j);
+        status_ = "Download failed: SD card removed";
+        return;
+    }
+    // A job that finished this frame is resolved in poll(): until then the slot is still taken.
+    if (dlActive_.load() || dlDone_.load()) {
         dlQueue_.push_back({uri, name, targetPath, isDir});
         dlJobs_.push_back({name, targetPath, uri, 4, 0, 0, isDir});
         status_ = "Added to download queue: " + name;
@@ -1160,6 +1179,7 @@ void Browser::startDownloadFile(const std::string& uri, const std::string& local
     speedBytes_ = 0;
     speedTime_ = {};
     dlStopped_.store(false);
+    dlCardGone_.store(false);
     dlPid_.store(-1);
     dlBaseBytes_.store(0);
     pausedByBrowse_ = false;
@@ -1340,6 +1360,7 @@ void Browser::startDownloadFolder(const std::string& uri,
     status_ = "Downloading folder " + dlName_ + " ...";
     PIXELVR_LOG_INFO("Download folder: %s -> %s", uri.c_str(), destDir.c_str());
     dlStopped_.store(false);
+    dlCardGone_.store(false);
     dlPaused_.store(false);
     dlAbort_.store(false);
     int existingIdx = -1;
@@ -1584,10 +1605,13 @@ bool Browser::copyRemoteFile(const std::string& uri, const std::string& localIn,
         }
         got += n;
     }
+    // On disk before it counts as done (an SD card pulled right after "Downloaded" keeps the file).
+    if (ok) ok = std::fflush(out) == 0 && ::fsync(fileno(out)) == 0;
     ok = (std::fclose(out) == 0) && ok && (size < 0 || got == size);
     if (ok) {
         fs::rename(part, local, ec);
         ok = !ec;
+        if (ok) filecopy::syncDir(fs::path(local).parent_path().string());
     }
     if (!ok) fs::remove(part, ec);
     return ok;
@@ -1746,10 +1770,19 @@ void Browser::cancelQueued(const std::string& uri) {
 
 void Browser::startNextQueued() {
     if (dlActive_.load()) return;
-    if (dlQueue_.empty()) return;
-
-    DownloadQueueItem item = dlQueue_.front();
-    dlQueue_.pop_front();
+    DownloadQueueItem item;
+    for (;;) {
+        if (dlQueue_.empty()) return;
+        item = dlQueue_.front();
+        dlQueue_.pop_front();
+        if (!removableMissing(item.destDir)) break;
+        for (DownloadJob& j : dlJobs_) {  // its drive is gone: fail it, try the next one
+            if (j.uri == item.uri && j.state == 4) {
+                j.state = 2;
+                j.error = "SD card removed";
+            }
+        }
+    }
 
     dlName_ = item.name;
     PIXELVR_LOG_INFO("Starting next queued download: %s (%s)", item.name.c_str(), item.uri.c_str());
@@ -1758,6 +1791,22 @@ void Browser::startNextQueued() {
     } else {
         startDownloadFile(item.uri, item.destDir);
     }
+}
+
+bool Browser::retryJob(int index) {
+    if (index < 0 || index >= static_cast<int>(dlJobs_.size())) return false;
+    DownloadJob& j = dlJobs_[static_cast<std::size_t>(index)];
+    if (j.state != 2 && j.state != 3) return false;
+    if (removableMissing(j.localPath)) {
+        status_ = "Insert the SD card again to retry";
+        return false;
+    }
+    j.state = 4;
+    j.error.clear();
+    j.bytes = 0;
+    dlQueue_.push_back({j.uri, j.name, j.localPath, j.isDir});
+    if (!dlActive_.load() && !dlDone_.load()) startNextQueued();
+    return true;
 }
 
 void Browser::measureFolder(const std::string& uri) {
@@ -1946,6 +1995,17 @@ Browser::Result Browser::poll(std::string& playPath) {
             dlJobs_[dlActiveJob_].bytes = b;
             dlJobs_[dlActiveJob_].total = t;
         }
+        // The SD card (or USB drive) under the target pulled: stop, reported as "SD card removed".
+        if (now >= dlNextDriveCheck_) {
+            dlNextDriveCheck_ = now + std::chrono::milliseconds(500);
+            if (!dlCardGone_.load() && !dlLocalPath_.empty() && removableMissing(dlLocalPath_)) {
+                PIXELVR_LOG_WARN("Download: the drive under %s was removed", dlLocalPath_.c_str());
+                dlCardGone_.store(true);
+                dlAbort_.store(true);
+                const int pid = dlPid_.load();
+                if (pid > 0) kill(pid, SIGKILL);
+            }
+        }
         return Result::None;
     }
     applyPendingRename();  // a download that finished within this very frame
@@ -1955,10 +2015,24 @@ Browser::Result Browser::poll(std::string& playPath) {
             DownloadJob& j = dlJobs_[dlActiveJob_];
             j.bytes = dlBytes_.load();
             j.total = dlTotal_.load();
-            j.state = dlStopped_.load() ? 3 : (dlOk_.load() ? 1 : 2);
+            const bool gone = dlCardGone_.load() || (!dlOk_.load() && !dlStopped_.load() && removableMissing(j.localPath));
+            j.state = gone ? 2 : dlStopped_.load() ? 3 : (dlOk_.load() ? 1 : 2);
+            j.error = gone ? "SD card removed" : std::string();
         }
         dlActiveJob_ = -1;
-        if (dlStopped_.load()) {
+        if (dlCardGone_.load()) {
+            status_ = "Download failed: SD card removed";
+            // Queued downloads to that drive fail the same way (never sent elsewhere).
+            for (DownloadJob& q : dlJobs_) {
+                if (q.state == 4 && removableMissing(q.localPath)) {
+                    q.state = 2;
+                    q.error = "SD card removed";
+                }
+            }
+            dlQueue_.erase(std::remove_if(dlQueue_.begin(), dlQueue_.end(),
+                                          [](const DownloadQueueItem& it) { return removableMissing(it.destDir); }),
+                           dlQueue_.end());
+        } else if (dlStopped_.load()) {
             status_ = "Stopped " + dlName_;
         } else if (dlOk_.load()) {
             // Completing a download must NOT interrupt current playback (it used

@@ -28,12 +28,29 @@ bool unlockKeyFile(const std::string& keyFile, const std::string& combo, std::st
 bool rewrapKeyFile(const std::string& keyFile, const std::string& oldCombo, const std::string& newCombo, std::string& err);
 
 bool isEncrypted(const std::string& path);  // has the PVRV1 header
+bool hasExtension(const std::string& path);  // ends in ".pvrv" (no file access)
 
-// Encrypts `src` into `dstDir` under a random name; outPath = the new file. progress(done, total).
+using Progress = std::function<void(uint64_t done, uint64_t total)>;
+using Cancelled = std::function<bool()>;  // true = stop (the partial output is removed)
+
+// Encrypts `src` into `dstDir`; outPath = the new file. The stored (real) name is `storedName`, or the
+// source's file name; the file name on disk is `diskName`, or a random one. File and folder are synced.
 bool encryptFile(const std::string& src, const std::string& dstDir, std::string& outPath, std::string& err,
-                 const std::function<void(uint64_t, uint64_t)>& progress = {});
-// Decrypts an encrypted file back to a plain one (moving out of the vault).
-bool decryptFile(const std::string& src, const std::string& dstPath, std::string& err);
+                 const Progress& progress = {}, const std::string& storedName = {},
+                 const Cancelled& cancelled = {}, const std::string& diskName = {});
+// Decrypts an encrypted file back to a plain one (moving out of the vault); synced before it returns.
+bool decryptFile(const std::string& src, const std::string& dstPath, std::string& err,
+                 const Progress& progress = {}, const Cancelled& cancelled = {});
+// Copies an encrypted file into `dstDir` with a FRESH nonce (a byte copy would share its keystream with
+// the original: renaming one of them later would expose both names). Same options as encryptFile.
+bool reencryptFile(const std::string& src, const std::string& dstDir, std::string& outPath, std::string& err,
+                   const Progress& progress = {}, const std::string& storedName = {},
+                   const Cancelled& cancelled = {}, const std::string& diskName = {});
+// Small buffers (thumbnails): nonce + AES-256-CTR. False without the key.
+bool encryptBlob(const std::string& plain, std::string& out);
+bool decryptBlob(const std::string& blob, std::string& out);
+// fsync of a folder (makes a rename / new file in it durable).
+void fsyncDir(const std::string& dir);
 
 // Reading an encrypted file at any offset.
 class Reader {

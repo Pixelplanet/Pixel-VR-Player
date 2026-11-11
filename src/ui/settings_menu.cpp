@@ -283,14 +283,27 @@ void SettingsMenu::refresh() {
         {
             // The SD card is offered while one is inserted; the label shows the free space where files go.
             const bool card = !sdCardMount().empty();
+            const bool custom = !downloadCustom_.empty();
+            const bool sdChosen = !custom && downloadDirIdx_ % kDownloadDirCount == 3;
             std::vector<std::string> opts{kDownloadDirs[0], kDownloadDirs[1], kDownloadDirs[2]};
-            if (card || downloadDirIdx_ % kDownloadDirCount == 3) opts.push_back(kDownloadDirs[3]);
+            if (card || sdChosen) opts.push_back(kDownloadDirs[3]);
+            opts.push_back("Other...");
+            const int idx = custom ? static_cast<int>(opts.size()) - 1 : downloadDirIdx_ % kDownloadDirCount;
             const std::string dir = downloadDir();
             const uint64_t freeB = freeBytes(std::filesystem::exists(dir) ? dir : std::filesystem::path(dir).parent_path().string());
-            const std::string label = (downloadDirIdx_ % kDownloadDirCount == 3 && !card)
-                                          ? "Download Folder (no SD card: saving to ~/Downloads)"
-                                          : "Download Folder" + (freeB ? " (" + gigabytes(freeB) + " free)" : std::string());
-            segmented(label, opts, downloadDirIdx_ % kDownloadDirCount, Action::CycleDownloadDir);
+            const std::string freeTxt = freeB ? " (" + gigabytes(freeB) + " free)" : std::string();
+            std::string label;
+            if (sdChosen && !card) {
+                label = "Download Folder (no SD card: saving to ~/Downloads)";
+            } else if (custom) {
+                std::string leaf = std::filesystem::path(downloadCustom_).filename().string();
+                if (leaf.empty()) leaf = downloadCustom_;
+                label = removableMissing(downloadCustom_) ? "Download Folder: " + leaf + " (drive removed)"
+                                                          : "Download Folder: " + leaf + freeTxt;
+            } else {
+                label = "Download Folder" + freeTxt;
+            }
+            segmented(label, opts, idx, Action::CycleDownloadDir);
         }
         {
             std::string on;
@@ -606,7 +619,22 @@ void SettingsMenu::refresh() {
         binding("Unlock Combo Sequence", comboLabel, Action::RecordVaultCombo);
 
         VaultManager& vm = VaultManager::instance();
-        if (vm.migrating()) {
+        {
+            // SD2: the vault on the SD card (key, combination and thumbnails stay on the headset).
+            const bool onCard = vm.location() == VaultManager::Location::SdCard;
+            if (onCard || !sdCardMount().empty()) {
+                const bool armed = std::chrono::steady_clock::now() < vaultMoveArmedUntil_;
+                const std::string value = !vaultMoveStatus_.empty() ? "Moving..."
+                    : armed ? "Click again to move it"
+                    : onCard ? "Move to Headset" : "Move to SD card";
+                binding(onCard ? "Vault Location: SD card" : "Vault Location: Headset", value, Action::MoveVault);
+            }
+        }
+        if (!vaultMoveStatus_.empty()) {
+            hint(vaultMoveStatus_);
+        } else if (vm.location() == VaultManager::Location::SdCard && !vm.available()) {
+            hint("The vault is on the SD card: insert it to see your files.");
+        } else if (vm.migrating() && vm.migrationTotal() > 0) {
             hint("Encrypting vault files in the background: " + std::to_string(vm.migrationDone()) + " / " +
                  std::to_string(vm.migrationTotal()) + ". The vault stays usable meanwhile.");
         } else {
@@ -818,9 +846,24 @@ SettingsMenu::Action SettingsMenu::activate() {
             refresh();
             break;
         case Action::CycleDownloadDir:
-            downloadDirIdx_ = (downloadDirIdx_ + 1) % kDownloadDirCount;
-            if (downloadDirIdx_ == 3 && sdCardMount().empty()) downloadDirIdx_ = 0;  // no card: skip it
+            if (!downloadCustom_.empty()) {
+                downloadCustom_.clear();  // from "Other..." back to the first preset
+                downloadDirIdx_ = 0;
+            } else {
+                downloadDirIdx_ = (downloadDirIdx_ + 1) % kDownloadDirCount;
+                if (downloadDirIdx_ == 3 && sdCardMount().empty()) downloadDirIdx_ = 0;  // no card: skip it
+            }
             saveConfig();
+            refresh();
+            break;
+        case Action::MoveVault:
+            // A second click within 5 s starts it: moving a whole vault should not happen by accident.
+            if (std::chrono::steady_clock::now() >= vaultMoveArmedUntil_) {
+                vaultMoveArmedUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+                refresh();
+                return Action::None;
+            }
+            vaultMoveArmedUntil_ = {};
             refresh();
             break;
         case Action::ToggleSwapEyes:
@@ -1077,6 +1120,21 @@ SettingsMenu::Action SettingsMenu::activateSegment(int segment) {
     if (selected_ < 0 || selected_ >= static_cast<int>(rows_.size())) return Action::None;
     const Row& row = rows_[static_cast<std::size_t>(selected_)];
     if (row.kind != Kind::Segmented || segment < 0 || segment >= row.steps) return activate();
+    if (row.action == Action::CycleDownloadDir) {
+        // The options depend on the card being in: pick by name, not by stepping.
+        const std::string opt = row.options[static_cast<std::size_t>(segment)];
+        if (opt == "Other...") return Action::PickDownloadFolder;
+        for (int i = 0; i < kDownloadDirCount; ++i) {
+            if (opt == kDownloadDirs[i]) {
+                downloadDirIdx_ = i;
+                downloadCustom_.clear();
+                saveConfig();
+                refresh();
+                return Action::CycleDownloadDir;
+            }
+        }
+        return Action::None;
+    }
     Action act = Action::None;
     // Each activation advances by one option; stop on the requested one.
     const int steps = row.steps;
@@ -1366,7 +1424,14 @@ std::vector<SettingsMenu::RailShortcut> SettingsMenu::railShortcuts() const {
     return out;
 }
 
+void SettingsMenu::setCustomDownloadDir(const std::string& dir) {
+    downloadCustom_ = dir;
+    saveConfig();
+    refresh();
+}
+
 std::string SettingsMenu::downloadDir() const {
+    if (!downloadCustom_.empty()) return downloadCustom_;
     const char* home = std::getenv("HOME");
     const std::string base = home ? home : ".";
     if (downloadDirIdx_ % kDownloadDirCount == 3) {
@@ -1459,6 +1524,7 @@ void SettingsMenu::loadConfig() {
             }
             else if (key == "bind_quick_path_btn") noteLegacyBinding(std::stoi(val) != 7);
             else if (key == "download_dir") downloadDirIdx_ = std::clamp(std::stoi(val), 0, kDownloadDirCount - 1);
+            else if (key == "download_dir_custom") downloadCustom_ = val;
             else if (key == "rail_shortcuts") railShortcutMask_ = std::stoi(val) & ((1 << kRailShortcutCount) - 1);
             else if (key == "jellyfin_url") legacyJellyfinUrl_ = val;
             else if (key == "heat_style") heatStyle_ = std::stoi(val) % 2;
@@ -1530,6 +1596,7 @@ void SettingsMenu::saveConfig() const {
             file << "show_stats=" << (showStats_ ? 1 : 0) << "\n";
             file << "distance=" << screenDistance_ << "\n";
             file << "download_dir=" << downloadDirIdx_ << "\n";
+            if (!downloadCustom_.empty()) file << "download_dir_custom=" << downloadCustom_ << "\n";
             file << "rail_shortcuts=" << railShortcutMask_ << "\n";
             file << "heat_style=" << heatStyle_ << "\n";
             for (const Shortcut& sc : shortcuts_) {
