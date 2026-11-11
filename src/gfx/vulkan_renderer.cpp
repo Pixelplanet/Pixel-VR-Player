@@ -394,13 +394,14 @@ constexpr float kBrowserDividerY = 0.385f;  // under the button row
 constexpr float kBrowserContentTop = 0.372f;
 // Captions in front of Sort and View ("Sort by", "View").
 constexpr float kBrowserSortCaptionX = -0.455f;
-constexpr float kBrowserViewCaptionX = -0.190f;
+constexpr float kBrowserViewCaptionX = -0.195f;
+constexpr float kBrowserCaptionMaxW = 0.085f;
 inline UiRect headerButton(int id) {
     switch (id) {
         case 5: return {-0.290f, kBrowserBtnY, 0.075f, kBrowserBtnHH};
-        case 2: return {-0.055f, kBrowserBtnY, 0.075f, kBrowserBtnHH};
-        case 3: return {0.140f, kBrowserBtnY, 0.100f, kBrowserBtnHH};
-        case 6: return {0.355f, kBrowserBtnY, 0.095f, kBrowserBtnHH};
+        case 2: return {-0.030f, kBrowserBtnY, 0.075f, kBrowserBtnHH};
+        case 3: return {0.160f, kBrowserBtnY, 0.100f, kBrowserBtnHH};
+        case 6: return {0.375f, kBrowserBtnY, 0.095f, kBrowserBtnHH};
         default: return {0.0f, -10.0f, 0.0f, 0.0f};  // removed buttons (pager, Up)
     }
 }
@@ -7229,8 +7230,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
 
             // Header button labels (icons sit at the left edge of each pill)
-            drawFit(hub::kBrowserSortCaptionX, hub::kBrowserBtnY, 0.085f, scSub * 0.90f, dimCol, "Sort by");
-            drawFit(hub::kBrowserViewCaptionX, hub::kBrowserBtnY, 0.055f, scSub * 0.90f, dimCol, "View");
+            drawFit(hub::kBrowserSortCaptionX, hub::kBrowserBtnY, hub::kBrowserCaptionMaxW, scSub * 0.90f, dimCol, "Sort by");
+            drawFit(hub::kBrowserViewCaptionX, hub::kBrowserBtnY, hub::kBrowserCaptionMaxW, scSub * 0.90f, dimCol, "View");
             const char* vModeLabels[3] = {"Large", "Grid", "List"};
             const UiRect viewR = hub::headerButton(2);
             drawFitCentered(viewR.cx + 0.014f, viewR.cy, viewR.hw * 2.0f - 0.05f, scSub * 0.90f,
@@ -7279,8 +7280,26 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     const float textLeft = lay.cx - lay.cardHalfW + 0.016f;
                     const float maxTextW = lay.cardHalfW * 2.0f - 0.032f;
                     const float bottom = lay.cy - lay.cardHalfH;
-                    drawFit(textLeft, bottom + 0.096f, maxTextW, scSub, themeTextCol, item.name);
-                    drawFit(textLeft, bottom + 0.044f, maxTextW, scDetail, slateCol, cardDet);
+                    // Title on up to two lines: break after the last space / - / _ / .
+                    // that still fits; the second line ends in "..." if needed.
+                    std::size_t cut = 0;
+                    if (measureString(scSub, item.name) > maxTextW) {
+                        for (std::size_t k = 0; k + 1 < item.name.size(); ++k) {
+                            const char ch = item.name[k];
+                            if (ch != ' ' && ch != '-' && ch != '_' && ch != '.') continue;
+                            if (measureString(scSub, item.name.substr(0, k + 1)) > maxTextW) break;
+                            cut = k + 1;
+                        }
+                    }
+                    if (cut > 0) {
+                        std::string first = item.name.substr(0, cut);
+                        while (!first.empty() && first.back() == ' ') first.pop_back();
+                        drawFit(textLeft, bottom + 0.118f, maxTextW, scSub, themeTextCol, first);
+                        drawFit(textLeft, bottom + 0.087f, maxTextW, scSub, themeTextCol, item.name.substr(cut));
+                    } else {
+                        drawFit(textLeft, bottom + 0.118f, maxTextW, scSub, themeTextCol, item.name);
+                    }
+                    drawFit(textLeft, bottom + 0.042f, maxTextW, scDetail, slateCol, cardDet);
                     drawFitCentered(lay.cx - lay.thumbHalfW + 0.062f, lay.thumbCy + lay.thumbHalfH - 0.024f,
                                     0.104f, scBadge, themeTextCol, bTag);
                     if (!item.durationTag.empty()) {
