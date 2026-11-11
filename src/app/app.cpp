@@ -3211,7 +3211,10 @@ int App::run() {
 
                     const int key = renderer_.keyboardKeyHovered();
                     const bool pressed = in.select || in.togglePlay;
-                    if (pressed && key >= 0) {
+                    if (pressed && textEntry_.password && renderer_.keyboardRevealHovered()) {
+                        textEntry_.reveal = !textEntry_.reveal;
+                        xr_.triggerHaptic(hand, 0.015f, 0.0f, 0.45f);
+                    } else if (pressed && key >= 0) {
                         xr_.triggerHaptic(hand, 0.015f, 0.0f, 0.45f);
                         pressKeyboardKey(key);
                         // Cursor arrows and Delete repeat while the trigger is held.
@@ -3267,6 +3270,7 @@ int App::run() {
                                        textEntry_.password, nullptr,
                                        static_cast<int>(textEntry_.cursor));
             renderer_.setKeyboardModes(textEntry_.shift, textEntry_.symbols);
+            renderer_.setKeyboardReveal(textEntry_.password, textEntry_.password && textEntry_.reveal);
 
             // Multi-screen grab: while the trigger is held on an unlocked screen it
             // follows the laser (grab point stays under it) and turns to face the
@@ -3471,6 +3475,7 @@ int App::run() {
                     if (fe.focused && kbWebSlot_ == slot) {
                         textEntry_.text = fe.value;
                         textEntry_.cursor = utf16ToByteOffset(fe.value, fe.cursor);
+                        if (textEntry_.password != fe.password) textEntry_.reveal = false;
                         textEntry_.password = fe.password;
                     } else if (fe.focused && fe.byClick && !textEntry_.active && slot == webMouseSlot_) {
                         openWebKeyboard(slot, &fe, in);

@@ -383,19 +383,28 @@ inline UiRect lockVaultButton(int page) {
     return {kRailCx, subY(page == 2 ? -0.478f : -0.47f), kRailItemHalfW, subHalfH(0.030f)};
 }
 
-// File browser header: 0 = prev page, 1 = next page, 2 = view mode,
-// 3 = bookmark, 4 = up to parent, 5 = sort order, 6 = new folder.
 constexpr float kHeaderY = 0.455f;
+// File browser header, two slim rows: the folder path on top (full width),
+// the buttons below. 0 = prev page, 1 = next page, 2 = view mode,
+// 3 = bookmark, 4 = up to parent, 5 = sort order, 6 = new folder.
+constexpr float kBrowserPathY = 0.470f;
+constexpr float kBrowserBtnY = 0.410f;
+constexpr float kBrowserBtnHH = 0.022f;
+constexpr float kBrowserPageTextX = 0.705f;
 inline UiRect headerButton(int id) {
     switch (id) {
-        case 0: return {0.52f, kHeaderY, 0.035f, 0.028f};
-        case 1: return {0.74f, kHeaderY, 0.035f, 0.028f};
-        case 2: return {0.355f, kHeaderY, 0.075f, 0.028f};
-        case 3: return {0.175f, kHeaderY, 0.090f, 0.028f};
-        case 5: return {-0.005f, kHeaderY, 0.075f, 0.028f};
-        case 6: return {-0.157f, kHeaderY, 0.065f, 0.028f};
-        default: return {-0.43f, kHeaderY, 0.038f, 0.028f};
+        case 0: return {0.600f, kBrowserBtnY, 0.035f, kBrowserBtnHH};
+        case 1: return {0.810f, kBrowserBtnY, 0.035f, kBrowserBtnHH};
+        case 2: return {0.015f, kBrowserBtnY, 0.075f, kBrowserBtnHH};
+        case 3: return {0.200f, kBrowserBtnY, 0.090f, kBrowserBtnHH};
+        case 5: return {-0.145f, kBrowserBtnY, 0.075f, kBrowserBtnHH};
+        case 6: return {-0.300f, kBrowserBtnY, 0.065f, kBrowserBtnHH};
+        default: return {-0.430f, kBrowserBtnY, 0.038f, kBrowserBtnHH};
     }
+}
+// Settings header pager (keeps the classic single-row header spots).
+inline UiRect settingsPagerButton(int id) {
+    return {id == 0 ? 0.52f : 0.74f, kHeaderY, 0.035f, 0.028f};
 }
 
 struct CardLayout {
@@ -614,6 +623,8 @@ struct KbKey {
 constexpr float kKbFieldY = 0.095f;      // input field centre
 constexpr float kKbFieldHalfW = 0.62f;
 constexpr float kKbFieldHalfH = 0.046f;
+// "Show" / "Hide" pill at the right end of a password field.
+constexpr UiRect kKbRevealBtn{kKbFieldHalfW - 0.085f, kKbFieldY, 0.068f, 0.030f};
 constexpr float kKbSheetY = -0.272f;     // key sheet centre
 constexpr float kKbSheetHalfW = 0.68f;
 constexpr float kKbSheetHalfH = 0.250f;
@@ -2873,6 +2884,7 @@ void VulkanRenderer::updatePointer() {
     actionMenuKeyHovered_ = -1;
     keyboardKeyHovered_ = -1;
     keyboardFieldHovered_ = false;
+    keyboardRevealHovered_ = false;
     pointerScreen_ = -1;
     webPointerSlot_ = -1;
 
@@ -2987,7 +2999,10 @@ void VulkanRenderer::updatePointer() {
                         break;
                     }
                 }
-                if (keyboardKeyHovered_ < 0 &&
+                if (keyboardKeyHovered_ < 0 && keyboardModal_.revealToggle &&
+                    hub::kKbRevealBtn.contains(hx, hyy, 0.004f)) {
+                    keyboardRevealHovered_ = true;
+                } else if (keyboardKeyHovered_ < 0 &&
                     UiRect{0.0f, hub::kKbFieldY, hub::kKbFieldHalfW, hub::kKbFieldHalfH}
                         .contains(hx, hyy, 0.006f)) {
                     keyboardFieldHovered_ = true;
@@ -3195,7 +3210,7 @@ void VulkanRenderer::updatePointer() {
                 }
                 if (settingsPages_ > 1) {  // header pager (same spots as the file browser's)
                     for (int id : {0, 1}) {
-                        if (hub::headerButton(id).contains(hx, hyy, hub::kHitPad)) {
+                        if (hub::settingsPagerButton(id).contains(hx, hyy, hub::kHitPad)) {
                             settingsPagerHovered_ = id;
                             break;
                         }
@@ -7166,14 +7181,13 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
 
             // Breadcrumb trail (chevrons drawn now, segment text in the text pass)
-            const float breadX = canGoUp ? -0.375f : -0.460f;
-            const int breadStop = browserCanCreateFolder_ ? 6 : 5;  // clear of New folder / Sort
-            const float breadRight = hub::headerButton(breadStop).cx - hub::headerButton(breadStop).hw - 0.012f;
+            const float breadX = -0.460f;  // the path has the whole top row
+            const float breadRight = 0.855f;
             const float breadSc = scHeader * 0.90f;
             const Crumbs crumbs = layoutCrumbs(
                 splitCrumbs(formatBreadcrumbs(browserTitle_.empty() ? "Local Storage" : browserTitle_)),
                 breadX, breadRight - breadX, breadSc);
-            drawCrumbChevrons(crumbs, 0.455f);
+            drawCrumbChevrons(crumbs, hub::kBrowserPathY);
 
             // Text pass for Hub rail + Files content
             bindPipe(textPipeline_);
@@ -7192,16 +7206,16 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             // Content header: Breadcrumb + Page switcher
             if (canGoUp) {
                 const bool phov = (browserPageBtnHovered_ == 4);
-                drawFit(-0.436f, 0.455f, 0.042f, scSub * 0.90f,
+                drawFit(-0.436f, hub::kBrowserBtnY, 0.042f, scSub * 0.90f,
                         phov ? themeAccentCol : themeTextCol, "Up");
             }
-            drawCrumbText(crumbs, 0.455f, breadSc, breadRight);
+            drawCrumbText(crumbs, hub::kBrowserPathY, breadSc, breadRight);
 
             const int totalPages = std::max(1, (total + perPage - 1) / perPage);
             const int curPage = (first / perPage) + 1;
             char pageBuf[32];
             std::snprintf(pageBuf, sizeof(pageBuf), "%d / %d", curPage, totalPages);
-            drawFitCentered(0.63f, 0.455f, 0.14f, scSub, slateCol, pageBuf);
+            drawFitCentered(hub::kBrowserPageTextX, hub::kBrowserBtnY, 0.14f, scSub, slateCol, pageBuf);
 
             // Header button labels (icons sit at the left edge of each pill)
             const char* vModeLabels[3] = {"Large", "Grid", "List"};
@@ -7222,18 +7236,18 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
 
             if (browserViewMode_ == BrowserViewMode::CompactList) {
-                drawFit(-0.315f, 0.380f, listCols.nameMaxW, scBadge * 0.95f, dimCol, "NAME");
+                drawFit(-0.315f, 0.360f, listCols.nameMaxW, scBadge * 0.95f, dimCol, "NAME");
                 if (listShowFormat_) {
-                    drawFitCentered(listCols.fmtCx, 0.380f, 0.11f, scBadge * 0.95f, dimCol, "FORMAT");
+                    drawFitCentered(listCols.fmtCx, 0.360f, 0.11f, scBadge * 0.95f, dimCol, "FORMAT");
                 }
                 if (listShowRes_) {
-                    drawFitCentered(listCols.resCx, 0.380f, 0.15f, scBadge * 0.95f, dimCol, "RESOLUTION");
+                    drawFitCentered(listCols.resCx, 0.360f, 0.15f, scBadge * 0.95f, dimCol, "RESOLUTION");
                 }
                 if (listShowSize_) {
-                    drawFitCentered(listCols.sizeCx, 0.380f, 0.11f, scBadge * 0.95f, dimCol, "SIZE");
+                    drawFitCentered(listCols.sizeCx, 0.360f, 0.11f, scBadge * 0.95f, dimCol, "SIZE");
                 }
                 if (listShowDuration_) {
-                    drawFitCentered(listCols.durCx, 0.380f, 0.11f, scBadge * 0.95f, dimCol, "DURATION");
+                    drawFitCentered(listCols.durCx, 0.360f, 0.11f, scBadge * 0.95f, dimCol, "DURATION");
                 }
             }
 
@@ -7509,7 +7523,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             if (pager) {
                 // Header pager like the file browser's: < n / m > (page text in the text pass).
                 for (int pb = 0; pb < 2; ++pb) {
-                    const UiRect r = hub::headerButton(pb);
+                    const UiRect r = hub::settingsPagerButton(pb);
                     const bool h = (settingsPagerHovered_ == pb);
                     drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox,
                                   h ? tabHovBg : tabNormBg, 1.0f, 0.06f, h ? tabHovBord : tabNormBord);
@@ -8882,10 +8896,18 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         // Caret in the input field
         const float fieldSc = ((0.034f * tScale) / fontAtlas_.lineHeight);
         const float fieldLeft = -hub::kKbFieldHalfW + 0.030f;
-        const float fieldRight = hub::kKbFieldHalfW - 0.030f;
+        const float fieldRight = keyboardModal_.revealToggle
+            ? hub::kKbRevealBtn.cx - hub::kKbRevealBtn.hw - 0.020f
+            : hub::kKbFieldHalfW - 0.030f;
         const TextFieldLayout kbLay = layoutTextField(
             fieldLeft, fieldRight, fieldSc, keyboardModal_.text, keyboardModal_.cursorPos,
-            keyboardModal_.isPassword, false);
+            keyboardModal_.isPassword && !keyboardModal_.revealed, false);
+        if (keyboardModal_.revealToggle) {
+            const UiRect& rb = hub::kKbRevealBtn;
+            drawUiElement(vpPanel, rb.cx, rb.cy, rb.hw, rb.hh, UiShape::RoundedBox,
+                          keyboardRevealHovered_ ? keyHovBg : (keyboardModal_.revealed ? keyOnBg : keySpecialBg),
+                          1.0f, 0.05f, (keyboardRevealHovered_ || keyboardModal_.revealed) ? accentBord : kGlassRimFaint);
+        }
         if (viewIndex == 0 || layerPass) {
             // Caret stops at every character boundary of the visible text, so a
             // laser click maps to exactly what is on screen (scrolling, masking).
@@ -8932,6 +8954,11 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     themeTextCol,
                     keyboardModal_.prompt.empty() ? std::string("Enter text") : keyboardModal_.prompt);
         });
+        if (keyboardModal_.revealToggle) {
+            drawFitCentered(hub::kKbRevealBtn.cx, hub::kKbRevealBtn.cy, hub::kKbRevealBtn.hw * 2.0f - 0.02f,
+                            scSmall * 1.1f, keyboardRevealHovered_ ? themeAccentCol : themeTextCol,
+                            keyboardModal_.revealed ? "Hide" : "Show");
+        }
         if (!kbLay.visibleStr.empty()) {
             const float baseline = hub::kKbFieldY - 0.35f * fontAtlas_.ascent * fieldSc;
             drawString(kbLay.startX, baseline, fieldSc, themeTextCol, kbLay.visibleStr);

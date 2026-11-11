@@ -402,6 +402,8 @@ public:
         int cursorPos = 0;
         bool hasTransform = false;
         float transform[3][4]{};
+        bool revealToggle = false;  // password field: "Show" / "Hide" pill in the field
+        bool revealed = false;      // password currently shown in clear
         bool shift = false;    // in-app keyboard: next letter upper-case
         bool symbols = false;  // in-app keyboard: symbols page
     };
@@ -411,6 +413,13 @@ public:
     }
     // Index into the in-app keyboard layout under the pointer, or -1.
     int keyboardKeyHovered() const { return keyboardKeyHovered_; }
+    // Password fields: the "Show" / "Hide" pill. isPassword stays the field kind,
+    // `revealed` draws the text in clear.
+    void setKeyboardReveal(bool toggle, bool revealed) {
+        keyboardModal_.revealToggle = toggle;
+        keyboardModal_.revealed = revealed;
+    }
+    bool keyboardRevealHovered() const { return keyboardRevealHovered_; }
     // True while the pointer is over the keyboard's text field.
     bool keyboardFieldHovered() const { return keyboardFieldHovered_; }
     // Byte offset of the caret position nearest to where the pointer hits the
@@ -1253,7 +1262,8 @@ private:
     VkDescriptorPool thumbPool_ = VK_NULL_HANDLE;
     BrowserViewMode browserViewMode_ = BrowserViewMode::BigCards;
     bool browserIsQuickPath_ = false;
-    bool browserCanCreateFolder_ = false;  // header "New folder" button shown
+    bool browserCanCreateFolder_ = false;
+    bool keyboardRevealHovered_ = false;  // header "New folder" button shown
     KeyboardModalData keyboardModal_{};
     int uiFollowMode_ = 0; // 0 = World Lock (Default, zero drift/tilt), 1 = Smooth Gaze Follow
     float panelCurve_ = 0.0f;

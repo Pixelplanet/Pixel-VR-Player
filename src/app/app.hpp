@@ -184,6 +184,7 @@ private:
         std::string text;
         std::size_t cursor = 0;  // byte offset (UTF-8 aware moves)
         bool password = false;
+        bool reveal = false;  // password shown in clear ("Show" on the keyboard)
         bool shift = false;
         bool symbols = false;
     } textEntry_;
