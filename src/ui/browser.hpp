@@ -176,6 +176,7 @@ public:
         long long total = 0;
         bool isDir = false;
         std::string error;  // why it failed ("SD card removed"), shown in the Downloads list
+        bool wrote = false; // it wrote straight to localPath (SMB): a failed one leaves a partial file there
     };
     struct DownloadQueueItem {
         std::string uri;
@@ -186,6 +187,8 @@ public:
     const std::vector<DownloadJob>& downloadJobs() const { return dlJobs_; }
     // A failed or stopped job again, to the same place. False (reason in status) if that is not possible.
     bool retryJob(int index);
+    // `path` is (inside) a running or queued download's target: not to be moved or deleted now.
+    bool isDownloadTarget(const std::string& path) const;
     bool hasDownloads() const { return !dlJobs_.empty(); }
     bool hasQueuedDownloads() const { return !dlQueue_.empty(); }
     void cancelQueued(const std::string& uri);
@@ -263,6 +266,7 @@ private:
     std::string homeDir_;
     std::string quickPath_;  // bookmarked folder for one-button jump
     std::vector<Bookmark> bookmarks_;
+    std::vector<Bookmark> scanBookmarks_;  // the scan thread's copy (the frame thread edits bookmarks_)
     std::string lastLocation_;  // last folder visited (local or smb), for re-open
     bool lastInSmb_ = false;
     std::vector<Entry> entries_;
@@ -293,6 +297,7 @@ private:
     std::atomic<bool> dlAbort_{false};
     std::atomic<bool> dlStopped_{false};
     std::atomic<bool> dlCardGone_{false};  // the drive under the target was pulled (not a user stop)
+    std::atomic<bool> dlDestExisted_{false};  // a folder download merges into a folder that was there
     std::chrono::steady_clock::time_point dlNextDriveCheck_{};
     std::atomic<bool> browseOpen_{false};  // worker yields while the panel is open
     // Downloads run as a CHILD PROCESS (curl) so they use their own SMB

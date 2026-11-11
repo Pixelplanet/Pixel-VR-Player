@@ -132,6 +132,39 @@ int main(int argc, char** argv) {
     check(!FileOps::checkTarget(FileOps::Mode::Copy, (out / "A_1.mkv").string(), false, "smb://nas/share").empty(),
           "network targets are refused");
 
+    // --- a folder Move takes hidden files along and leaves links (and their folder) behind ---------
+    writeFile(videos / "Mixed" / "Keep.mkv", "keep");
+    writeFile(videos / "Mixed" / ".nomedia", "");
+    fs::create_directories(home / "Elsewhere");
+    writeFile(home / "Elsewhere" / "Other.mkv", "other");
+    fs::create_directory_symlink(home / "Elsewhere", videos / "Mixed" / "Link");
+    r = run(req(FileOps::Mode::Move, {(videos / "Mixed").string()}, out.string(), "Mixed"));
+    check(r.ok && fs::exists(out / "Mixed" / "Keep.mkv") && fs::exists(out / "Mixed" / ".nomedia") &&
+              fs::is_symlink(out / "Mixed" / "Link") && fs::exists(home / "Elsewhere" / "Other.mkv") && !fs::exists(videos / "Mixed"),
+          "same-drive folder Move: renamed as a whole, the link moves as a link, its target untouched: " + r.message);
+
+    // --- a read-only original is refused before anything is copied --------------------------------
+    fs::create_directories(home / "RO");
+    writeFile(home / "RO" / "R.mkv", "ro");
+    fs::permissions(home / "RO", fs::perms::owner_read | fs::perms::owner_exec, fs::perm_options::replace);
+    check(!FileOps::checkTarget(FileOps::Mode::Move, (home / "RO" / "R.mkv").string(), false, out.string()).empty() &&
+              FileOps::checkTarget(FileOps::Mode::Copy, (home / "RO" / "R.mkv").string(), false, out.string()).empty(),
+          "Move from a read-only folder refused, Copy allowed");
+    fs::permissions(home / "RO", fs::perms::owner_all, fs::perm_options::replace);
+
+    // --- another video's subtitles / a shared script stay ------------------------------------------
+    fs::create_directories(home / "Cuts");
+    writeFile(home / "Cuts" / "Movie.mkv", "m");
+    writeFile(home / "Cuts" / "Movie.en.srt", "s");
+    writeFile(home / "Cuts" / "Movie.Directors.Cut.mkv", "dc");
+    writeFile(home / "Cuts" / "Movie.Directors.Cut.en.srt", "dcs");
+    auto cuts = FileOps::sidecarsOf((home / "Cuts" / "Movie.mkv").string(), FileOps::defaultSidecarPatterns());
+    check(cuts.size() == 1 && fs::path(cuts[0]).filename() == "Movie.en.srt",
+          "Movie.mkv takes Movie.en.srt, not the Director's Cut subtitles (" + std::to_string(cuts.size()) + ")");
+    writeFile(home / "Cuts" / "Movie.mp4", "m4");
+    cuts = FileOps::sidecarsOf((home / "Cuts" / "Movie.mkv").string(), FileOps::defaultSidecarPatterns());
+    check(cuts.empty(), "a sidecar shared with Movie.mp4 stays with both");
+
     // --- sidecars ------------------------------------------------------------------------------
     writeFile(videos / "Clip.mp4", std::string(300000, 'v'));
     writeFile(videos / "Clip.funscript", "{\"actions\":[]}");
@@ -157,6 +190,19 @@ int main(int argc, char** argv) {
     r = run(req(FileOps::Mode::Move, {(videos / "Clip.mp4").string()}, vault, "Clip.mp4"));
     inVault = vaultFiles(vault);
     check(r.ok && inVault.count("Clip_1.mp4") && plainOf(inVault["Clip_1.mp4"]) == "second clip", "real-name collision -> Clip_1.mp4");
+
+    // --- file by file into the vault: hidden files go, a link and its folder stay ---------------------
+    writeFile(videos / "Mixed2" / "Keep.mkv", "keep2");
+    writeFile(videos / "Mixed2" / ".nomedia", "");
+    fs::create_directory_symlink(home / "Elsewhere", videos / "Mixed2" / "Link");
+    r = run(req(FileOps::Mode::Move, {(videos / "Mixed2").string()}, vault, "Mixed2"));
+    {
+        const auto m2 = vaultFiles((fs::path(vault) / "Mixed2").string());
+        check(r.ok && m2.count("Keep.mkv") && m2.count(".nomedia") && fs::is_symlink(videos / "Mixed2" / "Link") &&
+                  !fs::exists(videos / "Mixed2" / "Keep.mkv") && fs::exists(home / "Elsewhere" / "Other.mkv") &&
+                  r.message.find("stayed") != std::string::npos,
+              "into the vault: files (hidden too) encrypted, the link and its folder stay, the user is told: " + r.message);
+    }
 
     // --- folder -> vault subfolder, plain file -> vault subfolder -------------------------------
     writeFile(videos / "Season 1" / "E01.mkv", "e01");
@@ -199,6 +245,15 @@ int main(int argc, char** argv) {
     r = run(req(FileOps::Mode::Move, {(videos / "Locked.mkv").string()}, vault, "Locked.mkv"));
     check(!r.ok && fs::exists(videos / "Locked.mkv"), "vault locked: nothing moved in (" + r.message + ")");
     check(vc::storedName(inVault["Clip.mp4"]).empty(), "locked: real names unreadable");
+    {
+        // Another master key (vault.key recreated): files are refused, never "decrypted" into garbage.
+        std::string kerr;
+        check(vc::createKeyFile((home / "other.key").string(), "X X X X X X", kerr), "a second key");
+        vc::Reader wrong;
+        check(!wrong.open(inVault["Clip.mp4"]) && vc::storedName(inVault["Clip.mp4"]).empty(),
+              "a file is refused with the wrong key (key check)");
+        vc::clearKey();
+    }
     vm.unlock();
     for (int i = 0; i < 100 && vm.migrating(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(20));
 

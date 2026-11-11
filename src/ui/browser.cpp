@@ -556,6 +556,7 @@ void Browser::beginScan(const std::string& location, bool isSmb,
     restoreChildPath_ = childPath;
     scanReady_.store(false);
     scanning_.store(true);
+    scanBookmarks_ = bookmarks_;  // the scan thread never reads bookmarks_ itself
     scanThread_ =
         std::thread([this, location, isSmb] { runScan(location, isSmb); });
 }
@@ -635,7 +636,7 @@ void Browser::openBookmarks() {
 }
 
 void Browser::addBookmark(const std::string& path, const std::string& label) {
-    if (path.empty() || path == "bookmarks://" || path == "smb://__add_share__") return;
+    if (path.empty() || path == "bookmarks://" || path == "smb://__add_share__" || path == kVaultMissing) return;
     for (auto& b : bookmarks_) {
         if (b.path == path) return;
     }
@@ -750,7 +751,7 @@ void Browser::scanBookmarksInto(ScanResult& out) {
     out.entries.push_back({".. (Home)", homeDir_, true, false, true, false});
 
     std::size_t visible = 0;  // vault bookmarks only count while the vault is open
-    for (const auto& bm : bookmarks_) {
+    for (const auto& bm : scanBookmarks_) {
         if (!VaultManager::isPrivatePath(bm.path) || VaultManager::instance().isUnlocked()) ++visible;
     }
     if (visible == 0) {
@@ -760,7 +761,7 @@ void Browser::scanBookmarksInto(ScanResult& out) {
 
     out.status = std::to_string(visible) + (visible == 1 ? " bookmark" : " bookmarks");
 
-    for (const auto& bm : bookmarks_) {
+    for (const auto& bm : scanBookmarks_) {
         // Bookmarks into the vault stay invisible while it is locked.
         if (VaultManager::isPrivatePath(bm.path) && !VaultManager::instance().isUnlocked()) continue;
         if (bm.path.empty()) continue;
@@ -796,6 +797,7 @@ bool Browser::isFileActionTarget(const Entry& e) const {
     const std::string card = sdCardMount();
     if (!card.empty() && e.path == card) return false;  // the card itself (Delete would wipe it)
     if (e.path.size() > 5 && e.path.compare(e.path.size() - 5, 5, ".part") == 0) return false;  // being written
+    if (isDownloadTarget(e.path)) return false;  // smbclient writes straight to the final name
     if (!e.isDir && e.label == "Encrypted file (vault locked)") return false;
     return true;
 }
@@ -1143,7 +1145,7 @@ void Browser::startDownload(const std::string& uri, const std::string& nameIn,
         downloadDir_.empty() ? homeDir_ + "/Downloads" : downloadDir_;
     const std::string targetPath = destDir + "/" + name;
 
-    if (removableMissing(destDir)) {  // the chosen folder is on a drive that is not inserted
+    if (removableMissing(destDir, true)) {  // the chosen folder is on a drive that is not inserted
         DownloadJob j{name, targetPath, uri, 2, 0, 0, isDir};
         j.error = "SD card removed";
         dlJobs_.push_back(j);
@@ -1222,6 +1224,9 @@ void Browser::startDownloadFile(const std::string& uri, const std::string& local
     }
     const std::string name = dlName_;
     dlLocalPath_ = local;
+    if (dlActiveJob_ >= 0 && dlActiveJob_ < static_cast<int>(dlJobs_.size())) {
+        dlJobs_[static_cast<std::size_t>(dlActiveJob_)].wrote = !(isRemoteFsPath(uri) || isHttpUrl(uri));
+    }
     if (isRemoteFsPath(uri) || isHttpUrl(uri)) {
         dlLocalPath_ = local + ".part";  // poll() measures progress from this file
         dlThread_ = std::thread([this, uri, local, name]() { downloadRemoteFile(uri, local, name); });
@@ -1268,6 +1273,10 @@ void Browser::startDownloadFile(const std::string& uri, const std::string& local
         }
         dlPid_.store(-1);
         const bool ok = WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        if (ok) {  // on disk before "Downloaded" (an SD card pulled right after keeps the file)
+            filecopy::syncFile(local);
+            filecopy::syncDir(std::filesystem::path(local).parent_path().string());
+        }
         if (dlStopped_.load()) {
             std::error_code rec;
             std::filesystem::remove(local, rec);  // no partial file left behind
@@ -1359,6 +1368,10 @@ void Browser::startDownloadFolder(const std::string& uri,
     dlActive_.store(true);
     status_ = "Downloading folder " + dlName_ + " ...";
     PIXELVR_LOG_INFO("Download folder: %s -> %s", uri.c_str(), destDir.c_str());
+    {
+        std::error_code xec;
+        dlDestExisted_.store(std::filesystem::exists(destDir, xec));
+    }
     dlStopped_.store(false);
     dlCardGone_.store(false);
     dlPaused_.store(false);
@@ -1480,6 +1493,8 @@ void Browser::startDownloadFolder(const std::string& uri,
                 return;
             }
             std::error_code sec;
+            filecopy::syncFile(dst);
+            filecopy::syncDir(std::filesystem::path(dst).parent_path().string());
             got += static_cast<long long>(std::filesystem::file_size(dst, sec));
             dlBaseBytes_.store(got);
             dlBytes_.store(got);
@@ -1526,7 +1541,7 @@ void Browser::startDownloadFolder(const std::string& uri,
         copyDir(uri, destDir);
         if (dlAbort_.load()) {
             std::error_code rec;
-            std::filesystem::remove_all(destDir, rec);  // no partial folder
+            if (!dlDestExisted_.load() && !dlCardGone_.load()) std::filesystem::remove_all(destDir, rec);  // no partial folder
             dlStopped_.store(true);
             dlOk_.store(false);
             dlDone_.store(true);
@@ -1685,7 +1700,7 @@ void Browser::downloadRemoteFolder(const std::string& uri, const std::string& de
     copyDir(uri, destDir);
     if (dlAbort_.load()) {
         std::error_code rec;
-        fs::remove_all(destDir, rec);  // no partial folder
+        if (!dlDestExisted_.load() && !dlCardGone_.load()) fs::remove_all(destDir, rec);  // no partial folder
         dlStopped_.store(true);
         dlOk_.store(false);
     } else {
@@ -1718,8 +1733,9 @@ void Browser::clearFinished() {
             keep.push_back(j);  // keep the in-flight and queued jobs
             continue;
         }
-        // Remove partial files from stopped/failed single-file downloads.
-        if (j.state != 1 && !j.isDir && !j.localPath.empty()) {
+        // Remove partial files from stopped/failed single-file downloads that wrote there themselves
+        // (never an older complete file of the same name; HTTP/SFTP write a .part of their own).
+        if (j.state != 1 && !j.isDir && j.wrote && !j.localPath.empty()) {
             std::error_code ec;
             std::filesystem::remove(j.localPath, ec);
         }
@@ -1740,7 +1756,7 @@ void Browser::removeJob(int index) {
         cancelQueued(j.uri);
         return;
     }
-    if (j.state != 1 && !j.isDir && !j.localPath.empty()) {
+    if (j.state != 1 && !j.isDir && j.wrote && !j.localPath.empty()) {
         std::error_code ec;
         std::filesystem::remove(j.localPath, ec);
     }
@@ -1765,6 +1781,10 @@ void Browser::cancelQueued(const std::string& uri) {
             break;
         }
     }
+    dlActiveJob_ = -1;  // indexes moved
+    for (std::size_t i = 0; i < dlJobs_.size(); ++i) {
+        if (dlJobs_[i].state == 0) dlActiveJob_ = static_cast<int>(i);
+    }
     status_ = "Removed from download queue";
 }
 
@@ -1775,7 +1795,7 @@ void Browser::startNextQueued() {
         if (dlQueue_.empty()) return;
         item = dlQueue_.front();
         dlQueue_.pop_front();
-        if (!removableMissing(item.destDir)) break;
+        if (!removableMissing(item.destDir, true)) break;
         for (DownloadJob& j : dlJobs_) {  // its drive is gone: fail it, try the next one
             if (j.uri == item.uri && j.state == 4) {
                 j.state = 2;
@@ -1793,11 +1813,28 @@ void Browser::startNextQueued() {
     }
 }
 
+bool Browser::isDownloadTarget(const std::string& path) const {
+    auto under = [](const std::string& p, const std::string& dir) {
+        return !dir.empty() && (p == dir || (p.size() > dir.size() && p.compare(0, dir.size(), dir) == 0 && p[dir.size()] == '/') ||
+                                (dir.size() > p.size() && dir.compare(0, p.size(), p) == 0 && dir[p.size()] == '/'));
+    };
+    for (const DownloadJob& j : dlJobs_) {
+        if ((j.state == 0 || j.state == 4) && under(path, j.localPath)) return true;  // also a folder holding it
+    }
+    return false;
+}
+
 bool Browser::retryJob(int index) {
     if (index < 0 || index >= static_cast<int>(dlJobs_.size())) return false;
     DownloadJob& j = dlJobs_[static_cast<std::size_t>(index)];
     if (j.state != 2 && j.state != 3) return false;
-    if (removableMissing(j.localPath)) {
+    for (const DownloadJob& o : dlJobs_) {
+        if (&o != &j && o.uri == j.uri && (o.state == 0 || o.state == 4)) {
+            status_ = "Already downloading or in queue: " + j.name;
+            return false;
+        }
+    }
+    if (removableMissing(j.localPath, true)) {
         status_ = "Insert the SD card again to retry";
         return false;
     }
@@ -2015,7 +2052,7 @@ Browser::Result Browser::poll(std::string& playPath) {
             DownloadJob& j = dlJobs_[dlActiveJob_];
             j.bytes = dlBytes_.load();
             j.total = dlTotal_.load();
-            const bool gone = dlCardGone_.load() || (!dlOk_.load() && !dlStopped_.load() && removableMissing(j.localPath));
+            const bool gone = dlCardGone_.load() || (!dlOk_.load() && !dlStopped_.load() && removableMissing(j.localPath, true));
             j.state = gone ? 2 : dlStopped_.load() ? 3 : (dlOk_.load() ? 1 : 2);
             j.error = gone ? "SD card removed" : std::string();
         }

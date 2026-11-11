@@ -177,6 +177,12 @@ public:
     void setCustomDownloadDir(const std::string& dir);
     const std::string& customDownloadDir() const { return downloadCustom_; }
     // Vault page status while the vault moves (App; "" = none).
+    // A result to show on the Vault page for a while (e.g. why moving the vault failed).
+    void setVaultMoveNotice(const std::string& text) {
+        vaultMoveNotice_ = text;
+        vaultMoveNoticeUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(15);
+        if (section_ == 4) refresh();
+    }
     void setVaultMoveStatus(const std::string& text) {
         if (text == vaultMoveStatus_) return;
         vaultMoveStatus_ = text;
@@ -391,7 +397,10 @@ private:
     int downloadDirIdx_ = 1;   // index into the download-destination presets (default ~/Downloads)
     std::string downloadCustom_;  // download_dir_custom: a folder picked with "Other..."
     std::chrono::steady_clock::time_point vaultMoveArmedUntil_{};
+    bool vaultMoveArmed_ = false;  // the row says "Click again to move it"
     std::string vaultMoveStatus_;
+    std::string vaultMoveNotice_;
+    std::chrono::steady_clock::time_point vaultMoveNoticeUntil_{};
     int railShortcutMask_ = (1 << 0) | (1 << 5);  // kRailShortcuts bits: YouTube + Browser
     int curvatureIdx_ = 0;     // 0=Flat (0%), 1=Gentle (25%), 2=Cinema (50%), 3=Deep (75%), 4=IMAX (100%)
     int uiTextScaleIdx_ = 2;   // 0=90%, 1=105%, 2=120% (default), 3=140%, 4=160%

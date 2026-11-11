@@ -1,4 +1,5 @@
 #include "app/vault_crypto.hpp"
+#include "util/file_copy.hpp"
 
 #include <fcntl.h>
 #include <sys/stat.h>
@@ -145,6 +146,35 @@ struct RawHeader {
     std::string name;
 };
 
+// Key check: the last 16 header bytes hold a known text encrypted with the file's own name keystream
+// at an offset no name reaches. A wrong master key (e.g. vault.key was recreated) is then refused
+// instead of "decrypting" into garbage. Files from before this check have zeros there.
+constexpr int kCheckOffset = kHeaderSize - 16;
+constexpr char kCheckText[17] = "PVRV-KEYCHECK-01";
+
+void writeKeyCheck(const uint8_t key[32], const uint8_t nonce[16], uint8_t* hdr) {
+    uint8_t nn[16];
+    nameNonce(nonce, nn);
+    std::memcpy(hdr + kCheckOffset, kCheckText, 16);
+    ctrXor(key, nn, kCheckOffset, hdr + kCheckOffset, 16);
+}
+
+// A stored name decrypted with the right key: valid UTF-8 without control characters.
+bool plausibleName(const std::string& n) {
+    if (n.empty()) return false;
+    for (size_t i = 0; i < n.size();) {
+        const unsigned char c = static_cast<unsigned char>(n[i]);
+        if (c < 0x20 || c == 0x7F) return false;
+        int len = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : (c >> 3) == 0x1E ? 4 : 0;
+        if (len == 0 || i + static_cast<size_t>(len) > n.size()) return false;
+        for (int k = 1; k < len; ++k) {
+            if ((static_cast<unsigned char>(n[i + static_cast<size_t>(k)]) >> 6) != 0x2) return false;
+        }
+        i += static_cast<size_t>(len);
+    }
+    return true;
+}
+
 bool readHeader(int fd, RawHeader& h, const uint8_t key[32]) {
     uint8_t buf[kHeaderSize];
     if (::pread(fd, buf, kHeaderSize, 0) != kHeaderSize || std::memcmp(buf, kMagic, 6) != 0) return false;
@@ -158,6 +188,16 @@ bool readHeader(int fd, RawHeader& h, const uint8_t key[32]) {
         uint8_t nn[16];
         nameNonce(h.nonce, nn);
         ctrXor(key, nn, 0, reinterpret_cast<uint8_t*>(h.name.data()), nl);
+        bool hasCheck = false;
+        for (int i = 0; i < 16; ++i) hasCheck = hasCheck || buf[kCheckOffset + i] != 0;
+        if (hasCheck) {
+            uint8_t chk[16];
+            std::memcpy(chk, buf + kCheckOffset, 16);
+            ctrXor(key, nn, kCheckOffset, chk, 16);
+            if (std::memcmp(chk, kCheckText, 16) != 0) return false;  // another key
+        } else if (!plausibleName(h.name)) {
+            return false;  // an older file read with the wrong key
+        }
     }
     return true;
 }
@@ -281,6 +321,7 @@ bool encryptStream(const std::function<long(uint64_t, uint8_t*, size_t)>& readCh
     uint8_t nn[16];
     nameNonce(nonce, nn);
     ctrXor(key, nn, 0, hdr.data() + 32, name.size());
+    writeKeyCheck(key, nonce, hdr.data());
     bool ok = writeAll(out, hdr.data(), kHeaderSize);
     bool stopped = false;
     std::vector<uint8_t> buf(4u << 20);
@@ -359,8 +400,8 @@ bool decryptFile(const std::string& src, const std::string& dstPath, std::string
         err = "cannot read the vault file (vault locked?)";
         return false;
     }
-    const std::string tmp = dstPath + ".part";
-    const int out = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    std::string tmp;
+    const int out = filecopy::openUniqueTemp(dstPath, tmp, 0644);  // never another writer's file
     if (out < 0) {
         err = "cannot write " + fs::path(dstPath).filename().string();
         return false;
@@ -391,9 +432,8 @@ bool decryptFile(const std::string& src, const std::string& dstPath, std::string
         err = stopped ? "stopped" : (hasKey() ? "decrypting failed (disk full?)" : "the vault was locked");
         return false;
     }
-    fs::rename(tmp, dstPath, ec);
-    if (ec) {
-        err = ec.message();
+    if (!filecopy::renameNoReplace(tmp, dstPath)) {
+        err = "a file with that name appeared meanwhile";
         fs::remove(tmp, ec);
         return false;
     }
@@ -480,7 +520,7 @@ bool setStoredName(const std::string& path, const std::string& name) {
     const int fd = ::open(path.c_str(), O_RDWR | O_CLOEXEC);
     if (fd < 0) return false;
     RawHeader h;
-    bool ok = readHeader(fd, h, nullptr);
+    bool ok = readHeader(fd, h, key);  // only with the file's own key
     if (ok) {
         std::vector<uint8_t> field(kHeaderSize - 30, 0);  // length + name + zero padding up to the header end
         field[0] = static_cast<uint8_t>(name.size());
@@ -489,6 +529,11 @@ bool setStoredName(const std::string& path, const std::string& name) {
         uint8_t nn[16];
         nameNonce(h.nonce, nn);
         ctrXor(key, nn, 0, field.data() + 2, name.size());
+        {
+            std::vector<uint8_t> hdr(kHeaderSize, 0);  // the key check sits at the header end
+            writeKeyCheck(key, h.nonce, hdr.data());
+            std::memcpy(field.data() + (kCheckOffset - 30), hdr.data() + kCheckOffset, 16);
+        }
         ok = ::pwrite(fd, field.data(), field.size(), 30) == static_cast<ssize_t>(field.size()) && ::fsync(fd) == 0;
     }
     ::close(fd);

@@ -598,9 +598,15 @@ if [ "$UNINSTALL" -eq 1 ]; then
     # combination. Offer to decrypt it into a normal folder first (only with a terminal to answer in).
     VAULT_KEPT=0
     VAULT_DIR="$HOME/.pixelvr_vault"
-    if [ -x "$INSTALL_DIR/pixelvr" ]; then
-        vinfo=$(timeout 60 "$INSTALL_DIR/pixelvr" --vault-info 2>/dev/null || true)
-        vget() { printf '%s\n' "$vinfo" | sed -n "s/^$1=//p" | head -n 1; }
+    VAULT_KEY="$HOME/.config/pixelvr/vault.key"
+    venc=0
+    vinfo=""
+    # Only a player that knows --vault-info is asked (an older one would start the VR player instead).
+    if [ -x "$INSTALL_DIR/pixelvr" ] && grep -qa -- '--vault-info' "$INSTALL_DIR/pixelvr" 2>/dev/null; then
+        vinfo=$(timeout 120 "$INSTALL_DIR/pixelvr" --vault-info 2>/dev/null || true)
+    fi
+    vget() { printf '%s\n' "$vinfo" | sed -n "s/^$1=//p" | head -n 1; }
+    if [ -n "$(vget location)" ]; then
         vfiles=$(vget files); venc=$(vget encrypted); vbytes=$(vget bytes); vloc=$(vget location); vavail=$(vget available)
         [ -n "$(vget dir)" ] && VAULT_DIR=$(vget dir)
         case "$vfiles" in ''|*[!0-9]*) vfiles=0 ;; esac
@@ -608,18 +614,19 @@ if [ "$UNINSTALL" -eq 1 ]; then
         if [ "$vloc" = "sdcard" ] && [ "$vavail" != "1" ]; then
             warn "Your vault is on an SD card that is not inserted: it stays encrypted there."
             VAULT_KEPT=1
+            venc=1
         elif [ "$vfiles" -gt 0 ]; then
             vgb=$(awk "BEGIN { printf \"%.1f\", ${vbytes:-0} / 1e9 }")
             warn "Your vault holds $vfiles file(s), $vgb GB ($venc encrypted)."
             export_dir="$HOME/PixelVR Vault"
             choice=k
             if has_tty; then
-                printf '  K  keep it encrypted (install the player again later to open it)\n' > /dev/tty
+                printf '  K  keep it (install the player again later to open it)\n' > /dev/tty
                 printf '  D  decrypt it into "%s" now\n' "$export_dir" > /dev/tty
                 printf 'Keep or decrypt? [K/d] ' > /dev/tty
                 read -r choice < /dev/tty || choice=k
             else
-                info "No terminal to ask in: the vault stays encrypted."
+                info "No terminal to ask in: the vault stays as it is."
             fi
             case "$choice" in
                 d|D)
@@ -634,8 +641,19 @@ if [ "$UNINSTALL" -eq 1 ]; then
                 *) VAULT_KEPT=1 ;;
             esac
         fi
-    elif [ -d "$VAULT_DIR" ] && [ -n "$(ls -A "$VAULT_DIR" 2>/dev/null)" ]; then
-        VAULT_KEPT=1
+    else
+        # No answer from the player (old version, not starting): judge by the files themselves.
+        if [ -f "$VAULT_DIR/.vault-on-sdcard" ]; then
+            vcard=$(sed -n '1s/^[^ ]* //p' "$VAULT_DIR/.vault-on-sdcard" 2>/dev/null)
+            [ -n "$vcard" ] && VAULT_DIR="$vcard"
+            VAULT_KEPT=1
+            venc=1
+        elif [ -d "$VAULT_DIR" ] && [ -n "$(ls -A "$VAULT_DIR" 2>/dev/null)" ]; then
+            VAULT_KEPT=1
+            find "$VAULT_DIR" -name '*.pvrv' 2>/dev/null | head -n 1 | grep -q . && venc=1
+        fi
+        [ -f "$VAULT_KEY" ] && VAULT_KEPT=1 && venc=1
+        [ "$VAULT_KEPT" -eq 1 ] && warn "Could not ask the player about the vault: it is kept as it is."
     fi
     # Take the player out of SteamVR's app list (it registers itself on launch).
     if [ -x "$INSTALL_DIR/pixelvr" ]; then
@@ -703,13 +721,16 @@ if [ "$UNINSTALL" -eq 1 ]; then
     fi
     rm -f "$HOME/Desktop/Update Pixel VR Player.desktop"
     printf '\nSettings (%s/.config/pixelvr) and cached thumbnails were kept.\n' "$HOME"
-    if [ "$VAULT_KEPT" -eq 1 ]; then
+    if [ "$VAULT_KEPT" -eq 1 ] && [ "${venc:-0}" -gt 0 ]; then
         printf 'Your vault stays encrypted in %s.\n' "$VAULT_DIR"
-        printf 'Only %s/.config/pixelvr/vault.key and your unlock combination open it again\n' "$HOME"
+        printf 'Only %s and your unlock combination open it again\n' "$VAULT_KEY"
         if [ "$keep_combo" -eq 1 ]; then
             printf '(the combination is written down in %s/logs/session.dat).\n' "$INSTALL_DIR"
         fi
         printf 'Keep ~/.config/pixelvr as long as you want the vault. Thumbnails: rm -rf ~/.cache/pixelvr\n'
+    elif [ "$VAULT_KEPT" -eq 1 ]; then
+        printf 'Your vault folder stays in %s (its files are not encrypted).\n' "$VAULT_DIR"
+        printf 'Delete the rest too with: rm -rf ~/.config/pixelvr ~/.cache/pixelvr\n'
     else
         printf 'Delete them too with: rm -rf ~/.config/pixelvr ~/.cache/pixelvr\n'
     fi

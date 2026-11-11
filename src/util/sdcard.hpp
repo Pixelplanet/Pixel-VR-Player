@@ -42,13 +42,14 @@ struct Mounts {
     std::vector<std::pair<std::string, std::string>> list;  // device, mount point
 };
 
-inline Mounts mounts() {
+// fresh = read /proc/mounts now (a card pulled within the last two seconds).
+inline Mounts mounts(bool fresh = false) {
     static std::mutex mu;
     static Mounts cached;
     static std::chrono::steady_clock::time_point at{};
     std::lock_guard<std::mutex> lk(mu);
     const auto now = std::chrono::steady_clock::now();
-    if (at != std::chrono::steady_clock::time_point{} && now - at < std::chrono::seconds(2)) return cached;
+    if (!fresh && at != std::chrono::steady_clock::time_point{} && now - at < std::chrono::seconds(2)) return cached;
     at = now;
     cached.list.clear();
     std::ifstream in("/proc/mounts");
@@ -77,9 +78,9 @@ inline std::string sdCardMount() {
 }
 
 // The mount point holding `path` (longest match; "/" if nothing else).
-inline std::string mountPointOf(const std::string& path) {
+inline std::string mountPointOf(const std::string& path, bool fresh = false) {
     std::string best = "/";
-    for (const auto& m : sdcard_detail::mounts().list) {
+    for (const auto& m : sdcard_detail::mounts(fresh).list) {
         if (m.second.size() > best.size() && sdcard_detail::under(path, m.second)) best = m.second;
     }
     return best;
@@ -87,9 +88,9 @@ inline std::string mountPointOf(const std::string& path) {
 
 // `path` is on a removable drive (under /run/media) that is no longer mounted: an SD card or USB drive
 // was pulled. Writing there would recreate the folders on the internal storage.
-inline bool removableMissing(const std::string& path) {
+inline bool removableMissing(const std::string& path, bool fresh = false) {
     if (path.rfind("/run/media/", 0) != 0) return false;
-    return mountPointOf(path).rfind("/run/media/", 0) != 0;
+    return mountPointOf(path, fresh).rfind("/run/media/", 0) != 0;
 }
 
 // Free bytes for the user at `path` (0 if unknown).

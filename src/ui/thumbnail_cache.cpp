@@ -585,7 +585,12 @@ void ThumbnailCache::workerLoop() {
 
         std::vector<uint8_t> rgba;
         MediaMeta meta{};
-        const bool ok = extractThumbnailAndMeta(path, rgba, meta);
+        bool ok = extractThumbnailAndMeta(path, rgba, meta);
+        {
+            // Moved into the vault (or deleted) while it was being decoded: nothing public is written.
+            std::error_code gec;
+            if (VaultManager::isPrivatePath(path) || !fs::exists(path, gec)) continue;
+        }
         if (meta.ready) {
             writeMeta(metaFile, meta, path);
             std::lock_guard<std::mutex> lk(mutex_);

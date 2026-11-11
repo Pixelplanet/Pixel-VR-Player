@@ -2987,6 +2987,13 @@ void App::openActionMenu() {
     actionMenu_.selectedOption = 0;
     actionMenu_.options.clear();
     actionMenu_.renameBuffer.clear();
+    pendingActionPath_ = fe ? fe->path : std::string();  // the row the menu is for (the list may change)
+    if (FileOps::instance().relocationPending() && browser_.inVault()) {
+        actionMenu_.title = "Vault";
+        actionMenu_.subtitle = "The vault is being moved: wait until that is done";
+        actionMenu_.options.push_back("Cancel");
+        return;
+    }
 
     const bool inBookmarks = (browser_.currentPath() == "bookmarks://");
     if (inBookmarks) {
@@ -3091,6 +3098,10 @@ std::vector<std::string> App::sidecarPatterns() const {
 void App::startPick(PickState::Kind kind, const Browser::Entry& e) {
 #ifdef PIXELVR_HAVE_FREETYPE
     pick_ = {};
+    if (FileOps::instance().relocationPending()) {
+        showNotice("The vault is being moved: wait until that is done", true);
+        return;
+    }
     if (kind == PickState::Kind::Move) {
         // A playing file (or one inside a folder) keeps its reader open: stop it first.
         for (int i = 0; i < VulkanRenderer::kMaxVideoSlots; ++i) {
@@ -3156,6 +3167,10 @@ void App::startVaultMove() {
         settings_.showStatus("Insert the SD card with your vault first.");
         return;
     }
+    if (vm.migrating()) {
+        settings_.setVaultMoveNotice("Wait until the vault files are encrypted, then move the vault.");
+        return;
+    }
     // Vault films keep their readers open: close them, the files move.
     for (int i = 0; i < VulkanRenderer::kMaxVideoSlots; ++i) {
         if (screens_[i].open && VaultManager::isPrivatePath(screens_[i].path)) closeMedia(i);
@@ -3212,6 +3227,24 @@ std::string App::pickReason() const {
 void App::confirmPick() {
 #ifdef PIXELVR_HAVE_FREETYPE
     if (!picking()) return;
+    if (pick_.kind != PickState::Kind::DownloadDir) {
+        if (FileOps::instance().relocationPending()) {
+            showNotice("The vault is being moved: wait until that is done", true);
+            return;
+        }
+        // Something may have started playing it since the pick began.
+        if (pick_.kind == PickState::Kind::Move) {
+            for (int i = 0; i < VulkanRenderer::kMaxVideoSlots; ++i) {
+                if (!screens_[i].open || screens_[i].path.empty()) continue;
+                bool hit = pathIsUnder(screens_[i].path, pick_.srcPath);
+                for (const std::string& s : pick_.sidecars) hit = hit || screens_[i].path == s;
+                if (hit) {
+                    showNotice("Stop the video first: it is playing", true);
+                    return;
+                }
+            }
+        }
+    }
     const std::string why = pickReason();
     if (!why.empty()) {
         showNotice(why, true);
@@ -3254,13 +3287,19 @@ void App::drainFileOps() {
                 playbackMemory_.forgetUnder(m.from);
                 letterboxDetector_.forgetUnder(m.from);
                 browser_.dropBookmarksUnder(m.from);
+                // The download folder went with it: downloads must not recreate it in plain.
+                const std::string custom = settings_.customDownloadDir();
+                if (!custom.empty() && pathIsUnder(custom, m.from)) {
+                    settings_.setCustomDownloadDir("");
+                    browser_.setDownloadDir(settings_.downloadDir());
+                }
             } else {
                 browser_.retargetBookmarks(m.from, m.to);
             }
         }
         if (!res.moved.empty()) playbackMemory_.save();
         const bool hide = res.privateText && !VaultManager::instance().isUnlocked();
-        showNotice(hide ? (res.ok ? "Done" : "Stopped: the vault is locked") : res.message, !res.ok, res.privateText);
+        showNotice(hide ? (res.ok ? "Done" : "Stopped") : res.message, !res.ok && !hide, res.privateText);
         if (res.relocated) {
             renderer_.clearCardThumbnails();
             vaultCardSeen_ = VaultManager::instance().location() == VaultManager::Location::SdCard;
@@ -3269,8 +3308,8 @@ void App::drainFileOps() {
                 if (browser_.isOpen() && pathIsUnder(browser_.currentLocation(), m.from)) browser_.openVault();
             }
             settings_.refresh();
-        } else if (!res.ok && res.relocation) {
-            settings_.showStatus(res.message);
+        } else if (!res.ok && res.relocation && VaultManager::instance().isUnlocked()) {
+            settings_.setVaultMoveNotice(res.message);
         }
     }
     if (any && browser_.isOpen()) browser_.rescan();  // moved files appear / disappear
@@ -3282,6 +3321,8 @@ void App::updateBrowserFooter(std::chrono::steady_clock::time_point now) {
     VulkanRenderer::BrowserPickBar bar;
     std::string text;
     bool warn = false;
+    // Choosing a folder only lives in the open file browser (tabs, a playing video, the menu end it).
+    if (picking() && (!browser_.isOpen() || downloadsWindow_ || settings_.isOpen())) cancelPick(false);
     if (picking()) {
         bar.active = true;
         const bool copy = pick_.kind == PickState::Kind::Copy;
@@ -3296,16 +3337,16 @@ void App::updateBrowserFooter(std::chrono::steady_clock::time_point now) {
         }
         const std::string why = pickReason();
         bar.canConfirm = why.empty();
-        bar.hint = "Trigger: Open folder  |  Y / B: Cancel";
+        bar.hint = "Trigger: Open folder  |  B: Up  |  Y: Cancel";
         if (!why.empty() && why != "Opening the folder...") {
             text = why;
             warn = true;
         }
     }
     const FileOps::Status st = FileOps::instance().status();
-    if (text.empty() && st.busy) {
-        const bool locked = !VaultManager::instance().isUnlocked();
-        const std::string what = (st.privateLabel && locked) ? std::string("vault files") : st.label;
+    const bool lockedNow = !VaultManager::instance().isUnlocked();
+    if (text.empty() && st.busy && !(lockedNow && (st.privateLabel || st.relocating))) {  // a lock says nothing
+        const std::string what = st.label;
         const int pct = st.total > 0 ? static_cast<int>(100.0 * static_cast<double>(st.done) / static_cast<double>(st.total)) : 0;
         text = std::string(st.relocating ? "Moving the vault" : (st.copy ? "Copying " : "Moving ") + what) +
                "...  " + std::to_string(std::min(pct, 100)) + " %" +
@@ -4182,10 +4223,14 @@ int App::run() {
                     const bool here = vm.available();
                     if (here) {
                         vaultCardSeen_ = true;
-                        if (browser_.currentLocation() == Browser::kVaultMissing) browser_.openVault();
+                        if (browser_.currentLocation() == Browser::kVaultMissing) {
+                            const bool wasOpen = browser_.isOpen();
+                            browser_.openVault();
+                            if (!wasOpen) browser_.setOpen(false);
+                        }
                     } else if (vaultCardSeen_) {
                         performVaultLock();
-                        showNotice("SD card removed: the vault was locked", true);
+                        showNotice("SD card removed", true);
                     }
                 }
             }
@@ -5203,7 +5248,9 @@ int App::run() {
                                         actionMenu_.visible = false;
                                     } else if (opt == "Move to Vault") {
                                         actionMenu_.visible = false;
-                                        if (fe && browser_.isFileActionTarget(*fe)) {
+                                        if (fe && fe->path != pendingActionPath_) {
+                                            showNotice("The folder changed meanwhile: nothing was moved", true);
+                                        } else if (fe && browser_.isFileActionTarget(*fe)) {
                                             startPick(PickState::Kind::Move, *fe);  // checks playing files, collects sidecars
                                             if (picking()) {
                                                 FileOps::Request r;
@@ -5241,7 +5288,9 @@ int App::run() {
                                         actionMenu_.selectedOption = 0;
                                     } else if (opt == "Move" || opt == "Copy") {
                                         actionMenu_.visible = false;
-                                        if (fe && browser_.isFileActionTarget(*fe)) {
+                                        if (fe && fe->path != pendingActionPath_) {
+                                            showNotice("The folder changed meanwhile: choose it again", true);
+                                        } else if (fe && browser_.isFileActionTarget(*fe)) {
                                             startPick(opt == "Move" ? PickState::Kind::Move : PickState::Kind::Copy, *fe);
                                             if (picking()) xr_.triggerHaptic(1, 0.040f, 0.0f, 0.6f);
                                         }
@@ -5610,6 +5659,8 @@ int App::run() {
                         renderer_.setBrowserFirst(0);
                         renderer_.scrollBrowser(0);
                         xr_.triggerHaptic(1, 0.025f, 0.0f, 0.5f);
+                    } else if (pbHover == 6 && FileOps::instance().relocationPending() && browser_.inVault()) {
+                        showNotice("The vault is being moved: wait until that is done", true);
                     } else if (pbHover == 6) {
                         openKeyboard("New Folder", "", false, in, [this](const std::string& text) {
                             std::string name = text;

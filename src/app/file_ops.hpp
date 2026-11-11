@@ -33,6 +33,8 @@ public:
         bool relocateVault = false;
         bool toSdCard = false;
         std::string cardId;
+        // Set by queue(): the vault may move to / from the SD card before this runs.
+        bool destWasVault = false, srcWasVault = false;
     };
 
     struct Moved {
@@ -68,6 +70,8 @@ public:
     Status status() const;
     bool takeResult(Result& out);  // frame thread
     bool busy() const { return busy_.load(); }
+    // A vault move (to / from the SD card) is waiting or running: nothing else may touch the vault.
+    bool relocationPending() const;
 
     // Why `destDir` can't take `src` ("" = it can). Frame thread, cheap (a few stat calls).
     static std::string checkTarget(Mode mode, const std::string& src, bool srcIsDir, const std::string& destDir);
@@ -91,6 +95,7 @@ private:
     std::deque<Request> jobs_;
     std::deque<Result> results_;
     Status status_;
+    int relocPending_ = 0;
     std::atomic<bool> busy_{false};
     std::atomic<bool> stop_{false};
     std::thread worker_;

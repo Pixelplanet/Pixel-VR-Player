@@ -249,6 +249,7 @@ VaultManager::ComboResult VaultManager::feedInput(int button, bool gripFullPress
 }
 
 VaultManager::~VaultManager() {
+    migStop_ = true;
     vaultcrypto::clearKey();
     if (migThread_.joinable()) migThread_.join();
 }
@@ -274,6 +275,18 @@ void VaultManager::startEncryption() {
     const std::string keyFile = keyFilePath();
     std::string err;
     std::error_code ec;
+    if (!fs::exists(keyFile, ec) && available()) {
+        // vault.key is gone but encrypted files are there: a NEW key would "decrypt" them into garbage.
+        for (auto it = fs::recursive_directory_iterator(vaultDir(), fs::directory_options::skip_permission_denied, ec);
+             !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+            if (vaultcrypto::hasExtension(it->path().string())) {
+                PIXELVR_LOG_ERROR("Vault key: %s is missing but the vault holds encrypted files; not creating a new key",
+                                  keyFile.c_str());
+                return;
+            }
+        }
+        ec.clear();
+    }
     const bool ok = fs::exists(keyFile, ec) ? vaultcrypto::unlockKeyFile(keyFile, comboString(), err)
                                             : vaultcrypto::createKeyFile(keyFile, comboString(), err);
     if (!ok) {
@@ -307,12 +320,13 @@ void VaultManager::startEncryption() {
         }
         migTotal_ = static_cast<int>(plain.size());
         if (!plain.empty()) PIXELVR_LOG_INFO("Vault: encrypting %zu files", plain.size());
+        auto stop = [this] { return migStop_.load() || !vaultcrypto::hasKey(); };
         for (const fs::path& p : plain) {
-            if (!vaultcrypto::hasKey()) break;  // locked meanwhile: continue next time
+            if (stop()) break;  // locked meanwhile: continue next time
             std::string out, err2;
             std::error_code e;
             const uint64_t size = fs::file_size(p, e);
-            if (vaultcrypto::encryptFile(p.string(), p.parent_path().string(), out, err2)) {
+            if (vaultcrypto::encryptFile(p.string(), p.parent_path().string(), out, err2, {}, {}, stop)) {
                 vaultcrypto::Reader r;
                 if (r.open(out) && r.size() == size) {
                     fs::remove(p, e);
@@ -440,12 +454,16 @@ bool VaultManager::feedRecordButton(int button) {
         // The vault key is protected by the combination: re-protect it with the new one first.
         const std::string oldCombo = comboString();
         const std::vector<int> oldSeq = comboSequence_;
-        comboSequence_ = recordingBuffer_;
+        {
+            std::lock_guard<std::mutex> cfg(cfgMu_);
+            comboSequence_ = recordingBuffer_;
+        }
         const std::string keyFile = keyFilePath();
         std::error_code kec;
         std::string err;
         if (fs::exists(keyFile, kec) && !vaultcrypto::rewrapKeyFile(keyFile, oldCombo, comboString(), err)) {
             PIXELVR_LOG_ERROR("Vault key: %s - keeping the old combination", err.c_str());
+            std::lock_guard<std::mutex> cfg(cfgMu_);
             comboSequence_ = oldSeq;
         }
         isRecordingCombo_ = false;
@@ -523,12 +541,15 @@ void VaultManager::loadConfig() {
 
 void VaultManager::saveConfig() const {
     const std::string path = getVaultConfigPath();
+    std::lock_guard<std::mutex> cfg(cfgMu_);
     try {
         fs::path p(path);
         if (p.has_parent_path()) {
             fs::create_directories(p.parent_path());
         }
-        std::ofstream file(path);
+        const std::string tmp = path + ".tmp";
+        {
+        std::ofstream file(tmp, std::ios::trunc);
         if (file.is_open()) {
             file << "auto_lock_headset_off=" << (autoLockHeadsetOff_ ? 1 : 0) << "\n";
             file << "auto_lock_timeout_sec=" << autoLockTimeoutSec_ << "\n";
@@ -543,6 +564,9 @@ void VaultManager::saveConfig() const {
             if (!cardDir_.empty()) file << "vault_card_dir=" << cardDir_ << "\n";
             if (!cardId_.empty()) file << "vault_card_id=" << cardId_ << "\n";
         }
+        }
+        std::error_code rec;
+        fs::rename(tmp, path, rec);
     } catch (const std::exception& e) {
         PIXELVR_LOG_WARN("Could not save vault settings: %s", e.what());
     }
@@ -561,11 +585,12 @@ struct VaultFile {
     bool encrypted = false;
 };
 
-std::vector<VaultFile> listVaultFiles(const std::string& root) {
+std::vector<VaultFile> listVaultFiles(const std::string& root, bool* incomplete = nullptr) {
     std::vector<VaultFile> out;
     std::error_code ec;
-    for (auto it = fs::recursive_directory_iterator(root, ec); !ec && it != fs::recursive_directory_iterator();
-         it.increment(ec)) {
+    auto it = fs::recursive_directory_iterator(root, fs::directory_options::skip_permission_denied, ec);
+    if (ec && incomplete) *incomplete = true;
+    for (; !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
         const std::string n = it->path().filename().string();
         if (!n.empty() && n[0] == '.') {  // markers, an old .thumbs folder
             if (it->is_directory(ec)) it.disable_recursion_pending();
@@ -580,7 +605,23 @@ std::vector<VaultFile> listVaultFiles(const std::string& root) {
         f.encrypted = vaultcrypto::hasExtension(n);
         out.push_back(std::move(f));
     }
+    if (ec && incomplete) *incomplete = true;
     return out;
+}
+
+// Encrypted files or other real files still in the vault (not markers).
+int leftInVault(const std::string& root) {
+    int n = 0;
+    std::error_code ec;
+    for (auto it = fs::recursive_directory_iterator(root, fs::directory_options::skip_permission_denied, ec);
+         !ec && it != fs::recursive_directory_iterator(); it.increment(ec)) {
+        const std::string name = it->path().filename().string();
+        if (it->is_regular_file(ec) && name != ".pixelvr_vault_id" && name != ".vault-on-sdcard" &&
+            it->path().parent_path().filename() != ".thumbs") {
+            ++n;
+        }
+    }
+    return n;
 }
 
 }  // namespace
@@ -615,7 +656,8 @@ int VaultManager::runCli(const std::string& mode, const std::string& dest) {
         std::fprintf(stderr, card ? "The vault is on an SD card that is not inserted.\n" : "There is no vault.\n");
         return 3;
     }
-    const std::vector<VaultFile> files = listVaultFiles(dir);
+    bool incomplete = false;
+    const std::vector<VaultFile> files = listVaultFiles(dir, &incomplete);
     const bool anyEncrypted = std::any_of(files.begin(), files.end(), [](const VaultFile& f) { return f.encrypted; });
     if (anyEncrypted) {
         std::string err;
@@ -646,7 +688,15 @@ int VaultManager::runCli(const std::string& mode, const std::string& dest) {
         const fs::path outDir = fs::path(dest) / f.rel;
         fs::create_directories(outDir, ec);
         std::string name = f.encrypted ? vaultcrypto::storedName(f.path.string()) : f.path.filename().string();
-        if (name.empty() || name.find('/') != std::string::npos) name = f.path.filename().string() + ".bin";
+        if (f.encrypted && name.empty()) {  // another key (or damaged): never delete it
+            ++failed;
+            std::fprintf(stderr, "  could not open %s with this key (kept in the vault)\n", f.path.filename().string().c_str());
+            continue;
+        }
+        for (char& c : name) {
+            if (c == '/') c = '_';
+        }
+        if (name.empty() || vaultcrypto::hasExtension(name)) name += ".bin";
         const std::string target = (outDir / filecopy::freeName(outDir.string(), name, false)).string();
         std::string err;
         bool ok = false;
@@ -682,8 +732,10 @@ int VaultManager::runCli(const std::string& mode, const std::string& dest) {
     for (const fs::path& d : dirs) {
         if (fs::is_empty(d, ec)) fs::remove(d, ec);
     }
-    std::printf("exported=%d\nfailed=%d\n", done, failed);
-    return failed == 0 ? 0 : 1;
+    const int left = leftInVault(dir);
+    std::printf("exported=%d\nfailed=%d\nleft=%d\n", done, failed, left);
+    if (incomplete) std::fprintf(stderr, "Some vault folders could not be read: they stay in the vault.\n");
+    return (failed == 0 && left == 0 && !incomplete) ? 0 : 1;
 }
 
 } // namespace pixelvr

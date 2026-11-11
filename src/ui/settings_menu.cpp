@@ -623,28 +623,32 @@ void SettingsMenu::refresh() {
             // SD2: the vault on the SD card (key, combination and thumbnails stay on the headset).
             const bool onCard = vm.location() == VaultManager::Location::SdCard;
             if (onCard || !sdCardMount().empty()) {
-                const bool armed = std::chrono::steady_clock::now() < vaultMoveArmedUntil_;
+                // The question goes away on the next refresh after a few seconds.
+                if (vaultMoveArmed_ && std::chrono::steady_clock::now() >= vaultMoveArmedUntil_) vaultMoveArmed_ = false;
+                const bool armed = vaultMoveArmed_;
                 const std::string value = !vaultMoveStatus_.empty() ? "Moving..."
                     : armed ? "Click again to move it"
                     : onCard ? "Move to Headset" : "Move to SD card";
                 binding(onCard ? "Vault Location: SD card" : "Vault Location: Headset", value, Action::MoveVault);
             }
         }
+        // One status line: the most important thing wins.
+        std::string rec = vm.recoveryFile();
+        if (const char* home = std::getenv("HOME"); home != nullptr && *home && rec.rfind(home, 0) == 0) {
+            rec = "~" + rec.substr(std::strlen(home));
+        }
         if (!vaultMoveStatus_.empty()) {
             hint(vaultMoveStatus_);
+        } else if (!vaultMoveNotice_.empty() && std::chrono::steady_clock::now() < vaultMoveNoticeUntil_) {
+            hint(vaultMoveNotice_);
         } else if (vm.location() == VaultManager::Location::SdCard && !vm.available()) {
             hint("The vault is on the SD card: insert it to see your files.");
         } else if (vm.migrating() && vm.migrationTotal() > 0) {
             hint("Encrypting vault files in the background: " + std::to_string(vm.migrationDone()) + " / " +
                  std::to_string(vm.migrationTotal()) + ". The vault stays usable meanwhile.");
         } else {
-            hint("Vault files are encrypted (AES-256) and their names hidden.");
+            hint("Files are encrypted (AES-256). Forgot the combination? It is written down in " + rec + ".");
         }
-        std::string rec = vm.recoveryFile();
-        if (const char* home = std::getenv("HOME"); home != nullptr && *home && rec.rfind(home, 0) == 0) {
-            rec = "~" + rec.substr(std::strlen(home));
-        }
-        hint("Forgot the combination? It is written down in " + rec + ".");
     } else if (showingButtons()) {
         // Read-only: one row per action with the buttons SteamVR binds to it.
         // Every card is a binding; the header pager (< n / m >) turns pages.
@@ -857,13 +861,14 @@ SettingsMenu::Action SettingsMenu::activate() {
             refresh();
             break;
         case Action::MoveVault:
-            // A second click within 5 s starts it: moving a whole vault should not happen by accident.
-            if (std::chrono::steady_clock::now() >= vaultMoveArmedUntil_) {
-                vaultMoveArmedUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            // A second click while the row asks for it starts it: a whole vault should not move by accident.
+            if (!vaultMoveArmed_) {
+                vaultMoveArmed_ = true;
+                vaultMoveArmedUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
                 refresh();
                 return Action::None;
             }
-            vaultMoveArmedUntil_ = {};
+            vaultMoveArmed_ = false;
             refresh();
             break;
         case Action::ToggleSwapEyes:

@@ -149,6 +149,8 @@ private:
     std::atomic<bool> migrating_{false};
     std::atomic<int> migDone_{0}, migTotal_{0};
     std::thread migThread_;
+    std::atomic<bool> migStop_{false};  // exit: the encryption pass stops inside the current file
+    mutable std::mutex cfgMu_;          // vault.conf writes (frame thread and the FileOps worker)
 };
 
 } // namespace pixelvr
