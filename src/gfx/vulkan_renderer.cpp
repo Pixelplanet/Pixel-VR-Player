@@ -387,15 +387,20 @@ constexpr float kHeaderY = 0.455f;
 // File browser header, two slim rows: the folder path on top (full width, each
 // level clickable), the buttons below, left-aligned: 5 = sort order,
 // 2 = view mode, 3 = bookmark, 6 = new folder (last: hidden on network shares).
-constexpr float kBrowserPathY = 0.470f;
-constexpr float kBrowserBtnY = 0.410f;
-constexpr float kBrowserBtnHH = 0.022f;
+constexpr float kBrowserPathY = 0.472f;
+constexpr float kBrowserBtnY = 0.418f;
+constexpr float kBrowserBtnHH = 0.021f;
+constexpr float kBrowserDividerY = 0.385f;  // under the button row
+constexpr float kBrowserContentTop = 0.372f;
+// Captions in front of Sort and View ("Sort by", "View").
+constexpr float kBrowserSortCaptionX = -0.455f;
+constexpr float kBrowserViewCaptionX = -0.190f;
 inline UiRect headerButton(int id) {
     switch (id) {
-        case 5: return {-0.380f, kBrowserBtnY, 0.080f, kBrowserBtnHH};
-        case 2: return {-0.205f, kBrowserBtnY, 0.080f, kBrowserBtnHH};
-        case 3: return {-0.010f, kBrowserBtnY, 0.100f, kBrowserBtnHH};
-        case 6: return {0.200f, kBrowserBtnY, 0.095f, kBrowserBtnHH};
+        case 5: return {-0.290f, kBrowserBtnY, 0.075f, kBrowserBtnHH};
+        case 2: return {-0.055f, kBrowserBtnY, 0.075f, kBrowserBtnHH};
+        case 3: return {0.140f, kBrowserBtnY, 0.100f, kBrowserBtnHH};
+        case 6: return {0.355f, kBrowserBtnY, 0.095f, kBrowserBtnHH};
         default: return {0.0f, -10.0f, 0.0f, 0.0f};  // removed buttons (pager, Up)
     }
 }
@@ -425,32 +430,35 @@ inline int cardColumns(VulkanRenderer::BrowserViewMode m) {
 inline CardLayout browserCard(VulkanRenderer::BrowserViewMode mode, int slot) {
     CardLayout lay;
     if (mode == VulkanRenderer::BrowserViewMode::BigCards) {
-        const float colX[3] = {-0.25f, 0.20f, 0.65f};
-        const float rowY[2] = {0.16f, -0.24f};
+        // 3 x 2 between the header and the status line, 1.6 cm gaps.
+        const float colX[3] = {-0.242f, 0.200f, 0.642f};
+        const float rowY[2] = {kBrowserContentTop - 0.194f, kBrowserContentTop - 0.194f * 3.0f - 0.016f};
         lay.cx = colX[slot % 3];
         lay.cy = rowY[(slot / 3) % 2];
-        lay.cardHalfW = 0.205f;
-        lay.cardHalfH = 0.180f;
-        lay.thumbCx = lay.cx;
-        lay.thumbCy = lay.cy + 0.056f;
+        lay.cardHalfW = 0.213f;
+        lay.cardHalfH = 0.194f;
         lay.thumbHalfW = lay.cardHalfW - 0.015f;
-        lay.thumbHalfH = 0.104f;
+        lay.thumbHalfH = 0.114f;
+        lay.thumbCx = lay.cx;
+        lay.thumbCy = lay.cy + lay.cardHalfH - 0.015f - lay.thumbHalfH;
     } else if (mode == VulkanRenderer::BrowserViewMode::MiniCards) {
-        const float colX[4] = {-0.285f, 0.045f, 0.375f, 0.705f};
-        const float rowY[3] = {0.20f, -0.06f, -0.32f};
+        // 4 x 3 between the header and the status line, 1.4 cm gaps.
+        const float colX[4] = {-0.2965f, 0.0345f, 0.3655f, 0.6965f};
+        const float rowY[3] = {kBrowserContentTop - 0.1298f, kBrowserContentTop - 0.1298f * 3.0f - 0.014f,
+                               kBrowserContentTop - 0.1298f * 5.0f - 0.028f};
         lay.cx = colX[slot % 4];
         lay.cy = rowY[(slot / 4) % 3];
-        lay.cardHalfW = 0.150f;
-        lay.cardHalfH = 0.115f;
-        lay.thumbCx = lay.cx;
-        lay.thumbCy = lay.cy + 0.030f;
+        lay.cardHalfW = 0.1585f;
+        lay.cardHalfH = 0.1298f;
         lay.thumbHalfW = lay.cardHalfW - 0.010f;
-        lay.thumbHalfH = 0.075f;
+        lay.thumbHalfH = 0.085f;
+        lay.thumbCx = lay.cx;
+        lay.thumbCy = lay.cy + lay.cardHalfH - 0.010f - lay.thumbHalfH;
     } else {  // CompactList (1 col x 8 rows)
         lay.cx = 0.20f;
-        lay.cy = 0.300f - 0.090f * static_cast<float>(slot % 8);
+        lay.cy = 0.318f - 0.094f * static_cast<float>(slot % 8);
         lay.cardHalfW = 0.65f;
-        lay.cardHalfH = 0.038f;
+        lay.cardHalfH = 0.040f;
         lay.thumbCx = -0.385f;
         lay.thumbCy = lay.cy;
         lay.thumbHalfW = 0.050f;
@@ -6691,7 +6699,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                       UiShape::RoundedBox, kGlassDivider, 1.0f);
 
         // Top header horizontal separator in content area
-        drawUiElement(vpPanel, kContentCx, 0.39f, 0.66f, 0.0012f,
+        drawUiElement(vpPanel, kContentCx, browserVisible_ ? hub::kBrowserDividerY : 0.39f, 0.66f, 0.0012f,
                       UiShape::RoundedBox, kGlassDivider, 1.0f);
 
         // Brand emblem in top-left of rail
@@ -7156,9 +7164,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             // Right-edge vertical scrollbar
             if (total > perPage) {
                 const float trackCx = 0.880f;
-                const float trackCy = -0.040f;
+                const float trackCy = -0.030f;
                 const float trackHalfW = 0.0035f;
-                const float trackHalfH = 0.350f;
+                const float trackHalfH = 0.400f;
                 drawUiElement(vpPanel, trackCx, trackCy, trackHalfW, trackHalfH,
                               UiShape::RoundedBox, glassWellT.data(), 1.0f);
 
@@ -7221,6 +7229,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
 
             // Header button labels (icons sit at the left edge of each pill)
+            drawFit(hub::kBrowserSortCaptionX, hub::kBrowserBtnY, 0.085f, scSub * 0.90f, dimCol, "Sort by");
+            drawFit(hub::kBrowserViewCaptionX, hub::kBrowserBtnY, 0.055f, scSub * 0.90f, dimCol, "View");
             const char* vModeLabels[3] = {"Large", "Grid", "List"};
             const UiRect viewR = hub::headerButton(2);
             drawFitCentered(viewR.cx + 0.014f, viewR.cy, viewR.hw * 2.0f - 0.05f, scSub * 0.90f,
@@ -7239,18 +7249,18 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
 
             if (browserViewMode_ == BrowserViewMode::CompactList) {
-                drawFit(-0.315f, 0.360f, listCols.nameMaxW, scBadge * 0.95f, dimCol, "NAME");
+                drawFit(-0.315f, 0.364f, listCols.nameMaxW, scBadge * 0.95f, dimCol, "NAME");
                 if (listShowFormat_) {
-                    drawFitCentered(listCols.fmtCx, 0.360f, 0.11f, scBadge * 0.95f, dimCol, "FORMAT");
+                    drawFitCentered(listCols.fmtCx, 0.364f, 0.11f, scBadge * 0.95f, dimCol, "FORMAT");
                 }
                 if (listShowRes_) {
-                    drawFitCentered(listCols.resCx, 0.360f, 0.15f, scBadge * 0.95f, dimCol, "RESOLUTION");
+                    drawFitCentered(listCols.resCx, 0.364f, 0.15f, scBadge * 0.95f, dimCol, "RESOLUTION");
                 }
                 if (listShowSize_) {
-                    drawFitCentered(listCols.sizeCx, 0.360f, 0.11f, scBadge * 0.95f, dimCol, "SIZE");
+                    drawFitCentered(listCols.sizeCx, 0.364f, 0.11f, scBadge * 0.95f, dimCol, "SIZE");
                 }
                 if (listShowDuration_) {
-                    drawFitCentered(listCols.durCx, 0.360f, 0.11f, scBadge * 0.95f, dimCol, "DURATION");
+                    drawFitCentered(listCols.durCx, 0.364f, 0.11f, scBadge * 0.95f, dimCol, "DURATION");
                 }
             }
 
@@ -7268,8 +7278,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 if (browserViewMode_ == BrowserViewMode::BigCards) {
                     const float textLeft = lay.cx - lay.cardHalfW + 0.016f;
                     const float maxTextW = lay.cardHalfW * 2.0f - 0.032f;
-                    drawFit(textLeft, lay.cy - 0.084f, maxTextW, scSub, themeTextCol, item.name);
-                    drawFit(textLeft, lay.cy - 0.136f, maxTextW, scDetail, slateCol, cardDet);
+                    const float bottom = lay.cy - lay.cardHalfH;
+                    drawFit(textLeft, bottom + 0.096f, maxTextW, scSub, themeTextCol, item.name);
+                    drawFit(textLeft, bottom + 0.044f, maxTextW, scDetail, slateCol, cardDet);
                     drawFitCentered(lay.cx - lay.thumbHalfW + 0.062f, lay.thumbCy + lay.thumbHalfH - 0.024f,
                                     0.104f, scBadge, themeTextCol, bTag);
                     if (!item.durationTag.empty()) {
@@ -7279,8 +7290,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 } else if (browserViewMode_ == BrowserViewMode::MiniCards) {
                     const float textLeft = lay.cx - lay.cardHalfW + 0.012f;
                     const float maxTextW = lay.cardHalfW * 2.0f - 0.024f;
-                    drawFit(textLeft, lay.cy - 0.064f, maxTextW, scSub * 0.88f, themeTextCol, item.name);
-                    drawFit(textLeft, lay.cy - 0.095f, maxTextW, scDetail * 0.88f, slateCol, cardDet);
+                    const float bottom = lay.cy - lay.cardHalfH;
+                    drawFit(textLeft, bottom + 0.053f, maxTextW, scSub * 0.88f, themeTextCol, item.name);
+                    drawFit(textLeft, bottom + 0.021f, maxTextW, scDetail * 0.88f, slateCol, cardDet);
                     drawFitCentered(lay.cx - lay.thumbHalfW + 0.046f, lay.thumbCy + lay.thumbHalfH - 0.018f,
                                     0.080f, scBadge * 0.88f, themeTextCol, bTag);
                     if (!item.durationTag.empty()) {
