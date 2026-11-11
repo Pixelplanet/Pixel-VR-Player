@@ -3873,6 +3873,16 @@ int App::run() {
             renderer_.setBrowserQuickPath(browser_.isCurrentBookmarked());
             renderer_.setBrowserCanCreateFolder(browser_.canCreateFolder());
             {
+                // Vault page: keep the encryption progress current.
+                static int sMigShown = -2;
+                const VaultManager& vm = VaultManager::instance();
+                const int mig = vm.migrating() ? vm.migrationDone() : -1;
+                if (mig != sMigShown) {
+                    sMigShown = mig;
+                    if (settings_.section() == 4) settings_.refresh();
+                }
+            }
+            {
                 static std::string sCrumbLoc;
                 if (browser_.currentLocation() != sCrumbLoc) {  // path levels only change with the folder
                     sCrumbLoc = browser_.currentLocation();

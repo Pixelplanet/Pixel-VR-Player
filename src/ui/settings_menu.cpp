@@ -12,6 +12,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <sstream>
@@ -603,6 +604,19 @@ void SettingsMenu::refresh() {
             comboLabel = VaultManager::instance().comboString();
         }
         binding("Unlock Combo Sequence", comboLabel, Action::RecordVaultCombo);
+
+        VaultManager& vm = VaultManager::instance();
+        if (vm.migrating()) {
+            hint("Encrypting vault files in the background: " + std::to_string(vm.migrationDone()) + " / " +
+                 std::to_string(vm.migrationTotal()) + ". The vault stays usable meanwhile.");
+        } else {
+            hint("Vault files are encrypted (AES-256) and their names hidden.");
+        }
+        std::string rec = vm.recoveryFile();
+        if (const char* home = std::getenv("HOME"); home != nullptr && *home && rec.rfind(home, 0) == 0) {
+            rec = "~" + rec.substr(std::strlen(home));
+        }
+        hint("Forgot the combination? It is written down in " + rec + ".");
     } else if (showingButtons()) {
         // Read-only: one row per action with the buttons SteamVR binds to it.
         // Every card is a binding; the header pager (< n / m >) turns pages.
