@@ -24,7 +24,8 @@ set -eu
 # desktop icons point users there). Run from a file we re-run ourselves through
 # tee; when piped from curl the message helpers below write the log instead.
 LOG_FILE="${PIXELVR_INSTALL_DIR:-$HOME/PixelVRPlayer}/logs/install.log"
-mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
+# (not for the detached last step of an uninstall: the folder is gone by then)
+[ -n "${PIXELVR_FINISH_STEAM:-}" ] || mkdir -p "$(dirname "$LOG_FILE")" 2>/dev/null || true
 # Old logs from the home folder: appended to this one (an older version may have written there again).
 for old in "$HOME/pixelvr-install.log" "$HOME/.local/state/pixelvr/install.log"; do
     if [ -f "$old" ]; then cat "$old" >> "$LOG_FILE" 2>/dev/null && rm -f "$old" 2>/dev/null || true; fi
@@ -52,6 +53,7 @@ VERSION=""
 DO_STEAM=1
 RESTART_STEAM=0
 UNINSTALL=0
+FINISH_STEAM=0
 DO_UPDATE=0
 FORCE=0
 
@@ -114,6 +116,7 @@ while [ $# -gt 0 ]; do
         --no-steam) DO_STEAM=0 ;;
         --restart-steam) RESTART_STEAM=1 ;;
         --uninstall) UNINSTALL=1 ;;
+        --finish-steam-uninstall) FINISH_STEAM=1 ;;  # internal: the detached last step of --uninstall
         --force) FORCE=1 ;;
         -h|--help) usage; exit 0 ;;
         *) die "unknown option: $1 (try --help)" ;;
@@ -592,8 +595,62 @@ unregister_steam_shortcut() {
 # ---------------------------------------------------------------------------
 # Uninstall
 # ---------------------------------------------------------------------------
+# Steam rewrites shortcuts.vdf from memory, so the entry can only be removed
+# while it is closed (a Gaming Mode session starts it again within seconds).
+remove_shortcut_with_steam_closed() {
+    steam_was_running=0
+    if steam_running; then
+        steam_was_running=1
+        info "Closing Steam to remove the shortcut..."
+        steam_session_env
+        steam -shutdown >/dev/null 2>&1 || true
+        waited=0
+        while steam_running && [ "$waited" -lt 150 ]; do
+            sleep 0.2
+            waited=$((waited + 1))
+        done
+    fi
+    if steam_running; then
+        warn "Steam did not close - delete the shortcut in Steam manually"
+    elif unregister_steam_shortcut; then
+        ok "removed the Steam shortcut"
+    else
+        warn "could not remove the Steam shortcut; delete it in Steam manually"
+    fi
+    if [ "$steam_was_running" -eq 1 ]; then
+        waited=0
+        while ! steam_running && [ "$waited" -lt 10 ]; do
+            sleep 1
+            waited=$((waited + 1))
+        done
+        if ! steam_running && command -v steam >/dev/null 2>&1; then
+            info "Starting Steam again..."
+            nohup steam >/dev/null 2>&1 &
+        fi
+    fi
+}
+
+# The detached last step (see below): nothing but the shortcut, from a copy of this script.
+if [ "$FINISH_STEAM" -eq 1 ]; then
+    trap '' HUP PIPE
+    sleep 4  # the uninstall's last lines stay readable before the window goes
+    remove_shortcut_with_steam_closed >/dev/null 2>&1 || true
+    case "$0" in */pixelvr-uninstall-steam.*) rm -f "$0" ;; esac
+    exit 0
+fi
+
 if [ "$UNINSTALL" -eq 1 ]; then
     info "Removing Pixel VR Player from $INSTALL_DIR"
+    # A copy of this script for the last step (the Steam shortcut, see the end): taken now,
+    # the script itself usually sits in the folder that is removed.
+    fin=""
+    if [ "$DO_STEAM" -eq 1 ] && [ -f "$0" ]; then
+        fin=$(mktemp "${TMPDIR:-/tmp}/pixelvr-uninstall-steam.XXXXXX" 2>/dev/null) || fin=""
+        if [ -n "$fin" ] && ! cp "$0" "$fin" 2>/dev/null; then
+            rm -f "$fin"
+            fin=""
+        fi
+    fi
     # The vault: encrypted files can only be opened with ~/.config/pixelvr/vault.key and the unlock
     # combination. Offer to decrypt it into a normal folder first (only with a terminal to answer in).
     VAULT_KEPT=0
@@ -660,40 +717,6 @@ if [ "$UNINSTALL" -eq 1 ]; then
         timeout 20 "$INSTALL_DIR/pixelvr" --steamvr-unregister 2>/dev/null || true
     fi
     rm -f "$HOME/.config/pixelvr/pixelvr.vrmanifest" "$HOME/.config/pixelvr/vr_manifest_registered"
-    if [ "$DO_STEAM" -eq 1 ]; then
-        # Steam rewrites shortcuts.vdf from memory, so the entry can only be
-        # removed while it is closed (a Gaming Mode session starts it again).
-        steam_was_running=0
-        if steam_running; then
-            steam_was_running=1
-            info "Closing Steam to remove the shortcut..."
-            steam_session_env
-            steam -shutdown >/dev/null 2>&1 || true
-            waited=0
-            while steam_running && [ "$waited" -lt 150 ]; do
-                sleep 0.2
-                waited=$((waited + 1))
-            done
-        fi
-        if steam_running; then
-            warn "Steam did not close - delete the shortcut in Steam manually"
-        elif unregister_steam_shortcut; then
-            ok "removed the Steam shortcut"
-        else
-            warn "could not remove the Steam shortcut; delete it in Steam manually"
-        fi
-        if [ "$steam_was_running" -eq 1 ]; then
-            waited=0
-            while ! steam_running && [ "$waited" -lt 5 ]; do
-                sleep 1
-                waited=$((waited + 1))
-            done
-            if ! steam_running && command -v steam >/dev/null 2>&1; then
-                info "Starting Steam again..."
-                nohup steam >/dev/null 2>&1 &
-            fi
-        fi
-    fi
     keep_scripts=0
     keep_combo=0
     if [ -d "$INSTALL_DIR/Funscripts" ] && [ -n "$(ls -A "$INSTALL_DIR/Funscripts" 2>/dev/null)" ]; then
@@ -733,6 +756,32 @@ if [ "$UNINSTALL" -eq 1 ]; then
         printf 'Delete the rest too with: rm -rf ~/.config/pixelvr ~/.cache/pixelvr\n'
     else
         printf 'Delete them too with: rm -rf ~/.config/pixelvr ~/.cache/pixelvr\n'
+    fi
+    # Last: the Steam shortcut. On the Steam Frame, Desktop Mode runs inside Steam: closing Steam
+    # closes the terminal this runs in, and the script with it. So with Steam running the step is
+    # handed to a detached copy of this script that outlives the window.
+    if [ "$DO_STEAM" -eq 1 ]; then
+        detached=0
+        if steam_running && [ -n "$fin" ]; then
+            if command -v systemd-run >/dev/null 2>&1 &&
+               systemd-run --user --collect --quiet --setenv=PIXELVR_FINISH_STEAM=1 \
+                   --setenv=PIXELVR_INSTALL_LOGGING=1 --setenv=HOME="$HOME" --setenv=PATH="$PATH" \
+                   sh "$fin" --finish-steam-uninstall >/dev/null 2>&1; then
+                detached=1
+            elif command -v setsid >/dev/null 2>&1; then
+                PIXELVR_FINISH_STEAM=1 PIXELVR_INSTALL_LOGGING=1 setsid nohup sh "$fin" --finish-steam-uninstall \
+                    >/dev/null 2>&1 < /dev/null &
+                detached=1
+            fi
+        fi
+        [ "$detached" -eq 1 ] || [ -z "$fin" ] || rm -f "$fin" 2>/dev/null || true
+        if [ "$detached" -eq 1 ]; then
+            printf '\n'
+            info "Steam restarts in a few seconds to take the player out of your library."
+            info "In Desktop Mode this window closes with it. Nothing else is left to do."
+        else
+            remove_shortcut_with_steam_closed
+        fi
     fi
     exit 0
 fi
