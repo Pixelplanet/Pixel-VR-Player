@@ -167,7 +167,7 @@ constexpr float kLabelUnderOut = 0.10f;      // trigger / bumper / grip cards: t
 // ... in these directions (out, up, n): trigger to the stick side and down,
 // bumper to the outer side, back and down, grip to the stick side, back and down.
 constexpr float kLabelUnderTrigger[3] = {-1.0f, 0.0f, -0.5f};
-constexpr float kLabelUnderBumper[3] = {0.75f, -1.0f, -0.6f};
+constexpr float kLabelUnderBumper[3] = {0.9f, 0.45f, -0.5f};  // outward and forward: the bumper is on the front, a way back runs through the body
 constexpr float kLabelUnderGrip[3] = {-1.0f, -1.0f, -0.6f};
 constexpr float kLabelFade = 0.15f;          // seconds in / out
 

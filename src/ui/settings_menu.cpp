@@ -918,7 +918,7 @@ void SettingsMenu::refresh() {
             return b ? gigabytes(b) + " free" : std::string();
         };
         auto line = [&](const std::string& label, bool active, const std::string& free, Action act, int data, bool enabled = true) {
-            Row r{label, active ? "In use" + (free.empty() ? std::string() : "  Â·  " + free) : free, act, enabled};
+            Row r{label, active ? "In use" + (free.empty() ? std::string() : "  ·  " + free) : free, act, enabled};
             r.data = data;
             rows_.push_back(r);
         };
