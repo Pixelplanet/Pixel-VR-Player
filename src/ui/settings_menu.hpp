@@ -1,6 +1,9 @@
 #pragma once
 
+#include <atomic>
 #include <chrono>
+#include <cstdint>
+#include <thread>
 #include <algorithm>
 #include <string>
 #include <utility>
@@ -71,6 +74,9 @@ public:
         CycleUiOpacity,
         ToggleMultiScreen,
         TogglePauseOnRemoval,
+        ToggleSilentScrub,     // stick scrub / skip keeps hidden controls hidden
+        ToggleSilentZoom,      // stick distance / zoom / tilt / pan keeps hidden controls hidden
+        ToggleSilentRecenter,  // Recenter keeps hidden controls hidden
         CycleKeyboardLayout,
         TogglePauseLivestreams,
         TogglePrivateBrowsing,
@@ -133,7 +139,12 @@ public:
     void refresh();
 
     const std::string& title() const { return title_; }
-    const std::string& status() const { return status_; }
+    // The footer line; on a sub-page the default hint says what B does there.
+    const std::string& status() const;
+    // One level up from a sub-page (track lists, Shortcuts, a plugin, Install plugins, Move Vault,
+    // Controller Buttons). False on a top-level page: B then leaves Settings.
+    bool navigateBack();
+    int parentSection() const;  // -1 = top level
     const std::vector<Row>& rows() const { return rows_; }
     int selected() const { return selected_; }
     void setSelected(int s);
@@ -193,7 +204,9 @@ public:
         vaultMoveStatus_ = text;
         if (section_ == 4 || section_ == kVaultMoveSection) refresh();
     }
-    void measureVault();
+    void measureVault();      // starts the walk on a worker (a big vault on an SD card takes a while)
+    void pollVaultMeasure();  // frame thread: refreshes the Move Vault page when the walk is done
+    ~SettingsMenu();
     // Web shortcuts shown as tabs on the hub's rail (in table order).
     // A web shortcut: name + address; on the hub's rail or not; a page only (kiosk) or the
     // full browser. An empty address is asked for on first use (e.g. a Jellyfin server).
@@ -257,6 +270,10 @@ public:
     bool multiScreen() const { return multiScreen_; }
     // Pause all screens (videos and browser pages) when the headset comes off.
     bool pauseOnRemoval() const { return pauseOnRemoval_; }
+    // With the player controls hidden: these inputs act without bringing them back.
+    bool silentScrub() const { return silentScrub_; }
+    bool silentZoom() const { return silentZoom_; }
+    bool silentRecenter() const { return silentRecenter_; }
     // In-app keyboard: 0 = English (QWERTY), 1 = German (QWERTZ).
     int keyboardLayout() const { return keyboardLayout_; }
     int laserSmoothing() const { return laserSmoothing_; }  // 0 Off, 1 Low, 2 Medium, 3 High
@@ -302,6 +319,7 @@ public:
     int selectedVideoStream() const;
     int selectedAudioStream() const;
     void setSelectedAudioStream(int containerIndex);
+    void setSelectedVideoStream(int containerIndex);
     std::string audioLanguage() const;  // ISO code of the preferred language, ""
 
     void loadConfig();
@@ -410,8 +428,12 @@ private:
     std::string vaultMoveStatus_;
     std::string vaultMoveNotice_;
     std::chrono::steady_clock::time_point vaultMoveNoticeUntil_{};
-    uint64_t vaultSizeBytes_ = 0;
-    int vaultFileCount_ = 0;
+    std::atomic<uint64_t> vaultSizeBytes_{0};
+    std::atomic<int> vaultFileCount_{0};
+    std::atomic<bool> vaultMeasuring_{false};  // the folder walk runs on measureThread_
+    std::atomic<bool> vaultMeasureDone_{false};
+    std::atomic<bool> vaultMeasureStop_{false};
+    std::thread measureThread_;
     int railShortcutMask_ = (1 << 0) | (1 << 5);  // kRailShortcuts bits: YouTube + Browser
     int curvatureIdx_ = 0;     // 0=Flat (0%), 1=Gentle (25%), 2=Cinema (50%), 3=Deep (75%), 4=IMAX (100%)
     int uiTextScaleIdx_ = 2;   // 0=90%, 1=105%, 2=120% (default), 3=140%, 4=160%
@@ -424,6 +446,9 @@ private:
     int uiOpacityIdx_ = 1;     // panel style: 0=Solid, 1=Frosted (default), 2=Glass
     bool multiScreen_ = true; // off = classic single-screen player
     bool pauseOnRemoval_ = true;
+    bool silentScrub_ = false;
+    bool silentZoom_ = false;
+    bool silentRecenter_ = false;
     int keyboardLayout_ = 0;
     int laserSmoothing_ = 2;
     int roomIdx_ = 0;

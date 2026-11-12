@@ -139,22 +139,45 @@ SettingsMenu::SettingsMenu() {
     refresh();
 }
 
+SettingsMenu::~SettingsMenu() {
+    vaultMeasureStop_ = true;
+    if (measureThread_.joinable()) measureThread_.join();
+}
+
 void SettingsMenu::measureVault() {
+    vaultMeasureStop_ = true;  // a walk still running is for an older state: start over
+    if (measureThread_.joinable()) measureThread_.join();
+    vaultMeasureStop_ = false;
+    const std::string dir = VaultManager::instance().vaultDir();
     vaultSizeBytes_ = 0;
     vaultFileCount_ = 0;
-    const std::string dir = VaultManager::instance().vaultDir();
     if (dir.empty()) return;
-    std::error_code ec;
-    for (auto it = std::filesystem::recursive_directory_iterator(
-             dir, std::filesystem::directory_options::skip_permission_denied, ec);
-         !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
-        std::error_code ec2;
-        if (!it->is_regular_file(ec2)) continue;
-        const std::string name = it->path().filename().string();
-        if (!name.empty() && name[0] == '.') continue;
-        vaultSizeBytes_ += it->file_size(ec2);
-        ++vaultFileCount_;
-    }
+    vaultMeasuring_ = true;
+    vaultMeasureDone_ = false;
+    measureThread_ = std::thread([this, dir] {
+        uint64_t bytes = 0;
+        int files = 0;
+        std::error_code ec;
+        for (auto it = std::filesystem::recursive_directory_iterator(
+                 dir, std::filesystem::directory_options::skip_permission_denied, ec);
+             !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+            if (vaultMeasureStop_.load()) break;
+            std::error_code ec2;
+            if (!it->is_regular_file(ec2)) continue;
+            const std::string name = it->path().filename().string();
+            if (!name.empty() && name[0] == '.') continue;
+            bytes += it->file_size(ec2);
+            ++files;
+        }
+        vaultSizeBytes_ = bytes;
+        vaultFileCount_ = files;
+        vaultMeasuring_ = false;
+        vaultMeasureDone_ = true;
+    });
+}
+
+void SettingsMenu::pollVaultMeasure() {
+    if (vaultMeasureDone_.exchange(false) && section_ == kVaultMoveSection) refresh();
 }
 
 void SettingsMenu::open() {
@@ -192,7 +215,53 @@ void SettingsMenu::setSelected(int s) {
 }
 
 void SettingsMenu::move(int delta) {
-    setSelected(selected_ + delta);
+    if (!compactPage() || delta == 0) {
+        setSelected(selected_ + delta);
+        return;
+    }
+    // List pages: one row per step, skipping text paragraphs and disabled rows.
+    const int n = static_cast<int>(rows_.size());
+    const int dir = delta > 0 ? 1 : -1;
+    for (int i = selected_ + dir; i >= 0 && i < n; i += dir) {
+        const Row& r = rows_[static_cast<std::size_t>(i)];
+        if (r.enabled && r.kind != Kind::Paragraph) {
+            setSelected(i);
+            return;
+        }
+    }
+}
+
+int SettingsMenu::parentSection() const {
+    if (showingButtons()) return 3;                       // Controller Buttons -> Controls & Input
+    if (section_ == 10 || section_ == 11 || section_ == 12) return 2;  // track lists -> Audio & Video Tracks
+    if (section_ == 21 || section_ == 22) return 1;       // List Columns, Shortcuts -> UI & Appearance
+    if (section_ == 17) return 22;                        // one shortcut -> Shortcuts
+    if (section_ == kPluginSection || section_ == kStoreSection) return kPluginsSection;
+    if (section_ == kStoreItemSection) return storeUpdate_ ? kPluginsSection : kStoreSection;
+    if (section_ == kVaultMoveSection) return 4;
+    return -1;
+}
+
+bool SettingsMenu::navigateBack() {
+    const int p = parentSection();
+    if (p < 0) return false;
+    const int from = section_;
+    if (p == kPluginsSection && plugins_) plugins_->rescan();
+    if (p == kStoreSection) {
+        openPluginStore();  // refreshes the list
+        return true;
+    }
+    section_ = p;
+    selected_ = from == 17 ? shortcutIdx_ : (from == kVaultMoveSection ? 4 : 0);
+    deleteArmedIdx_ = -1;
+    vaultMoveArmed_ = false;
+    refresh();
+    return true;
+}
+
+const std::string& SettingsMenu::status() const {
+    static const std::string kSubStatus = "Point + Trigger: Change Setting  |  B: Back";
+    return (status_ == kDefaultStatus && parentSection() >= 0) ? kSubStatus : status_;
 }
 
 void SettingsMenu::refresh() {
@@ -298,7 +367,7 @@ void SettingsMenu::refresh() {
                   uiOpacityIdx_ % kUiOpacityCount, Action::CycleUiOpacity);
         segmented("UI in 360/180 Videos", {"Fixed", "Follow Gaze"}, uiFollowMode_ % 2,
                   Action::CycleUiFollowMode);
-        segmented("Web Browser Mode", {"Regular", "Incognito"}, privateBrowsing_ ? 1 : 0,
+        segmented("Web Browser Mode (full browser only)", {"Regular", "Incognito"}, privateBrowsing_ ? 1 : 0,
                   Action::TogglePrivateBrowsing);
         {
             // The SD card is offered while one is inserted; the label shows the free space where files go.
@@ -368,6 +437,10 @@ void SettingsMenu::refresh() {
         choice("Rumble Strength", hoverHapticsStrengthStr(), kHoverHapticsStrengthCount,
                hoverHapticsStrengthIdx_ % kHoverHapticsStrengthCount,
                Action::CycleHoverHapticsStrength, hoverHapticsEnabled_);
+        // Hidden controls stay hidden for these (only buttons bring them back).
+        toggle("Scrub / Skip Keeps Controls Hidden", silentScrub_, Action::ToggleSilentScrub);
+        toggle("Zoom / Distance Keeps Controls Hidden", silentZoom_, Action::ToggleSilentZoom);
+        toggle("Recenter Keeps Controls Hidden", silentRecenter_, Action::ToggleSilentRecenter);
     } else if (section_ == kPluginsSection) {
         title_ = "Settings > Plugins";
         const auto& list = pluginList(plugins_);
@@ -592,9 +665,12 @@ void SettingsMenu::refresh() {
             const uint64_t internalFree = freeBytes(vm.internalVaultDir());
             const uint64_t cardFree = card.empty() ? 0 : freeBytes(card);
             const uint64_t destFree = onCard ? internalFree : cardFree;
-            const uint64_t neededBytes = vaultSizeBytes_ + (64ull << 20);
+            const bool measuring = vaultMeasuring_.load();
+            const uint64_t vaultBytes = vaultSizeBytes_.load();
+            const int vaultFiles = vaultFileCount_.load();
+            const uint64_t neededBytes = vaultBytes + (64ull << 20);
             const bool enoughSpace = destFree == 0 || destFree >= neededBytes;
-            const bool canMove = !moving && vm.available() && (onCard || !card.empty()) && !vm.migrating() && enoughSpace;
+            const bool canMove = !moving && !measuring && vm.available() && (onCard || !card.empty()) && !vm.migrating() && enoughSpace;
             title_ = "Settings > Vault & Privacy > Move Vault";
             std::vector<std::pair<std::string, bool>> text;
             auto add = [&](const std::string& t, bool heading) {
@@ -607,8 +683,9 @@ void SettingsMenu::refresh() {
             add("- **Current Location:** " + std::string(onCard ? "SD Card" : "Headset (Internal Storage)"), false);
             add("- **Destination:** " + std::string(onCard ? "Headset (Internal Storage)"
                                                            : (card.empty() ? "SD Card (not inserted)" : "SD Card (" + card + ")")), false);
-            add("- **Vault Size:** " + fmtBytes(vaultSizeBytes_) + " (" + std::to_string(vaultFileCount_) +
-                    (vaultFileCount_ == 1 ? " encrypted file)" : " encrypted files)"), false);
+            add(measuring ? std::string("- **Vault Size:** measuring...")
+                          : "- **Vault Size:** " + fmtBytes(vaultBytes) + " (" + std::to_string(vaultFiles) +
+                                (vaultFiles == 1 ? " encrypted file)" : " encrypted files)"), false);
             add("- **Headset Free Space:** " + (internalFree ? fmtBytes(internalFree) + " available" : std::string("Unknown")), false);
             add("- **SD Card Free Space:** " + (card.empty() ? std::string("No SD card inserted")
                                                              : (cardFree ? fmtBytes(cardFree) + " available" : std::string("Unknown"))), false);
@@ -627,6 +704,8 @@ void SettingsMenu::refresh() {
                 text.push_back({"", false});
                 add("- **Status:** " + vaultMoveNotice_, false);
                 hint(vaultMoveNotice_);
+            } else if (measuring) {
+                hint("Measuring the vault...");
             } else {
                 hint("Choose whether the vault should lock automatically once the transfer finishes.");
             }
@@ -1129,6 +1208,21 @@ SettingsMenu::Action SettingsMenu::activate() {
             saveConfig();
             refresh();
             break;
+        case Action::ToggleSilentScrub:
+            silentScrub_ = !silentScrub_;
+            saveConfig();
+            refresh();
+            break;
+        case Action::ToggleSilentZoom:
+            silentZoom_ = !silentZoom_;
+            saveConfig();
+            refresh();
+            break;
+        case Action::ToggleSilentRecenter:
+            silentRecenter_ = !silentRecenter_;
+            saveConfig();
+            refresh();
+            break;
         case Action::TogglePauseOnRemoval:
             pauseOnRemoval_ = !pauseOnRemoval_;
             saveConfig();
@@ -1216,7 +1310,8 @@ SettingsMenu::Action SettingsMenu::activateSegment(int segment) {
     if (selected_ < 0 || selected_ >= static_cast<int>(rows_.size())) return Action::None;
     const Row& row = rows_[static_cast<std::size_t>(selected_)];
     if (!row.enabled) return Action::None;
-    if (row.kind != Kind::Segmented || segment < 0 || segment >= row.steps) return activate();
+    const bool direct = row.kind == Kind::Segmented || ((row.kind == Kind::Choice || row.kind == Kind::Color) && row.steps > 1);
+    if (!direct || segment < 0 || segment >= row.steps) return activate();
     if (row.action == Action::CycleDownloadDir) {
         // The options depend on the card being in: pick by name, not by stepping.
         const std::string opt = row.options[static_cast<std::size_t>(segment)];
@@ -1275,6 +1370,16 @@ int SettingsMenu::selectedAudioStream() const {
     return (audioSel_ >= 0 && audioSel_ < static_cast<int>(audioStreams_.size()))
                ? audioStreams_[audioSel_].first
                : -1;
+}
+
+void SettingsMenu::setSelectedVideoStream(int containerIndex) {
+    for (std::size_t i = 0; i < videoStreams_.size(); ++i) {
+        if (videoStreams_[i].first == containerIndex) {
+            videoSel_ = static_cast<int>(i);
+            break;
+        }
+    }
+    if (open_) refresh();
 }
 
 void SettingsMenu::setSelectedAudioStream(int containerIndex) {
@@ -1653,6 +1758,9 @@ void SettingsMenu::loadConfig() {
             else if (key == "room") roomIdx_ = std::clamp(std::stoi(val), 0, 3);
             else if (key == "multi_screen") multiScreen_ = (val == "1" || val == "true");
             else if (key == "pause_on_removal") pauseOnRemoval_ = (val == "1" || val == "true");
+            else if (key == "silent_scrub") silentScrub_ = (val == "1");
+            else if (key == "silent_zoom") silentZoom_ = (val == "1");
+            else if (key == "silent_recenter") silentRecenter_ = (val == "1");
             else if (key == "keyboard_layout") keyboardLayout_ = std::clamp(std::stoi(val), 0, 4);
             else if (key == "pause_livestreams") pauseLivestreams_ = (val == "1" || val == "true");
             else if (key == "private_browsing") privateBrowsing_ = (val == "1" || val == "true");
@@ -1722,6 +1830,9 @@ void SettingsMenu::saveConfig() const {
             file << "panel_style=" << uiOpacityIdx_ << "\n";
             file << "multi_screen=" << (multiScreen_ ? 1 : 0) << "\n";
             file << "pause_on_removal=" << (pauseOnRemoval_ ? 1 : 0) << "\n";
+            file << "silent_scrub=" << (silentScrub_ ? 1 : 0) << "\n";
+            file << "silent_zoom=" << (silentZoom_ ? 1 : 0) << "\n";
+            file << "silent_recenter=" << (silentRecenter_ ? 1 : 0) << "\n";
             file << "keyboard_layout=" << keyboardLayout_ << "\n";
             file << "pause_livestreams=" << (pauseLivestreams_ ? 1 : 0) << "\n";
             file << "private_browsing=" << (privateBrowsing_ ? 1 : 0) << "\n";

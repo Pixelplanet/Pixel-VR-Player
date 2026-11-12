@@ -342,7 +342,16 @@ public:
     int pointerHand() const { return pointerHand_; }
     void setBrowserQuickFilter(int f) { browserQuickFilter_ = f; }
     int browserQuickFilter() const { return browserQuickFilter_; }
-    void setDownloadsFilter(int f) { downloadsFilter_ = f; }
+    void setDownloadsFilter(int f) {
+        downloadsFilter_ = f;
+        downloadsFirst_ = 0;
+    }
+    // Downloads list: 4 cards are shown; the stick scrolls through the rest.
+    void scrollDownloads(int delta) {
+        int shown = 0;
+        for (const auto& j : downloadJobs_) shown += downloadJobVisible(j.state) ? 1 : 0;
+        downloadsFirst_ = std::clamp(downloadsFirst_ + delta, 0, std::max(0, shown - 4));
+    }
     int downloadsFilter() const { return downloadsFilter_; }
     void setActiveDownloadCount(int c) { activeDownloadCount_ = c; }
     void setSettingsSection(int s) { settingsSection_ = s; }
@@ -1347,6 +1356,7 @@ private:
     std::vector<CrumbHit> browserCrumbHits_;  // from the last drawn frame
     int browserQuickFilter_ = 0;  // 0=Local, 1=Videos, 2=SMB, 3=Downloads, 4=Bookmarks, 5=Vault
     int downloadsFilter_ = 0;  // 0=All, 1=Active, 2=Completed
+    int downloadsFirst_ = 0;   // first shown job among those the filter lets through
     int activeDownloadCount_ = 0;
     int settingsSection_ = 0;
     float uiTextScale_ = 1.20f;

@@ -470,6 +470,7 @@ void App::cancelPendingOpen(int slot, bool wait) {
     if (slot < 0 || slot >= VulkanRenderer::kMaxVideoSlots) return;
     ScreenState& sc = screens_[slot];
     sc.hasDeferredLoad = false;
+    sc.hasDeferredPlex = false;
     sc.deferredPath.clear();
     if (sc.openThread.joinable()) {
         sc.engine.abortOpen();
@@ -516,11 +517,30 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
     const bool sameFile = (path == sc.path) && (sc.open || (sc.opening && sc.openSameFile));
     cancelPendingOpen(slot);
     if (sc.openAbandoned) {
-        // The cancelled open still holds the engine: start this one as soon as it lets go.
+        // The cancelled open still holds the engine: start this one as soon as it lets go. Until
+        // then the screen counts as loading (Stop / Back cancel it, it is not a free slot).
         sc.hasDeferredLoad = true;
         sc.deferredPath = path;
         sc.deferredFromQueue = fromQueue;
         sc.openStartedAt = std::chrono::steady_clock::now();
+        sc.open = false;
+        sc.opening = true;
+        sc.openSameFile = false;
+        sc.path = path;
+        if (!fromQueue) {  // what a normal load does to the UI, now and not when the engine frees up
+            hudDismissed_ = false;
+            lastControllerActivity_ = std::chrono::steady_clock::now();
+            if (textEntry_.active) cancelKeyboard();
+            actionMenu_.visible = false;
+            smbModal_.active = false;
+            smbModal_.editingField = SmbModalState::Field::None;
+#ifdef PIXELVR_HAVE_FREETYPE
+            browser_.setOpen(false);
+#endif
+            downloadsWindow_ = false;
+            pendingDl_.clear();
+            selectScreen(slot);
+        }
         return;
     }
     if (!sameFile) {
@@ -593,7 +613,7 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
         if (proj == VulkanRenderer::ProjectionMode::Flat) joinArrangement(slot);
     }
 
-    if (!fromQueue) {  // a track change of the queue leaves the UI alone
+    if (!fromQueue && !startingDeferredLoad_) {  // a track change of the queue leaves the UI alone
         hudDismissed_ = false;
         lastControllerActivity_ = std::chrono::steady_clock::now();
         if (textEntry_.active) cancelKeyboard();
@@ -638,12 +658,20 @@ void App::pollMediaOpens(std::chrono::steady_clock::time_point now) {
                 sc.engine.close();
                 sc.openState.store(0, std::memory_order_relaxed);
                 sc.openAbandoned = false;
-                if (sc.hasDeferredLoad) {
+                if (sc.hasDeferredPlex) {
+                    const BrowserHost::PlexPlay play = sc.deferredPlex;
+                    sc.hasDeferredPlex = false;
+                    startPlexPlay(slot, play);
+                } else if (sc.hasDeferredLoad) {
                     const std::string next = sc.deferredPath;
                     const bool fromQueue = sc.deferredFromQueue;
                     sc.hasDeferredLoad = false;
                     sc.deferredPath.clear();
+                    sc.opening = false;
+                    sc.path.clear();  // a fresh load, not "the same file"
+                    startingDeferredLoad_ = true;
                     loadMedia(next, slot, fromQueue);
+                    startingDeferredLoad_ = false;
                 }
             } else if (sc.hasDeferredLoad) {
                 const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - sc.openStartedAt).count();
@@ -1405,6 +1433,13 @@ void App::beginWebPlay(int slot, const BrowserHost::PlexPlay& play) {
 void App::startPlexPlay(int slot, const BrowserHost::PlexPlay& play) {
 #ifdef PIXELVR_HAVE_MEDIA
     ScreenState& sc = screens_[slot];
+    if (sc.openAbandoned) {
+        // A cancelled open still holds this screen's engine: the hand-off starts when it lets go
+        // (with its whole context: the page stays, Stop returns to it).
+        sc.hasDeferredPlex = true;
+        sc.deferredPlex = play;
+        return;
+    }
     if (kbWebSlot_ == slot) cancelKeyboard();
     if (webMouseSlot_ == slot) {
         webMouseSlot_ = -1;
@@ -1655,7 +1690,66 @@ void App::cycleAudioTrack() {
 #endif
 }
 
+void App::openTracksMenu() {
+#ifdef PIXELVR_HAVE_MEDIA
+    if (!cur().open || cur().web) return;
+    const auto audio = cur().engine.audioStreams();
+    const auto video = cur().engine.videoStreams();
+    if (audio.size() < 2 && video.size() < 2) return;
+    actionMenu_.visible = true;
+    actionMenu_.page = 11;
+    actionMenu_.title = video.size() > 1 ? "Tracks" : "Audio Track";
+    actionMenu_.subtitle = "The video reloads at the same position";
+    actionMenu_.options.clear();
+    trackRows_.clear();
+    actionMenu_.selectedOption = 0;
+    const int curAudio = cur().engine.currentAudioStream();
+    const int curVideo = cur().engine.currentVideoStream();
+    auto upper = [](std::string s) {
+        for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+        return s;
+    };
+    // At most 10 rows fit the menu: audio first (what people switch), then video tracks.
+    for (std::size_t i = 0; i < audio.size() && trackRows_.size() < 10; ++i) {
+        const bool on = audio[i].index == curAudio;
+        const std::string shortName = audio[i].language.empty() ? "Audio " + std::to_string(i + 1) : upper(audio[i].language);
+        actionMenu_.options.push_back(shortName + "|" + audio[i].label + (on ? "  (playing)" : ""));
+        if (on) actionMenu_.selectedOption = static_cast<int>(trackRows_.size());
+        trackRows_.push_back({true, audio[i].index});
+    }
+    for (std::size_t i = 0; video.size() > 1 && i < video.size() && trackRows_.size() < 10; ++i) {
+        const bool on = video[i].index == curVideo;
+        actionMenu_.options.push_back("Video " + std::to_string(i + 1) + "|" + video[i].label + (on ? "  (playing)" : ""));
+        trackRows_.push_back({false, video[i].index});
+    }
+    actionMenu_.options.push_back("Cancel");
+    xr_.triggerHaptic(0, 0.020f, 0.0f, 0.4f);
+    xr_.triggerHaptic(1, 0.020f, 0.0f, 0.4f);
+#endif
+}
+
+void App::chooseFormat(int projection, int stereo) {
+    formatStoredOnly_ = false;
+#ifdef PIXELVR_HAVE_MEDIA
+    const bool playing = formatMenuPath_.empty() || ((cur().open || cur().opening) && cur().path == formatMenuPath_);
+    if (playing) {
+        applyFormat(projection, stereo);
+        return;
+    }
+    // A file picked in the browser that is not on the selected screen: remembered for its next play.
+    formatStoredOnly_ = true;
+    if (VaultManager::isPrivatePath(formatMenuPath_)) return;  // nothing about vault files is stored
+    playbackMemory_.setFormat(formatMenuPath_, projection, stereo, PlaybackMemory::fingerprintOf(formatMenuPath_));
+    playbackMemory_.save();
+    showNotice("Format saved: used the next time this file plays");
+#else
+    (void)projection;
+    (void)stereo;
+#endif
+}
+
 void App::openFormatMenu() {
+    formatMenuPath_.clear();  // from the dock: the playing screen
     actionMenu_.visible = true;
     actionMenu_.page = 5;
     actionMenu_.title = "Playback Format";
@@ -1970,6 +2064,23 @@ void App::saveSmbModal() {
     actionMenu_.visible = false;
     browser_.openNetwork();
 #endif
+}
+
+void App::deleteShareEntry(const std::string& path) {
+    RemoteUri ru;
+    if (parseRemoteUri(path, ru)) {
+        std::string folder = ru.path;
+        while (!folder.empty() && folder.front() == '/') folder.erase(folder.begin());
+        while (!folder.empty() && folder.back() == '/') folder.pop_back();
+        SmbCredentialsManager::instance().deleteShare(ru.host, folder, ru.protocol, ru.port);
+        return;
+    }
+    std::string rest = path;
+    if (rest.rfind("smb://", 0) == 0) rest = rest.substr(6);
+    while (!rest.empty() && rest.back() == '/') rest.pop_back();
+    const auto slash = rest.find('/');
+    SmbCredentialsManager::instance().deleteShare(slash == std::string::npos ? rest : rest.substr(0, slash),
+                                                  slash == std::string::npos ? std::string() : rest.substr(slash + 1));
 }
 
 void App::deleteSmbModal() {
@@ -3288,7 +3399,7 @@ void App::openActionMenu() {
             if (vm.isUnlocked() && vm.available() && !browser_.inVault() && !vaultcrypto::hasExtension(fe->path)) {
                 actionMenu_.options.push_back("Move to Vault");
             }
-            if (fe && !fe->isDir && fe->isVideo) {
+            if (fe && !fe->isDir && fe->isVideo && !VaultManager::isPrivatePath(fe->path)) {  // nothing is stored for vault files
                 actionMenu_.options.push_back("Change 3D / VR Format");
             }
             actionMenu_.options.push_back("Move");
@@ -3584,9 +3695,15 @@ void App::updateBrowserFooter(std::chrono::steady_clock::time_point now) {
             bar.confirmLabel = "Use this folder";
         } else {
             const int n = static_cast<int>(pick_.sidecars.size());
-            bar.text = std::string(copy ? "Copying " : "Moving ") + pick_.srcLabel +
-                       (n > 0 ? " (+" + std::to_string(n) + (n == 1 ? " file)" : " files)") : std::string()) +
-                       " \xB7 open destination folder";
+            std::string name = pick_.srcLabel;
+            if (name.size() > 34) {  // keep the start and the end (the extension), bytes are fine for a cut
+                std::size_t head = 20, tail = name.size() - 11;
+                while (head > 0 && (static_cast<unsigned char>(name[head]) & 0xC0) == 0x80) --head;
+                while (tail < name.size() && (static_cast<unsigned char>(name[tail]) & 0xC0) == 0x80) ++tail;
+                name = name.substr(0, head) + "..." + name.substr(tail);
+            }
+            bar.text = std::string(copy ? "Copying " : "Moving ") + name +
+                       (n > 0 ? " (+" + std::to_string(n) + (n == 1 ? " file)" : " files)") : std::string());
             bar.confirmLabel = copy ? "Copy here" : "Move here";
         }
         const std::string why = pickReason();
@@ -3638,7 +3755,10 @@ void App::updateBrowserFooter(std::chrono::steady_clock::time_point now) {
         text = std::string(st.relocating ? "Vault move" : (st.copy ? "Copying " : "Moving ") + st.label) + ": " +
                std::to_string(pct) + " %" + rate + (st.waiting > 0 ? "  +" + std::to_string(st.waiting) : std::string());
     }
-    settings_.setVaultMoveStatus(st.busy && st.relocating
+    settings_.pollVaultMeasure();
+    settings_.setVaultMoveStatus(st.busy && st.relocating && FileOps::instance().relocationCancelling()
+        ? std::string("Stopping the vault move...")
+        : st.busy && st.relocating
         ? "Moving the vault: " + std::to_string(pct) + " %" + rate +
               ". Auto-lock is paused during the transfer (you can take the headset off)."
         : std::string());
@@ -4594,11 +4714,31 @@ int App::run() {
             // without waking the HUD or clearing hudDismissed_.
             const bool watching = !hubShown && !actionMenu_.visible && pendingDl_.empty() && !textEntry_.active;
             const bool hudCurrentlyShown = !hudDismissed_ && renderer_.controlBarVisible();
-            const bool rawStickMoved =
-                std::fabs(in.thumbstickX) > 0.25f || std::fabs(in.thumbstickY) > 0.25f ||
-                std::fabs(in.thumbstickLX) > 0.25f || std::fabs(in.thumbstickLY) > 0.25f ||
-                std::fabs(in.thumbstickRX) > 0.25f || std::fabs(in.thumbstickRY) > 0.25f;
-            const bool stickMoved = (!watching || hudCurrentlyShown) && rawStickMoved;
+            const bool rawStickX = std::fabs(in.thumbstickX) > 0.25f || std::fabs(in.thumbstickLX) > 0.25f ||
+                                   std::fabs(in.thumbstickRX) > 0.25f;
+            const bool rawStickY = std::fabs(in.thumbstickY) > 0.25f || std::fabs(in.thumbstickLY) > 0.25f ||
+                                   std::fabs(in.thumbstickRY) > 0.25f;
+            const bool rawStickMoved = rawStickX || rawStickY;
+            // Settings > Controls & Input (off = any stick use brings the controls back, as always):
+            // left / right is scrub and skip; up / down is distance and zoom; with a bumper held in
+            // 360/180 both axes pan and tilt the view, which goes with zoom.
+            // In 360/180 the view gestures (zoom, bumper + stick pan / tilt) never brought the
+            // controls back and still don't; there one push counts by its main direction, as the
+            // action code takes it.
+            const bool sphereNow = settings_.projectionMode() != 0;
+            const bool panShift = sphereNow && (in.previousHeld || in.nextHeld || panShiftLatched_);
+            const bool quietX = panShift ? true : settings_.silentScrub();
+            const bool quietY = sphereNow ? true : settings_.silentZoom();
+            bool wakeX = rawStickX, wakeY = rawStickY;
+            if (sphereNow) {
+                const float ax = std::max({std::fabs(in.thumbstickX), std::fabs(in.thumbstickLX), std::fabs(in.thumbstickRX)});
+                const float ay = std::max({std::fabs(in.thumbstickY), std::fabs(in.thumbstickLY), std::fabs(in.thumbstickRY)});
+                wakeX = rawStickX && ax >= ay;
+                wakeY = rawStickY && ay > ax;
+            }
+            const bool stickMoved = !watching || hudCurrentlyShown
+                                        ? rawStickMoved
+                                        : ((wakeX && !quietX) || (wakeY && !quietY));
             // Only the digital full grip press or an action wakes the HUD (a soft
             // squeeze from a resting hand doesn't). Show / Hide UI toggles it
             // explicitly below; the combo gate and the keyboard consumed theirs.
@@ -4617,16 +4757,20 @@ int App::run() {
 #ifdef PIXELVR_HAVE_MEDIA
             musicActive = cur().open && !cur().web && cur().engine.audioOnly();
 #endif
-            const bool silentPlaybackAction = watching && (recenterPressed || skipBackPressed || skipFwdPressed ||
-                                                           (!musicActive && (prevPressed || nextPressed)));
-            if (watching) {
-                in.recenter = false;
+            const bool quietRecenter = watching && settings_.silentRecenter();
+            const bool quietSkip = watching && settings_.silentScrub();
+            const bool quietBumper = watching && !musicActive && sphereNow;  // 360/180: the pan / tilt shift
+            const bool silentPlaybackAction = (quietRecenter && recenterPressed) ||
+                                              (quietSkip && (skipBackPressed || skipFwdPressed)) ||
+                                              (quietBumper && (prevPressed || nextPressed));
+            if (quietRecenter) in.recenter = false;
+            if (quietSkip) {
                 in.skipBack = false;
                 in.skipForward = false;
-                if (!musicActive) {
-                    in.previous = false;
-                    in.next = false;
-                }
+            }
+            if (quietBumper) {
+                in.previous = false;
+                in.next = false;
             }
             const bool anyActionPressed = in.anyButton();
             in.back = backPressed;
@@ -4713,7 +4857,8 @@ int App::run() {
                 } else if (downloadsWindow_) {
                     downloadsWindow_ = false;
                 } else if (settings_.isOpen()) {
-                    if (settings_.section() == 20) settings_.setSection(4);
+                    // Up one level on a sub-page; from a top-level page B leaves Settings.
+                    if (settings_.navigateBack()) xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.025f, 0.0f, 0.5f);
                     else settings_.close();
                 } else if (browser_.isOpen()) {
                     // A folder still loading shows a lone "Scanning..." row (no Up
@@ -4883,7 +5028,7 @@ int App::run() {
                 dlWin, "Downloads", drows,
                 browser_.downloadActive()
                     ? browser_.downloadText()
-                    : "Trigger: Play Completed  |  B: Back",
+                    : "Stick: Scroll  |  Trigger: Play Completed  |  B: Back",
                 dbtns, djList);
 
             // Folder-download confirmation: a modal with the size and two buttons.
@@ -5415,6 +5560,10 @@ int App::run() {
             }
 
             // Downloads view interaction inside Unified Spatial Hub
+            // More than four downloads: the stick scrolls the list.
+            if (dlWin && sbHover < 0 && pendingDl_.empty() && !actionMenu_.visible) {
+                if (const int d = navStep(in.thumbstickY, nowT)) renderer_.scrollDownloads(d);
+            }
             if (dlWin && (in.select || in.togglePlay) && sbHover < 0) {
                 const int bi = renderer_.downloadsButtonHovered();
                 if (bi >= 0) {
@@ -5474,7 +5623,8 @@ int App::run() {
 
             // File Action Submenu or Files view interaction inside Unified Spatial Hub
             if (actionMenu_.visible) {
-                if ((!browser_.isOpen() && actionMenu_.page != 5 && actionMenu_.page != 8 && actionMenu_.page != 9) ||
+                if ((!browser_.isOpen() && actionMenu_.page != 5 && actionMenu_.page != 8 && actionMenu_.page != 9 &&
+                     actionMenu_.page != 11) ||
                     downloadsWindow_ || settings_.isOpen() || !pendingDl_.empty()) {
                     actionMenu_.visible = false;
                 } else {
@@ -5528,25 +5678,19 @@ int App::run() {
                                             openSmbModal(false, fe->path);
                                         }
                                     } else if (opt == "Delete Network Share") {
-                                        if (fe) {
-                                            RemoteUri ru;
-                                            if (parseRemoteUri(fe->path, ru)) {
-                                                std::string folder = ru.path;
-                                                while (!folder.empty() && folder.front() == '/') folder.erase(folder.begin());
-                                                while (!folder.empty() && folder.back() == '/') folder.pop_back();
-                                                SmbCredentialsManager::instance().deleteShare(ru.host, folder, ru.protocol, ru.port);
-                                            } else {
-                                                std::string rest = fe->path;
-                                                if (rest.rfind("smb://", 0) == 0) rest = rest.substr(6);
-                                                while (!rest.empty() && rest.back() == '/') rest.pop_back();
-                                                auto slash = rest.find('/');
-                                                std::string host = (slash == std::string::npos) ? rest : rest.substr(0, slash);
-                                                std::string share = (slash == std::string::npos) ? "" : rest.substr(slash + 1);
-                                                SmbCredentialsManager::instance().deleteShare(host, share);
-                                            }
-                                            browser_.openNetwork();
+                                        // A saved share and its login: never on a single click.
+                                        if (fe && fe->path == pendingActionPath_) {
+                                            confirmShareDelete_ = true;
+                                            actionMenu_.page = 2;
+                                            actionMenu_.title = "Delete Network Share?";
+                                            actionMenu_.subtitle = "Remove the saved share \"" + fe->label + "\" and its login?";
+                                            actionMenu_.options.clear();
+                                            actionMenu_.options.push_back("Yes, Delete");
+                                            actionMenu_.options.push_back("Cancel");
+                                            actionMenu_.selectedOption = 1;
+                                        } else {
+                                            actionMenu_.visible = false;
                                         }
-                                        actionMenu_.visible = false;
                                     } else if (opt == "Go to Bookmarks" || opt == "Go to Quick Path") {
                                         browser_.openBookmarks();
                                         actionMenu_.visible = false;
@@ -5590,6 +5734,7 @@ int App::run() {
                                             }
                                         }
                                     } else if (opt == "Change 3D / VR Format") {
+                                        formatMenuPath_ = pendingActionPath_;  // this file, not the playing one
                                         actionMenu_.page = 5;
                                         actionMenu_.title = "3D & VR Format";
                                         actionMenu_.subtitle = fe ? fe->label : "";
@@ -5648,6 +5793,7 @@ int App::run() {
                                                 });
                                         }
                                     } else if (opt == "Delete") {
+                                        confirmShareDelete_ = false;
                                         pendingActionPath_ = fe ? fe->path : std::string();
                                         actionMenu_.page = 2;
                                         actionMenu_.title = (fe && fe->isDir) ? "Delete Folder?" : "Delete File?";
@@ -5695,28 +5841,44 @@ int App::run() {
                                         }
                                         actionMenu_.visible = false;
                                     }
+                                } else if (actionMenu_.page == 11) {
+                                    // Tracks: pick one; the file reloads at the same position.
+                                    actionMenu_.visible = false;
+#ifdef PIXELVR_HAVE_MEDIA
+                                    if (chosen < static_cast<int>(trackRows_.size()) && cur().open) {
+                                        const TrackRow tr = trackRows_[static_cast<std::size_t>(chosen)];
+                                        if (tr.audio) {
+                                            settings_.setSelectedAudioStream(tr.index);
+                                            if (tr.index != cur().engine.currentAudioStream()) switchTracks(false);
+                                        } else {
+                                            settings_.setSelectedVideoStream(tr.index);
+                                            if (tr.index != cur().engine.currentVideoStream()) switchTracks(false);
+                                        }
+                                        xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.02f, 0.0f, 0.5f);
+                                    }
+#endif
                                 } else if (actionMenu_.page == 5) {
                                     if (opt == "2D|Flat, standard video") {
-                                        applyFormat(0, 0);
+                                        chooseFormat(0, 0);
                                     } else if (opt == "3D SBS|Side-by-side 3D") {
-                                        applyFormat(0, 1);
+                                        chooseFormat(0, 1);
                                     } else if (opt == "3D TB|Top-bottom 3D (over-under)") {
-                                        applyFormat(0, 2);
+                                        chooseFormat(0, 2);
                                     } else if (opt == "3D FS|Frame-sequential 3D (FS3D)") {
-                                        applyFormat(0, 3);
+                                        chooseFormat(0, 3);
                                     } else if (opt == "VR180|180° 2D (mono)") {
-                                        applyFormat(2, 0);
+                                        chooseFormat(2, 0);
                                     } else if (opt == "VR180 3D|180° side-by-side 3D") {
-                                        applyFormat(2, 1);
+                                        chooseFormat(2, 1);
                                     } else if (opt == "VR360|360° 2D (mono)") {
-                                        applyFormat(1, 0);
+                                        chooseFormat(1, 0);
                                     } else if (opt == "VR360 3D|360° top-bottom 3D") {
-                                        applyFormat(1, 2);
+                                        chooseFormat(1, 2);
                                     } else if (opt == "VR360 SBS|360° side-by-side 3D") {
-                                        applyFormat(1, 1);
+                                        chooseFormat(1, 1);
                                     }
 #ifdef PIXELVR_HAVE_MEDIA
-                                    if (opt != "Cancel" && (cur().open || cur().opening) &&
+                                    if (opt != "Cancel" && !formatStoredOnly_ && (cur().open || cur().opening) &&
                                         !VaultManager::isPrivatePath(cur().path)) {
                                         playbackMemory_.setFormat(cur().path, cur().projection, cur().stereo,
                                                                   cur().fingerprint);
@@ -5786,7 +5948,15 @@ int App::run() {
                         if (in.select || in.togglePlay) {
                             int chosen = (hov >= 0) ? hov : actionMenu_.selectedOption;
                             const Browser::Entry* del = browser_.focused();
-                            if (chosen == 0 && (!del || del->path != pendingActionPath_ || !browser_.isFileActionTarget(*del))) {
+                            if (confirmShareDelete_) {
+                                confirmShareDelete_ = false;
+                                if (chosen == 0 && del && del->path == pendingActionPath_) {
+                                    deleteShareEntry(del->path);
+                                    browser_.openNetwork();
+                                    xr_.triggerHaptic(1, 0.050f, 0.0f, 0.7f);
+                                }
+                                actionMenu_.visible = false;
+                            } else if (chosen == 0 && (!del || del->path != pendingActionPath_ || !browser_.isFileActionTarget(*del))) {
                                 showNotice("The folder changed meanwhile: nothing was deleted", true);
                                 actionMenu_.visible = false;
                             } else if (chosen == 0) {
@@ -5910,7 +6080,14 @@ int App::run() {
                                     smbModal_.editingField = SmbModalState::Field::None;
                                     if (textEntry_.active) cancelKeyboard();
                                 } else if (chosen == 9 && !smbModal_.isNew) {
-                                    deleteSmbModal();
+                                    // Asks once more: the second press within 4 s deletes.
+                                    if (nowT < smbDeleteArmedUntil_) {
+                                        smbDeleteArmedUntil_ = {};
+                                        deleteSmbModal();
+                                    } else {
+                                        smbDeleteArmedUntil_ = nowT + std::chrono::seconds(4);
+                                        actionMenu_.subtitle = "Press Delete again to remove this share and its login";
+                                    }
                                 } else if (chosen == 10) {
                                     static const char* const kProtocols[4] = {"smb", "sftp", "dav", "davs"};
                                     const int seg = renderer_.actionMenuKeyHovered();
@@ -6052,7 +6229,7 @@ int App::run() {
 
             if (settings_.isOpen() && sbHover < 0) {
                 if (const int d = navStep(in.thumbstickY, nowT)) {
-                    settings_.move(d * 2);
+                    settings_.move(d * (settings_.compactPage() ? 1 : 2));  // list pages have one column
                 }
                 if (const int dx = navStepX(in.thumbstickX, nowT)) {
                     // The Buttons pages are read-only: left / right turns the page.
@@ -6132,7 +6309,11 @@ int App::run() {
                 }
                 // Trigger activates the selection made by the laser or the stick;
                 // Play / OK activates the selected row, pointed at or not.
-                if ((in.select && (hovered >= 0 || std::fabs(in.thumbstickY) > 0.25f)) || in.togglePlay) {
+                // (List pages show no stick selection: there only the row under the laser acts, so a
+                // stray stick flick + Play can never start "Move vault" or "Install".)
+                const bool listPage = settings_.compactPage();
+                if (((in.select && (hovered >= 0 || std::fabs(in.thumbstickY) > 0.25f)) || in.togglePlay) &&
+                    (!listPage || hovered >= 0)) {
                     const int seg = (hovered >= 0) ? renderer_.settingsSegmentHovered() : -1;
                     auto act = (seg >= 0) ? settings_.activateSegment(seg) : settings_.activate();
                         if (act == SettingsMenu::Action::PickDownloadFolder) {
@@ -6278,7 +6459,7 @@ int App::run() {
                     } else if (cb == VulkanRenderer::CtrlButton::FormatToggle) {
                         openFormatMenu();
                     } else if (cb == VulkanRenderer::CtrlButton::AudioToggle) {
-                        cycleAudioTrack();
+                        openTracksMenu();
                     } else if (cb == VulkanRenderer::CtrlButton::ScreenToggle) {
                         if (settings_.projectionMode() == 0 &&
                             (selectedScreen_ > 0 || renderer_.screenPlacement(selectedScreen_).active)) {
@@ -6353,7 +6534,15 @@ int App::run() {
             if (barOk && !browserOpen) {
                 const bool hudShown = !wasHudDismissed && renderer_.controlBarVisible();
                 const bool sphereMode = settings_.projectionMode() != 0;
-                const bool bumperShift = sphereMode && (in.previousHeld || in.nextHeld);
+                // The shift stays on until the sticks are back in the middle: letting go of the
+                // bumper first must not turn the rest of a pan into a scrub or a 30 s step.
+                const bool sticksCentred = std::fabs(in.thumbstickX) < 0.2f && std::fabs(in.thumbstickY) < 0.2f &&
+                                           std::fabs(in.thumbstickLX) < 0.2f && std::fabs(in.thumbstickRX) < 0.2f;
+                const bool bumperHeldNow = sphereMode && (in.previousHeld || in.nextHeld);
+                if (bumperHeldNow) panShiftLatched_ = true;
+                else if (sticksCentred || !sphereMode) panShiftLatched_ = false;
+                const bool bumperShift = bumperHeldNow || (sphereMode && panShiftLatched_);
+                if (bumperShift) seekStepArmed_ = false;
                 if (in.recenter && in.headValid) {
                     recenterView(in);
                     if (hudShown) interacted = true;
@@ -6416,11 +6605,13 @@ int App::run() {
                 } else if (dt > 0.0f) {
                     // 360/180: unshifted Stick Y zooms (consistent with Flat screen distance);
                     // holding Bumper + Stick X/Y pans yaw and tilts pitch. Silent when HUD is hidden.
-                    if (bumperShift) {
+                    if (bumperHeldNow) {
                         if (std::fabs(in.thumbstickY) > 0.15f) renderer_.adjustSpherePitch(in.thumbstickY * dt * 0.6f);
                         if (std::fabs(in.thumbstickX) > 0.15f) renderer_.adjustSphereYaw(in.thumbstickX * dt * 0.6f);
-                    } else {
-                        if (std::fabs(in.thumbstickY) > 0.15f) renderer_.adjustSphereZoom(in.thumbstickY * dt * 0.6f);
+                    } else if (!bumperShift && !scrubbing_ && std::fabs(in.thumbstickY) > 0.15f &&
+                               std::fabs(in.thumbstickY) > std::fabs(in.thumbstickX)) {
+                        // Zoom only on a mostly vertical push: a scrub (left / right) never zooms too.
+                        renderer_.adjustSphereZoom(in.thumbstickY * dt * 0.6f);
                     }
                     if (hudShown && (std::fabs(in.thumbstickY) > 0.15f || (bumperShift && std::fabs(in.thumbstickX) > 0.15f))) {
                         interacted = true;
@@ -6542,7 +6733,8 @@ int App::run() {
                         scrubTarget_ = curTimelineStart() + renderer_.pointerScrub() * (curDuration() - curTimelineStart());
                         scrubInput = true;
                     } else if (!bumperShift && std::fabs(in.thumbstickRX) > 0.15f && dt > 0.0f &&
-                               curDuration() > 0.0) {
+                               curDuration() > 0.0 &&
+                               (!sphereMode || scrubbing_ || std::fabs(in.thumbstickRX) >= std::fabs(in.thumbstickRY))) {
                         if (!scrubbing_) scrubTarget_ = shownPosition();
                         const float ax = in.thumbstickRX;
                         const float t = (std::fabs(ax) - 0.15f) / 0.85f;
@@ -6639,7 +6831,7 @@ int App::run() {
                         }
                     }
                     // Only enable audio cycling if there is more than 1 audio stream
-                    aEnabled = (aStreams.size() > 1);
+                    aEnabled = (aStreams.size() > 1) || cur().engine.videoStreams().size() > 1;
                 }
 
                 std::string sLabel = "Reset Horizon";

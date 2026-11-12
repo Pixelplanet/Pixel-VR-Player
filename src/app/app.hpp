@@ -179,6 +179,14 @@ private:
     void updateBrowserFooter(std::chrono::steady_clock::time_point now);
     void drainFileOps();
     std::string pendingActionPath_;  // the row Rename / Delete was opened for (the list may change meanwhile)
+    // The format menu opened from a file's menu in the browser applies to THAT file (stored for its
+    // next play), not to whatever is playing. Empty = opened from the dock: the playing screen.
+    std::string formatMenuPath_;
+    bool formatStoredOnly_ = false;
+    void chooseFormat(int projection, int stereo);
+    bool confirmShareDelete_ = false;  // the delete confirmation (page 2) is for a saved network share
+    void deleteShareEntry(const std::string& path);  // removes a saved share and its login
+    std::chrono::steady_clock::time_point smbDeleteArmedUntil_{};  // share editor: Delete asks once more
     bool vaultCardSeen_ = false;     // the SD card with the vault was in while unlocked
 
     struct SmbModalState {
@@ -253,6 +261,14 @@ private:
     void musicNext(int slot);
     void cycleAudioTrack();         // the dock's Audio button
     void openFormatMenu();          // the dock's Format button (page 5)
+    // The dock's Audio button: a list of the file's audio tracks (and video tracks when it has
+    // several) to pick from directly (page 11). The bound "Audio Track" action still cycles.
+    void openTracksMenu();
+    struct TrackRow {
+        bool audio = true;
+        int index = -1;  // stream index within the container
+    };
+    std::vector<TrackRow> trackRows_;
     void downloadFocusedEntry();    // network entry: download (a folder asks first)
     void refreshControlsInfo();     // Settings > Controls > Buttons: live bindings
     bool buttonsPageShown_ = false;
@@ -299,6 +315,8 @@ private:
         bool hasDeferredLoad = false;
         std::string deferredPath;
         bool deferredFromQueue = false;
+        bool hasDeferredPlex = false;          // a Plex / Jellyfin hand-off waiting for the engine
+        BrowserHost::PlexPlay deferredPlex{};
         std::chrono::steady_clock::time_point openStartedAt{};
         bool openFromQueue = false;
         bool openSameFile = false;
@@ -469,6 +487,8 @@ private:
     // keeps the queue, and leaves open menus alone).
     void loadMedia(const std::string& path, int slot = -1, bool fromQueue = false);
     void cancelPendingOpen(int slot, bool wait = false);  // wait: join even a stuck open (exit only)
+    bool startingDeferredLoad_ = false;  // the UI part of loadMedia already ran when it was requested
+    bool panShiftLatched_ = false;       // 360/180: bumper + stick pan lasts until the sticks are centred
     void finishLoadMedia(int slot);
     void pollMediaOpens(std::chrono::steady_clock::time_point now);
     void buildMusicQueue(int slot, const std::string& path);  // audio file opened from a folder

@@ -3040,7 +3040,7 @@ void VulkanRenderer::updatePointer() {
             if (inPanel) {
                 hitHere(world.x, world.y, world.z);
                 const int optCount = static_cast<int>(actionMenu_.options.size());
-                if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5 || actionMenu_.page == 9 ||
+                if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5 || actionMenu_.page == 11 || actionMenu_.page == 9 ||
                     actionMenu_.page == 10) {
                     for (int i = 0; i < optCount; ++i) {
                         if (hub::actionMenuOption(i, optCount).contains(hx, hyy, 0.002f)) {
@@ -3190,7 +3190,6 @@ void VulkanRenderer::updatePointer() {
                 for (int bi = 0; bi < nBtns; ++bi) {
                     const int id = btns[bi];
                     if (id == 6 && !browserCanCreateFolder_) continue;
-                    if (id == 7 && !browserPick_.canConfirm) continue;
                     if (hub::headerButton(id).contains(hx, hyy, hub::kHitPad)) {
                         browserPageBtnHovered_ = id;
                         break;
@@ -3227,8 +3226,13 @@ void VulkanRenderer::updatePointer() {
                     const int total = static_cast<int>(downloadJobs_.empty() ? downloadsRows_.size()
                                                                              : downloadJobs_.size());
                     int visIdx = 0;
+                    int skip = downloadJobs_.empty() ? 0 : downloadsFirst_;  // scrolled past (same as the drawing)
                     for (int i = 0; i < total && visIdx < hub::kMaxDownloadCards; ++i) {
                         if (!downloadJobs_.empty() && !downloadJobVisible(downloadJobs_[i].state)) {
+                            continue;
+                        }
+                        if (skip > 0) {
+                            --skip;
                             continue;
                         }
                         if (hub::downloadCard(visIdx).contains(hx, hyy, hub::kHitPad)) {
@@ -3287,6 +3291,23 @@ void VulkanRenderer::updatePointer() {
                                 if (hub::settingsSegment(L, s, n).contains(hx, hyy, 0.003f)) {
                                     settingsSegmentHovered_ = s;
                                 }
+                            }
+                        }
+                        // Stepped sliders and colour dots: the step / dot under the laser (same
+                        // geometry as the drawing code), so one click picks it.
+                        if (row.enabled && !settingsCompact_ && row.kind == 4 /* Color */ && row.steps > 1) {
+                            const int n = std::min(row.steps, 5);
+                            const float dotR = L.ctrlHalfH * 0.42f, pitch = dotR * 3.0f;
+                            for (int p = 0; p < n; ++p) {
+                                const float dotX = (L.cx + L.ctrlHalfW) - 0.020f - dotR - static_cast<float>(n - 1 - p) * pitch;
+                                if (UiRect{dotX, L.ctrlY, pitch * 0.5f, L.ctrlHalfH}.contains(hx, hyy)) settingsSegmentHovered_ = p;
+                            }
+                        } else if (row.enabled && !settingsCompact_ && row.kind == 0 /* Choice */ && row.steps > 1 && row.steps <= 8) {
+                            const float segRight = (L.cx + L.ctrlHalfW) - 0.022f, segLeft = L.cx + 0.035f, gap = 0.006f;
+                            const float segW = (segRight - segLeft - gap * static_cast<float>(row.steps - 1)) / static_cast<float>(row.steps);
+                            for (int s = 0; s < row.steps; ++s) {
+                                const float sx = segLeft + segW * 0.5f + static_cast<float>(s) * (segW + gap);
+                                if (UiRect{sx, L.ctrlY, (segW + gap) * 0.5f, L.ctrlHalfH}.contains(hx, hyy)) settingsSegmentHovered_ = s;
                             }
                         }
                         break;
@@ -7478,9 +7499,29 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
 
             // Visible jobs under the current filter, in card order.
             std::vector<int> visJobs;
-            for (int i = 0; i < totalJobs && static_cast<int>(visJobs.size()) < hub::kMaxDownloadCards; ++i) {
+            int dlShown = 0;  // all jobs the filter lets through
+            for (int i = 0; i < totalJobs; ++i) {
+                if (downloadJobs_.empty() || downloadJobVisible(downloadJobs_[i].state)) ++dlShown;
+            }
+            if (downloadJobs_.empty()) downloadsFirst_ = 0;
+            downloadsFirst_ = std::clamp(downloadsFirst_, 0, std::max(0, dlShown - hub::kMaxDownloadCards));  // jobs go away
+            for (int i = 0, skip = downloadsFirst_; i < totalJobs && static_cast<int>(visJobs.size()) < hub::kMaxDownloadCards; ++i) {
                 if (!downloadJobs_.empty() && !downloadJobVisible(downloadJobs_[i].state)) continue;
+                if (skip > 0) {
+                    --skip;
+                    continue;
+                }
                 visJobs.push_back(i);
+            }
+            if (dlShown > hub::kMaxDownloadCards) {  // scrollbar, like the file browser's
+                const float trackCx = 0.880f, trackCy = -0.030f, trackHalfW = 0.0035f, trackHalfH = 0.345f;
+                drawUiElement(vpPanel, trackCx, trackCy, trackHalfW, trackHalfH, UiShape::RoundedBox, glassWellT.data(), 1.0f);
+                const float frac = std::clamp(static_cast<float>(hub::kMaxDownloadCards) / static_cast<float>(dlShown), 0.12f, 0.90f);
+                const float thumbHalfH = trackHalfH * frac;
+                const float prog = static_cast<float>(downloadsFirst_) / static_cast<float>(std::max(1, dlShown - hub::kMaxDownloadCards));
+                const float thumbCy = (trackCy + trackHalfH - thumbHalfH) - prog * (trackHalfH - thumbHalfH) * 2.0f;
+                const float thumbCol[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.85f};
+                drawUiElement(vpPanel, trackCx, thumbCy, trackHalfW * 1.4f, thumbHalfH, UiShape::RoundedBox, thumbCol, 1.0f);
             }
             // Which per-job buttons a job shows: 0 = pause/resume or Play, 1 = X.
             auto jobHasButton = [](int state, int which) {
@@ -7865,6 +7906,10 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                             drawUiElement(vpPanel, dotX, L.ctrlY, dotR * 1.16f, dotR * 1.16f,
                                           UiShape::RoundedBox, glassWellT.data(), 1.0f);
                         }
+                        if (i == settingsHovered_ && p == settingsSegmentHovered_ && p != row.stepIdx && en) {
+                            const float ring[4] = {1.0f, 1.0f, 1.0f, 0.45f};
+                            drawUiElement(vpPanel, dotX, L.ctrlY, dotR * 1.30f, dotR * 1.30f, UiShape::RoundedBox, ring, 1.0f);
+                        }
                         drawUiElement(vpPanel, dotX, L.ctrlY, dotR, dotR,
                                       UiShape::RoundedBox, palCol, 1.0f);
                     }
@@ -7879,8 +7924,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     for (int s = 0; s < row.steps; ++s) {
                         const float sx = segLeft + segW * 0.5f + static_cast<float>(s) * (segW + gap);
                         const bool filled = (s <= row.stepIdx);
-                        drawUiElement(vpPanel, sx, L.ctrlY, segW * 0.5f, segHalfH, UiShape::RoundedBox,
-                                      (filled && en) ? themeAccentCol : stepOff, 1.0f);
+                        const bool aimed = en && i == settingsHovered_ && s == settingsSegmentHovered_;  // click picks it
+                        drawUiElement(vpPanel, sx, L.ctrlY, segW * 0.5f, aimed ? segHalfH * 1.8f : segHalfH, UiShape::RoundedBox,
+                                      (filled && en) ? themeAccentCol : (aimed ? knobOn : stepOff), 1.0f);
                     }
                     if (en) {
                         const float kx = segLeft + segW * 0.5f +
@@ -8420,7 +8466,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                       [&](int a, int b) { return arrTiles[a].depth < arrTiles[b].depth; });
         }
 
-        if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5 || actionMenu_.page == 9 ||
+        if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5 || actionMenu_.page == 11 || actionMenu_.page == 9 ||
             actionMenu_.page == 10) {
             const float btnHalfW = 0.38f;
             const float btnHalfH = 0.028f;
@@ -8768,7 +8814,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
         }
 
-        if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5 || actionMenu_.page == 9 ||
+        if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5 || actionMenu_.page == 11 || actionMenu_.page == 9 ||
             actionMenu_.page == 10) {
             for (int i = 0; i < menuOptCount; ++i) {
                 const float cy = hub::actionMenuOption(i, menuOptCount).cy;

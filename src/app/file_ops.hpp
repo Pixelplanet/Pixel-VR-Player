@@ -74,6 +74,7 @@ public:
     bool busy() const { return busy_.load(); }
     // Stops the currently running vault relocation (if any), keeping the original vault untouched.
     void cancelRelocation();
+    bool relocationCancelling() const { return cancelReloc_.load(); }
     // A vault move (to / from the SD card) is waiting or running: nothing else may touch the vault.
     bool relocationPending() const;
 
