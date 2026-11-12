@@ -7002,7 +7002,12 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     drawUiElement(vpPanel, headerIconX(r), r.cy, 0.012f, 0.012f, UiShape::Files, slateIconCol);
                 }
                 if (browserPick_.canConfirm) {
-                    const UiRect r = headerBtn(7, true);
+                    const UiRect r = hub::headerButton(7);
+                    const bool hov7 = browserPageBtnHovered_ == 7;
+                    const float fill[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 1.0f};
+                    const float rim[4] = {1.0f, 1.0f, 1.0f, hov7 ? 0.95f : 0.55f};
+                    if (hov7) drawGlow(vpPanel, r.cx, r.cy, r.hw, r.hh, 0.012f, fill);
+                    drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox, fill, 1.0f, hov7 ? 0.12f : 0.08f, rim);
                     drawUiElement(vpPanel, headerIconX(r), r.cy, 0.012f, 0.012f, UiShape::Checkmark, hub::kPickDarkText);
                 } else {
                     const UiRect r = hub::headerButton(7);
@@ -8013,7 +8018,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                                                      0.5f * measureString(valSc, row.value) + 0.022f);
                     const float chipCx = ctrlLeft + 0.010f + chipHalfW;
                     drawFitCentered(chipCx, L.ctrlY, chipHalfW * 2.0f - 0.02f, valSc, valueCol, row.value);
-                    if (i == settingsHovered_ && en && !isListening(row.value)) {
+                    if (i == settingsHovered_ && en && !isListening(row.value) && row.label.rfind("Vault Location", 0) != 0) {
                         drawFit(chipCx + chipHalfW + 0.020f, L.ctrlY, L.cx + kSetCtrlHalfW - (chipCx + chipHalfW + 0.030f),
                                 scDetail, dimCol, "Trigger to rebind");
                     }

@@ -338,6 +338,9 @@ bool encryptStream(const std::function<long(uint64_t, uint8_t*, size_t)>& readCh
         ok = ctrXor(key, nonce, done, buf.data(), static_cast<size_t>(r)) &&
              writeAll(out, buf.data(), static_cast<size_t>(r));
         done += static_cast<uint64_t>(r);
+        // Flush as we go: a slow SD card would otherwise collect GBs of unwritten data, stall every
+        // other write of the player (frozen frames -> SteamVR drops focus -> the vault locks).
+        if (ok && done % (32u << 20) < static_cast<uint64_t>(r)) ::fdatasync(out);
         if (progress) progress(done, total);
     }
     ok = ok && done == total && ::fsync(out) == 0;
@@ -422,6 +425,7 @@ bool decryptFile(const std::string& src, const std::string& dstPath, std::string
         }
         ok = writeAll(out, buf.data(), static_cast<size_t>(n));
         off += static_cast<uint64_t>(n);
+        if (ok && off % (32u << 20) < static_cast<uint64_t>(n)) ::fdatasync(out);  // see encryptStream
         if (progress) progress(off, r.size());
     }
     ok = ok && off == r.size() && ::fsync(out) == 0;

@@ -102,6 +102,7 @@ inline bool copyFileSynced(const std::string& src, const std::string& dst, std::
         }
         if (!ok) break;
         done += static_cast<uint64_t>(r);
+        if (done % (32u << 20) < static_cast<uint64_t>(r)) ::fdatasync(out);  // no GBs of unwritten data
         if (progress) progress(done, total);
     }
     ok = ok && done == total && ::fsync(out) == 0;

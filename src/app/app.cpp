@@ -3370,13 +3370,17 @@ void App::updateBrowserFooter(std::chrono::steady_clock::time_point now) {
             sLastAt = now;
         }
         pct = st.total > 0 ? std::min(100, static_cast<int>(100.0 * static_cast<double>(st.done) / static_cast<double>(st.total))) : 0;
+        static std::string sRate;
+        static auto sRateAt = now;
         char b[64];
-        if (sSpeed > 1e5 && st.total > st.done) {
+        if (now - sRateAt < std::chrono::seconds(3) && !sRate.empty()) {
+            rate = sRate;  // steady text: it changes every few seconds, not every frame
+        } else if (sSpeed > 1e5 && st.total > st.done) {
+            sRateAt = now;
             const double left = static_cast<double>(st.total - st.done) / sSpeed;
-            if (left >= 3600) std::snprintf(b, sizeof b, "  %.0f MB/s  %dh %02dm", sSpeed / 1e6, static_cast<int>(left / 3600), static_cast<int>(left / 60) % 60);
-            else if (left >= 60) std::snprintf(b, sizeof b, "  %.0f MB/s  %d min", sSpeed / 1e6, static_cast<int>(left / 60 + 0.5));
-            else std::snprintf(b, sizeof b, "  %.0f MB/s  %d s", sSpeed / 1e6, static_cast<int>(left + 0.5));
-            rate = b;
+            if (left >= 3600) std::snprintf(b, sizeof b, "  %.0f MB/s  %dh %02dm left", sSpeed / 1e6, static_cast<int>(left / 3600), static_cast<int>(left / 60) % 60);
+            else std::snprintf(b, sizeof b, "  %.0f MB/s  %d min left", sSpeed / 1e6, std::max(1, static_cast<int>(left / 60 + 0.5)));
+            rate = sRate = b;
         }
     } else {
         sLastDone = 0;
