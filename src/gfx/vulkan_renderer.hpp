@@ -1337,6 +1337,9 @@ private:
     VkDescriptorSet textSetBold_ = VK_NULL_HANDLE;
     VkPipelineLayout textPipelineLayout_ = VK_NULL_HANDLE;
     VkPipeline textPipeline_ = VK_NULL_HANDLE;
+    // Depth-tested text (button label cards behind a controller are hidden by it); best effort.
+    VkPipeline textPipelineDepth_ = VK_NULL_HANDLE;
+    VkPipeline textPipelineDepth1x_ = VK_NULL_HANDLE;
     bool textReady_ = false;
     // Per-pass glyph instance buffers (host-visible, persistently mapped): text
     // is appended during renderView and drawn in a few instanced batches.

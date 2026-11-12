@@ -1031,6 +1031,10 @@ VulkanRenderer::~VulkanRenderer() {
             vkDestroyPipeline(device_, thumbPipeline_, nullptr);
         if (textPipeline_ != VK_NULL_HANDLE)
             vkDestroyPipeline(device_, textPipeline_, nullptr);
+        for (VkPipeline* p : {&textPipelineDepth_, &textPipelineDepth1x_}) {
+            if (*p != VK_NULL_HANDLE) vkDestroyPipeline(device_, *p, nullptr);
+            *p = VK_NULL_HANDLE;
+        }
         for (int v = 0; v < kRenderPasses; ++v) {
             if (glyphBuffer_[v] != VK_NULL_HANDLE) vkDestroyBuffer(device_, glyphBuffer_[v], nullptr);
             if (glyphMemory_[v] != VK_NULL_HANDLE) vkFreeMemory(device_, glyphMemory_[v], nullptr);
@@ -1764,6 +1768,7 @@ VkPipeline VulkanRenderer::eyePipeline(VkPipeline p) const {
     if (p == uiPipeline_) return uiPipeline1x_;
     if (p == uiPipelineDepth_) return uiPipelineDepth1x_;
     if (p == textPipeline_) return textPipeline1x_;
+    if (p == textPipelineDepth_) return textPipelineDepth1x_ != VK_NULL_HANDLE ? textPipelineDepth1x_ : textPipeline1x_;
     if (p == thumbPipeline_) return thumbPipeline1x_;
     if (p == modelPipeline_) return modelPipeline1x_;
     if (p == maskPipeline_) return maskPipeline1x_;
@@ -3808,6 +3813,11 @@ bool VulkanRenderer::initText() {
                        VK_SAMPLE_COUNT_FLAG_BITS_MAX_ENUM, &glyphInput)) {
         return false;
     }
+    if (!buildPipeline("text.vert.spv", "text.frag.spv", textPipelineLayout_, textPipelineDepth_, true, VK_NULL_HANDLE,
+                       VK_SAMPLE_COUNT_FLAG_BITS_MAX_ENUM, &glyphInput, kWriteRgba, false,
+                       VK_COMPARE_OP_LESS_OR_EQUAL)) {
+        textPipelineDepth_ = VK_NULL_HANDLE;
+    }
     // Thumbnail pipeline with rounded corner SDF masking
     if (!buildPipeline("thumb.vert.spv", "thumb.frag.spv", textPipelineLayout_,
                        thumbPipeline_, true)) {
@@ -3818,6 +3828,12 @@ bool VulkanRenderer::initText() {
         if (!buildPipeline("text.vert.spv", "text.frag.spv", textPipelineLayout_, textPipeline1x_, true,
                            renderPass1x_, VK_SAMPLE_COUNT_1_BIT, &glyphInput)) {
             textPipeline1x_ = VK_NULL_HANDLE;
+        }
+        if (textPipelineDepth_ != VK_NULL_HANDLE &&
+            !buildPipeline("text.vert.spv", "text.frag.spv", textPipelineLayout_, textPipelineDepth1x_, true,
+                           renderPass1x_, VK_SAMPLE_COUNT_1_BIT, &glyphInput, kWriteRgba, false,
+                           VK_COMPARE_OP_LESS_OR_EQUAL)) {
+            textPipelineDepth1x_ = VK_NULL_HANDLE;
         }
         if (thumbPipeline_ != VK_NULL_HANDLE &&
             !buildPipeline("thumb.vert.spv", "thumb.frag.spv", textPipelineLayout_, thumbPipeline1x_, true,
@@ -10399,8 +10415,9 @@ void VulkanRenderer::drawButtonLabels(const XrView& view, void* glyphs, VkBuffer
         box(frame(mid, across, up, toEye), 0.5f * kLabelLineW, 0.5f * len, lineCol, 1.0f, 0.0f, nullptr,
             UiShape::FlatBox);
     }
-    // Cards: always visible (no depth test), dark translucent grey, faint rim.
-    vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, eyePipeline(uiPipeline_));
+    // Cards: dark translucent grey, faint rim; depth-tested like their lines, so a card behind the
+    // controller is hidden by it (drawn over it, it looked as if it belonged to the near side).
+    vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, eyePipeline(linePipe));
     for (const LabelCardDraw& d : labelDraws_) {
         float bg[4], rim[4];
         faded(kLabelCardCol, d.alpha, bg);
@@ -10417,7 +10434,9 @@ void VulkanRenderer::drawButtonLabels(const XrView& view, void* glyphs, VkBuffer
     if (!font.ok || font.ascent <= 0.0f || fontSet == VK_NULL_HANDLE) return;
     const float scale = kLabelTextH / font.ascent;  // as layoutButtonLabels
     const float lineH = font.lineHeight > 0.0f ? font.lineHeight * scale : kLabelTextH * 1.3f;
-    vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, eyePipeline(textPipeline_));
+    const VkPipeline labelTextPipe =
+        (textPipelineDepth_ != VK_NULL_HANDLE && linePipe == uiPipelineDepth_) ? textPipelineDepth_ : textPipeline_;
+    vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, eyePipeline(labelTextPipe));
     vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipelineLayout_, 0, 1, &fontSet, 0,
                             nullptr);
     const VkDeviceSize off = 0;
