@@ -1542,6 +1542,9 @@ bool MediaEngine::open(const std::string& path) {
         }
         const AVCodec* dc = avcodec_find_decoder(cp->codec_id);
         char buf[160];
+        if (cp->codec_type == AVMEDIA_TYPE_VIDEO && (impl_->format->streams[si]->disposition & AV_DISPOSITION_ATTACHED_PIC)) {
+            continue;  // embedded cover art: not a track to choose
+        }
         if (cp->codec_type == AVMEDIA_TYPE_VIDEO) {
             std::snprintf(buf, sizeof(buf), "%s %dx%d%s%s", dc ? dc->name : "?",
                           cp->width, cp->height, lang.empty() ? "" : " ",

@@ -339,6 +339,11 @@ public:
     // Folder path levels (root first); the pointer reports which level it is on.
     void setBrowserCrumbs(std::vector<std::string> labels) { browserCrumbs_ = std::move(labels); }
     int browserCrumbHovered() const { return browserCrumbHovered_; }
+    // Settings header path: the section each part leads to (-1 = none); the hovered part's section.
+    void setSettingsCrumbTargets(std::vector<int> t) { settingsCrumbTargets_ = std::move(t); }
+    int settingsCrumbHovered() const { return settingsCrumbHovered_; }
+    // The hub's close button (top right, all tabs).
+    bool hubCloseHovered() const { return hubCloseHovered_; }
     int pointerHand() const { return pointerHand_; }
     void setBrowserQuickFilter(int f) { browserQuickFilter_ = f; }
     int browserQuickFilter() const { return browserQuickFilter_; }
@@ -1354,6 +1359,10 @@ private:
     int browserCrumbHovered_ = -1;
     struct CrumbHit { float x0, x1; int index; };
     std::vector<CrumbHit> browserCrumbHits_;  // from the last drawn frame
+    std::vector<CrumbHit> settingsCrumbHits_;  // index = target section
+    std::vector<int> settingsCrumbTargets_;
+    int settingsCrumbHovered_ = -1;
+    bool hubCloseHovered_ = false;
     int browserQuickFilter_ = 0;  // 0=Local, 1=Videos, 2=SMB, 3=Downloads, 4=Bookmarks, 5=Vault
     int downloadsFilter_ = 0;  // 0=All, 1=Active, 2=Completed
     int downloadsFirst_ = 0;   // first shown job among those the filter lets through

@@ -399,6 +399,8 @@ constexpr float kPickDarkText[4] = {0.03f, 0.05f, 0.09f, 1.0f};  // on the accen
 constexpr float kBrowserSortCaptionX = -0.455f;
 constexpr float kBrowserViewCaptionX = -0.195f;
 constexpr float kBrowserCaptionMaxW = 0.085f;
+// Close button of the hub: top right corner, above the header rows of every tab.
+inline UiRect closeButton() { return {0.862f, 0.524f, 0.019f, 0.019f}; }
 inline UiRect headerButton(int id) {
     switch (id) {
         case 5: return {-0.290f, kBrowserBtnY, 0.075f, kBrowserBtnHH};
@@ -2894,6 +2896,8 @@ void VulkanRenderer::updatePointer() {
     browserSidebarHovered_ = -1;
     browserPageBtnHovered_ = -1;
     browserCrumbHovered_ = -1;
+    settingsCrumbHovered_ = -1;
+    hubCloseHovered_ = false;
     settingsPagerHovered_ = -1;
     settingsHeaderHovered_ = false;
     settingsHovered_ = -1;
@@ -3173,6 +3177,10 @@ void VulkanRenderer::updatePointer() {
                 break;
             }
 
+            if (hub::closeButton().contains(hx, hyy, hub::kHitPad)) {
+                hubCloseHovered_ = true;
+                break;
+            }
             if (browserVisible_) {
                 if (std::fabs(hyy - hub::kBrowserPathY) <= hub::kBrowserBtnHH + hub::kHitPad) {
                     for (const CrumbHit& c : browserCrumbHits_) {
@@ -3250,6 +3258,15 @@ void VulkanRenderer::updatePointer() {
                     }
                 }
             } else if (settingsVisible_) {
+                if (std::fabs(hyy - hub::kHeaderY) <= 0.024f) {  // the path: a click on a parent goes there
+                    for (const CrumbHit& c : settingsCrumbHits_) {
+                        if (hx >= c.x0 - 0.006f && hx <= c.x1 + 0.006f) {
+                            settingsCrumbHovered_ = c.index;
+                            break;
+                        }
+                    }
+                    if (settingsCrumbHovered_ >= 0) break;
+                }
                 if (!settingsHeaderButton_.empty() && settingsPages_ <= 1 &&
                     UiRect{0.64f, hub::kHeaderY, 0.13f, 0.028f}.contains(hx, hyy, hub::kHitPad)) {
                     settingsHeaderHovered_ = true;
@@ -6747,6 +6764,14 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         // Left navigation rail background & vertical separator
         drawUiElement(vpPanel, -0.695f, 0.0f, 0.190f, kPanelTop - 0.02f,
                       UiShape::RoundedBox, glassRailT.data(), 0.075f);
+        {
+            const UiRect cb = hub::closeButton();
+            const float cbBg[4] = {0.20f, 0.23f, 0.29f, hubCloseHovered_ ? 0.95f : 0.55f};
+            const float cbRim[4] = {1.0f, 1.0f, 1.0f, hubCloseHovered_ ? 0.80f : 0.22f};
+            const float cbIcon[4] = {0.92f, 0.94f, 0.98f, hubCloseHovered_ ? 1.0f : 0.70f};
+            drawUiElement(vpPanel, cb.cx, cb.cy, cb.hw, cb.hh, UiShape::RoundedBox, cbBg, 1.0f, 0.08f, cbRim);
+            drawUiElement(vpPanel, cb.cx, cb.cy, cb.hw * 0.42f, cb.hh * 0.42f, UiShape::Close, cbIcon);
+        }
         drawUiElement(vpPanel, kRailRight, 0.0f, 0.0012f, kPanelTop - 0.04f,
                       UiShape::RoundedBox, kGlassDivider, 1.0f);
 
@@ -7950,9 +7975,23 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 }
             }
 
-            const Crumbs setCrumbs = layoutCrumbs(splitCrumbs(settingsTitle_), -0.45f, 0.84f,
-                                                  scHeader * 0.90f);
+            const std::vector<std::string> setSegs = splitCrumbs(settingsTitle_);
+            const Crumbs setCrumbs = layoutCrumbs(setSegs, -0.45f, 0.84f, scHeader * 0.90f);
             drawCrumbChevrons(setCrumbs, 0.455f);
+            if (viewIndex == 0 || layerPass) {
+                // Clickable parents (same idea as the file browser's path).
+                settingsCrumbHits_.clear();
+                if (settingsCrumbTargets_.size() == setSegs.size()) {  // names with " > " in them: no hits
+                    const int shownStart = static_cast<int>(setSegs.size()) - static_cast<int>(setCrumbs.parts.size());
+                    for (std::size_t i = 0; i + 1 < setCrumbs.parts.size(); ++i) {
+                        const int idx = shownStart + static_cast<int>(i);
+                        if (idx < 0 || settingsCrumbTargets_[static_cast<std::size_t>(idx)] < 0) continue;
+                        settingsCrumbHits_.push_back({setCrumbs.partX[i],
+                                                      setCrumbs.partX[i] + measureString(scHeader * 0.90f, setCrumbs.parts[i]),
+                                                      settingsCrumbTargets_[static_cast<std::size_t>(idx)]});
+                    }
+                }
+            }
 
             // Text pass for Hub rail + Settings cards
             bindPipe(textPipeline_);
@@ -7970,6 +8009,15 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
 
             drawCrumbText(setCrumbs, 0.455f, scHeader * 0.90f, 0.40f);
+            for (const CrumbHit& c : settingsCrumbHits_) {  // the parent under the laser, in the accent colour
+                if (c.index != settingsCrumbHovered_) continue;
+                for (std::size_t i = 0; i + 1 < setCrumbs.parts.size(); ++i) {
+                    if (std::fabs(setCrumbs.partX[i] - c.x0) < 1e-4f) {
+                        drawFit(setCrumbs.partX[i], 0.455f, 0.40f - setCrumbs.partX[i], scHeader * 0.90f, themeAccentCol,
+                                setCrumbs.parts[i]);
+                    }
+                }
+            }
             if (pager) {
                 drawFitCentered(0.63f, 0.455f, 0.14f, scSub, themeTextCol,
                                 std::to_string(settingsPage_ + 1) + " / " + std::to_string(settingsPages_));

@@ -231,15 +231,38 @@ void SettingsMenu::move(int delta) {
     }
 }
 
-int SettingsMenu::parentSection() const {
-    if (showingButtons()) return 3;                       // Controller Buttons -> Controls & Input
-    if (section_ == 10 || section_ == 11 || section_ == 12) return 2;  // track lists -> Audio & Video Tracks
-    if (section_ == 21 || section_ == 22) return 1;       // List Columns, Shortcuts -> UI & Appearance
-    if (section_ == 17) return 22;                        // one shortcut -> Shortcuts
-    if (section_ == kPluginSection || section_ == kStoreSection) return kPluginsSection;
-    if (section_ == kStoreItemSection) return storeUpdate_ ? kPluginsSection : kStoreSection;
-    if (section_ == kVaultMoveSection) return 4;
+int SettingsMenu::parentOf(int s) const {
+    if (s >= kButtonsSection && s < kButtonsSection + buttonsPages()) return 3;  // Controller Buttons -> Controls & Input
+    if (s == 10 || s == 11 || s == 12) return 2;  // track lists -> Audio & Video Tracks
+    if (s == 21 || s == 22) return 1;             // List Columns, Shortcuts -> UI & Appearance
+    if (s == 17) return 22;                       // one shortcut -> Shortcuts
+    if (s == kPluginSection || s == kStoreSection) return kPluginsSection;
+    if (s == kStoreItemSection) return storeUpdate_ ? kPluginsSection : kStoreSection;
+    if (s == kVaultMoveSection) return 4;
     return -1;
+}
+
+int SettingsMenu::parentSection() const { return parentOf(section_); }
+
+std::vector<int> SettingsMenu::crumbTargets() const {
+    // "Settings > [ancestors...] > this page": only the ancestors lead somewhere.
+    std::vector<int> up;
+    for (int p = parentOf(section_); p >= 0 && up.size() < 4; p = parentOf(p)) up.push_back(p);
+    std::vector<int> out{-1};
+    out.insert(out.end(), up.rbegin(), up.rend());
+    if (!up.empty()) out.push_back(-1);  // a top-level page is the second (last) part itself
+    else out.push_back(-1);
+    return out;
+}
+
+bool SettingsMenu::navigateUpTo(int section) {
+    bool isAncestor = false;
+    for (int p = parentOf(section_), n = 0; p >= 0 && n < 4; p = parentOf(p), ++n) isAncestor = isAncestor || p == section;
+    if (!isAncestor) return false;
+    for (int n = 0; n < 4 && section_ != section; ++n) {
+        if (!navigateBack()) break;
+    }
+    return section_ == section;
 }
 
 bool SettingsMenu::navigateBack() {
@@ -247,8 +270,10 @@ bool SettingsMenu::navigateBack() {
     if (p < 0) return false;
     const int from = section_;
     if (p == kPluginsSection && plugins_) plugins_->rescan();
-    if (p == kStoreSection) {
-        openPluginStore();  // refreshes the list
+    if (p == kStoreSection) {  // the list as it is (the header button refreshes it)
+        section_ = kStoreSection;
+        selected_ = 0;
+        refresh();
         return true;
     }
     section_ = p;
@@ -1330,10 +1355,13 @@ SettingsMenu::Action SettingsMenu::activateSegment(int segment) {
     Action act = Action::None;
     // Each activation advances by one option; stop on the requested one.
     const int steps = row.steps;
+    holdSaves_ = true;  // one write for the whole jump, not one per step
     for (int guard = 0; guard < steps + 1; ++guard) {
         if (rows_[static_cast<std::size_t>(selected_)].stepIdx == segment) break;
         act = activate();
     }
+    holdSaves_ = false;
+    saveConfig();
     return act;
 }
 
@@ -1785,6 +1813,7 @@ void SettingsMenu::loadConfig() {
 }
 
 void SettingsMenu::saveConfig() const {
+    if (holdSaves_) return;
     const std::string path = getConfigPath();
     try {
         std::filesystem::path p(path);

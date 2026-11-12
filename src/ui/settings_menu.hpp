@@ -145,6 +145,11 @@ public:
     // Controller Buttons). False on a top-level page: B then leaves Settings.
     bool navigateBack();
     int parentSection() const;  // -1 = top level
+    int parentOf(int section) const;
+    // One target section per " > " part of the title (-1 = not clickable: "Settings" and the page itself).
+    std::vector<int> crumbTargets() const;
+    // Up the page tree to `section` (a breadcrumb click). False if it is not an ancestor.
+    bool navigateUpTo(int section);
     const std::vector<Row>& rows() const { return rows_; }
     int selected() const { return selected_; }
     void setSelected(int s);
@@ -432,6 +437,7 @@ private:
     std::atomic<int> vaultFileCount_{0};
     std::atomic<bool> vaultMeasuring_{false};  // the folder walk runs on measureThread_
     std::atomic<bool> vaultMeasureDone_{false};
+    mutable bool holdSaves_ = false;  // several steps in a row (a direct click on a slider step): saved once
     std::atomic<bool> vaultMeasureStop_{false};
     std::thread measureThread_;
     int railShortcutMask_ = (1 << 0) | (1 << 5);  // kRailShortcuts bits: YouTube + Browser
