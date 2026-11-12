@@ -3343,19 +3343,7 @@ void App::updateBrowserFooter(std::chrono::steady_clock::time_point now) {
             warn = true;
         }
     }
-    const FileOps::Status st = FileOps::instance().status();
-    const bool lockedNow = !VaultManager::instance().isUnlocked();
-    if (text.empty() && st.busy && !(lockedNow && (st.privateLabel || st.relocating))) {  // a lock says nothing
-        const std::string what = st.label;
-        const int pct = st.total > 0 ? static_cast<int>(100.0 * static_cast<double>(st.done) / static_cast<double>(st.total)) : 0;
-        text = std::string(st.relocating ? "Moving the vault" : (st.copy ? "Copying " : "Moving ") + what) +
-               "...  " + std::to_string(std::min(pct, 100)) + " %" +
-               (st.waiting > 0 ? "  (" + std::to_string(st.waiting) + " more waiting)" : std::string());
-    }
-    settings_.setVaultMoveStatus(st.busy && st.relocating
-        ? "Moving the vault: " + std::to_string(st.total > 0 ? std::min<int>(100, static_cast<int>(100.0 * static_cast<double>(st.done) / static_cast<double>(st.total))) : 0) +
-              " %. Keep the headset on; the vault stays where it is until everything is copied."
-        : std::string());
+    // A fresh notice (e.g. why Move was refused) wins over the progress line.
     if (text.empty() && !hubNotice_.empty()) {
         if (now >= hubNoticeUntil_ || (hubNoticePrivate_ && !VaultManager::instance().isUnlocked())) {
             hubNotice_.clear();
@@ -3364,6 +3352,45 @@ void App::updateBrowserFooter(std::chrono::steady_clock::time_point now) {
             warn = hubNoticeWarn_;
         }
     }
+    const FileOps::Status st = FileOps::instance().status();
+    const bool lockedNow = !VaultManager::instance().isUnlocked();
+    // Speed and time left from the last few seconds (EMA), short so it fits the footer.
+    static uint64_t sLastDone = 0;
+    static double sSpeed = 0.0;
+    static auto sLastAt = now;
+    std::string rate;
+    int pct = 0;
+    if (st.busy) {
+        const double dt = std::chrono::duration<double>(now - sLastAt).count();
+        if (st.done < sLastDone) sLastDone = 0;  // a new job
+        if (dt >= 0.5) {
+            const double inst = static_cast<double>(st.done - sLastDone) / dt;
+            sSpeed = sSpeed <= 0.0 ? inst : sSpeed * 0.7 + inst * 0.3;
+            sLastDone = st.done;
+            sLastAt = now;
+        }
+        pct = st.total > 0 ? std::min(100, static_cast<int>(100.0 * static_cast<double>(st.done) / static_cast<double>(st.total))) : 0;
+        char b[64];
+        if (sSpeed > 1e5 && st.total > st.done) {
+            const double left = static_cast<double>(st.total - st.done) / sSpeed;
+            if (left >= 3600) std::snprintf(b, sizeof b, "  %.0f MB/s  %dh %02dm", sSpeed / 1e6, static_cast<int>(left / 3600), static_cast<int>(left / 60) % 60);
+            else if (left >= 60) std::snprintf(b, sizeof b, "  %.0f MB/s  %d min", sSpeed / 1e6, static_cast<int>(left / 60 + 0.5));
+            else std::snprintf(b, sizeof b, "  %.0f MB/s  %d s", sSpeed / 1e6, static_cast<int>(left + 0.5));
+            rate = b;
+        }
+    } else {
+        sLastDone = 0;
+        sSpeed = 0.0;
+        sLastAt = now;
+    }
+    if (text.empty() && st.busy && !(lockedNow && (st.privateLabel || st.relocating))) {  // a lock says nothing
+        text = std::string(st.relocating ? "Vault move" : (st.copy ? "Copying " : "Moving ") + st.label) + ": " +
+               std::to_string(pct) + " %" + rate + (st.waiting > 0 ? "  +" + std::to_string(st.waiting) : std::string());
+    }
+    settings_.setVaultMoveStatus(st.busy && st.relocating
+        ? "Moving the vault: " + std::to_string(pct) + " %" + rate +
+              ". Keep the headset on; the vault stays where it is until everything is copied."
+        : std::string());
     renderer_.setBrowserPickBar(bar);
     renderer_.setBrowserNotice(text, warn);
 #else

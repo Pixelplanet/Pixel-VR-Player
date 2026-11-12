@@ -7391,7 +7391,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             // Bottom status bar: a notice (progress, results, warnings) wins over the browser's status.
             static const float kWarnCol[4] = {1.0f, 0.72f, 0.36f, 1.0f};
             if (!browserNotice_.empty()) {
-                drawFit(-0.45f, -0.490f, 0.62f, scDetail, browserNoticeWarn_ ? kWarnCol : themeAccentCol, browserNotice_);
+                drawFit(-0.45f, -0.490f, 1.28f, scDetail, browserNoticeWarn_ ? kWarnCol : themeAccentCol, browserNotice_);
             } else if (!browserStatus_.empty()) {
                 drawFit(-0.45f, -0.490f, 0.62f, scDetail, themeAccentCol, browserStatus_);
             }
@@ -7399,7 +7399,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 : browserOnNetwork_
                 ? "Stick: Scroll  |  Trigger: Stream  |  Y: Download"
                 : "Stick: Scroll  |  Trigger: Play  |  Y: Actions";
-            drawFit(0.18f, -0.490f, 0.68f, scDetail, dimCol, hintText);
+            if (browserNotice_.empty()) drawFit(0.18f, -0.490f, 0.68f, scDetail, dimCol, hintText);  // a notice uses the row
         }
 
         // ---------------------------------------------------------------------
