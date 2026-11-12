@@ -174,6 +174,7 @@ struct ReadAhead {
     bool stop = false;
 
     bool start(std::unique_ptr<RemoteFile> src) {
+        std::lock_guard<std::mutex> lk(mutex);
         source = std::move(src);
         fileSize = source->size();
         head = fill = 0;
@@ -527,6 +528,7 @@ struct MediaEngine::Impl {
 
     std::thread thread;
     std::atomic<bool> running{false};
+    std::atomic<bool> openAborted{false};
     std::atomic<bool> eof{false};
     std::atomic<bool> paused{false};
     std::atomic<bool> muted{false};  // audio keeps its clock but plays silence
@@ -1351,8 +1353,22 @@ MediaEngine::~MediaEngine() {
 
 const std::string& MediaEngine::lastError() const { return impl_->lastError; }
 
+void MediaEngine::resetAbort() {
+    if (impl_) impl_->openAborted.store(false, std::memory_order_release);
+}
+
+void MediaEngine::abortOpen() {
+    if (!impl_) return;
+    impl_->openAborted.store(true, std::memory_order_release);
+    impl_->remoteReader.abort();
+}
+
 bool MediaEngine::open(const std::string& path) {
     close();
+    if (impl_->openAborted.load(std::memory_order_acquire)) {
+        impl_->lastError = "cancelled";
+        return false;
+    }
     impl_->lastError = "the file could not be opened";
     impl_->httpSource = false;
     impl_->readRetries = 0;
@@ -1398,18 +1414,30 @@ bool MediaEngine::open(const std::string& path) {
                 smbc_free_context(ctx, 1);
                 ctx = nullptr;
             }
+            if (file != nullptr) {
+                remote = std::make_unique<SmbFile>(ctx, file);
+            }
         }
-        if (file == nullptr) {
+        if (!remote) {
             PIXELVR_LOG_ERROR("MediaEngine: cannot open SMB stream %s", path.c_str());
             return false;
         }
-        remote = std::make_unique<SmbFile>(ctx, file);
 #else
             impl_->lastError = "SMB support not built";
             return false;
 #endif
         }
+        if (impl_->openAborted.load(std::memory_order_acquire)) {
+            impl_->lastError = "cancelled";
+            return false;
+        }
         impl_->remoteReader.start(std::move(remote));
+        if (impl_->openAborted.load(std::memory_order_acquire)) {
+            impl_->remoteReader.abort();
+            close();
+            impl_->lastError = "cancelled";
+            return false;
+        }
 
         constexpr int kBuf = 1 << 16;  // 64 KiB AVIO buffer (ring is separate)
         auto* buffer = static_cast<unsigned char*>(av_malloc(kBuf));
@@ -1428,9 +1456,14 @@ bool MediaEngine::open(const std::string& path) {
             close();
             return false;
         }
+        impl_->format->interrupt_callback.callback = [](void* opaque) -> int {
+            return static_cast<MediaEngine::Impl*>(opaque)->openAborted.load(std::memory_order_relaxed) ? 1 : 0;
+        };
+        impl_->format->interrupt_callback.opaque = impl_.get();
         impl_->format->pb = impl_->avio;
         impl_->format->flags |= AVFMT_FLAG_CUSTOM_IO;
         if (avformat_open_input(&impl_->format, path.c_str(), nullptr, nullptr) < 0) {
+            if (impl_->openAborted.load(std::memory_order_acquire)) impl_->lastError = "cancelled";
             PIXELVR_LOG_ERROR("MediaEngine: cannot open network stream %s", path.c_str());
             close();
             return false;
@@ -1451,15 +1484,28 @@ bool MediaEngine::open(const std::string& path) {
         av_dict_set(&httpOpts, "reconnect_delay_max", "5", 0);
         av_dict_set(&httpOpts, "multiple_requests", "1", 0);
     }
+    impl_->format = avformat_alloc_context();
+    if (impl_->format == nullptr) {
+        av_dict_free(&httpOpts);
+        return false;
+    }
+    impl_->format->interrupt_callback.callback = [](void* opaque) -> int {
+        return static_cast<MediaEngine::Impl*>(opaque)->openAborted.load(std::memory_order_relaxed) ? 1 : 0;
+    };
+    impl_->format->interrupt_callback.opaque = impl_.get();
     const int openRc = avformat_open_input(&impl_->format, path.c_str(), nullptr, &httpOpts);
     av_dict_free(&httpOpts);
     if (openRc < 0) {
+        if (impl_->openAborted.load(std::memory_order_acquire)) impl_->lastError = "cancelled";
         PIXELVR_LOG_ERROR("MediaEngine: cannot open %s", path.c_str());
         return false;
     }
     }
-    if (avformat_find_stream_info(impl_->format, nullptr) < 0) {
-        impl_->lastError = "unknown or damaged file format";
+    if (impl_->openAborted.load(std::memory_order_acquire) ||
+        avformat_find_stream_info(impl_->format, nullptr) < 0) {
+        impl_->lastError = impl_->openAborted.load(std::memory_order_acquire)
+                               ? "cancelled"
+                               : "unknown or damaged file format";
         PIXELVR_LOG_ERROR("MediaEngine: no stream info in %s", path.c_str());
         close();
         return false;
@@ -1722,12 +1768,13 @@ bool MediaEngine::open(const std::string& path) {
 
         impl_->hwBlockedBy.clear();
         bool opened = open_with(decoder);
-        if (!opened && hardware) {
+        if (!opened && hardware && !impl_->openAborted.load(std::memory_order_acquire)) {
             // The previous session (ours or a just-closed browser page's) may
             // still be winding down in the driver; give it a moment before
             // settling for software, which can't keep up with 8K.
-            for (int attempt = 0; attempt < 4 && !opened; ++attempt) {
+            for (int attempt = 0; attempt < 4 && !opened && !impl_->openAborted.load(std::memory_order_acquire); ++attempt) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(150));
+                if (impl_->openAborted.load(std::memory_order_acquire)) break;
                 opened = open_with(decoder);
             }
             if (opened) PIXELVR_LOG_INFO("MediaEngine: hardware decoder opened on retry");
@@ -1843,6 +1890,12 @@ bool MediaEngine::open(const std::string& path) {
         impl_->lastError = "no audio output available";
         PIXELVR_LOG_ERROR("MediaEngine: audio file without audio output: %s", path.c_str());
         close();
+        return false;
+    }
+
+    if (impl_->openAborted.load(std::memory_order_acquire)) {
+        close();
+        impl_->lastError = "cancelled";
         return false;
     }
 

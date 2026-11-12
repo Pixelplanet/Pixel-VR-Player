@@ -365,6 +365,7 @@ inline float subY(float resting) { return (-0.01f + railSubShift()) + (resting -
 inline float subHalfH(float resting) { return resting * std::min(1.0f, railSubSqueeze() + 0.15f); }
 // Rail hover ids: 0..2 the fixed tabs, 3..8 section tabs, 9 lock, 10.. shortcuts.
 constexpr int kShortcutHoverBase = 10;
+constexpr int kShortcutIncogHoverBase = 20;
 inline int mainTabHoverId(int s) { return s < kFixedTabCount ? s : kShortcutHoverBase + (s - kFixedTabCount); }
 // Display, UI, Audio, Controls, Plugins, Vault (when unlocked).
 constexpr float kSettingsSubY[6] = {-0.01f, -0.088f, -0.166f, -0.244f, -0.322f, -0.400f};
@@ -373,6 +374,7 @@ constexpr float kFilesSubY[6] = {-0.04f, -0.11f, -0.18f, -0.25f, -0.32f, -0.39f}
 constexpr float kHitPad = 0.004f;  // laser targets are slightly larger than drawn
 
 inline UiRect mainTab(int s) { return {kRailCx, mainTabY(s), kRailItemHalfW, mainTabHalfH()}; }
+inline UiRect mainTabIncogBtn(int s) { return {-0.568f, mainTabY(s), 0.038f, mainTabHalfH() * 0.74f}; }
 // page: 0 = Files, 1 = Downloads, 2 = Settings
 inline UiRect subTab(int page, int sub) {
     if (page == 2) return {kRailCx, subY(kSettingsSubY[sub]), kRailItemHalfW, subHalfH(0.030f)};
@@ -512,13 +514,20 @@ inline SettingsCard settingsCard(int i, int total, bool compact = false) {
         L.ctrlY = L.cy - 0.024f;
         L.ctrlHalfH = 0.027f;
         L.textScale = 0.95f;
-    } else if (!compact) {
+    } else if (!compact && total <= 10) {
         L.cy = 0.28f - r * 0.152f;
         L.halfH = 0.066f;
         L.labelY = L.cy + 0.028f;
         L.ctrlY = L.cy - 0.020f;
         L.ctrlHalfH = 0.023f;
         L.textScale = 0.90f;
+    } else if (!compact) {  // 11..12 cards (6 rows of 2)
+        L.cy = 0.305f - r * 0.128f;
+        L.halfH = 0.056f;
+        L.labelY = L.cy + 0.023f;
+        L.ctrlY = L.cy - 0.017f;
+        L.ctrlHalfH = 0.020f;
+        L.textScale = 0.86f;
     } else {  // list pages (the shortcut list): one full-width line per row, 12 lines
         L.cx = 0.20f;
         L.halfW = 0.65f;
@@ -532,7 +541,9 @@ inline SettingsCard settingsCard(int i, int total, bool compact = false) {
     }
     return L;
 }
-inline int settingsMaxVisible(int total, bool compact = false) { return compact ? 18 : (total > 8 ? 10 : 8); }
+inline int settingsMaxVisible(int total, bool compact = false) {
+    return compact ? 18 : (total > 10 ? 12 : (total > 8 ? 10 : 8));
+}
 // Segment `s` of `n` inside a settings control well (segmented choices).
 // A shortcut line (list pages): 0 = grab handle (drag to reorder), 1 = on / off switch,
 // 2 = Edit, 3 = Delete. Name and address sit between the switch and Edit.
@@ -2296,6 +2307,7 @@ void VulkanRenderer::recenterScreen(const float headPos[3],
         screenYaw_ = std::atan2(-fx, -fz);
         sphereYaw_ = std::atan2(fx, -fz);
     }
+    sphereYawOffset_ = 0.0f;
     // Distance is deliberately kept: recenter only re-aims the screen, so a
     // distance the viewer set with the thumbstick survives.
 }
@@ -2793,7 +2805,7 @@ bool VulkanRenderer::dialogButtonRect(int r, int layoutN, float& cx, float& cy, 
     // The button row sits one line below the text panel, buttons centred side by side.
     const hub::SettingsCard L = hub::settingsCard(first, layoutN, true);
     const float gap = 0.024f;
-    hw = std::min(0.20f, (L.halfW * 2.0f - gap * static_cast<float>(n - 1)) / static_cast<float>(n) * 0.5f);
+    hw = std::min(0.26f, (L.halfW * 2.0f - gap * static_cast<float>(n - 1)) / static_cast<float>(n) * 0.5f);
     hh = L.halfH + 0.004f;
     const float span = hw * 2.0f * static_cast<float>(n) + gap * static_cast<float>(n - 1);
     cx = L.cx - span * 0.5f + hw + static_cast<float>(k) * (hw * 2.0f + gap);
@@ -3029,7 +3041,7 @@ void VulkanRenderer::updatePointer() {
                 hitHere(world.x, world.y, world.z);
                 const int optCount = static_cast<int>(actionMenu_.options.size());
                 if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5 || actionMenu_.page == 9 ||
-            actionMenu_.page == 10) {
+                    actionMenu_.page == 10) {
                     for (int i = 0; i < optCount; ++i) {
                         if (hub::actionMenuOption(i, optCount).contains(hx, hyy, 0.002f)) {
                             actionMenuBtnHovered_ = i;
@@ -3131,6 +3143,14 @@ void VulkanRenderer::updatePointer() {
             // Left navigation rail
             if (hx <= kRailRight) {
                 for (int s = 0; s < hub::mainTabCount(); ++s) {
+                    if (s >= hub::kFixedTabCount) {
+                        const int sc = s - hub::kFixedTabCount;
+                        if (sc < static_cast<int>(railShortcuts_.size()) && !railShortcuts_[sc].kiosk &&
+                            hub::mainTabIncogBtn(s).contains(hx, hyy, 0.002f)) {
+                            browserSidebarHovered_ = hub::kShortcutIncogHoverBase + sc;
+                            break;
+                        }
+                    }
                     if (hub::mainTab(s).contains(hx, hyy, hub::kHitPad)) {
                         browserSidebarHovered_ = hub::mainTabHoverId(s);
                         break;
@@ -3261,7 +3281,7 @@ void VulkanRenderer::updatePointer() {
                                 if (hub::shortcutZone(L, z, noHandle).contains(hx, hyy, 0.002f)) settingsSegmentHovered_ = z;
                             }
                         }
-                        if (row.kind == kSettingsKindSegmented && !row.options.empty()) {
+                        if (row.enabled && row.kind == kSettingsKindSegmented && !row.options.empty()) {
                             const int n = static_cast<int>(row.options.size());
                             for (int s = 0; s < n; ++s) {
                                 if (hub::settingsSegment(L, s, n).contains(hx, hyy, 0.003f)) {
@@ -6121,13 +6141,14 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     view.pose.orientation.x, view.pose.orientation.y,
                     view.pose.orientation.z, view.pose.orientation.w});
                 // Recenter yaw + pitch (so 360/180 re-centers where you look, incl.
-                // reclined) folded with the user's viewpoint tilt.
+                // reclined) folded with the user's viewpoint tilt and horizontal pan.
                 const float spherePitchTotal = spherePitch_ - recenterPitch_;
+                const float sphereYawTotal = sphereYaw_ + sphereYawOffset_;
                 const Mat4 adjust = multiply(
                     fromQuat(Quat{std::sin(0.5f * spherePitchTotal), 0.0f, 0.0f,
                                   std::cos(0.5f * spherePitchTotal)}),
-                    fromQuat(Quat{0.0f, std::sin(0.5f * sphereYaw_), 0.0f,
-                                  std::cos(0.5f * sphereYaw_)}));
+                    fromQuat(Quat{0.0f, std::sin(0.5f * sphereYawTotal), 0.0f,
+                                  std::cos(0.5f * sphereYawTotal)}));
                 const Mat4 rot = multiply(adjust, headRot);
                 SpherePush push{};
                 std::memcpy(push.viewRotation, rot.m, sizeof(push.viewRotation));
@@ -6769,6 +6790,16 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 drawUiElement(vpPanel, -0.555f, mainTabY[s], 0.018f, 0.018f,
                               UiShape::RoundedBox, redBadge, 1.0f);
             }
+            if (s >= hub::kFixedTabCount) {
+                const int sc = s - hub::kFixedTabCount;
+                if (sc < static_cast<int>(railShortcuts_.size()) && !railShortcuts_[sc].kiosk) {
+                    const UiRect ib = hub::mainTabIncogBtn(s);
+                    const bool ibHov = (browserSidebarHovered_ == hub::kShortcutIncogHoverBase + sc);
+                    drawUiElement(vpPanel, ib.cx, ib.cy, ib.hw, ib.hh,
+                                  UiShape::RoundedBox, ibHov ? tabActiveBg : tabNormBg,
+                                  0.55f, ibHov ? 0.08f : 0.05f, ibHov ? tabActiveBord : tabNormBord);
+                }
+            }
         }
         // Thin separator between the primary tabs and the contextual sub-navigation
         drawUiElement(vpPanel, -0.695f, hub::railDividerY(), 0.160f, 0.0012f,
@@ -6785,7 +6816,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         if (activeMainTab == 1) {
             activeSubTab = downloadsFilter_;
         } else if (activeMainTab == 2) {
-            activeSubTab = (settingsSection_ >= 10 && settingsSection_ <= 12) ? 2 : ((settingsSection_ == 21 || settingsSection_ == 22) ? 1 : (settingsSection_ >= 23 && settingsSection_ < 30) ? 3 : (settingsSection_ == 15 || settingsSection_ == 16 || settingsSection_ == 18 || settingsSection_ == 19) ? 4 : settingsSection_ == 4 ? 5 : settingsSection_);
+            activeSubTab = (settingsSection_ >= 10 && settingsSection_ <= 12) ? 2 : ((settingsSection_ == 21 || settingsSection_ == 22) ? 1 : (settingsSection_ >= 23 && settingsSection_ < 30) ? 3 : (settingsSection_ == 15 || settingsSection_ == 16 || settingsSection_ == 18 || settingsSection_ == 19) ? 4 : (settingsSection_ == 4 || settingsSection_ == 20) ? 5 : settingsSection_);
         }
         const float subActBg[4] = {0.85f, 0.90f, 1.00f, 0.14f};
         const float slateIconCol[4] = {
@@ -6855,13 +6886,23 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             // Compressed pitch (more than 5 tabs): slightly smaller labels.
             const float tabSc = (mainTabCount > 5) ? scSub : scStd;
             for (int s = 0; s < mainTabCount; ++s) {
+                const bool hasIncogBtn = s >= hub::kFixedTabCount &&
+                                         (s - hub::kFixedTabCount) < static_cast<int>(railShortcuts_.size()) &&
+                                         !railShortcuts_[s - hub::kFixedTabCount].kiosk;
                 const char* label = s == 0 ? "Files" : s == 1 ? "Downloads" : s == 2 ? "Settings"
                                     : railShortcuts_[s - hub::kFixedTabCount].name.c_str();
-                drawFit(-0.790f, mainTabY[s], 0.23f, tabSc,
+                drawFit(-0.790f, mainTabY[s], hasIncogBtn ? 0.17f : 0.23f, tabSc,
                         (s == activeMainTab) ? themeTextCol : slateCol, label);
                 if (s == 1 && activeDownloadCount_ > 0) {
                     drawFitCentered(-0.555f, mainTabY[s], 0.035f, scBadge, themeTextCol,
                                     std::to_string(activeDownloadCount_));
+                }
+                if (hasIncogBtn) {
+                    const int sc = s - hub::kFixedTabCount;
+                    const UiRect ib = hub::mainTabIncogBtn(s);
+                    const bool ibHov = (browserSidebarHovered_ == hub::kShortcutIncogHoverBase + sc);
+                    drawFitCentered(ib.cx, ib.cy, ib.hw * 1.85f, scBadge * 0.90f,
+                                    ibHov ? themeAccentCol : slateCol, "Incog");
                 }
             }
         };
@@ -6993,10 +7034,12 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             };
             auto headerIconX = [](const UiRect& r) { return r.cx - r.hw + 0.026f; };
             if (browserPick_.active) {
-                // Move / Copy target: a tinted bar behind the row, the confirm and cancel pills.
-                const float barCol[4] = {themeAccentCol[0] * 0.22f, themeAccentCol[1] * 0.22f, themeAccentCol[2] * 0.22f, 0.92f};
+                // Move / Copy target: a prominent accent-tinted bar behind the row, confirm and cancel pills.
+                const float barCol[4] = {themeAccentCol[0] * 0.28f, themeAccentCol[1] * 0.28f, themeAccentCol[2] * 0.34f, 0.96f};
+                const float barGlow[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.18f};
+                drawGlow(vpPanel, 0.195f, hub::kBrowserBtnY, 0.665f, 0.027f, 0.012f, barGlow);
                 drawUiElement(vpPanel, 0.195f, hub::kBrowserBtnY, 0.665f, 0.027f, UiShape::RoundedBox, barCol, 1.0f,
-                              0.06f, tabActiveBord);
+                              0.08f, tabActiveBord);
                 if (browserCanCreateFolder_) {
                     const UiRect r = headerBtn(6, false);
                     drawUiElement(vpPanel, headerIconX(r), r.cy, 0.012f, 0.012f, UiShape::Files, slateIconCol);
@@ -7011,8 +7054,11 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     drawUiElement(vpPanel, headerIconX(r), r.cy, 0.012f, 0.012f, UiShape::Checkmark, hub::kPickDarkText);
                 } else {
                     const UiRect r = hub::headerButton(7);
-                    drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox, glassControlT.data(), 1.0f, 0.06f,
-                                  kGlassRimFaint);
+                    const bool hov7 = browserPageBtnHovered_ == 7;
+                    drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox,
+                                  hov7 ? tabHovBg : glassControlT.data(), 1.0f, 0.06f,
+                                  hov7 ? tabHovBord : tabNormBord);
+                    drawUiElement(vpPanel, headerIconX(r), r.cy, 0.012f, 0.012f, UiShape::Checkmark, dimCol);
                 }
                 {
                     const UiRect r = headerBtn(8, false);
@@ -7269,7 +7315,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             // Header button labels (icons sit at the left edge of each pill)
             if (browserPick_.active) {
                 withHeadingFont([&] {
-                    drawFit(-0.455f, hub::kBrowserBtnY, browserCanCreateFolder_ ? 0.72f : 0.92f, scSub, themeAccentCol,
+                    drawFit(-0.455f, hub::kBrowserBtnY, browserCanCreateFolder_ ? 0.72f : 0.92f, scSub, themeTextCol,
                             browserPick_.text);
                 });
                 if (browserCanCreateFolder_) {
@@ -7404,7 +7450,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 : browserOnNetwork_
                 ? "Stick: Scroll  |  Trigger: Stream  |  Y: Download"
                 : "Stick: Scroll  |  Trigger: Play  |  Y: Actions";
-            if (browserNotice_.empty()) drawFit(0.18f, -0.490f, 0.68f, scDetail, dimCol, hintText);  // a notice uses the row
+            if (browserNotice_.empty() || measureString(scDetail, browserNotice_) <= 0.60f) {
+                drawFit(0.18f, -0.490f, 0.68f, scDetail, dimCol, hintText);  // a long notice uses the whole row
+            }
         }
 
         // ---------------------------------------------------------------------
@@ -7868,7 +7916,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             drawRailText();
             const char* setSubLabels[6] = {"Display & Cinema", "UI & Appearance", "Audio & Tracks",
                                            "Controls & Input", "Plugins", "Vault & Privacy"};
-            const int effSec = (settingsSection_ >= 10 && settingsSection_ <= 12) ? 2 : ((settingsSection_ == 21 || settingsSection_ == 22) ? 1 : (settingsSection_ >= 23 && settingsSection_ < 30) ? 3 : (settingsSection_ == 15 || settingsSection_ == 16 || settingsSection_ == 18 || settingsSection_ == 19) ? 4 : settingsSection_ == 4 ? 5 : settingsSection_);
+            const int effSec = (settingsSection_ >= 10 && settingsSection_ <= 12) ? 2 : ((settingsSection_ == 21 || settingsSection_ == 22) ? 1 : (settingsSection_ >= 23 && settingsSection_ < 30) ? 3 : (settingsSection_ == 15 || settingsSection_ == 16 || settingsSection_ == 18 || settingsSection_ == 19) ? 4 : (settingsSection_ == 4 || settingsSection_ == 20) ? 5 : settingsSection_);
             const int sCount = vaultUnlocked_ ? 6 : 5;
             for (int sub = 0; sub < sCount; ++sub) {
                 drawFit(-0.84f, hub::subY(setSubY[sub]), 0.30f, scSub * 0.92f,

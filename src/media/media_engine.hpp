@@ -64,6 +64,9 @@ public:
     bool open(const std::string& path);
     // Why the last open() failed, for the user (e.g. "no decoder for av1").
     const std::string& lastError() const;
+    // Clear or trigger an open() abort flag so a background open() can be cancelled.
+    void resetAbort();
+    void abortOpen();
     void close();
 
     int width() const;

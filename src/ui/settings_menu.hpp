@@ -74,6 +74,11 @@ public:
         CycleKeyboardLayout,
         TogglePauseLivestreams,
         TogglePrivateBrowsing,
+        ToggleVaultForceIncognito,
+        StartVaultMoveLock,
+        StartVaultMoveUnlock,
+        CancelVaultMove,
+        BackToVault,
         CycleBrowserSort,
         BackToUI,
         CycleAmbilightScope,
@@ -181,13 +186,14 @@ public:
     void setVaultMoveNotice(const std::string& text) {
         vaultMoveNotice_ = text;
         vaultMoveNoticeUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(15);
-        if (section_ == 4) refresh();
+        if (section_ == 4 || section_ == kVaultMoveSection) refresh();
     }
     void setVaultMoveStatus(const std::string& text) {
         if (text == vaultMoveStatus_) return;
         vaultMoveStatus_ = text;
-        if (section_ == 4) refresh();
+        if (section_ == 4 || section_ == kVaultMoveSection) refresh();
     }
+    void measureVault();
     // Web shortcuts shown as tabs on the hub's rail (in table order).
     // A web shortcut: name + address; on the hub's rail or not; a page only (kiosk) or the
     // full browser. An empty address is asked for on first use (e.g. a Jellyfin server).
@@ -220,7 +226,7 @@ public:
     // Dense line lists: the shortcut list and the plugin list.
     bool compactPage() const {
         return section_ == 22 || section_ == kPluginsSection || section_ == kPluginSection || section_ == kStoreSection ||
-               section_ == kStoreItemSection;
+               section_ == kStoreItemSection || section_ == kVaultMoveSection;
     }
     // A plugin's page turns pages with the header pager when its lines do not fit.
     int pluginPage() const { return section_ == kPluginSection ? pluginPage_ : -1; }
@@ -258,6 +264,8 @@ public:
     bool pauseLivestreams() const { return pauseLivestreams_; }
     // New browser screens open in a private (incognito) browser context.
     bool privateBrowsing() const { return privateBrowsing_; }
+    // Force non-kiosk browser windows to open in incognito while the vault is unlocked.
+    bool vaultForceIncognito() const { return vaultForceIncognito_; }
     // Borders around the screens in multi-screen mode (dock toggle).
     // Multi-screen: a big number on each screen (dock toggle).
     bool screenNumbers() const { return screenNumbers_; }
@@ -387,6 +395,7 @@ private:
     static constexpr int kPluginSection = 16;   // one plugin's page
     static constexpr int kStoreSection = 18;    // Install plugins (from the repository)
     static constexpr int kStoreItemSection = 19;  // one repository plugin: about, how to use, install / update
+    static constexpr int kVaultMoveSection = 20;  // Vault & Privacy > Move Vault
     static constexpr int kButtonsSection = 23;  // 23.. one section per Buttons page
     static constexpr int kButtonsPerPage = 10;  // all bindings; the header pager turns pages
     std::vector<std::pair<std::string, std::string>> controlsInfo_;  // (action label, bound buttons)
@@ -401,6 +410,8 @@ private:
     std::string vaultMoveStatus_;
     std::string vaultMoveNotice_;
     std::chrono::steady_clock::time_point vaultMoveNoticeUntil_{};
+    uint64_t vaultSizeBytes_ = 0;
+    int vaultFileCount_ = 0;
     int railShortcutMask_ = (1 << 0) | (1 << 5);  // kRailShortcuts bits: YouTube + Browser
     int curvatureIdx_ = 0;     // 0=Flat (0%), 1=Gentle (25%), 2=Cinema (50%), 3=Deep (75%), 4=IMAX (100%)
     int uiTextScaleIdx_ = 2;   // 0=90%, 1=105%, 2=120% (default), 3=140%, 4=160%
@@ -418,6 +429,7 @@ private:
     int roomIdx_ = 0;
     bool pauseLivestreams_ = false;
     bool privateBrowsing_ = false;
+    bool vaultForceIncognito_ = true;
     bool screenNumbers_ = false;
     std::vector<Shortcut> shortcuts_;  // `shortcut=` lines in settings.conf; defaults when absent
     int shortcutIdx_ = 0;

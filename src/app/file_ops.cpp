@@ -462,6 +462,7 @@ void FileOps::loop() {
             r = std::move(jobs_.front());
             jobs_.pop_front();  // the destructor's clear() then only drops the waiting ones
             status_ = Status{};
+            if (r.relocateVault) cancelReloc_.store(false);
             status_.busy = true;
             status_.copy = r.mode == Mode::Copy;
             status_.relocating = r.relocateVault;
@@ -478,6 +479,7 @@ void FileOps::loop() {
         Result res;
         res.mode = r.mode;
         res.destDir = r.destDir;
+        res.lockWhenDone = r.lockWhenDone;
         run(r, res);
         std::lock_guard<std::mutex> l(mu_);
         if (r.relocateVault) --relocPending_;
@@ -486,6 +488,10 @@ void FileOps::loop() {
         if (jobs_.empty()) busy_ = false;
         if (stop_) return;
     }
+}
+
+void FileOps::cancelRelocation() {
+    cancelReloc_.store(true);
 }
 
 bool FileOps::relocationPending() const {
@@ -588,7 +594,9 @@ void FileOps::run(const Request& r, Result& res) {
         std::lock_guard<std::mutex> l(mu_);
         status_.done += n;
     };
-    job.stopRequested = [this] { return stop_.load(); };
+    job.stopRequested = [this, reloc = r.relocateVault] {
+        return stop_.load() || (reloc && cancelReloc_.load());
+    };
     res.intoPrivate = vm.isVaultPath(r.destDir);
     res.fromPrivate = !r.sources.empty() && VaultManager::isPrivatePath(r.sources[0]);
     res.privateText = res.intoPrivate || res.fromPrivate || r.destWasVault || r.srcWasVault;

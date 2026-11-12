@@ -32,6 +32,7 @@ public:
         // destDir = the new vault folder (created here), toSdCard / cardId for VaultManager.
         bool relocateVault = false;
         bool toSdCard = false;
+        bool lockWhenDone = false;         // lock the vault as soon as the move completes
         std::string cardId;
         // Set by queue(): the vault may move to / from the SD card before this runs.
         bool destWasVault = false, srcWasVault = false;
@@ -48,6 +49,7 @@ public:
         bool fromPrivate = false;
         bool relocated = false;
         bool relocation = false;    // a vault move was tried (ok or not)
+        bool lockWhenDone = false;
         Mode mode = Mode::Move;
         std::string message;
         std::vector<Moved> moved;   // Move only: each source that is gone now, and where it went
@@ -70,6 +72,8 @@ public:
     Status status() const;
     bool takeResult(Result& out);  // frame thread
     bool busy() const { return busy_.load(); }
+    // Stops the currently running vault relocation (if any), keeping the original vault untouched.
+    void cancelRelocation();
     // A vault move (to / from the SD card) is waiting or running: nothing else may touch the vault.
     bool relocationPending() const;
 
@@ -98,6 +102,7 @@ private:
     int relocPending_ = 0;
     std::atomic<bool> busy_{false};
     std::atomic<bool> stop_{false};
+    std::atomic<bool> cancelReloc_{false};
     std::thread worker_;
 };
 

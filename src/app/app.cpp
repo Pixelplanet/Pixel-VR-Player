@@ -284,6 +284,11 @@ float wrapAngle(float a) { return std::atan2(std::sin(a), std::cos(a)); }
 App::App() = default;
 
 App::~App() {
+#ifdef PIXELVR_HAVE_MEDIA
+    for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
+        cancelPendingOpen(slot);
+    }
+#endif
     plugins_.shutdownAll();  // plugins stop their devices before anything else goes away
     watchdogRunning_.store(false);
     if (watchdogThread_.joinable()) {
@@ -344,8 +349,10 @@ void App::watchdogLoop() {
                         }
                     }
                 }
-                // Only with "Auto-Lock on Headset Removal" on (off: e.g. a vault move runs while away).
-                if (VaultManager::instance().isUnlocked() && VaultManager::instance().autoLockHeadsetOff()) {
+                // Only with "Auto-Lock on Headset Removal" on, and never while a vault relocation is running
+                // (an SD card vault transfer can take 30+ minutes while the headset sits on a desk).
+                if (VaultManager::instance().isUnlocked() && VaultManager::instance().autoLockHeadsetOff() &&
+                    !FileOps::instance().relocationPending()) {
                     pendingAutoLock_.store(true, std::memory_order_release);
                 }
             }
@@ -450,6 +457,20 @@ bool App::init(const std::string& mediaPath) {
 }
 
 #ifdef PIXELVR_HAVE_MEDIA
+void App::cancelPendingOpen(int slot) {
+    if (slot < 0 || slot >= VulkanRenderer::kMaxVideoSlots) return;
+    ScreenState& sc = screens_[slot];
+    if (sc.opening || sc.openThread.joinable()) {
+        sc.engine.abortOpen();
+        if (sc.openThread.joinable()) sc.openThread.join();
+    }
+    sc.opening = false;
+    sc.openState.store(0, std::memory_order_relaxed);
+    sc.openPlex = false;
+    sc.openSeekPos = -1.0;
+    sc.openStartPaused = false;
+}
+
 void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
     lastLoadFailed_ = false;
     if (slot < 0 || !multiScreenEnabled()) slot = multiScreenEnabled() ? selectedScreen_ : 0;
@@ -467,22 +488,25 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
         // would silently fall back to software decoding. Close them first.
         if (p != VulkanRenderer::ProjectionMode::Flat) {
             for (int i = 1; i < VulkanRenderer::kMaxVideoSlots; ++i) {
-                if (screens_[i].open) closeMedia(i);
+                if (screens_[i].open || screens_[i].opening) closeMedia(i);
             }
         }
     }
     if (screens_[slot].web) clearSlotKeepLayout(slot);  // a file replaces a browser screen
     ScreenState& sc = screens_[slot];
-    const bool sameFile = (path == sc.path);
+    const bool sameFile = (path == sc.path) && (sc.open || sc.opening);
+    cancelPendingOpen(slot);
     if (!sameFile) {
         rememberPlaybackPosition(slot);  // the clip being replaced
         playbackMemory_.save();
+        sc.openQueueTries = 0;
     }
     if (!sameFile) renderer_.clearScrubPreview();  // stale frame from the previous clip
     if (sc.webSuspended && !plexLoading_ && !sameFile) {  // another file replaces the Plex hand-off
         webHosts_[slot].stop();
         sc.webSuspended = false;
     }
+    sc.open = false;
     sc.path = path;
     pluginNamePath_[slot].clear();  // re-read the reported name (a vault file may have been renamed)
     const bool privatePath = VaultManager::isPrivatePath(path) || sc.webSuspended;
@@ -492,11 +516,17 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
     VulkanRenderer::StereoMode stereo = VulkanRenderer::StereoMode::Mono;
     bool stereoFromName = false;
     detect_format(formatName(path), proj, stereo, stereoFromName);
+    if (remembered != nullptr && remembered->projection >= 0 && remembered->stereo >= 0) {
+        proj = static_cast<VulkanRenderer::ProjectionMode>(remembered->projection);
+        stereo = rendererStereo(remembered->stereo);
+    }
 
     renderer_.releaseVideoFrame(slot);  // free the previous clip's dma-buf before reopening
-    if (slot == 0) {
+    if (!sameFile) renderer_.clearVideo(slot);
+    if (slot == 0 && !sameFile) {
         renderer_.setSphereZoom(1.0f);  // reset the 360/180 viewpoint per clip
         renderer_.setSpherePitch(0.0f);
+        renderer_.setSphereYawOffset(0.0f);
     }
     sc.engine.setPreferredAudioLanguage(settings_.audioLanguage());
     if (!sameFile) {  // a new file starts from automatic track selection
@@ -508,15 +538,115 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
         sc.engine.setPreferredAudioStream(plexAudioStream_);
     }
     // Frame-sequential 3D: a format picked by hand for this file decides; otherwise detect it.
-    sc.engine.setFrameSequentialMode(remembered == nullptr || remembered->stereo < 0 ? -1 : (remembered->stereo == 3 ? 1 : 0));
-    sc.open = sc.engine.open(path);
+    if (!sameFile) {
+        sc.engine.setFrameSequentialMode(remembered == nullptr || remembered->stereo < 0 ? -1 : (remembered->stereo == 3 ? 1 : 0));
+    }
+
+    // Place the screen in the layout right away and close the hub so the user
+    // sees the "Loading..." indicator on the screen while the background worker
+    // opens the stream (especially over slow SMB / SFTP / HTTP connections).
+    sc.projection = static_cast<int>(proj);
+    sc.stereo = static_cast<int>(stereo);
+    if (slot == 0) {
+        renderer_.setProjectionMode(proj);
+        renderer_.setStereoMode(stereo);
+    } else {
+        VulkanRenderer::ScreenPlacement pl = renderer_.screenPlacement(slot);
+        if (!pl.active) {
+            placeNewScreen(slot);
+            pl = renderer_.screenPlacement(slot);
+        }
+        pl.active = true;
+        pl.stereo = stereo;
+        renderer_.setScreenPlacement(slot, pl);
+    }
+    if (proj == VulkanRenderer::ProjectionMode::Flat) joinArrangement(slot);
+
+    if (!fromQueue) {  // a track change of the queue leaves the UI alone
+        hudDismissed_ = false;
+        lastControllerActivity_ = std::chrono::steady_clock::now();
+        if (textEntry_.active) cancelKeyboard();
+        actionMenu_.visible = false;
+        smbModal_.active = false;
+        smbModal_.editingField = SmbModalState::Field::None;
+#ifdef PIXELVR_HAVE_FREETYPE
+        browser_.setOpen(false);
+#endif
+        downloadsWindow_ = false;
+        pendingDl_.clear();
+        selectScreen(slot);
+    }
+
+    std::string dispName = sc.webSuspended && !plexTitles_[slot].empty()
+                               ? plexTitles_[slot]
+                               : std::filesystem::path(formatName(path)).filename().string();
+    if (dispName.empty()) dispName = std::filesystem::path(path).filename().string();
+    renderer_.setScreenTitle(slot, "Loading " + dispName + "...", 60.0f);
+
+    sc.openFromQueue = fromQueue;
+    sc.openSameFile = sameFile;
+    sc.openStartedAt = std::chrono::steady_clock::now();
+    sc.opening = true;
+    sc.openState.store(0, std::memory_order_release);
+    sc.engine.resetAbort();
+    sc.openThread = std::thread([&sc, path] {
+        const bool ok = sc.engine.open(path);
+        sc.openState.store(ok ? 1 : 2, std::memory_order_release);
+    });
+}
+
+void App::pollMediaOpens(std::chrono::steady_clock::time_point now) {
+    for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
+        ScreenState& sc = screens_[slot];
+        if (!sc.opening) continue;
+        const int st = sc.openState.load(std::memory_order_acquire);
+        if (st == 0) {
+            // Keep the loading indicator alive with animated dots while the background open runs.
+            const auto elapsedMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - sc.openStartedAt).count();
+            const int dots = static_cast<int>((elapsedMs / 400) % 4);
+            std::string dispName = sc.webSuspended && !plexTitles_[slot].empty()
+                                       ? plexTitles_[slot]
+                                       : std::filesystem::path(formatName(sc.path)).filename().string();
+            if (dispName.empty()) dispName = std::filesystem::path(sc.path).filename().string();
+            renderer_.setScreenTitle(slot, "Loading " + dispName + std::string(static_cast<std::size_t>(dots), '.'), 2.0f);
+            continue;
+        }
+        if (sc.openThread.joinable()) sc.openThread.join();
+        sc.opening = false;
+        sc.openState.store(0, std::memory_order_relaxed);
+        sc.open = (st == 1);
+        renderer_.setScreenTitle(slot, std::string(), 0.0f);
+        finishLoadMedia(slot);
+    }
+}
+
+void App::finishLoadMedia(int slot) {
+    ScreenState& sc = screens_[slot];
+    const std::string path = sc.path;
+    const bool fromQueue = sc.openFromQueue;
+    const bool sameFile = sc.openSameFile;
+    const bool isPlex = sc.openPlex;
+    const BrowserHost::PlexPlay plexPlay = sc.openPlexPlay;
+    const double explicitSeek = sc.openSeekPos;
+    const bool startPaused = sc.openStartPaused;
+    sc.openPlex = false;
+    sc.openSeekPos = -1.0;
+    sc.openStartPaused = false;
+
     if (!sc.open) {
         // Clear stale video from the previous clip so the renderer shows black
         // instead of the last decoded frame of the old file.
         const std::string why = sc.engine.lastError();
         lastLoadFailed_ = true;
-        if (fromQueue) {  // the queue moves on to the next track (playQueueTrack)
+        if (fromQueue) {  // the queue moves on to the next track
             PIXELVR_LOG_WARN("Failed to open %s: %s", path.c_str(), why.c_str());
+            const int next = sc.queue.next(false);
+            if (next >= 0 && sc.openQueueTries + 1 < sc.queue.size()) {
+                ++sc.openQueueTries;
+                playQueueTrack(slot, next);
+            } else {
+                closeMedia(slot);
+            }
             return;
         }
         if (returnFromPlex(slot)) {
@@ -526,24 +656,23 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
         closeMedia(slot);
         PIXELVR_LOG_WARN("Failed to open %s: %s", path.c_str(), why.c_str());
 #ifdef PIXELVR_HAVE_FREETYPE
-        // Say so in the file browser instead of silently doing nothing.
-        browser_.setStatus("Can't play " + std::filesystem::path(path).filename().string() + ": " + why);
-        if (!fromQueue) browser_.setOpen(true);
+        if (why != "cancelled") {
+            // Say so in the file browser instead of silently doing nothing.
+            browser_.setStatus("Can't play " + std::filesystem::path(path).filename().string() + ": " + why);
+            if (!fromQueue) browser_.setOpen(true);
+        }
 #endif
         return;
     }
-    sc.engine.setPaused(false);
-    if (!fromQueue) {  // a track change of the queue leaves the UI alone
-        hudDismissed_ = false;
-        lastControllerActivity_ = std::chrono::steady_clock::now();
-        if (textEntry_.active) cancelKeyboard();
-        actionMenu_.visible = false;
-        smbModal_.active = false;
-        smbModal_.editingField = SmbModalState::Field::None;
-        browser_.setOpen(false);
-        downloadsWindow_ = false;
-        pendingDl_.clear();
-    }
+    sc.openQueueTries = 0;
+    sc.engine.setPaused(startPaused);
+
+    const bool privatePath = VaultManager::isPrivatePath(path) || sc.webSuspended;
+    const PlaybackMemory::Entry* remembered = privatePath ? nullptr : playbackMemory_.find(path, sc.fingerprint);
+    VulkanRenderer::ProjectionMode proj = VulkanRenderer::ProjectionMode::Flat;
+    VulkanRenderer::StereoMode stereo = VulkanRenderer::StereoMode::Mono;
+    bool stereoFromName = false;
+    detect_format(formatName(path), proj, stereo, stereoFromName);
 
     // Refine the stereo layout from the frame aspect ratio when the filename did
     // not state it: once the projection is a VR type the aspect is unambiguous
@@ -579,6 +708,9 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
 
     // No layout in the name: the file's own 3D / VR metadata, else what the
     // picture check found (now, or once the thumbnail worker has looked).
+    // Skip opening additional SMB/SFTP/WebDAV connections for thumbnail/letterbox
+    // probes while streaming a remote file so playback doesn't contend on smbGlobalLock().
+    const bool remoteStream = isRemotePath(path);
     sc.formatPending = false;
     if (!stereoFromName && !sc.engine.audioOnly()) {
         const FormatHint meta = sc.engine.formatHint();
@@ -592,7 +724,7 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
             ThumbnailCache::MediaMeta tm;
             if (thumbnailCache_.getMeta(path, tm) && tm.stereoHint >= 0) {
                 hintStereo = tm.stereoHint;
-            } else if (!sc.webSuspended) {
+            } else if (!sc.webSuspended && !remoteStream) {
                 sc.formatPending = true;
                 thumbnailCache_.request(path, true);
             }
@@ -609,6 +741,9 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
         stereo = rendererStereo(remembered->stereo);
         sc.formatByHand = true;
         sc.formatPending = false;
+    } else if (sameFile) {
+        proj = static_cast<VulkanRenderer::ProjectionMode>(sc.projection);
+        stereo = rendererStereo(sc.stereo);
     }
     // Dimension-based detection can turn a file immersive only after opening:
     // move it to the main screen in that case.
@@ -626,12 +761,16 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
         loadMedia(path, 0);
         return;
     }
+    if (sameFile && sc.stereo == 3 && !sc.engine.frameSequential()) {
+        renderer_.setScreenTitle(slot, "Not frame-sequential: needs a doubled frame rate (48 / 50 / 60 fps)", 6.0f);
+        stereo = VulkanRenderer::StereoMode::Mono;
+    }
     sc.projection = static_cast<int>(proj);
     sc.stereo = sc.engine.frameSequential() ? 3 : static_cast<int>(stereo);  // FS3D shows as its own format
-    // Letterbox bars: measured in the background (not for the vault: the results are kept on disk).
+    // Letterbox bars: measured in the background (not for the vault or remote network shares).
     sc.letterbox = 0.0f;
     renderer_.setLetterbox(slot, 0.0f);
-    sc.letterboxPending = !privatePath || sc.webSuspended;
+    sc.letterboxPending = (!privatePath || sc.webSuspended) && !remoteStream;
     if (VaultManager::isPrivatePath(path)) sc.letterboxPending = false;
     if (sc.letterboxPending) letterboxDetector_.request(path);
     if (slot == 0) {
@@ -642,7 +781,7 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
             // first, see playFromBrowser; this catches a format found only
             // now, from the picture size).
             for (int i = 1; i < VulkanRenderer::kMaxVideoSlots; ++i) {
-                if (screens_[i].open) closeMedia(i);
+                if (screens_[i].open || screens_[i].opening) closeMedia(i);
             }
         }
     } else {
@@ -656,10 +795,11 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
         renderer_.setScreenPlacement(slot, pl);
     }
     if (proj == VulkanRenderer::ProjectionMode::Flat) joinArrangement(slot);
-    // Resume where this file was left (track switches reopen the same file and
-    // restore their own position).
-    if (!sameFile && !fromQueue && remembered != nullptr && remembered->position > 0.0 &&
-        (sc.engine.duration() <= 0.0 || remembered->position < sc.engine.duration())) {
+    // Explicit seek (track switch / FS3D toggle) or resume where this file was left.
+    if (explicitSeek > 0.5 && (sc.engine.duration() <= 0.0 || explicitSeek < sc.engine.duration())) {
+        sc.engine.seek(explicitSeek);
+    } else if (!sameFile && !fromQueue && remembered != nullptr && remembered->position > 0.0 &&
+               (sc.engine.duration() <= 0.0 || remembered->position < sc.engine.duration())) {
         sc.engine.seek(remembered->position);
         PIXELVR_LOG_INFO("Resuming %s at %.1fs", path.c_str(), remembered->position);
     }
@@ -676,7 +816,7 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
     }
     // The loaded screen becomes the selected one (publishes its track lists and
     // format to the settings / HUD). The queue moving on keeps the selection.
-    if (!fromQueue) selectScreen(slot);
+    if (!fromQueue || slot == selectedScreen_) selectScreen(slot);
     static const char* const kProj[] = {"flat", "360", "180"};
     static const char* const kStereo[] = {"mono", "SBS", "TB"};
     PIXELVR_LOG_INFO("Loaded %s on screen %d (%dx%d, %s/%s)", path.c_str(), slot + 1, w, h,
@@ -691,11 +831,27 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
         renderer_.setScreenTitle(slot, msg, 12.0f);
         PIXELVR_LOG_WARN("%s", msg.c_str());
     }
+    if (isPlex && sc.webSuspended) {
+        if (plexPlay.offset > 0.5 && (sc.engine.duration() <= 0.0 || plexPlay.offset < sc.engine.duration() - 5.0)) {
+            sc.engine.seek(plexPlay.offset);
+        }
+        const auto now = std::chrono::steady_clock::now();
+        hudDismissed_ = false;  // the dock shows, with the hint above it
+        lastControllerActivity_ = now;
+        renderer_.setDockHint(plexPlay.service == "jellyfin" ? "Press Stop to return to Jellyfin"
+                                                             : "Press Stop to return to Plex",
+                              8.0f);
+        renderer_.setScreenTitle(slot, plexPlay.episodeInfo, plexPlay.episodeInfo.empty() ? 0.0f : 5.0f);
+        sc.plexReportAt = now + std::chrono::seconds(10);
+        webHosts_[slot].plexTimeline("playing", static_cast<int64_t>(plexPlay.offset * 1000.0));
+        PIXELVR_LOG_INFO("Plex: playing \"%s\" on screen %d", plexPlay.title.c_str(), slot + 1);
+    }
 }
 
 void App::switchTracks(bool byLanguage) {
-    if (cur().path.empty() || !cur().open) return;
-    const double pos = cur().engine.position();
+    if (cur().path.empty() || (!cur().open && !cur().opening)) return;
+    const double pos = cur().open ? cur().engine.position() : cur().openSeekPos;
+    const bool paused = cur().open ? cur().engine.paused() : cur().openStartPaused;
     if (byLanguage) {
         cur().engine.setPreferredAudioLanguage(settings_.audioLanguage());
         cur().engine.setPreferredAudioStream(-1);
@@ -705,7 +861,8 @@ void App::switchTracks(bool byLanguage) {
     }
     cur().engine.setPreferredVideoStream(settings_.selectedVideoStream());
     loadMedia(cur().path);  // same file: keeps the preferences set above
-    if (pos > 0.5 && cur().engine.duration() > 0.0) cur().engine.seek(pos);
+    cur().openSeekPos = pos;
+    cur().openStartPaused = paused;
 }
 
 void App::updateStats() {
@@ -989,14 +1146,13 @@ void App::buildMusicQueue(int slot, const std::string& path) {
 void App::playQueueTrack(int slot, int index) {
 #ifdef PIXELVR_HAVE_MEDIA
     MusicQueue& q = screens_[slot].queue;
-    // Tracks that can't be opened are skipped; give up once every track failed.
-    for (int tries = 0; tries < q.size() && index >= 0; ++tries) {
+    if (index >= 0 && index < q.size()) {
         const std::string next = q.track(index).path;
-        if (next.empty()) break;
-        q.setCurrent(index);
-        loadMedia(next, slot, true);
-        if (!lastLoadFailed_) return;
-        index = q.next(false);
+        if (!next.empty()) {
+            q.setCurrent(index);
+            loadMedia(next, slot, true);
+            return;
+        }
     }
     closeMedia(slot);  // nothing in the queue plays
 #else
@@ -1095,6 +1251,10 @@ void App::clearSlotKeepLayout(int slot) {
 void App::closeMedia(int slot) {
     if (slot < 0) slot = selectedScreen_;
     ScreenState& sc = screens_[slot];
+#ifdef PIXELVR_HAVE_MEDIA
+    cancelPendingOpen(slot);
+#endif
+    renderer_.setScreenTitle(slot, std::string(), 0.0f);
     sc.letterbox = 0.0f;
     sc.letterboxPending = false;
     renderer_.setLetterbox(slot, 0.0f);
@@ -1150,7 +1310,7 @@ void App::closeMedia(int slot) {
         // Hand control to another open screen (main first), else stay on main.
         int next = 0;
         for (int i = 0; i < VulkanRenderer::kMaxVideoSlots; ++i) {
-            if (screens_[i].open) {
+            if (screens_[i].open || screens_[i].opening) {
                 next = i;
                 break;
             }
@@ -1212,21 +1372,9 @@ void App::startPlexPlay(int slot, const BrowserHost::PlexPlay& play) {
     loadMedia(play.url, slot);
     plexLoading_ = false;
     plexAudioStream_ = -1;
+    sc.openPlex = true;
+    sc.openPlexPlay = play;
     if (play.audioStream >= 0) PIXELVR_LOG_INFO("Web play: audio track %d as chosen on the page", play.audioStream);
-    if (!sc.open || !sc.webSuspended) return;
-    if (play.offset > 0.5 && (sc.engine.duration() <= 0.0 || play.offset < sc.engine.duration() - 5.0)) {
-        sc.engine.seek(play.offset);
-    }
-    const auto now = std::chrono::steady_clock::now();
-    hudDismissed_ = false;  // the dock shows, with the hint above it
-    lastControllerActivity_ = now;
-    renderer_.setDockHint(play.service == "jellyfin" ? "Press Stop to return to Jellyfin" : "Press Stop to return to Plex",
-                          8.0f);
-    // An episode: which one, briefly, on the screen itself (else the waiting message goes).
-    renderer_.setScreenTitle(slot, play.episodeInfo, play.episodeInfo.empty() ? 0.0f : 5.0f);
-    sc.plexReportAt = now + std::chrono::seconds(10);
-    webHosts_[slot].plexTimeline("playing", static_cast<int64_t>(play.offset * 1000.0));
-    PIXELVR_LOG_INFO("Plex: playing \"%s\" on screen %d", play.title.c_str(), slot + 1);
 #else
     (void)slot;
     (void)play;
@@ -1238,6 +1386,8 @@ bool App::returnFromPlex(int slot) {
     if (slot < 0) slot = selectedScreen_;
     ScreenState& sc = screens_[slot];
     if (!sc.webSuspended) return false;
+    cancelPendingOpen(slot);
+    renderer_.setScreenTitle(slot, std::string(), 0.0f);
     sc.plexAwaitingNext = false;  // a next episode still on its way is dropped
     for (size_t p = 0; p < pendingWebPlays_.size(); ++p) {
         if (pendingWebPlays_[p].slot == slot) pendingWebPlays_.erase(pendingWebPlays_.begin() + static_cast<long>(p--));
@@ -1324,7 +1474,11 @@ void App::performVaultLock() {
 
 #ifdef PIXELVR_HAVE_MEDIA
     for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
-        if (screens_[slot].open && VaultManager::isPrivatePath(screens_[slot].path)) {  // any encrypted file too
+        if ((screens_[slot].open || screens_[slot].opening) && VaultManager::isPrivatePath(screens_[slot].path)) {  // any encrypted file too
+            closeMedia(slot);
+        } else if (screens_[slot].open && screens_[slot].web && !webHosts_[slot].kiosk() &&
+                   webHosts_[slot].incognito() && !settings_.privateBrowsing()) {
+            // Close browser screens that were opened in incognito while the vault was unlocked.
             closeMedia(slot);
         }
     }
@@ -1351,7 +1505,7 @@ void App::performVaultLock() {
 #endif
     vaultCardSeen_ = false;
 
-    if (settings_.section() == 4) {  // Vault & Privacy is hidden once locked
+    if (settings_.section() == 4 || settings_.section() == 20) {  // Vault & Privacy is hidden once locked
         settings_.setSection(0);
     }
     settings_.refresh();
@@ -1417,7 +1571,7 @@ void App::selectNextScreen(int dir) {
     constexpr int n = VulkanRenderer::kMaxVideoSlots;
     for (int k = 1; k < n; ++k) {
         const int s = ((selectedScreen_ + dir * k) % n + n) % n;
-        if (screens_[s].open) {
+        if (screens_[s].open || screens_[s].opening) {
             selectScreen(s);
             return;
         }
@@ -2017,13 +2171,13 @@ bool App::multiScreenEnabled() const {
 
 int App::openScreenCount() const {
     int n = 0;
-    for (const ScreenState& sc : screens_) n += sc.open ? 1 : 0;
+    for (const ScreenState& sc : screens_) n += (sc.open || sc.opening) ? 1 : 0;
     return n;
 }
 
 int App::freeScreenSlot() const {
     for (int slot = 1; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
-        if (!screens_[slot].open) return slot;
+        if (!screens_[slot].open && !screens_[slot].opening) return slot;
     }
     return -1;
 }
@@ -2171,16 +2325,13 @@ bool App::applyFormat(int projection, int stereo) {
     if (sc.open && !sc.web && (stereo == 3) != sc.engine.frameSequential()) {
         const double pos = sc.engine.position();
         const bool paused = sc.engine.paused();
-        renderer_.releaseVideoFrame(selectedScreen_);
+        sc.projection = projection;
+        sc.stereo = stereo;
         sc.engine.setFrameSequentialMode(stereo == 3 ? 1 : 0);
-        if (sc.engine.open(sc.path)) {
-            sc.engine.seek(pos);
-            sc.engine.setPaused(paused);
-        }
-        if (stereo == 3 && !sc.engine.frameSequential()) {
-            renderer_.setScreenTitle(selectedScreen_, "Not frame-sequential: needs a doubled frame rate (48 / 50 / 60 fps)", 6.0f);
-            stereo = 0;
-        }
+        loadMedia(sc.path, selectedScreen_);
+        sc.openSeekPos = pos;
+        sc.openStartPaused = paused;
+        return true;
     }
 #endif
     sc.projection = projection;
@@ -2388,7 +2539,14 @@ void App::openPlayTargetMenu(const std::string& path) {
         }
         if (freeSlot >= 0 && !inArrangement(freeSlot)) {
             Arrangement joined = arrangement_;
-            joined.order.push_back(freeSlot);
+            // In TwoBelowOneAbove with 2 screens open (sitting side by side),
+            // place the next "+" screen on top (index 0) so the two playing
+            // screens stay side by side at {1, 2} and the preview matches.
+            if (joined.preset == ArrangePreset::TwoBelowOneAbove && joined.order.size() == 2) {
+                joined.order.insert(joined.order.begin(), freeSlot);
+            } else {
+                joined.order.push_back(freeSlot);
+            }
             computeArrangement(joined, pls);
         }
     }
@@ -2760,7 +2918,13 @@ void App::joinArrangement(int slot) {
         arrangement_.scale = 1.0f;
         arrangement_.curvature = renderer_.screenCurvature();
     }
-    if (!inArrangement(slot)) arrangement_.order.push_back(slot);
+    if (!inArrangement(slot)) {
+        if (arrangement_.preset == ArrangePreset::TwoBelowOneAbove && arrangement_.order.size() == 2) {
+            arrangement_.order.insert(arrangement_.order.begin(), slot);
+        } else {
+            arrangement_.order.push_back(slot);
+        }
+    }
     applyArrangement(arrangement_);
 }
 
@@ -2826,11 +2990,12 @@ void App::showChromiumDialog() {
     if (actionMenu_.selectedOption >= static_cast<int>(actionMenu_.options.size())) actionMenu_.selectedOption = 0;
 }
 
-void App::openWebScreen(const std::string& url, bool kiosk) {
+void App::openWebScreen(const std::string& url, bool kiosk, bool forceIncognito) {
     settings_.close();
     downloadsWindow_ = false;
     pendingWebUrl_ = url;
     pendingWebKiosk_ = kiosk;
+    pendingWebIncognito_ = forceIncognito;
     // A 180/360 video plays alone: the page replaces it, like a new file does.
     const bool immersiveMain = screens_[0].open && screens_[0].projection != 0;
     if (!immersiveMain && multiScreenEnabled() && openScreenCount() > 0) {
@@ -2840,18 +3005,22 @@ void App::openWebScreen(const std::string& url, bool kiosk) {
         browser_.setOpen(true);
 #endif
         openPlayTargetMenu(kWebPath);
-        actionMenu_.subtitle = kiosk ? "YouTube" : "Web browser";
+        const bool wantIncog = !kiosk && (forceIncognito || settings_.privateBrowsing() ||
+                                          (VaultManager::instance().isUnlocked() && settings_.vaultForceIncognito()));
+        actionMenu_.subtitle = kiosk ? "YouTube" : (wantIncog ? "Web browser (Incognito)" : "Web browser");
         return;
     }
 #ifdef PIXELVR_HAVE_FREETYPE
     browser_.setOpen(false);
 #endif
-    loadWeb(0, url, kiosk);
+    loadWeb(0, url, kiosk, forceIncognito);
 }
 
-void App::loadWeb(int slot, const std::string& url, bool kiosk) {
+void App::loadWeb(int slot, const std::string& url, bool kiosk, bool forceIncognito) {
     if (!multiScreenEnabled()) slot = 0;
-    if (screens_[slot].web && webHosts_[slot].kiosk() == kiosk) {  // same kind: keep its pages
+    const bool wantIncognito = !kiosk && (forceIncognito || settings_.privateBrowsing() ||
+                                          (VaultManager::instance().isUnlocked() && settings_.vaultForceIncognito()));
+    if (screens_[slot].web && webHosts_[slot].kiosk() == kiosk && webHosts_[slot].incognito() == wantIncognito) {
         webHosts_[slot].openTab(url);
         selectScreen(slot);
         return;
@@ -2859,7 +3028,7 @@ void App::loadWeb(int slot, const std::string& url, bool kiosk) {
     if (screens_[slot].open) clearSlotKeepLayout(slot);
     BrowserHost::Options opt;
     opt.kiosk = kiosk;
-    opt.incognito = settings_.privateBrowsing();
+    opt.incognito = wantIncognito;
     if (!webHosts_[slot].start(url, 1280, 720, opt)) {
         PIXELVR_LOG_WARN("Web screen: browser helper unavailable");
         return;
@@ -3150,7 +3319,7 @@ void App::startDownloadDirPick() {
 #endif
 }
 
-void App::startVaultMove() {
+void App::startVaultMove(bool lockWhenDone) {
 #ifdef PIXELVR_HAVE_FREETYPE
     VaultManager& vm = VaultManager::instance();
     if (!vm.isUnlocked()) return;
@@ -3179,6 +3348,7 @@ void App::startVaultMove() {
     if (picking()) cancelPick(false);
     FileOps::Request r;
     r.relocateVault = true;
+    r.lockWhenDone = lockWhenDone;
     r.mode = FileOps::Mode::Copy;
     r.sources.push_back(vm.vaultDir());
     r.destDir = toCard ? VaultManager::cardVaultDirFor(card) : vm.internalVaultDir();
@@ -3194,6 +3364,8 @@ void App::startVaultMove() {
     settings_.setVaultMoveStatus("Moving the vault...");
     xr_.triggerHaptic(0, 0.050f, 0.0f, 0.7f);
     xr_.triggerHaptic(1, 0.050f, 0.0f, 0.7f);
+#else
+    (void)lockWhenDone;
 #endif
 }
 
@@ -3308,7 +3480,12 @@ void App::drainFileOps() {
             for (const FileOps::Moved& m : res.moved) {
                 if (browser_.isOpen() && pathIsUnder(browser_.currentLocation(), m.from)) browser_.openVault();
             }
-            settings_.refresh();
+            if (res.lockWhenDone && VaultManager::instance().isUnlocked()) {
+                performVaultLock();
+                showNotice("Vault move finished and vault locked");
+            } else {
+                settings_.refresh();
+            }
         } else if (!res.ok && res.relocation && VaultManager::instance().isUnlocked()) {
             settings_.setVaultMoveNotice(res.message);
         }
@@ -3324,6 +3501,15 @@ void App::updateBrowserFooter(std::chrono::steady_clock::time_point now) {
     bool warn = false;
     // Choosing a folder only lives in the open file browser (tabs, a playing video, the menu end it).
     if (picking() && (!browser_.isOpen() || downloadsWindow_ || settings_.isOpen())) cancelPick(false);
+    // A fresh notice (e.g. why Move was refused) wins over both passive pick reasons and the progress line.
+    if (!hubNotice_.empty()) {
+        if (now >= hubNoticeUntil_ || (hubNoticePrivate_ && !VaultManager::instance().isUnlocked())) {
+            hubNotice_.clear();
+        } else {
+            text = hubNotice_;
+            warn = hubNoticeWarn_;
+        }
+    }
     if (picking()) {
         bar.active = true;
         const bool copy = pick_.kind == PickState::Kind::Copy;
@@ -3333,24 +3519,18 @@ void App::updateBrowserFooter(std::chrono::steady_clock::time_point now) {
         } else {
             const int n = static_cast<int>(pick_.sidecars.size());
             bar.text = std::string(copy ? "Copying " : "Moving ") + pick_.srcLabel +
-                       (n > 0 ? " (+" + std::to_string(n) + (n == 1 ? " file)" : " files)") : std::string()) + "...";
+                       (n > 0 ? " (+" + std::to_string(n) + (n == 1 ? " file)" : " files)") : std::string()) +
+                       " \xB7 open destination folder";
             bar.confirmLabel = copy ? "Copy here" : "Move here";
         }
         const std::string why = pickReason();
         bar.canConfirm = why.empty();
         bar.hint = "Trigger: Open folder  |  B: Up  |  Y: Cancel";
-        if (!why.empty() && why != "Opening the folder...") {
+        // Don't treat still standing in the starting folder as an error warning in the footer
+        // (clicking the disabled "Move here" pill still shows the refusal notice via confirmPick()).
+        if (text.empty() && !why.empty() && why != "Opening the folder..." && why != "It is already in this folder") {
             text = why;
             warn = true;
-        }
-    }
-    // A fresh notice (e.g. why Move was refused) wins over the progress line.
-    if (text.empty() && !hubNotice_.empty()) {
-        if (now >= hubNoticeUntil_ || (hubNoticePrivate_ && !VaultManager::instance().isUnlocked())) {
-            hubNotice_.clear();
-        } else {
-            text = hubNotice_;
-            warn = hubNoticeWarn_;
         }
     }
     const FileOps::Status st = FileOps::instance().status();
@@ -3394,7 +3574,7 @@ void App::updateBrowserFooter(std::chrono::steady_clock::time_point now) {
     }
     settings_.setVaultMoveStatus(st.busy && st.relocating
         ? "Moving the vault: " + std::to_string(pct) + " %" + rate +
-              ". Keep the headset on; the vault stays where it is until everything is copied."
+              ". Auto-lock is paused during the transfer (you can take the headset off)."
         : std::string());
     renderer_.setBrowserPickBar(bar);
     renderer_.setBrowserNotice(text, warn);
@@ -3441,6 +3621,7 @@ int App::run() {
             lastFrameTime_ = now;
 
 #ifdef PIXELVR_HAVE_MEDIA
+            pollMediaOpens(now);
             // Feed every open screen's newest frame into its renderer slot. Held
             // dma-buf frames are released when a decoder is about to seek so it
             // can reclaim its V4L2 capture buffers (otherwise it wedges).
@@ -4163,7 +4344,7 @@ int App::run() {
             // classic single main screen; audio follows the chosen mode.
             if (!multiScreenEnabled()) {
                 for (int slot = 1; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
-                    if (screens_[slot].open) closeMedia(slot);
+                    if (screens_[slot].open || screens_[slot].opening) closeMedia(slot);
                 }
                 if (selectedScreen_ != 0) selectScreen(0);
                 if (renderer_.screenPlacement(0).active) {
@@ -4237,7 +4418,7 @@ int App::run() {
 #endif
             renderer_.setMultiScreen(multiScreenEnabled() && openScreenCount() > 0, selectedScreen_);
             if (!multiScreenEnabled() || openScreenCount() == 0) screensUnlocked_ = false;
-            renderer_.setScreenControls(multiScreenEnabled() && cur().open, selectedScreen_ + 1,
+            renderer_.setScreenControls(multiScreenEnabled() && (cur().open || cur().opening), selectedScreen_ + 1,
                                         cur().muted, screensUnlocked_, settings_.screenNumbers());
             renderer_.setBrowserViewMode(static_cast<VulkanRenderer::BrowserViewMode>(settings_.browserViewMode()));
             renderer_.setBrowserQuickPath(browser_.isCurrentBookmarked());
@@ -4341,14 +4522,17 @@ int App::run() {
                     for (int k = 0; k < 4; ++k) activityAnchorOrient_[h][k] = c.orientation[k];
                 }
             }
-            // In 360/180 the right stick tilts (Y) and zooms (X) the scene: used
-            // blindly, and a flat dock popping up over the whole view is
-            // distracting, so it doesn't wake the UI. Scrubbing (left X) does.
-            const bool sphereView = settings_.projectionMode() != 0;
-            const bool stickMoved =
-                sphereView ? (std::fabs(in.thumbstickLX) > 0.25f || std::fabs(in.thumbstickLY) > 0.25f)
-                           : (std::fabs(in.thumbstickX) > 0.25f || std::fabs(in.thumbstickY) > 0.25f ||
-                              std::fabs(in.thumbstickRX) > 0.25f || std::fabs(in.thumbstickRY) > 0.25f);
+            // While watching media with the HUD hidden (either dismissed or auto-faded),
+            // stick actions (scrub, +-30s step, screen distance, 180/360 zoom/tilt/pan),
+            // Recenter (X), +-30s skip, and Bumper hold (pan/tilt shift) execute silently
+            // without waking the HUD or clearing hudDismissed_.
+            const bool watching = !hubShown && !actionMenu_.visible && pendingDl_.empty() && !textEntry_.active;
+            const bool hudCurrentlyShown = !hudDismissed_ && renderer_.controlBarVisible();
+            const bool rawStickMoved =
+                std::fabs(in.thumbstickX) > 0.25f || std::fabs(in.thumbstickY) > 0.25f ||
+                std::fabs(in.thumbstickLX) > 0.25f || std::fabs(in.thumbstickLY) > 0.25f ||
+                std::fabs(in.thumbstickRX) > 0.25f || std::fabs(in.thumbstickRY) > 0.25f;
+            const bool stickMoved = (!watching || hudCurrentlyShown) && rawStickMoved;
             // Only the digital full grip press or an action wakes the HUD (a soft
             // squeeze from a resting hand doesn't). Show / Hide UI toggles it
             // explicitly below; the combo gate and the keyboard consumed theirs.
@@ -4358,8 +4542,33 @@ int App::run() {
             // bring them back only for the next Back to hide them again).
             const bool backPressed = in.back;
             if (hudDismissed_) in.back = false;
+            const bool recenterPressed = in.recenter;
+            const bool skipBackPressed = in.skipBack;
+            const bool skipFwdPressed = in.skipForward;
+            const bool prevPressed = in.previous;
+            const bool nextPressed = in.next;
+            bool musicActive = false;
+#ifdef PIXELVR_HAVE_MEDIA
+            musicActive = cur().open && !cur().web && cur().engine.audioOnly();
+#endif
+            const bool silentPlaybackAction = watching && (recenterPressed || skipBackPressed || skipFwdPressed ||
+                                                           (!musicActive && (prevPressed || nextPressed)));
+            if (watching) {
+                in.recenter = false;
+                in.skipBack = false;
+                in.skipForward = false;
+                if (!musicActive) {
+                    in.previous = false;
+                    in.next = false;
+                }
+            }
             const bool anyActionPressed = in.anyButton();
             in.back = backPressed;
+            in.recenter = recenterPressed;
+            in.skipBack = skipBackPressed;
+            in.skipForward = skipFwdPressed;
+            in.previous = prevPressed;
+            in.next = nextPressed;
             bool anyButtonPressed = (anyActionPressed ||
                                      in.gripFullPressDown[0] || in.gripFullPressDown[1] ||
                                      stickMoved);
@@ -4372,11 +4581,13 @@ int App::run() {
                 if (!inDismissCooldown) {
                     hudDismissed_ = false;
                 }
-            } else if (!hudDismissed_ && (in.select || in.selectHeld)) {
+            } else if (!hudDismissed_ && (in.select || in.selectHeld || (hudCurrentlyShown && silentPlaybackAction))) {
                 activity = true;
             }
             if (activity) {
                 lastControllerActivity_ = nowT;
+                VaultManager::instance().recordActivity(nowT);
+            } else if (rawStickMoved || silentPlaybackAction) {
                 VaultManager::instance().recordActivity(nowT);
             }
             pauseOnRemoval_.store(settings_.pauseOnRemoval(), std::memory_order_relaxed);
@@ -4386,7 +4597,8 @@ int App::run() {
             }
             VulkanRenderer::setKeyboardLayout(settings_.keyboardLayout());
             pauseLivestreams_.store(settings_.pauseLivestreams(), std::memory_order_relaxed);
-            if (VaultManager::instance().tick(nowT, in.headValid && xr_.sessionFocused())) {
+            if (!FileOps::instance().relocationPending() &&
+                VaultManager::instance().tick(nowT, in.headValid && xr_.sessionFocused())) {
                 performVaultLock();
             }
             // Show / Hide UI: the player HUD on / off (ignored with the hub open).
@@ -4435,7 +4647,8 @@ int App::run() {
                 } else if (downloadsWindow_) {
                     downloadsWindow_ = false;
                 } else if (settings_.isOpen()) {
-                    settings_.close();
+                    if (settings_.section() == 20) settings_.setSection(4);
+                    else settings_.close();
                 } else if (browser_.isOpen()) {
                     // A folder still loading shows a lone "Scanning..." row (no Up
                     // entry): it is not the root, so ignore Back until it lands.
@@ -4457,6 +4670,11 @@ int App::run() {
                     } else {  // the root of a location: close the hub
                         closeHub();
                     }
+                } else if (cur().opening) {
+#ifdef PIXELVR_HAVE_MEDIA
+                    if (!returnFromPlex(selectedScreen_)) closeMedia(selectedScreen_);
+#endif
+                    if (openScreenCount() == 0) browser_.open();
                 } else if (cur().open && renderer_.controlBarVisible()) {
                     dismissHud(in, nowT);  // HUD shown during playback: hide it
                 }
@@ -5054,25 +5272,28 @@ int App::run() {
                                    pendingDl_.empty() && !actionMenu_.visible;
             const int sbHover = renderer_.browserSidebarHovered();
             if (hubActive && (in.togglePlay || in.select) && sbHover >= 0) {
-                if (sbHover >= 10 && sbHover < 10 + static_cast<int>(settings_.railShortcuts().size())) {
+                if ((sbHover >= 10 && sbHover < 10 + static_cast<int>(settings_.railShortcuts().size())) ||
+                    (sbHover >= 20 && sbHover < 20 + static_cast<int>(settings_.railShortcuts().size()))) {
                     // A web shortcut tab (Settings > UI & Appearance): a streaming
-                    // service as a kiosk page, or the full browser.
-                    const SettingsMenu::RailShortcut sc = settings_.railShortcuts()[sbHover - 10];
+                    // service as a kiosk page, or the full browser (with optional Incog badge).
+                    const bool forceIncog = (sbHover >= 20);
+                    const int scIdx = forceIncog ? (sbHover - 20) : (sbHover - 10);
+                    const SettingsMenu::RailShortcut sc = settings_.railShortcuts()[scIdx];
                     if (!sc.url.empty()) {
-                        PIXELVR_LOG_INFO("Shortcut \"%s\": opening %s", sc.name.c_str(), sc.url.c_str());
-                        openWebScreen(sc.url, sc.kiosk);
+                        PIXELVR_LOG_INFO("Shortcut \"%s\": opening %s (forceIncog=%d)", sc.name.c_str(), sc.url.c_str(), forceIncog ? 1 : 0);
+                        openWebScreen(sc.url, sc.kiosk, forceIncog);
                     } else {
                         // No address yet (e.g. the user's Jellyfin server): ask for it, save it, open it.
                         PIXELVR_LOG_INFO("Shortcut \"%s\": no address set, asking", sc.name.c_str());
                         const int idx = sc.index;
                         const bool kiosk = sc.kiosk;
                         openKeyboard(sc.name + " address (e.g. 192.168.1.10:8096)", "", false, in,
-                                     [this, idx, kiosk](const std::string& t) {
+                                     [this, idx, kiosk, forceIncog](const std::string& t) {
                                          settings_.setShortcutUrl(idx, t);
                                          const auto& list = settings_.shortcuts();
                                          if (idx >= 0 && idx < static_cast<int>(list.size()) && !list[static_cast<size_t>(idx)].url.empty()) {
                                              PIXELVR_LOG_INFO("Shortcut: opening %s", list[static_cast<size_t>(idx)].url.c_str());
-                                             openWebScreen(list[static_cast<size_t>(idx)].url, kiosk);
+                                             openWebScreen(list[static_cast<size_t>(idx)].url, kiosk, forceIncog);
                                          }
                                      });
                     }
@@ -5472,7 +5693,7 @@ int App::run() {
                                             actionMenu_.subtitle = "Not enough decoder capacity - close a screen first";
                                         } else {
                                             if (pendingPlayPath_ == kWebPath) {
-                                                loadWeb(chosen, pendingWebUrl_, pendingWebKiosk_);
+                                                loadWeb(chosen, pendingWebUrl_, pendingWebKiosk_, pendingWebIncognito_);
                                             } else {
 #ifdef PIXELVR_HAVE_MEDIA
                                                 loadMedia(pendingPlayPath_, chosen);
@@ -5851,8 +6072,17 @@ int App::run() {
                     auto act = (seg >= 0) ? settings_.activateSegment(seg) : settings_.activate();
                         if (act == SettingsMenu::Action::PickDownloadFolder) {
                             startDownloadDirPick();
-                        } else if (act == SettingsMenu::Action::MoveVault) {
-                            startVaultMove();
+                        } else if (act == SettingsMenu::Action::StartVaultMoveLock) {
+                            startVaultMove(true);
+                        } else if (act == SettingsMenu::Action::StartVaultMoveUnlock) {
+                            startVaultMove(false);
+                        } else if (act == SettingsMenu::Action::CancelVaultMove) {
+                            if (FileOps::instance().relocationPending()) {
+                                FileOps::instance().cancelRelocation();
+                                settings_.setVaultMoveStatus("Stopping vault move...");
+                                xr_.triggerHaptic(0, 0.040f, 0.0f, 0.6f);
+                                xr_.triggerHaptic(1, 0.040f, 0.0f, 0.6f);
+                            }
                         } else if (act == SettingsMenu::Action::CycleDistance) {
                             renderer_.setScreenDistance(settings_.screenDistance());
                             if (arrangementActive_) {
@@ -6004,6 +6234,7 @@ int App::run() {
                             renderer_.setScreenCurvature(settings_.screenCurvature());
                         } else {
                             renderer_.setSpherePitch(0.0f);
+                            renderer_.setSphereYawOffset(0.0f);
                             renderer_.setSphereZoom(1.0f);
                         }
                     } else if (cb == VulkanRenderer::CtrlButton::HideHud) {
@@ -6055,9 +6286,12 @@ int App::run() {
             // Viewpoint / transport controls only when no panel is open (the
             // thumbstick drives in-panel navigation otherwise).
             if (barOk && !browserOpen) {
+                const bool hudShown = !wasHudDismissed && renderer_.controlBarVisible();
+                const bool sphereMode = settings_.projectionMode() != 0;
+                const bool bumperShift = sphereMode && (in.previousHeld || in.nextHeld);
                 if (in.recenter && in.headValid) {
                     recenterView(in);
-                    interacted = true;
+                    if (hudShown) interacted = true;
                 }
                 // Dragging the volume bar (started by a click on it above).
                 if (volumeDragging_) {
@@ -6071,7 +6305,8 @@ int App::run() {
                     }
                 }
                 // Pointing at the VOLUME pill, the stick sets this screen's volume.
-                if (renderer_.pointerButton() == static_cast<int>(VulkanRenderer::CtrlButton::Volume) &&
+                if (hudShown &&
+                    renderer_.pointerButton() == static_cast<int>(VulkanRenderer::CtrlButton::Volume) &&
                     std::fabs(in.thumbstickX) > 0.15f && dt > 0.0f) {
                     cur().volume = std::clamp(cur().volume + in.thumbstickX * dt * 0.6f, 0.0f, 1.0f);
                     if (cur().volume > 0.0f) cur().muted = false;
@@ -6081,9 +6316,9 @@ int App::run() {
                     interacted = true;
                 }
                 // Viewpoint: flat screens move nearer/farther (thumbstick Y);
-                // immersive 360/180 uses the RIGHT stick -- up/down tilts (angle),
-                // left/right zooms.
-                if (settings_.projectionMode() == 0) {
+                // immersive 360/180 uses thumbstick Y to zoom by default, and
+                // holding Bumper (Previous/Next) + thumbstick X/Y pans yaw and tilts pitch.
+                if (!sphereMode) {
                     if (in.thumbstickY > 0.15f || in.thumbstickY < -0.15f) {
                         if (groupedScreen(selectedScreen_)) {
                             // Snapped layout: the whole wall moves nearer / farther.
@@ -6103,21 +6338,28 @@ int App::run() {
                         } else {
                             renderer_.adjustScreenDistance(in.thumbstickY * 0.04f);
                         }
-                        interacted = true;
+                        if (hudShown) interacted = true;
                     }
                     // When pointing at the Screen Curve pill on the HUD, thumbstick X smoothly adjusts curvature!
-                    if (renderer_.pointerButton() == static_cast<int>(VulkanRenderer::CtrlButton::ScreenToggle) &&
+                    if (hudShown &&
+                        renderer_.pointerButton() == static_cast<int>(VulkanRenderer::CtrlButton::ScreenToggle) &&
                         std::fabs(in.thumbstickX) > 0.15f && dt > 0.0f) {
                         renderer_.adjustScreenCurvature(in.thumbstickX * dt * 0.65f);
                         in.thumbstickX = in.thumbstickLX = in.thumbstickRX = 0.0f;  // no scrubbing too
                         interacted = true;
                     }
                 } else if (dt > 0.0f) {
-                    // 360/180: the right stick does the view on its own -- Y tilts,
-                    // X zooms (left X scrubs, below). Not "interacted": these keep
-                    // the UI hidden.
-                    if (std::fabs(in.thumbstickRY) > 0.15f) renderer_.adjustSpherePitch(in.thumbstickRY * dt * 0.6f);
-                    if (std::fabs(in.thumbstickRX) > 0.15f) renderer_.adjustSphereZoom(in.thumbstickRX * dt * 0.6f);
+                    // 360/180: unshifted Stick Y zooms (consistent with Flat screen distance);
+                    // holding Bumper + Stick X/Y pans yaw and tilts pitch. Silent when HUD is hidden.
+                    if (bumperShift) {
+                        if (std::fabs(in.thumbstickY) > 0.15f) renderer_.adjustSpherePitch(in.thumbstickY * dt * 0.6f);
+                        if (std::fabs(in.thumbstickX) > 0.15f) renderer_.adjustSphereYaw(in.thumbstickX * dt * 0.6f);
+                    } else {
+                        if (std::fabs(in.thumbstickY) > 0.15f) renderer_.adjustSphereZoom(in.thumbstickY * dt * 0.6f);
+                    }
+                    if (hudShown && (std::fabs(in.thumbstickY) > 0.15f || (bumperShift && std::fabs(in.thumbstickX) > 0.15f))) {
+                        interacted = true;
+                    }
                 }
 #ifdef PIXELVR_HAVE_MEDIA
                 if (in.togglePlay && cur().open) {
@@ -6168,7 +6410,7 @@ int App::run() {
                     cur().muted = !cur().muted;
                     interacted = true;
                 }
-                if (in.stop && cur().open) {
+                if (in.stop && (cur().open || cur().opening)) {
                     if (!returnFromPlex(selectedScreen_)) closeMedia();
 #ifdef PIXELVR_HAVE_FREETYPE
                     if (openScreenCount() == 0) browser_.open();
@@ -6181,7 +6423,7 @@ int App::run() {
                 }
                 if ((in.skipBack || in.skipForward) && cur().open) {
                     curSeekRelative(in.skipForward ? 30.0 : -30.0);
-                    interacted = true;
+                    if (hudShown) interacted = true;
                 }
                 if (in.lockScreens && multiScreenEnabled() && cur().open) {
                     screensUnlocked_ = !screensUnlocked_;
@@ -6210,18 +6452,17 @@ int App::run() {
                     return scrubHoldPos_;
                 };
                 if (cur().open) {
-                    // Left stick left/right steps -/+30s (flat only; in 360/180 the
-                    // left stick scrubs instead, the right one zooms).
+                    // Unified stick mapping across Flat and 360/180 (when Bumper is not held):
+                    // Left stick X steps -/+30s; Right stick X scrubs continuously.
                     constexpr double kStep = 30.0;
-                    const bool sphereMode = settings_.projectionMode() != 0;
-                    if (!sphereMode && in.thumbstickLX > 0.6f && seekStepArmed_) {
+                    if (!bumperShift && in.thumbstickLX > 0.6f && seekStepArmed_) {
                         curSeekRelative(kStep);
                         seekStepArmed_ = false;
-                        interacted = true;
-                    } else if (!sphereMode && in.thumbstickLX < -0.6f && seekStepArmed_) {
+                        if (hudShown) interacted = true;
+                    } else if (!bumperShift && in.thumbstickLX < -0.6f && seekStepArmed_) {
                         curSeekRelative(-kStep);
                         seekStepArmed_ = false;
-                        interacted = true;
+                        if (hudShown) interacted = true;
                     } else if (std::fabs(in.thumbstickLX) < 0.3f) {
                         seekStepArmed_ = true;
                     }
@@ -6231,17 +6472,14 @@ int App::run() {
                     // hardware decoder (a reopen each) and stalls it; one seek per
                     // gesture stays responsive.
                     bool scrubInput = false;
-                    if (!wasHudDismissed && renderer_.pointerOnTimeline() && in.selectHeld &&
-                        curDuration() > 0.0) {
+                    const bool timelineDrag = !wasHudDismissed && renderer_.pointerOnTimeline() && in.selectHeld;
+                    if (timelineDrag && curDuration() > 0.0) {
                         scrubTarget_ = curTimelineStart() + renderer_.pointerScrub() * (curDuration() - curTimelineStart());
                         scrubInput = true;
-                    } else if (std::fabs(sphereMode ? in.thumbstickLX : in.thumbstickRX) > 0.15f && dt > 0.0f &&
+                    } else if (!bumperShift && std::fabs(in.thumbstickRX) > 0.15f && dt > 0.0f &&
                                curDuration() > 0.0) {
-                        // Flat: right stick X scrubs, so one (right) controller can
-                        // scrub; the left stick X steps 30 s. 360/180: the right
-                        // stick tilts and zooms, so the left stick X scrubs.
                         if (!scrubbing_) scrubTarget_ = shownPosition();
-                        const float ax = sphereMode ? in.thumbstickLX : in.thumbstickRX;
+                        const float ax = in.thumbstickRX;
                         const float t = (std::fabs(ax) - 0.15f) / 0.85f;
                         const double rate =
                             std::copysign(static_cast<double>(t * t) * 60.0, ax);
@@ -6249,10 +6487,10 @@ int App::run() {
                         scrubInput = true;
                     }
                     // Plugins (device outputs) pause while the user scrubs: stick or timeline drag.
-                    pluginScrubbing_ = scrubInput || (renderer_.pointerOnTimeline() && in.selectHeld);
+                    pluginScrubbing_ = scrubInput || timelineDrag;
                     if (scrubInput) {
                         scrubbing_ = true;
-                        interacted = true;
+                        if (hudShown || timelineDrag) interacted = true;
                     } else if (scrubbing_) {
                         curSeek(scrubTarget_);  // commit the scrub with one seek
                         scrubbing_ = false;
@@ -6266,9 +6504,9 @@ int App::run() {
                 if (interacted) {
                     lastControllerActivity_ = nowT;
                 }
-                const bool paused = cur().open && curPaused();
+                const bool paused = (cur().open && curPaused()) || cur().opening;
                 const bool controlsUp =
-                    cur().open &&
+                    (cur().open || cur().opening) && !hudDismissed_ &&
                     (paused || (controllersEngaged && (in.controllers[0].active ||
                                                        in.controllers[1].active)));
                 float progress = 0.0f;

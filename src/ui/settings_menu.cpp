@@ -139,11 +139,30 @@ SettingsMenu::SettingsMenu() {
     refresh();
 }
 
+void SettingsMenu::measureVault() {
+    vaultSizeBytes_ = 0;
+    vaultFileCount_ = 0;
+    const std::string dir = VaultManager::instance().vaultDir();
+    if (dir.empty()) return;
+    std::error_code ec;
+    for (auto it = std::filesystem::recursive_directory_iterator(
+             dir, std::filesystem::directory_options::skip_permission_denied, ec);
+         !ec && it != std::filesystem::recursive_directory_iterator(); it.increment(ec)) {
+        std::error_code ec2;
+        if (!it->is_regular_file(ec2)) continue;
+        const std::string name = it->path().filename().string();
+        if (!name.empty() && name[0] == '.') continue;
+        vaultSizeBytes_ += it->file_size(ec2);
+        ++vaultFileCount_;
+    }
+}
+
 void SettingsMenu::open() {
     open_ = true;
     // Sub-pages (track lists, list columns) reopen at their parent section; the
     // Vault section is only reachable while the vault is unlocked.
     if (section_ == kPluginSection) section_ = kPluginsSection;  // a plugin's page reopens at the plugin list
+    if (section_ == kVaultMoveSection) section_ = 4;
     if (section_ == kPluginsSection && plugins_) plugins_->rescan();
     if (section_ < 0 || (section_ > 4 && section_ != kPluginsSection) ||
         (section_ == 4 && !VaultManager::instance().isUnlocked())) {
@@ -205,22 +224,22 @@ void SettingsMenu::refresh() {
         r.stepIdx = on ? 1 : 0;
         rows_.push_back(r);
     };
-    auto binding = [&](const std::string& label, const std::string& value, Action act) {
-        Row r{label, value, act};
+    auto binding = [&](const std::string& label, const std::string& value, Action act, bool enabled = true) {
+        Row r{label, value, act, enabled};
         r.kind = Kind::Binding;
         rows_.push_back(r);
     };
     auto color = [&](const std::string& label, const std::string& value, int steps,
-                     int idx, Action act) {
-        Row r{label, value, act};
+                     int idx, Action act, bool enabled = true) {
+        Row r{label, value, act, enabled};
         r.kind = Kind::Color;
         r.steps = steps;
         r.stepIdx = idx;
         rows_.push_back(r);
     };
     auto segmented = [&](const std::string& label, std::vector<std::string> opts, int idx,
-                         Action act) {
-        Row r{label, opts.empty() ? std::string() : opts[static_cast<std::size_t>(idx) % opts.size()], act};
+                         Action act, bool enabled = true) {
+        Row r{label, opts.empty() ? std::string() : opts[static_cast<std::size_t>(idx) % opts.size()], act, enabled};
         r.kind = Kind::Segmented;
         r.steps = static_cast<int>(opts.size());
         r.stepIdx = idx;
@@ -243,10 +262,9 @@ void SettingsMenu::refresh() {
         choice("Ambient Screen Glow", kAmbilightNames[ambilightIdx_ % kAmbilightCount],
                kAmbilightCount, ambilightIdx_ % kAmbilightCount, Action::CycleAmbilight,
                projectionMode_ == 0);
-        if (multiScreen_ && ambilightIdx_ % kAmbilightCount > 0) {
-            segmented("Glow Around", {"Selected Screen", "All Screens"}, ambilightAllScreens_ ? 1 : 0,
-                      Action::CycleAmbilightScope);
-        }
+        segmented("Glow Around", {"Selected Screen", "All Screens"}, ambilightAllScreens_ ? 1 : 0,
+                  Action::CycleAmbilightScope,
+                  projectionMode_ == 0 && multiScreen_ && (ambilightIdx_ % kAmbilightCount > 0));
         std::ostringstream distStream;
         distStream << std::fixed;
         distStream.precision(1);
@@ -280,6 +298,8 @@ void SettingsMenu::refresh() {
                   uiOpacityIdx_ % kUiOpacityCount, Action::CycleUiOpacity);
         segmented("UI in 360/180 Videos", {"Fixed", "Follow Gaze"}, uiFollowMode_ % 2,
                   Action::CycleUiFollowMode);
+        segmented("Web Browser Mode", {"Regular", "Incognito"}, privateBrowsing_ ? 1 : 0,
+                  Action::TogglePrivateBrowsing);
         {
             // The SD card is offered while one is inserted; the label shows the free space where files go.
             const bool card = !sdCardMount().empty();
@@ -420,7 +440,7 @@ void SettingsMenu::refresh() {
                       ? "No plugins yet: press Install plugins (top right) to add some."
                   : list.empty() ? "Plugin files found in Downloads: install one below, or press Install plugins."
                                  : "Switch plugins on and off here. Install plugins (top right) adds more.";
-    } else if (section_ == kStoreSection || section_ == kStoreItemSection) {
+    } else if (section_ == kStoreSection || section_ == kStoreItemSection || section_ == kVaultMoveSection) {
         // Install plugins, a plugin's details and its update share one dialog layout: a text panel
         // (paragraph rows) and buttons below it (the main one in the accent colour).
         auto para = [&](const std::string& t, bool heading = false) {
@@ -507,7 +527,7 @@ void SettingsMenu::refresh() {
             }
             status_ = shown ? "Pick a plugin to see what it does. New plugins start switched off." : "";
             button("Back to Plugins", Action::BackToPlugins, false);
-        } else {
+        } else if (section_ == kStoreItemSection) {
             const PluginRepo::Entry* e = nullptr;
             int ei = -1;
             for (size_t i = 0; i < entries.size(); ++i) {
@@ -556,6 +576,69 @@ void SettingsMenu::refresh() {
             const bool busy = repo_->downloading(e->id);
             button(busy ? "Downloading..." : (update ? "Update to " + e->version : "Install"), Action::InstallRepoPlugin, true, ei, !busy);
             button("Back", update ? Action::BackToPlugins : Action::OpenStore, false);
+        } else if (section_ == kVaultMoveSection) {
+            VaultManager& vm = VaultManager::instance();
+            const bool onCard = vm.location() == VaultManager::Location::SdCard;
+            const std::string card = sdCardMount();
+            const bool moving = !vaultMoveStatus_.empty();
+            auto fmtBytes = [](uint64_t b) -> std::string {
+                char buf[48];
+                if (b == 0) return "0 MB";
+                if (b < (1ull << 20)) std::snprintf(buf, sizeof(buf), "%.0f KB", static_cast<double>(b) / 1024.0);
+                else if (b < (1ull << 30)) std::snprintf(buf, sizeof(buf), "%.1f MB", static_cast<double>(b) / static_cast<double>(1ull << 20));
+                else std::snprintf(buf, sizeof(buf), "%.2f GB", static_cast<double>(b) / static_cast<double>(1ull << 30));
+                return buf;
+            };
+            const uint64_t internalFree = freeBytes(vm.internalVaultDir());
+            const uint64_t cardFree = card.empty() ? 0 : freeBytes(card);
+            const uint64_t destFree = onCard ? internalFree : cardFree;
+            const uint64_t neededBytes = vaultSizeBytes_ + (64ull << 20);
+            const bool enoughSpace = destFree == 0 || destFree >= neededBytes;
+            const bool canMove = !moving && vm.available() && (onCard || !card.empty()) && !vm.migrating() && enoughSpace;
+            title_ = "Settings > Vault & Privacy > Move Vault";
+            std::vector<std::pair<std::string, bool>> text;
+            auto add = [&](const std::string& t, bool heading) {
+                std::vector<std::string> ls;
+                wrapped(t, ls);
+                for (const auto& l : ls) text.push_back({l, heading});
+            };
+            add(moving ? "Moving Encrypted Vault..."
+                       : (onCard ? "Move Vault to Headset (Internal Storage)" : "Move Vault to SD Card"), true);
+            add("- **Current Location:** " + std::string(onCard ? "SD Card" : "Headset (Internal Storage)"), false);
+            add("- **Destination:** " + std::string(onCard ? "Headset (Internal Storage)"
+                                                           : (card.empty() ? "SD Card (not inserted)" : "SD Card (" + card + ")")), false);
+            add("- **Vault Size:** " + fmtBytes(vaultSizeBytes_) + " (" + std::to_string(vaultFileCount_) +
+                    (vaultFileCount_ == 1 ? " encrypted file)" : " encrypted files)"), false);
+            add("- **Headset Free Space:** " + (internalFree ? fmtBytes(internalFree) + " available" : std::string("Unknown")), false);
+            add("- **SD Card Free Space:** " + (card.empty() ? std::string("No SD card inserted")
+                                                             : (cardFree ? fmtBytes(cardFree) + " available" : std::string("Unknown"))), false);
+            text.push_back({"", false});
+            add("- **Headset Auto-Lock:** Automatically paused while the vault moves, so you can take the headset off and set it down without interrupting the transfer.", false);
+            add("- **Security:** All files remain AES-256 encrypted on the destination drive; your unlock key stays on the headset.", false);
+            if (moving) {
+                text.push_back({"", false});
+                add("- **Progress:** " + vaultMoveStatus_, false);
+                hint(vaultMoveStatus_);
+            } else if (!enoughSpace) {
+                text.push_back({"", false});
+                add("- **Warning:** Not enough free space on the destination drive (needs at least " + fmtBytes(neededBytes) + ").", false);
+                hint("Not enough free space on destination drive.");
+            } else if (!vaultMoveNotice_.empty() && std::chrono::steady_clock::now() < vaultMoveNoticeUntil_) {
+                text.push_back({"", false});
+                add("- **Status:** " + vaultMoveNotice_, false);
+                hint(vaultMoveNotice_);
+            } else {
+                hint("Choose whether the vault should lock automatically once the transfer finishes.");
+            }
+            for (size_t i = 0; i < text.size() && i < 15; ++i) para(text[i].first, text[i].second);
+            if (moving) {
+                button("Cancel Move", Action::CancelVaultMove, true, 0, true);
+                button("Back", Action::BackToVault, false, 0, true);
+            } else {
+                button("Move & Lock When Done", Action::StartVaultMoveLock, true, 0, canMove);
+                button("Move & Stay Unlocked", Action::StartVaultMoveUnlock, false, 0, canMove);
+                button("Back", Action::BackToVault, false, 0, true);
+            }
         }
     } else if (section_ == kPluginSection) {
         const auto& list = pluginList(plugins_);
@@ -578,12 +661,12 @@ void SettingsMenu::refresh() {
                 std::string value = plugins_->settingValueLabel(pluginIdx_, static_cast<int>(si));
                 if (st.type == "action") value = p.enabled ? "Press to run" : "Turn the plugin on first";
                 Row r{st.label, value, st.type == "text" ? Action::EditPluginText : Action::PluginSetting,
-                      st.type != "action" || p.enabled};
+                      p.enabled};
                 r.data = static_cast<int>(si);
                 lines.push_back(r);  // plain lines: a press cycles the value / runs the action / edits the text
             }
             if (VaultManager::instance().isUnlocked() && p.hasPermission("playback")) {
-                lines.push_back({"Use with vault videos", p.vaultGrant ? "On" : "Off", Action::PluginVaultGrant});
+                lines.push_back({"Use with vault videos", p.vaultGrant ? "On" : "Off", Action::PluginVaultGrant, p.enabled});
             }
             lines.push_back({"Restart plugin", p.pid > 0 ? "" : "not running", Action::PluginRestart, p.pid > 0});
         }
@@ -603,7 +686,7 @@ void SettingsMenu::refresh() {
         title_ = "Settings > Vault & Privacy";
         toggle("Auto-Lock on Headset Removal", VaultManager::instance().autoLockHeadsetOff(),
                Action::CycleVaultAutoLockHeadset);
-        toggle("Private Browsing (Incognito)", privateBrowsing_, Action::TogglePrivateBrowsing);
+        toggle("Incognito Browser While Vault Open", vaultForceIncognito_, Action::ToggleVaultForceIncognito);
 
         const int toSec = VaultManager::instance().autoLockTimeoutSec();
         const int toIdx = (toSec == 120) ? 1 : (toSec == 300) ? 2 : (toSec == 600) ? 3 : 0;
@@ -622,15 +705,14 @@ void SettingsMenu::refresh() {
         {
             // SD2: the vault on the SD card (key, combination and thumbnails stay on the headset).
             const bool onCard = vm.location() == VaultManager::Location::SdCard;
-            if (onCard || !sdCardMount().empty()) {
-                // The question goes away on the next refresh after a few seconds.
-                if (vaultMoveArmed_ && std::chrono::steady_clock::now() >= vaultMoveArmedUntil_) vaultMoveArmed_ = false;
-                const bool armed = vaultMoveArmed_;
-                const std::string value = !vaultMoveStatus_.empty() ? "Moving..."
-                    : armed ? "Click again to move it"
-                    : onCard ? "Move to Headset" : "Move to SD card";
-                binding(onCard ? "Vault Location: SD card" : "Vault Location: Headset", value, Action::MoveVault);
-            }
+            const std::string card = sdCardMount();
+            const bool moving = !vaultMoveStatus_.empty();
+            const bool canOpenMove = moving || (onCard ? vm.available() : !card.empty());
+            const std::string label = onCard ? "Vault Location: SD Card" : "Vault Location: Headset";
+            const std::string value = moving ? "Moving... (Options / Cancel)"
+                : (onCard ? (vm.available() ? "Move to Headset..." : "SD card not inserted")
+                          : (!card.empty() ? "Move to SD Card..." : "No SD card inserted"));
+            rows_.push_back({label, value, Action::MoveVault, canOpenMove});
         }
         // One status line: the most important thing wins.
         std::string rec = vm.recoveryFile();
@@ -734,6 +816,9 @@ void SettingsMenu::refresh() {
 
 SettingsMenu::Action SettingsMenu::activate() {
     if (selected_ < 0 || selected_ >= static_cast<int>(rows_.size())) {
+        return Action::None;
+    }
+    if (!rows_[static_cast<size_t>(selected_)].enabled) {
         return Action::None;
     }
     const Action act = rows_[selected_].action;
@@ -861,14 +946,15 @@ SettingsMenu::Action SettingsMenu::activate() {
             refresh();
             break;
         case Action::MoveVault:
-            // A second click while the row asks for it starts it: a whole vault should not move by accident.
-            if (!vaultMoveArmed_) {
-                vaultMoveArmed_ = true;
-                vaultMoveArmedUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(8);
-                refresh();
-                return Action::None;
-            }
             vaultMoveArmed_ = false;
+            measureVault();
+            section_ = kVaultMoveSection;
+            selected_ = 0;
+            refresh();
+            break;
+        case Action::BackToVault:
+            section_ = 4;
+            selected_ = 4;
             refresh();
             break;
         case Action::ToggleSwapEyes:
@@ -1058,6 +1144,11 @@ SettingsMenu::Action SettingsMenu::activate() {
             saveConfig();
             refresh();
             break;
+        case Action::ToggleVaultForceIncognito:
+            vaultForceIncognito_ = !vaultForceIncognito_;
+            saveConfig();
+            refresh();
+            break;
         case Action::CycleUiOpacity:
             uiOpacityIdx_ = (uiOpacityIdx_ + 1) % kUiOpacityCount;
             saveConfig();
@@ -1124,6 +1215,7 @@ SettingsMenu::Action SettingsMenu::activate() {
 SettingsMenu::Action SettingsMenu::activateSegment(int segment) {
     if (selected_ < 0 || selected_ >= static_cast<int>(rows_.size())) return Action::None;
     const Row& row = rows_[static_cast<std::size_t>(selected_)];
+    if (!row.enabled) return Action::None;
     if (row.kind != Kind::Segmented || segment < 0 || segment >= row.steps) return activate();
     if (row.action == Action::CycleDownloadDir) {
         // The options depend on the card being in: pick by name, not by stepping.
@@ -1564,6 +1656,7 @@ void SettingsMenu::loadConfig() {
             else if (key == "keyboard_layout") keyboardLayout_ = std::clamp(std::stoi(val), 0, 4);
             else if (key == "pause_livestreams") pauseLivestreams_ = (val == "1" || val == "true");
             else if (key == "private_browsing") privateBrowsing_ = (val == "1" || val == "true");
+            else if (key == "vault_force_incognito") vaultForceIncognito_ = (val == "1" || val == "true");
             else if (key == "screen_numbers") screenNumbers_ = (val == "1");
             else if (key == "audio_follow") audioFollow_ = (val == "1" || val == "true");
             else if (key == "panel_style") {
@@ -1632,6 +1725,7 @@ void SettingsMenu::saveConfig() const {
             file << "keyboard_layout=" << keyboardLayout_ << "\n";
             file << "pause_livestreams=" << (pauseLivestreams_ ? 1 : 0) << "\n";
             file << "private_browsing=" << (privateBrowsing_ ? 1 : 0) << "\n";
+            file << "vault_force_incognito=" << (vaultForceIncognito_ ? 1 : 0) << "\n";
             file << "screen_numbers=" << (screenNumbers_ ? 1 : 0) << "\n";
             file << "audio_follow=" << (audioFollow_ ? 1 : 0) << "\n";
             file << "browser_sort=" << browserSort_ << "\n";

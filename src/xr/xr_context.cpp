@@ -835,8 +835,8 @@ void XrContext::syncActions() {
     input_.options = read_bool(act(IA::Options));
     input_.recenter = read_bool(act(IA::Recenter));
     input_.toggleUi = read_bool(act(IA::ToggleUi));
-    input_.previous = read_bool(act(IA::Previous));
-    input_.next = read_bool(act(IA::Next));
+    input_.previous = read_bool(act(IA::Previous), &input_.previousHeld);
+    input_.next = read_bool(act(IA::Next), &input_.nextHeld);
     input_.dpadUp = read_bool(act(IA::DpadUp), &input_.dpadUpHeld);
     input_.dpadDown = read_bool(act(IA::DpadDown), &input_.dpadDownHeld);
     input_.dpadLeft = read_bool(act(IA::DpadLeft), &input_.dpadLeftHeld);

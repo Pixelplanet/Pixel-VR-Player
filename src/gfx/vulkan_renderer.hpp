@@ -117,8 +117,15 @@ public:
     }
     void setSphereZoom(float z) { sphereZoom_ = z; }
     void setSpherePitch(float p) { spherePitch_ = p; }
+    void adjustSphereYaw(float deltaRadians) {
+        sphereYawOffset_ += deltaRadians;
+        while (sphereYawOffset_ > 3.14159265f) sphereYawOffset_ -= 6.28318530f;
+        while (sphereYawOffset_ < -3.14159265f) sphereYawOffset_ += 6.28318530f;
+    }
+    void setSphereYawOffset(float y) { sphereYawOffset_ = y; }
     float sphereZoom() const { return sphereZoom_; }
     float spherePitch() const { return spherePitch_; }
+    float sphereYawOffset() const { return sphereYawOffset_; }
     void setSwapEyes(bool on) { swapEyes_ = on; }
 
     // Multi-screen placement. Slots 1..2 are extra flat screens and are drawn
@@ -1170,6 +1177,7 @@ private:
     float screenYaw_ = 0.0f;
     float recenterPitch_ = 0.0f;  // head pitch at recenter (screen/controls tilt)
     float sphereYaw_ = 0.0f;  // recenter longitude offset for 360/180 content
+    float sphereYawOffset_ = 0.0f;  // 360/180 horizontal pan offset (radians)
     float spherePitch_ = 0.0f;  // 360/180 viewpoint tilt (radians)
     float sphereZoom_ = 1.0f;   // 360/180 FOV scale (>1 pushes content farther)
     float screenDistance_ = 3.0f;

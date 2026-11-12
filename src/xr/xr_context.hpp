@@ -68,6 +68,8 @@ struct XrInputState {
     bool recenter = false;     // "Recenter"
     bool previous = false;     // "Previous": rail tab / track
     bool next = false;         // "Next"
+    bool previousHeld = false; // held state for function-shift modifier (e.g. 180/360 pan/tilt)
+    bool nextHeld = false;
     bool dpadUp = false, dpadDown = false, dpadLeft = false, dpadRight = false;
     bool dpadUpHeld = false, dpadDownHeld = false, dpadLeftHeld = false, dpadRightHeld = false;
     bool showControls = false; // "Show Controls": the Controls page
@@ -91,6 +93,7 @@ struct XrInputState {
     // comboEdge), e.g. while the keyboard or a grab owns the input.
     void clearButtons() {
         togglePlay = back = mainMenu = toggleUi = options = recenter = previous = next = false;
+        previousHeld = nextHeld = false;
         dpadUp = dpadDown = dpadLeft = dpadRight = false;
         dpadUpHeld = dpadDownHeld = dpadLeftHeld = dpadRightHeld = false;
         showControls = mute = stop = bookmarks = nextScreen = previousScreen = false;

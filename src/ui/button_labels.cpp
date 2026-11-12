@@ -45,8 +45,10 @@ const LabelTexts kLabelTexts[] = {
     {InputAction::ToggleUi, nullptr, "Show / Hide UI", nullptr, nullptr, nullptr, 0},
     {InputAction::Options, "Options", nullptr, nullptr, nullptr, nullptr, kMenusNeedOptions},  // Stage 2: playback
     {InputAction::Recenter, "Recenter", "Recenter", nullptr, nullptr, nullptr, kMenusNeedRecenter},
-    {InputAction::Previous, "Previous Tab", "Previous Track", nullptr, nullptr, nullptr, kNeedsMusic | kNotInDialog},
-    {InputAction::Next, "Next Tab", "Next Track", nullptr, nullptr, nullptr, kNeedsMusic | kNotInDialog},
+    {InputAction::Previous, "Previous Tab", "Previous Track", "Hold: Pan \xC2\xB7 Tilt", nullptr, nullptr,
+     kNeedsMedia | kNeedsMusic | kNotInDialog},
+    {InputAction::Next, "Next Tab", "Next Track", "Hold: Pan \xC2\xB7 Tilt", nullptr, nullptr,
+     kNeedsMedia | kNeedsMusic | kNotInDialog},
     {InputAction::DpadUp, "Up", "Volume +", nullptr, nullptr, nullptr, kNeedsMedia | kNotWeb | kNotLaserOnWeb | kMenusStick},
     {InputAction::DpadDown, "Down", "Volume \xE2\x80\x93", nullptr, nullptr, nullptr,
      kNeedsMedia | kNotWeb | kNotLaserOnWeb | kMenusStick},
@@ -54,9 +56,9 @@ const LabelTexts kLabelTexts[] = {
      kNeedsMedia | kNotWeb | kNotLaserOnWeb | kMenusStick | kMenusLeftRight},
     {InputAction::DpadRight, "Right", "+10 s", nullptr, nullptr, nullptr,
      kNeedsMedia | kNotWeb | kNotLaserOnWeb | kMenusStick | kMenusLeftRight},
-    {InputAction::StickRight, "Navigate", "Scrub \xC2\xB7 Distance", "Zoom \xC2\xB7 Tilt", "Scrub \xC2\xB7 Scroll",
+    {InputAction::StickRight, "Navigate", "Scrub \xC2\xB7 Distance", "Scrub \xC2\xB7 Zoom", "Scrub \xC2\xB7 Scroll",
      "Move Cursor", kNeedsMedia | kMenusStick},
-    {InputAction::StickLeft, "Navigate", "Skip 30 s \xC2\xB7 Distance", "Scrub", "Skip 30 s \xC2\xB7 Scroll",
+    {InputAction::StickLeft, "Navigate", "Skip 30 s \xC2\xB7 Distance", "Skip 30 s \xC2\xB7 Zoom", "Skip 30 s \xC2\xB7 Scroll",
      "Move Cursor", kNeedsMedia | kMenusStick},
     {InputAction::ShowControls, "Hide Labels", "Hide Labels", nullptr, nullptr, nullptr, 0},
     // No default binding (SteamVR chords / long presses).
@@ -106,7 +108,7 @@ std::string buttonLabelText(InputAction a, const ButtonLabelState& s) {
         return t->menus ? t->menus : "";
     }
     if ((t->flags & kNeedsMedia) && !s.mediaOpen) return std::string();
-    if ((t->flags & kNeedsMusic) && !s.music) return std::string();
+    if ((t->flags & kNeedsMusic) && !s.music && !(s.sphere && t->sphere)) return std::string();
     if ((t->flags & kNotWeb) && s.web) return std::string();
     if ((t->flags & kNotLaserOnWeb) && s.laserOnWeb) return std::string();
     // On a web page the page takes B (page back) and the stick's Y (scroll).

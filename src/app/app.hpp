@@ -165,7 +165,7 @@ private:
     bool picking() const { return pick_.kind != PickState::Kind::None; }
     void startPick(PickState::Kind kind, const Browser::Entry& e);
     void startDownloadDirPick();
-    void startVaultMove();  // Settings > Vault location: to / from the SD card (FileOps relocation)
+    void startVaultMove(bool lockWhenDone = false);  // Settings > Vault location: to / from the SD card (FileOps relocation)
     void cancelPick(bool backToSettings = true);
     void confirmPick();
     std::string pickReason() const;  // why the open folder can't take it ("" = it can)
@@ -288,6 +288,17 @@ private:
         DrmVideoFrame drmFrame;
 #endif
         bool open = false;
+        bool opening = false;       // MediaEngine::open() is running on openThread
+        std::thread openThread;
+        std::atomic<int> openState{0};  // 0 = idle/running, 1 = succeeded, 2 = failed
+        std::chrono::steady_clock::time_point openStartedAt{};
+        bool openFromQueue = false;
+        bool openSameFile = false;
+        bool openPlex = false;
+        BrowserHost::PlexPlay openPlexPlay{};
+        double openSeekPos = -1.0;  // >= 0: explicit seek after open (switchTracks / applyFormat)
+        bool openStartPaused = false;
+        int openQueueTries = 0;
         std::string path;    // for resume and reloading on a track change
         bool muted = false;  // user mute (the audio mode may mute it as well)
         int projection = 0;  // 0 flat, 1 360, 2 180 (extra screens: always 0)
@@ -416,12 +427,13 @@ private:
     std::chrono::steady_clock::time_point webStickUntil_{};
     // YouTube / Browser tabs: pick a screen (or use the main one) for `url`;
     // `kiosk` = just the page (YouTube), else a full browser with toolbar.
-    void openWebScreen(const std::string& url, bool kiosk);
+    void openWebScreen(const std::string& url, bool kiosk, bool forceIncognito = false);
     // Opens `url` on `slot`; a browser of the same kind already there opens it
     // in a new tab (kiosk: navigates).
-    void loadWeb(int slot, const std::string& url, bool kiosk);
+    void loadWeb(int slot, const std::string& url, bool kiosk, bool forceIncognito = false);
     std::string pendingWebUrl_;  // page waiting for the "play where?" choice
     bool pendingWebKiosk_ = false;
+    bool pendingWebIncognito_ = false;
     // In-app keyboard typing straight into a browser screen's focused field
     // (-1 = the keyboard edits its own text as usual).
     int kbWebSlot_ = -1;
@@ -448,6 +460,9 @@ private:
     // `fromQueue`: the music queue picked this track (it starts from the top,
     // keeps the queue, and leaves open menus alone).
     void loadMedia(const std::string& path, int slot = -1, bool fromQueue = false);
+    void cancelPendingOpen(int slot);
+    void finishLoadMedia(int slot);
+    void pollMediaOpens(std::chrono::steady_clock::time_point now);
     void buildMusicQueue(int slot, const std::string& path);  // audio file opened from a folder
     // Empties `slot` for new content, keeping its place in the screen layout.
     void clearSlotKeepLayout(int slot);
