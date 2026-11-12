@@ -344,7 +344,8 @@ void App::watchdogLoop() {
                         }
                     }
                 }
-                if (VaultManager::instance().isUnlocked()) {
+                // Only with "Auto-Lock on Headset Removal" on (off: e.g. a vault move runs while away).
+                if (VaultManager::instance().isUnlocked() && VaultManager::instance().autoLockHeadsetOff()) {
                     pendingAutoLock_.store(true, std::memory_order_release);
                 }
             }
