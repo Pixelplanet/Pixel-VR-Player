@@ -763,8 +763,14 @@ if [ "$UNINSTALL" -eq 1 ]; then
     if [ "$DO_STEAM" -eq 1 ]; then
         detached=0
         if steam_running && [ -n "$fin" ]; then
-            if command -v systemd-run >/dev/null 2>&1 &&
-               systemd-run --user --collect --quiet --setenv=PIXELVR_FINISH_STEAM=1 \
+            # As a unit of the user's systemd, outside Steam's own service: Desktop Mode on the Frame
+            # (terminal included) lives in steam.service, and everything in it is killed when Steam
+            # closes; a new session alone (setsid) does not get out of that. Desktop Mode also has
+            # its own runtime folder and D-Bus, so the real ones are named.
+            real_run="/run/user/$(id -u)"
+            if command -v systemd-run >/dev/null 2>&1 && [ -S "$real_run/bus" ] &&
+               XDG_RUNTIME_DIR="$real_run" DBUS_SESSION_BUS_ADDRESS="unix:path=$real_run/bus" \
+                   systemd-run --user --collect --quiet --setenv=PIXELVR_FINISH_STEAM=1 \
                    --setenv=PIXELVR_INSTALL_LOGGING=1 --setenv=HOME="$HOME" --setenv=PATH="$PATH" \
                    sh "$fin" --finish-steam-uninstall >/dev/null 2>&1; then
                 detached=1
