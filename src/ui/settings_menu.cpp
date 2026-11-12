@@ -902,28 +902,45 @@ void SettingsMenu::refresh() {
         toggle("Video Duration", listShowDuration_, Action::ToggleListColDuration);
         rows_.push_back({"Back to UI & Appearance", "", Action::BackToUI});
     } else if (section_ == 13) {
-        // Download Folder: the same list page as the track pickers.
+        // Download Folder: one full-width line per choice (a list page), each with the free space
+        // of the drive it is on.
         title_ = "Settings > UI & Appearance > Download Folder";
-        const bool card = !sdCardMount().empty();
+        const std::string card = sdCardMount();
         const bool custom = !downloadCustom_.empty();
         const int cur = downloadDirIdx_ % kDownloadDirCount;
-        for (int i = 0; i < 3; ++i) option(kDownloadDirs[i], !custom && cur == i, Action::PickDownloadPreset, i);
-        if (card || (!custom && cur == 3)) {
-            const uint64_t freeB = card ? freeBytes(sdCardMount()) : 0;
-            option(card ? "SD card (Downloads folder)" + (freeB ? "  \xC2\xB7  " + gigabytes(freeB) + " free" : std::string())
-                        : std::string("SD card (not inserted: saving to ~/Downloads)"),
-                   !custom && cur == 3, Action::PickDownloadPreset, 3);
+        const char* home = std::getenv("HOME");
+        const std::string base = home ? home : ".";
+        auto freeOf = [](const std::string& dir) {
+            std::error_code ec;
+            std::string d = dir;
+            while (d.size() > 1 && !std::filesystem::exists(d, ec)) d = std::filesystem::path(d).parent_path().string();
+            const uint64_t b = freeBytes(d);
+            return b ? gigabytes(b) + " free" : std::string();
+        };
+        auto line = [&](const std::string& label, bool active, const std::string& free, Action act, int data, bool enabled = true) {
+            Row r{label, active ? "In use" + (free.empty() ? std::string() : "  Â·  " + free) : free, act, enabled};
+            r.data = data;
+            rows_.push_back(r);
+        };
+        for (int i = 0; i < 3; ++i) {
+            line(kDownloadDirs[i], !custom && cur == i, freeOf(base + (kDownloadDirs[i] + 1)), Action::PickDownloadPreset, i);
+        }
+        if (!card.empty()) {
+            line("SD card (Downloads folder)", !custom && cur == 3, freeOf(card), Action::PickDownloadPreset, 3);
+        } else if (!custom && cur == 3) {
+            line("SD card (not inserted: saving to ~/Downloads)", true, freeOf(base), Action::PickDownloadPreset, 3, false);
         }
         if (custom) {
             std::string shown = downloadCustom_;
-            if (const char* home = std::getenv("HOME"); home && *home && shown.rfind(home, 0) == 0) {
-                shown = "~" + shown.substr(std::strlen(home));
-            }
-            option(shown + (removableMissing(downloadCustom_) ? "  (drive removed)" : ""), true, Action::PickDownloadFolder, 0);
+            if (home && *home && shown.rfind(home, 0) == 0) shown = "~" + shown.substr(std::strlen(home));
+            line(shown, true, removableMissing(downloadCustom_) ? std::string("drive removed") : freeOf(downloadCustom_),
+                 Action::PickDownloadFolder, 0);
         }
         rows_.push_back({"Other Folder...", "Choose in the file browser", Action::PickDownloadFolder});
         rows_.push_back({"Back to UI & Appearance", "", Action::BackToUI});
+        hint("Downloads are saved to the folder marked In use.");
     } else if (section_ == 10) {
+        title_ = "Settings > Tracks > Video Track";    } else if (section_ == 10) {
         title_ = "Settings > Tracks > Video Track";
         for (std::size_t i = 0; i < videoStreams_.size(); ++i) {
             option(videoStreams_[i].second, static_cast<int>(i) == videoSel_,

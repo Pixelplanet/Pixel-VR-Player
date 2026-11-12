@@ -245,7 +245,7 @@ public:
     void tickShortcuts();                 // per frame: an unconfirmed Delete times out
     // Dense line lists: the shortcut list and the plugin list.
     bool compactPage() const {
-        return section_ == 22 || section_ == kPluginsSection || section_ == kPluginSection || section_ == kStoreSection ||
+        return section_ == 13 || section_ == 22 || section_ == kPluginsSection || section_ == kPluginSection || section_ == kStoreSection ||
                section_ == kStoreItemSection || section_ == kVaultMoveSection;
     }
     // A plugin's page turns pages with the header pager when its lines do not fit.

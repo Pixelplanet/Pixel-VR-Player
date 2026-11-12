@@ -167,7 +167,7 @@ constexpr float kLabelUnderOut = 0.10f;      // trigger / bumper / grip cards: t
 // ... in these directions (out, up, n): trigger to the stick side and down,
 // bumper to the outer side, back and down, grip to the stick side, back and down.
 constexpr float kLabelUnderTrigger[3] = {-1.0f, 0.0f, -0.5f};
-constexpr float kLabelUnderBumper[3] = {1.0f, -0.5f, -0.6f};
+constexpr float kLabelUnderBumper[3] = {0.75f, -1.0f, -0.6f};
 constexpr float kLabelUnderGrip[3] = {-1.0f, -1.0f, -0.6f};
 constexpr float kLabelFade = 0.15f;          // seconds in / out
 
@@ -10078,7 +10078,7 @@ void VulkanRenderer::layoutButtonLabels(const XrView* views, uint32_t viewCount)
                 const float* k = cmp == "trigger" ? kLabelUnderTrigger : cmp == "bumper" ? kLabelUnderBumper
                                                                                          : kLabelUnderGrip;
                 const Vec3 d = normalize(fOut * k[0] + fU * k[1] + fN * k[2]);
-                it.pLocal = it.aRest + d * kLabelUnderOut;
+                it.pLocal = it.aRest + d * (cmp == "bumper" ? 0.075f : kLabelUnderOut);  // the bumper card stays near
                 it.dirLocal = d;
             }
             float w = 0.0f;

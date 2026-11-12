@@ -116,9 +116,9 @@ std::string buttonLabelText(InputAction a, const ButtonLabelState& s) {
     if ((t->flags & kNeedsControls) && !s.controlsVisible) return std::string();
     // 360 / 180 with a bumper held: both sticks pan (left / right) and tilt (up / down) the view.
     if (s.sphere && s.panShift && (a == InputAction::StickRight || a == InputAction::StickLeft)) {
-        return "Pan Â· Tilt";
+        return "Pan · Tilt";
     }
-    if (s.sphere && s.panShift && (a == InputAction::Previous || a == InputAction::Next)) return "Release: Scrub Â· Zoom";
+    if (s.sphere && s.panShift && (a == InputAction::Previous || a == InputAction::Next)) return "Release: Scrub · Zoom";
     const char* w = (s.sphere && t->sphere) ? t->sphere : t->watching;
     return w ? w : "";
 }
