@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.24)
 
 project(PixelVRPlayer
-    VERSION 1.19.0
+    VERSION 1.19.1
     DESCRIPTION "Native VR video player for the Valve Steam Frame"
     LANGUAGES CXX)
 
