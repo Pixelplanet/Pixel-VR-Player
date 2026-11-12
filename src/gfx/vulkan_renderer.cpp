@@ -10196,7 +10196,8 @@ void VulkanRenderer::layoutButtonLabels(const XrView* views, uint32_t viewCount)
                     if (std::fabs(l.x) > 1e-5f) t = std::min(t, it.aHalf.x / std::fabs(l.x));
                     if (std::fabs(l.y) > 1e-5f) t = std::min(t, it.aHalf.y / std::fabs(l.y));
                     if (std::fabs(l.z) > 1e-5f) t = std::min(t, it.aHalf.z / std::fabs(l.z));
-                    dr.tip = a + dirW * std::min(t + 0.001f, 0.8f * dist);
+                    // The box is far wider than the curved part: its edge is 2-3 cm of air away, so end near the centre.
+                    dr.tip = a + dirW * std::min({t + 0.001f, 0.005f, 0.8f * dist});
                 }
             } else {
                 // The part's half width across the face (its box's X: across
