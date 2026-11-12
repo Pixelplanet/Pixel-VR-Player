@@ -1602,6 +1602,7 @@ void App::performVaultLock() {
     downloadToastText_.clear();
     renderer_.clearCardThumbnails();
     thumbnailCache_.clearPrivateThumbs();
+    badgeNameCache_.clear();
 #endif
     vaultCardSeen_ = false;
 
@@ -1902,6 +1903,7 @@ void App::updateButtonLabels(std::chrono::steady_clock::time_point nowT, bool la
     st.music = cur().open && !cur().web && cur().engine.audioOnly();
 #endif
     st.sphere = settings_.projectionMode() != 0;
+    st.panShift = st.sphere && panShiftLatched_;
     st.controlsVisible = cur().open && !hudDismissed_ && renderer_.controlBarVisible();
     renderer_.setButtonLabels(shown, buildButtonLabelCards(labelSources_, st));
 }
@@ -1909,6 +1911,7 @@ void App::updateButtonLabels(std::chrono::steady_clock::time_point nowT, bool la
 void App::openSmbModal(bool isNew, const std::string& smbPath) {
     actionMenu_.subtitle.clear();  // no stale error from a previous edit
     smbDeleteArmedUntil_ = {};
+    confirmEditorDelete_ = false;
 #ifdef PIXELVR_HAVE_FREETYPE
     smbModal_.active = true;
     smbModal_.isNew = isNew;
@@ -2753,13 +2756,14 @@ bool App::looksImmersive(const std::string& path) {
     VulkanRenderer::ProjectionMode p = VulkanRenderer::ProjectionMode::Flat;
     VulkanRenderer::StereoMode st = VulkanRenderer::StereoMode::Mono;
     bool fromName = false;
-    detect_format(path, p, st, fromName);
+    const std::string name = formatName(path);  // an encrypted file's real name, never the random one
+    detect_format(name, p, st, fromName);
     if (p != VulkanRenderer::ProjectionMode::Flat) return true;
 #ifdef PIXELVR_HAVE_FREETYPE
     ThumbnailCache::MediaMeta tm;
     if (thumbnailCache_.getMeta(path, tm)) {
         if (tm.projectionHint > 0) return true;
-        if (tm.height > 0 && is_vr180_media(path, tm.width, tm.height)) return true;
+        if (tm.height > 0 && is_vr180_media(name, tm.width, tm.height)) return true;
     }
 #endif
     return false;
@@ -5204,8 +5208,18 @@ int App::run() {
                         // video is added to the detail line below.
                         item.tag = "FOLDER";
                         if (!e.previewPath.empty()) {
+                            std::string previewName = e.previewPath;
+                            if (vaultcrypto::hasExtension(previewName)) {  // encrypted: judge by its real name
+                                auto it = badgeNameCache_.find(e.previewPath);
+                                if (it == badgeNameCache_.end()) {
+                                    if (badgeNameCache_.size() > 2000) badgeNameCache_.clear();
+                                    it = badgeNameCache_.emplace(e.previewPath, formatName(e.previewPath)).first;
+                                }
+                                previewName = it->second;
+                                if (vaultcrypto::hasExtension(previewName)) previewName = "video";  // name not readable
+                            }
                             const std::string innerFmt = classifyMediaBadge(
-                                e.previewPath, hasMeta ? meta.width : 0, hasMeta ? meta.height : 0);
+                                previewName, hasMeta ? meta.width : 0, hasMeta ? meta.height : 0);
                             if (!item.detail.empty()) {
                                 item.detail = innerFmt + " \xB7 " + item.detail;
                             } else {
@@ -5213,8 +5227,9 @@ int App::run() {
                             }
                         }
                     } else if (e.isVideo) {
+                        // An encrypted file is judged by its real name (the label), never the random one.
                         item.tag = classifyMediaBadge(
-                            e.path.empty() ? e.label : e.path,
+                            (e.path.empty() || vaultcrypto::hasExtension(e.path)) ? e.label : e.path,
                             hasMeta ? meta.width : 0, hasMeta ? meta.height : 0);
                     } else {
                         item.tag = "FILE";
@@ -5700,6 +5715,7 @@ int App::run() {
                                         // A saved share and its login: never on a single click.
                                         if (fe && fe->path == pendingActionPath_) {
                                             confirmShareDelete_ = true;
+                                            confirmEditorDelete_ = false;
                                             actionMenu_.page = 2;
                                             actionMenu_.title = "Delete Network Share?";
                                             actionMenu_.subtitle = "Remove the saved share \"" + fe->label + "\" and its login?";
@@ -5813,6 +5829,7 @@ int App::run() {
                                         }
                                     } else if (opt == "Delete") {
                                         confirmShareDelete_ = false;
+                                        confirmEditorDelete_ = false;
                                         pendingActionPath_ = fe ? fe->path : std::string();
                                         actionMenu_.page = 2;
                                         actionMenu_.title = (fe && fe->isDir) ? "Delete Folder?" : "Delete File?";
@@ -5967,7 +5984,18 @@ int App::run() {
                         if (in.select || in.togglePlay) {
                             int chosen = (hov >= 0) ? hov : actionMenu_.selectedOption;
                             const Browser::Entry* del = browser_.focused();
-                            if (confirmShareDelete_) {
+                            if (confirmEditorDelete_) {
+                                confirmEditorDelete_ = false;
+                                if (chosen == 0) {
+                                    deleteSmbModal();
+                                    xr_.triggerHaptic(1, 0.050f, 0.0f, 0.7f);
+                                } else {  // back to the editor
+                                    actionMenu_.page = 4;
+                                    actionMenu_.subtitle.clear();
+                                    updateSmbModalMenu();
+                                    actionMenu_.selectedOption = 9;
+                                }
+                            } else if (confirmShareDelete_) {
                                 confirmShareDelete_ = false;
                                 if (chosen == 0 && del && del->path == pendingActionPath_) {
                                     deleteShareEntry(del->path);
@@ -6100,13 +6128,18 @@ int App::run() {
                                     if (textEntry_.active) cancelKeyboard();
                                 } else if (chosen == 9 && !smbModal_.isNew) {
                                     // Asks once more: the second press within 4 s deletes.
-                                    if (nowT < smbDeleteArmedUntil_) {
-                                        smbDeleteArmedUntil_ = {};
-                                        deleteSmbModal();
-                                    } else {  // armed until anything else is done in the editor
-                                        smbDeleteArmedUntil_ = nowT + std::chrono::hours(1);
-                                        actionMenu_.subtitle = "Press Delete again to remove this share and its login";
-                                    }
+                                    // The same question as "Delete Network Share" in the file menu;
+                                    // Cancel comes back to the editor as it was.
+                                    confirmEditorDelete_ = true;
+                                    confirmShareDelete_ = false;
+                                    actionMenu_.page = 2;
+                                    actionMenu_.title = "Delete Network Share?";
+                                    actionMenu_.subtitle = "Remove the saved share \"" + smbModal_.host +
+                                                           (smbModal_.share.empty() ? "" : "/" + smbModal_.share) + "\" and its login?";
+                                    actionMenu_.options.clear();
+                                    actionMenu_.options.push_back("Yes, Delete");
+                                    actionMenu_.options.push_back("Cancel");
+                                    actionMenu_.selectedOption = 1;
                                 } else if (chosen == 10) {
                                     static const char* const kProtocols[4] = {"smb", "sftp", "dav", "davs"};
                                     const int seg = renderer_.actionMenuKeyHovered();

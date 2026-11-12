@@ -31,6 +31,7 @@
 #include <functional>
 #include <string>
 #include <thread>
+#include <unordered_map>
 
 namespace pixelvr {
 
@@ -184,6 +185,10 @@ private:
     std::string formatMenuPath_;
     bool formatStoredOnly_ = false;
     void chooseFormat(int projection, int stereo);
+    // Real names of encrypted files shown as a folder's preview (read once, dropped on lock): the
+    // random file name must never be searched for format hints ("3d" is two hex digits).
+    std::unordered_map<std::string, std::string> badgeNameCache_;
+    bool confirmEditorDelete_ = false;  // the same confirmation, opened from the share editor's Delete
     bool confirmShareDelete_ = false;  // the delete confirmation (page 2) is for a saved network share
     void deleteShareEntry(const std::string& path);  // removes a saved share and its login
     std::chrono::steady_clock::time_point smbDeleteArmedUntil_{};  // share editor: Delete asks once more

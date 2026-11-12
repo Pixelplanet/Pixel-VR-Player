@@ -114,6 +114,11 @@ std::string buttonLabelText(InputAction a, const ButtonLabelState& s) {
     // On a web page the page takes B (page back) and the stick's Y (scroll).
     if (s.laserOnWeb && t->webPage && !(s.sphere && t->sphere)) return t->webPage;
     if ((t->flags & kNeedsControls) && !s.controlsVisible) return std::string();
+    // 360 / 180 with a bumper held: both sticks pan (left / right) and tilt (up / down) the view.
+    if (s.sphere && s.panShift && (a == InputAction::StickRight || a == InputAction::StickLeft)) {
+        return "Pan Â· Tilt";
+    }
+    if (s.sphere && s.panShift && (a == InputAction::Previous || a == InputAction::Next)) return "Release: Scrub Â· Zoom";
     const char* w = (s.sphere && t->sphere) ? t->sphere : t->watching;
     return w ? w : "";
 }

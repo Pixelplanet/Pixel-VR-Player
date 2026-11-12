@@ -274,6 +274,7 @@ constexpr int kBtnCount = static_cast<int>(VulkanRenderer::CtrlButton::Count);
 
 // The multi-screen row extends the dock downward by this much when shown.
 constexpr float kDockScreenRowExtra = 0.100f;
+constexpr float kScreenPillCx = -0.325f;  // the "Screen N" pill, left of the row's buttons
 inline bool is_screen_row_button(int b) {
     using Btn = VulkanRenderer::CtrlButton;
     const auto cb = static_cast<Btn>(b);
@@ -302,11 +303,12 @@ inline CtrlButtonRect get_ctrl_button_rect(int b) {
         case Btn::ScreenToggle: return { 0.62f, kBarY - 0.128f, 0.210f, 0.036f};
 
         // Multi-screen row (below the main controls, only while shown)
-        case Btn::ScreenAudioFollow: return { 0.10f, kBarY - 0.250f, 0.046f, 0.046f};
-        case Btn::ScreenLock:   return { 0.23f, kBarY - 0.250f, 0.046f, 0.046f};
-        case Btn::ScreenNumbers: return { 0.36f, kBarY - 0.250f, 0.046f, 0.046f};
-        case Btn::ScreenLayout: return { 0.49f, kBarY - 0.250f, 0.046f, 0.046f};
-        case Btn::ScreenClose:  return { 0.62f, kBarY - 0.250f, 0.046f, 0.046f};
+        // The row (screen pill + five buttons) is centred under Play.
+        case Btn::ScreenAudioFollow: return {-0.115f, kBarY - 0.250f, 0.046f, 0.046f};
+        case Btn::ScreenLock:   return { 0.015f, kBarY - 0.250f, 0.046f, 0.046f};
+        case Btn::ScreenNumbers: return { 0.145f, kBarY - 0.250f, 0.046f, 0.046f};
+        case Btn::ScreenLayout: return { 0.275f, kBarY - 0.250f, 0.046f, 0.046f};
+        case Btn::ScreenClose:  return { 0.405f, kBarY - 0.250f, 0.046f, 0.046f};
         default: return {0.0f, 0.0f, 0.0f, 0.0f};
     }
 }
@@ -400,7 +402,7 @@ constexpr float kBrowserSortCaptionX = -0.455f;
 constexpr float kBrowserViewCaptionX = -0.195f;
 constexpr float kBrowserCaptionMaxW = 0.085f;
 // Close button of the hub: top right corner, above the header rows of every tab.
-inline UiRect closeButton() { return {0.862f, 0.524f, 0.019f, 0.019f}; }
+inline UiRect closeButton() { return {0.853f, 0.522f, 0.027f, 0.027f}; }
 inline UiRect headerButton(int id) {
     switch (id) {
         case 5: return {-0.290f, kBrowserBtnY, 0.075f, kBrowserBtnHH};
@@ -6234,7 +6236,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                           UiShape::RoundedBox, kGlassDivider, 1.0f);
             const float labelBg[4] = {themeAccentCol[0] * 0.22f, themeAccentCol[1] * 0.22f,
                                       themeAccentCol[2] * 0.28f, 0.92f};
-            drawUiElement(vpPanel, -0.11f, kBarY - 0.250f, 0.125f, 0.038f,
+            drawUiElement(vpPanel, kScreenPillCx, kBarY - 0.250f, 0.125f, 0.038f,
                           UiShape::RoundedBox, labelBg, 1.0f, 0.08f, themeAccentCol);
         }
 
@@ -6727,7 +6729,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 char lbl[32];
                 std::snprintf(lbl, sizeof(lbl), "Screen %d", screenControlsNumber_);
                 withHeadingFont([&] {
-                    drawFitCentered(-0.11f, kBarY - 0.250f, 0.23f, pillSc * 1.05f, themeTextCol, lbl);
+                    drawFitCentered(kScreenPillCx, kBarY - 0.250f, 0.23f, pillSc * 1.05f, themeTextCol, lbl);
                 });
             }
             // Tooltip text for button hover
