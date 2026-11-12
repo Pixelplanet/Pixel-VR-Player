@@ -21,6 +21,8 @@ public:
         Back,
         CycleDownloadDir,
         PickDownloadFolder,   // "Other...": the App lets the user pick a folder in the browser
+        EnterDownloadFolder,  // opens the Download Folder page (one option per line, like the track lists)
+        PickDownloadPreset,   // a preset on that page (data = index)
         MoveVault,            // Vault location: move the vault to / from the SD card (App, after a 2nd click)
         ToggleRailShortcut0,
         ToggleRailShortcut1,

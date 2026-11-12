@@ -234,7 +234,7 @@ void SettingsMenu::move(int delta) {
 int SettingsMenu::parentOf(int s) const {
     if (s >= kButtonsSection && s < kButtonsSection + buttonsPages()) return 3;  // Controller Buttons -> Controls & Input
     if (s == 10 || s == 11 || s == 12) return 2;  // track lists -> Audio & Video Tracks
-    if (s == 21 || s == 22) return 1;             // List Columns, Shortcuts -> UI & Appearance
+    if (s == 13 || s == 21 || s == 22) return 1;  // Download Folder, List Columns, Shortcuts -> UI & Appearance
     if (s == 17) return 22;                       // one shortcut -> Shortcuts
     if (s == kPluginSection || s == kStoreSection) return kPluginsSection;
     if (s == kStoreItemSection) return storeUpdate_ ? kPluginsSection : kStoreSection;
@@ -417,7 +417,13 @@ void SettingsMenu::refresh() {
             } else {
                 label = "Download Folder" + freeTxt;
             }
-            segmented(label, opts, idx, Action::CycleDownloadDir);
+            // One row that opens its own page: five folder names don't fit side by side.
+            std::string value = custom ? downloadCustom_ : std::string(opts[static_cast<std::size_t>(idx)]);
+            if (const char* home = std::getenv("HOME"); custom && home && *home && value.rfind(home, 0) == 0) {
+                value = "~" + value.substr(std::strlen(home));
+            }
+            if (!custom && idx == 3) value = "SD card";
+            rows_.push_back({label, value, Action::EnterDownloadFolder});
         }
         {
             std::string on;
@@ -895,6 +901,28 @@ void SettingsMenu::refresh() {
         toggle("File Size", listShowSize_, Action::ToggleListColSize);
         toggle("Video Duration", listShowDuration_, Action::ToggleListColDuration);
         rows_.push_back({"Back to UI & Appearance", "", Action::BackToUI});
+    } else if (section_ == 13) {
+        // Download Folder: the same list page as the track pickers.
+        title_ = "Settings > UI & Appearance > Download Folder";
+        const bool card = !sdCardMount().empty();
+        const bool custom = !downloadCustom_.empty();
+        const int cur = downloadDirIdx_ % kDownloadDirCount;
+        for (int i = 0; i < 3; ++i) option(kDownloadDirs[i], !custom && cur == i, Action::PickDownloadPreset, i);
+        if (card || (!custom && cur == 3)) {
+            const uint64_t freeB = card ? freeBytes(sdCardMount()) : 0;
+            option(card ? "SD card (Downloads folder)" + (freeB ? "  \xC2\xB7  " + gigabytes(freeB) + " free" : std::string())
+                        : std::string("SD card (not inserted: saving to ~/Downloads)"),
+                   !custom && cur == 3, Action::PickDownloadPreset, 3);
+        }
+        if (custom) {
+            std::string shown = downloadCustom_;
+            if (const char* home = std::getenv("HOME"); home && *home && shown.rfind(home, 0) == 0) {
+                shown = "~" + shown.substr(std::strlen(home));
+            }
+            option(shown + (removableMissing(downloadCustom_) ? "  (drive removed)" : ""), true, Action::PickDownloadFolder, 0);
+        }
+        rows_.push_back({"Other Folder...", "Choose in the file browser", Action::PickDownloadFolder});
+        rows_.push_back({"Back to UI & Appearance", "", Action::BackToUI});
     } else if (section_ == 10) {
         title_ = "Settings > Tracks > Video Track";
         for (std::size_t i = 0; i < videoStreams_.size(); ++i) {
@@ -1038,6 +1066,23 @@ SettingsMenu::Action SettingsMenu::activate() {
             selected_ = shortcutIdx_;
             refresh();
             break;
+        case Action::EnterDownloadFolder:
+            section_ = 13;
+            selected_ = 0;
+            refresh();
+            break;
+        case Action::PickDownloadPreset: {
+            const int i = rows_[static_cast<std::size_t>(selected_)].data;
+            if (i >= 0 && i < kDownloadDirCount && !(i == 3 && sdCardMount().empty())) {
+                downloadDirIdx_ = i;
+                downloadCustom_.clear();
+                saveConfig();
+            }
+            section_ = 1;
+            selected_ = 0;
+            refresh();
+            break;
+        }
         case Action::CycleDownloadDir:
             if (!downloadCustom_.empty()) {
                 downloadCustom_.clear();  // from "Other..." back to the first preset
