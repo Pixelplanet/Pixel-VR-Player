@@ -286,7 +286,7 @@ App::App() = default;
 App::~App() {
 #ifdef PIXELVR_HAVE_MEDIA
     for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
-        cancelPendingOpen(slot);
+        cancelPendingOpen(slot, true);  // exit: wait for the thread (the engine goes away next)
     }
 #endif
     plugins_.shutdownAll();  // plugins stop their devices before anything else goes away
@@ -300,6 +300,7 @@ void App::watchdogLoop() {
     using namespace std::chrono_literals;
     auto lastPresentTime = std::chrono::steady_clock::now();
     bool prevAbsent = false;
+    bool lockDeferred = false;  // headset off during a vault move: lock as soon as the move is over
 
     while (watchdogRunning_.load(std::memory_order_relaxed)) {
         std::this_thread::sleep_for(250ms);
@@ -318,8 +319,16 @@ void App::watchdogLoop() {
 
         const bool isAbsent = !userPresent || heartbeatStalled;
 
+        // The lock that a running vault move held back: due once the move is over and nobody is back.
+        if (lockDeferred && isAbsent && !FileOps::instance().relocationPending()) {
+            lockDeferred = false;
+            if (VaultManager::instance().isUnlocked() && VaultManager::instance().autoLockHeadsetOff()) {
+                pendingAutoLock_.store(true, std::memory_order_release);
+            }
+        }
         if (!isAbsent) {
             lastPresentTime = now;
+            lockDeferred = false;
             if (prevAbsent) {
                 PIXELVR_LOG_INFO("Watchdog: user returned / frame loop resumed (vrPresent=%d xrPresent=%d hbDelta=%lldms)",
                                  (int)vrPresent, (int)xrPresent, static_cast<long long>(nowMs - lastHeartbeat));
@@ -351,9 +360,9 @@ void App::watchdogLoop() {
                 }
                 // Only with "Auto-Lock on Headset Removal" on, and never while a vault relocation is running
                 // (an SD card vault transfer can take 30+ minutes while the headset sits on a desk).
-                if (VaultManager::instance().isUnlocked() && VaultManager::instance().autoLockHeadsetOff() &&
-                    !FileOps::instance().relocationPending()) {
-                    pendingAutoLock_.store(true, std::memory_order_release);
+                if (VaultManager::instance().isUnlocked() && VaultManager::instance().autoLockHeadsetOff()) {
+                    if (FileOps::instance().relocationPending()) lockDeferred = true;
+                    else pendingAutoLock_.store(true, std::memory_order_release);
                 }
             }
         }
@@ -457,12 +466,20 @@ bool App::init(const std::string& mediaPath) {
 }
 
 #ifdef PIXELVR_HAVE_MEDIA
-void App::cancelPendingOpen(int slot) {
+void App::cancelPendingOpen(int slot, bool wait) {
     if (slot < 0 || slot >= VulkanRenderer::kMaxVideoSlots) return;
     ScreenState& sc = screens_[slot];
-    if (sc.opening || sc.openThread.joinable()) {
+    sc.hasDeferredLoad = false;
+    sc.deferredPath.clear();
+    if (sc.openThread.joinable()) {
         sc.engine.abortOpen();
-        if (sc.openThread.joinable()) sc.openThread.join();
+        if (wait || sc.openThreadDone.load(std::memory_order_acquire)) {
+            sc.openThread.join();
+            if (sc.openAbandoned || sc.opening) sc.engine.close();  // an open that finished after all
+            sc.openAbandoned = false;
+        } else {
+            sc.openAbandoned = true;  // reaped by pollMediaOpens once the network call returns
+        }
     }
     sc.opening = false;
     sc.openState.store(0, std::memory_order_relaxed);
@@ -494,12 +511,22 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
     }
     if (screens_[slot].web) clearSlotKeepLayout(slot);  // a file replaces a browser screen
     ScreenState& sc = screens_[slot];
-    const bool sameFile = (path == sc.path) && (sc.open || sc.opening);
+    // A reload of the same file keeps its place and format; while it is still opening for the
+    // first time it is not "the same file" yet (the resume position must still apply).
+    const bool sameFile = (path == sc.path) && (sc.open || (sc.opening && sc.openSameFile));
     cancelPendingOpen(slot);
+    if (sc.openAbandoned) {
+        // The cancelled open still holds the engine: start this one as soon as it lets go.
+        sc.hasDeferredLoad = true;
+        sc.deferredPath = path;
+        sc.deferredFromQueue = fromQueue;
+        sc.openStartedAt = std::chrono::steady_clock::now();
+        return;
+    }
     if (!sameFile) {
         rememberPlaybackPosition(slot);  // the clip being replaced
         playbackMemory_.save();
-        sc.openQueueTries = 0;
+        if (!fromQueue) sc.openQueueTries = 0;  // the queue's own retries keep counting
     }
     if (!sameFile) renderer_.clearScrubPreview();  // stale frame from the previous clip
     if (sc.webSuspended && !plexLoading_ && !sameFile) {  // another file replaces the Plex hand-off
@@ -545,22 +572,26 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
     // Place the screen in the layout right away and close the hub so the user
     // sees the "Loading..." indicator on the screen while the background worker
     // opens the stream (especially over slow SMB / SFTP / HTTP connections).
-    sc.projection = static_cast<int>(proj);
-    sc.stereo = static_cast<int>(stereo);
-    if (slot == 0) {
-        renderer_.setProjectionMode(proj);
-        renderer_.setStereoMode(stereo);
-    } else {
-        VulkanRenderer::ScreenPlacement pl = renderer_.screenPlacement(slot);
-        if (!pl.active) {
-            placeNewScreen(slot);
-            pl = renderer_.screenPlacement(slot);
+    // (A reload of the playing file, e.g. an audio-track switch, keeps the format it plays in:
+    // finishLoadMedia reads sc.projection / sc.stereo back.)
+    if (!sameFile) {
+        sc.projection = static_cast<int>(proj);
+        sc.stereo = static_cast<int>(stereo);
+        if (slot == 0) {
+            renderer_.setProjectionMode(proj);
+            renderer_.setStereoMode(stereo);
+        } else {
+            VulkanRenderer::ScreenPlacement pl = renderer_.screenPlacement(slot);
+            if (!pl.active) {
+                placeNewScreen(slot);
+                pl = renderer_.screenPlacement(slot);
+            }
+            pl.active = true;
+            pl.stereo = stereo;
+            renderer_.setScreenPlacement(slot, pl);
         }
-        pl.active = true;
-        pl.stereo = stereo;
-        renderer_.setScreenPlacement(slot, pl);
+        if (proj == VulkanRenderer::ProjectionMode::Flat) joinArrangement(slot);
     }
-    if (proj == VulkanRenderer::ProjectionMode::Flat) joinArrangement(slot);
 
     if (!fromQueue) {  // a track change of the queue leaves the UI alone
         hudDismissed_ = false;
@@ -589,15 +620,38 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
     sc.opening = true;
     sc.openState.store(0, std::memory_order_release);
     sc.engine.resetAbort();
+    sc.openThreadDone.store(false, std::memory_order_release);
     sc.openThread = std::thread([&sc, path] {
         const bool ok = sc.engine.open(path);
         sc.openState.store(ok ? 1 : 2, std::memory_order_release);
+        sc.openThreadDone.store(true, std::memory_order_release);
     });
 }
 
 void App::pollMediaOpens(std::chrono::steady_clock::time_point now) {
     for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
         ScreenState& sc = screens_[slot];
+        if (sc.openAbandoned) {
+            // A cancelled open: once its thread is back, the engine is free again.
+            if (sc.openThreadDone.load(std::memory_order_acquire)) {
+                if (sc.openThread.joinable()) sc.openThread.join();
+                sc.engine.close();
+                sc.openState.store(0, std::memory_order_relaxed);
+                sc.openAbandoned = false;
+                if (sc.hasDeferredLoad) {
+                    const std::string next = sc.deferredPath;
+                    const bool fromQueue = sc.deferredFromQueue;
+                    sc.hasDeferredLoad = false;
+                    sc.deferredPath.clear();
+                    loadMedia(next, slot, fromQueue);
+                }
+            } else if (sc.hasDeferredLoad) {
+                const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - sc.openStartedAt).count();
+                std::string name = std::filesystem::path(formatName(sc.deferredPath)).filename().string();
+                renderer_.setScreenTitle(slot, "Loading " + name + std::string(static_cast<std::size_t>((ms / 400) % 4), '.'), 2.0f);
+            }
+            continue;
+        }
         if (!sc.opening) continue;
         const int st = sc.openState.load(std::memory_order_acquire);
         if (st == 0) {
@@ -849,9 +903,9 @@ void App::finishLoadMedia(int slot) {
 }
 
 void App::switchTracks(bool byLanguage) {
-    if (cur().path.empty() || (!cur().open && !cur().opening)) return;
-    const double pos = cur().open ? cur().engine.position() : cur().openSeekPos;
-    const bool paused = cur().open ? cur().engine.paused() : cur().openStartPaused;
+    if (cur().path.empty() || !cur().open) return;  // not while it is still opening (the open thread reads these)
+    const double pos = cur().engine.position();
+    const bool paused = cur().engine.paused();
     if (byLanguage) {
         cur().engine.setPreferredAudioLanguage(settings_.audioLanguage());
         cur().engine.setPreferredAudioStream(-1);
@@ -1260,7 +1314,7 @@ void App::closeMedia(int slot) {
     renderer_.setLetterbox(slot, 0.0f);
     if (sc.webSuspended) {
 #ifdef PIXELVR_HAVE_MEDIA
-        webHosts_[slot].plexTimeline("stopped", static_cast<int64_t>(sc.engine.position() * 1000.0));
+        webHosts_[slot].plexTimeline("stopped", sc.openAbandoned ? 0 : static_cast<int64_t>(sc.engine.position() * 1000.0));
 #endif
         webHosts_[slot].stop();
         renderer_.setDockHint(std::string(), 0.0f);
@@ -1279,7 +1333,7 @@ void App::closeMedia(int slot) {
         rememberPlaybackPosition(slot);
         playbackMemory_.save();
         if (slot == selectedScreen_) scrubPreview_.setSource(std::string(), 0);
-        sc.engine.close();
+        if (!sc.openAbandoned) sc.engine.close();  // else: closed when that open returns (pollMediaOpens)
         // Hand the last frame back to the hardware decoder, so it can free
         // the closed clip's buffers (else the next big video finds no room).
         renderer_.releaseVideoFrame(slot);
@@ -1392,9 +1446,9 @@ bool App::returnFromPlex(int slot) {
     for (size_t p = 0; p < pendingWebPlays_.size(); ++p) {
         if (pendingWebPlays_[p].slot == slot) pendingWebPlays_.erase(pendingWebPlays_.begin() + static_cast<long>(p--));
     }
-    webHosts_[slot].plexReturn(static_cast<int64_t>(sc.engine.position() * 1000.0));
+    webHosts_[slot].plexReturn(sc.openAbandoned ? 0 : static_cast<int64_t>(sc.engine.position() * 1000.0));
     renderer_.setDockHint(std::string(), 0.0f);
-    sc.engine.close();
+    if (!sc.openAbandoned) sc.engine.close();
     renderer_.releaseVideoFrame(slot);
     renderer_.clearVideo(slot);
     sc.webSuspended = false;
@@ -2452,6 +2506,17 @@ bool App::decoderBudgetAllows(const std::string& path) const {
     double used = 0.0;
 #ifdef PIXELVR_HAVE_MEDIA
     for (const ScreenState& sc : screens_) {
+        if (sc.opening && !sc.web) {  // still loading: what its thumbnail says, else 1080p30
+            double est = 1920.0 * 1080.0 * 30.0;
+#ifdef PIXELVR_HAVE_FREETYPE
+            ThumbnailCache::MediaMeta m;
+            if (const_cast<ThumbnailCache&>(thumbnailCache_).getMeta(sc.path, m) && m.width > 0) {
+                est = static_cast<double>(m.width) * m.height * (m.fps > 0.0 ? m.fps : 30.0);
+            }
+#endif
+            used += est;
+            continue;
+        }
         if (!sc.open) continue;
         const double fps = sc.engine.frameRate() > 0.0 ? sc.engine.frameRate() : 30.0;
         used += static_cast<double>(sc.engine.width()) * sc.engine.height() * fps;
@@ -2480,7 +2545,7 @@ void App::openPlayTargetMenu(const std::string& path) {
     // Cancel; the renderer draws them as live preview tiles.
     actionMenu_.options.clear();
     for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
-        actionMenu_.options.push_back(screens_[slot].open ? "Replace" : "Add");
+        actionMenu_.options.push_back((screens_[slot].open || screens_[slot].opening) ? "Replace" : "Add");
     }
     actionMenu_.options.push_back("Cancel");
     actionMenu_.selectedOption = selectedScreen_;
@@ -2496,7 +2561,7 @@ void App::openPlayTargetMenu(const std::string& path) {
     bool spatial = !(screens_[0].open && screens_[0].projection != 0);
     VulkanRenderer::ScreenPlacement pls[VulkanRenderer::kMaxVideoSlots];
     for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots && spatial; ++slot) {
-        if (!screens_[slot].open) continue;
+        if (!screens_[slot].open && !screens_[slot].opening) continue;  // a loading screen has its place
         VulkanRenderer::ScreenPlacement pl = renderer_.screenPlacement(slot);
         if (!pl.active) {
             if (slot > 0) continue;  // not placed (should not happen for an open screen)
@@ -3343,7 +3408,7 @@ void App::startVaultMove(bool lockWhenDone) {
     }
     // Vault films keep their readers open: close them, the files move.
     for (int i = 0; i < VulkanRenderer::kMaxVideoSlots; ++i) {
-        if (screens_[i].open && VaultManager::isPrivatePath(screens_[i].path)) closeMedia(i);
+        if ((screens_[i].open || screens_[i].opening) && VaultManager::isPrivatePath(screens_[i].path)) closeMedia(i);
     }
     if (picking()) cancelPick(false);
     FileOps::Request r;
@@ -3481,9 +3546,10 @@ void App::drainFileOps() {
                 if (browser_.isOpen() && pathIsUnder(browser_.currentLocation(), m.from)) browser_.openVault();
             }
             if (res.lockWhenDone && VaultManager::instance().isUnlocked()) {
-                performVaultLock();
-                showNotice("Vault move finished and vault locked");
+                performVaultLock();  // the locked state is the confirmation: no notice names a vault
+                hubNotice_.clear();
             } else {
+                VaultManager::instance().recordActivity(std::chrono::steady_clock::now());  // not "idle since the start"
                 settings_.refresh();
             }
         } else if (!res.ok && res.relocation && VaultManager::instance().isUnlocked()) {
@@ -5650,11 +5716,10 @@ int App::run() {
                                         applyFormat(1, 1);
                                     }
 #ifdef PIXELVR_HAVE_MEDIA
-                                    if (opt != "Cancel" && cur().open &&
+                                    if (opt != "Cancel" && (cur().open || cur().opening) &&
                                         !VaultManager::isPrivatePath(cur().path)) {
-                                        playbackMemory_.setFormat(cur().path,
-                                                                  settings_.projectionMode(),
-                                                                  settings_.stereoMode(), cur().fingerprint);
+                                        playbackMemory_.setFormat(cur().path, cur().projection, cur().stereo,
+                                                                  cur().fingerprint);
                                         playbackMemory_.save();
                                         cur().formatByHand = true;
                                         cur().formatPending = false;
@@ -5688,7 +5753,7 @@ int App::run() {
                                 } else if (actionMenu_.page == 6) {
                                     // Screen picker: 0..2 = screen slot tile, 3 = Cancel.
                                     if (chosen < VulkanRenderer::kMaxVideoSlots) {
-                                        const bool occupied = screens_[chosen].open;
+                                        const bool occupied = screens_[chosen].open || screens_[chosen].opening;
                                         if (!occupied && !decoderBudgetAllows(pendingPlayPath_)) {
                                             actionMenu_.subtitle = "Not enough decoder capacity - close a screen first";
                                         } else {

@@ -291,6 +291,14 @@ private:
         bool opening = false;       // MediaEngine::open() is running on openThread
         std::thread openThread;
         std::atomic<int> openState{0};  // 0 = idle/running, 1 = succeeded, 2 = failed
+        // A cancelled open whose thread is still inside the network library (an SMB connect or
+        // read can't be interrupted): it is left to finish on its own, never joined on the frame
+        // thread. Until then the engine belongs to that thread; a new load for this screen waits.
+        bool openAbandoned = false;
+        std::atomic<bool> openThreadDone{true};
+        bool hasDeferredLoad = false;
+        std::string deferredPath;
+        bool deferredFromQueue = false;
         std::chrono::steady_clock::time_point openStartedAt{};
         bool openFromQueue = false;
         bool openSameFile = false;
@@ -460,7 +468,7 @@ private:
     // `fromQueue`: the music queue picked this track (it starts from the top,
     // keeps the queue, and leaves open menus alone).
     void loadMedia(const std::string& path, int slot = -1, bool fromQueue = false);
-    void cancelPendingOpen(int slot);
+    void cancelPendingOpen(int slot, bool wait = false);  // wait: join even a stuck open (exit only)
     void finishLoadMedia(int slot);
     void pollMediaOpens(std::chrono::steady_clock::time_point now);
     void buildMusicQueue(int slot, const std::string& path);  // audio file opened from a folder
