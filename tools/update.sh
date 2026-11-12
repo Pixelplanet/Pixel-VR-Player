@@ -9,10 +9,10 @@ REPO="Pixelplanet/Pixel-VR-Player"
 INSTALL_DIR="${PIXELVR_INSTALL_DIR:-$HOME/PixelVRPlayer}"
 
 if [ -t 1 ]; then
-    C_INFO=$(printf '\0033[36m')
-    C_OK=$(printf '\0033[32m')
-    C_ERR=$(printf '\0033[31m')
-    C_OFF=$(printf '\0033[0m')
+    C_INFO=$(printf '\033[36m')
+    C_OK=$(printf '\033[32m')
+    C_ERR=$(printf '\033[31m')
+    C_OFF=$(printf '\033[0m')
 else
     C_INFO=""; C_OK=""; C_ERR=""; C_OFF=""
 fi

@@ -49,6 +49,7 @@ cp tools/install.sh "${stage}/PixelVRPlayer/install.sh"
 if [[ -f "tools/update.sh" ]]; then
     cp tools/update.sh "${stage}/PixelVRPlayer/update.sh"
 fi
+cp tools/uninstall.sh "${stage}/PixelVRPlayer/uninstall.sh"
 if [[ -f "tools/Install Pixel VR Player.desktop" ]]; then
     cp "tools/Install Pixel VR Player.desktop" "${stage}/PixelVRPlayer/Install Pixel VR Player.desktop"
 fi
@@ -72,7 +73,8 @@ if [[ -n "${VERSION}" ]]; then
 fi
 chmod +x "${stage}/PixelVRPlayer/pixelvr" \
          "${stage}/PixelVRPlayer/run.sh" \
-         "${stage}/PixelVRPlayer/install.sh"
+         "${stage}/PixelVRPlayer/install.sh" \
+         "${stage}/PixelVRPlayer/uninstall.sh"
 if [[ -f "${stage}/PixelVRPlayer/update.sh" ]]; then
     chmod +x "${stage}/PixelVRPlayer/update.sh"
 fi

@@ -42,6 +42,7 @@ jobs:
         run: |
           set -eux
           sh -n tools/install.sh
+          sh -n tools/uninstall.sh
           bash -n tools/package-release.sh
           bash -n tools/build.sh
 
@@ -111,6 +112,7 @@ jobs:
           tar -tzf pixelvr-linux-arm64.tar.gz | grep -q '/ffmpeg-source/dmabuf.patch$'
           tar -tzf pixelvr-linux-arm64.tar.gz | grep -q '^PixelVRPlayer/run.sh$'
           tar -tzf pixelvr-linux-arm64.tar.gz | grep -q '^PixelVRPlayer/install.sh$'
+          tar -tzf pixelvr-linux-arm64.tar.gz | grep -q '^PixelVRPlayer/uninstall.sh$'
           tar -tzf pixelvr-linux-arm64.tar.gz | grep -q '^PixelVRPlayer/VERSION$'
           tar -tzf pixelvr-linux-arm64.tar.gz | grep -q '/shaders/thumb.frag.spv$'
           tar -tzf pixelvr-linux-arm64.tar.gz | grep -q '/fonts/Inter-Medium.ttf$'

@@ -12,7 +12,7 @@
 #   --version vX.Y.Z    release to install (default: the latest release)
 #   --no-steam          do not add the Non-Steam Game shortcut
 #   --restart-steam     close Steam before registering, then start it again
-#   --uninstall         remove the app and its Steam shortcut
+#   --uninstall         remove the app and its Steam shortcut (what uninstall.sh runs)
 #   --force             install even if the CPU is not aarch64
 #   -h, --help          show this help
 #
@@ -56,11 +56,11 @@ DO_UPDATE=0
 FORCE=0
 
 if [ -t 1 ]; then
-    C_INFO=$(printf '\0033[36m')
-    C_OK=$(printf '\0033[32m')
-    C_WARN=$(printf '\0033[33m')
-    C_ERR=$(printf '\0033[31m')
-    C_OFF=$(printf '\0033[0m')
+    C_INFO=$(printf '\033[36m')
+    C_OK=$(printf '\033[32m')
+    C_WARN=$(printf '\033[33m')
+    C_ERR=$(printf '\033[31m')
+    C_OFF=$(printf '\033[0m')
 else
     C_INFO=""; C_OK=""; C_WARN=""; C_ERR=""; C_OFF=""
 fi
@@ -849,6 +849,7 @@ if [ "$(cd "$srcdir" && pwd -P)" = "$(cd "$INSTALL_DIR" && pwd -P)" ]; then
     SAME_DIR=1
 fi
 INSTALLED_SCRIPT=0
+HAVE_UNINSTALLER=0
 if [ "$SAME_DIR" -eq 1 ]; then
     info "the files are already in $INSTALL_DIR"
     [ -f "$INSTALL_DIR/install.sh" ] && INSTALLED_SCRIPT=1
@@ -885,6 +886,27 @@ elif [ -n "$script_dir" ] && [ -f "$script_dir/update.sh" ]; then
     put_script "$script_dir/update.sh" "$INSTALL_DIR/update.sh"
 elif [ -f "tools/update.sh" ]; then
     put_script "tools/update.sh" "$INSTALL_DIR/update.sh"
+fi
+# The uninstaller, and an icon for it in the player folder (not on the Desktop: too easy to hit).
+HAVE_UNINSTALLER=0
+for cand in "$srcdir/uninstall.sh" "${script_dir:+$script_dir/uninstall.sh}" "tools/uninstall.sh"; do
+    if [ -n "$cand" ] && [ -f "$cand" ]; then
+        put_script "$cand" "$INSTALL_DIR/uninstall.sh"
+        HAVE_UNINSTALLER=1
+        break
+    fi
+done
+if [ "$HAVE_UNINSTALLER" -eq 1 ]; then
+    cat > "$INSTALL_DIR/Uninstall $APP_NAME.desktop" <<UNINSTALLICON
+[Desktop Entry]
+Name=Uninstall $APP_NAME
+Comment=Remove Pixel VR Player and its Steam shortcut (settings and the vault are kept)
+Exec=env PIXELVR_GUI=1 sh "$INSTALL_DIR/uninstall.sh" --dir "$INSTALL_DIR"
+Icon=edit-delete
+Terminal=true
+Type=Application
+UNINSTALLICON
+    chmod 0755 "$INSTALL_DIR/Uninstall $APP_NAME.desktop"
 fi
 
 if [ -f "$srcdir/VERSION" ]; then
@@ -965,7 +987,9 @@ printf '  From Steam  : Library > Non-Steam > %s\n' "$APP_NAME"
 printf '  Play a clip : %s/run.sh /path/to/clip.mp4\n' "$INSTALL_DIR"
 printf '  Logs        : %s/logs\n' "$INSTALL_DIR"
 printf '  1-Click Upd : %s/update.sh (or "Update Pixel VR Player" icon on Desktop)\n' "$INSTALL_DIR"
-if [ "$INSTALLED_SCRIPT" -eq 1 ]; then
+if [ "$HAVE_UNINSTALLER" -eq 1 ]; then
+    printf '  Remove      : %s/uninstall.sh (or "Uninstall Pixel VR Player" in that folder)\n\n' "$INSTALL_DIR"
+elif [ "$INSTALLED_SCRIPT" -eq 1 ]; then
     printf '  Remove      : %s/install.sh --uninstall\n\n' "$INSTALL_DIR"
 else
     printf '  Remove      : rerun this script with --uninstall\n\n'

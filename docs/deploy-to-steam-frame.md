@@ -30,10 +30,10 @@ The installer verifies checksums, installs to `~/PixelVRPlayer`, and registers *
 To cleanly remove the application and its Steam shortcut:
 
 ```bash
-# On headset:
-~/PixelVRPlayer/install.sh --uninstall
+# On headset (or double-click "Uninstall Pixel VR Player" in the ~/PixelVRPlayer folder):
+~/PixelVRPlayer/uninstall.sh
 
-# Or one-liner:
+# Or one-liner (also for installs older than v1.19.1, which have no uninstall.sh):
 curl -fsSL https://raw.githubusercontent.com/Pixelplanet/Pixel-VR-Player/main/tools/install.sh | sh -s -- --uninstall
 
 # Or from PC over Wi-Fi:

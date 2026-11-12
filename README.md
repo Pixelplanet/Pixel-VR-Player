@@ -178,15 +178,19 @@ curl -fsSL https://raw.githubusercontent.com/Pixelplanet/Pixel-VR-Player/main/to
 
 To remove Pixel VR Player and its Steam shortcut from your Steam Frame:
 
-### From the Headset (Desktop Mode / Konsole or SSH)
+### From the Headset (Desktop Mode)
 
-Run the uninstaller script directly:
+1. Open the **`PixelVRPlayer`** folder in your home folder.
+2. Double-click **`Uninstall Pixel VR Player`**.
+3. Answer `y` in the window that opens.
+
+The same from a terminal (Konsole or SSH):
 
 ```bash
-~/PixelVRPlayer/install.sh --uninstall
+~/PixelVRPlayer/uninstall.sh
 ```
 
-Or run the one-command uninstaller:
+If the folder has no uninstaller (installs older than v1.19.1) or is already gone, this one command does the same:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/Pixelplanet/Pixel-VR-Player/main/tools/install.sh | sh -s -- --uninstall
