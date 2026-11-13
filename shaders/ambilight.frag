@@ -33,7 +33,9 @@ vec3 sampleEye(vec2 uv, float lod) {
 void main() {
     vec2 p = (vUV - 0.5) * kScale;          // the screen covers |p| <= 0.5
     vec2 q = abs(p) - 0.5;
-    if (q.x < 0.0 && q.y < 0.0) {
+    // The hole is a little smaller than the screen: the glow sits behind it, and seen at an angle
+    // the hole's edge would show as a black sliver beside the screen's edge.
+    if (q.x < -0.03 && q.y < -0.03) {
         discard;                             // hidden behind the screen anyway
     }
     float d = length(max(q * vec2(kAspect, 1.0), 0.0));   // metres-ish, in screen heights
