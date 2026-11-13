@@ -39,11 +39,9 @@ vec3 sampleEye(vec2 uv) {
 void main() {
     vec2 p = (vUV - 0.5) * kScale;
     vec2 q = abs(p) - 0.5;
-    // The hole is a little smaller than the screen: the glow sits behind it, and seen at an angle
-    // the hole's edge would show as a black sliver beside the screen's edge.
-    if (q.x < -0.03 && q.y < -0.03) {
-        discard;
-    }
+    // No hole behind the screen: the screen covers the glow anyway, and the glow is not on the
+    // screen's own surface (a curved screen comes forward at its sides, the glow does not), so the
+    // edge of a hole showed as a black sliver beside the screen's edge when seen at an angle.
     float d = length(max(q * vec2(kAspect, 1.0), 0.0));
     float reach = pc.extra.x > 0.0 ? pc.extra.x : 0.46;
     float a = 1.0 - smoothstep(0.0, reach, d);

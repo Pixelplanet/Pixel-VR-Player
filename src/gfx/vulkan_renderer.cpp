@@ -4743,6 +4743,14 @@ void VulkanRenderer::recordScreenCopy(int slot, const ScreenLayer& L, uint32_t i
             // share, the same share of the whole frame) outside the image.
             const float keep = 1.0f - 2.0f * letterboxFor(slot);
             const Mat4 videoOrtho = keep < 0.999f ? orthographicVulkan(-1.6f, 1.6f, -0.9f * keep, 0.9f * keep) : ortho;
+            if (keep < 0.999f) {
+                // The picture is taller than the image now: keep it out of the transparent border rows
+                // (the black bars drawn there showed as a black line along the top and bottom edge).
+                const VkRect2D inner{{1, 1},
+                                     {static_cast<uint32_t>(std::max(L.targets.width - 2, 1)),
+                                      static_cast<uint32_t>(std::max(L.targets.height - 2, 1))}};
+                vkCmdSetScissor(commandBuffer_, 0, 1, &inner);
+            }
             std::memcpy(push.mvp, videoOrtho.m, sizeof(push.mvp));
             std::memcpy(push.conversion, v.conversion, sizeof(push.conversion));
             std::memcpy(push.range, v.range, sizeof(push.range));
@@ -4755,6 +4763,7 @@ void VulkanRenderer::recordScreenCopy(int slot, const ScreenLayer& L, uint32_t i
             vkCmdPushConstants(commandBuffer_, layout, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
                                sizeof(PushConstants), &push);
             vkCmdDraw(commandBuffer_, 64 * 6, 1, 0, 0);
+            vkCmdSetScissor(commandBuffer_, 0, 1, &sc);
         }
     }
     // Screen number: a dark disc with the number in the middle of each eye's
