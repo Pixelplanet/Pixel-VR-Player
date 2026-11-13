@@ -2952,7 +2952,8 @@ void VulkanRenderer::updatePointer() {
     screenNavSlot_ = -1;
     screenNavHover_ = -1;
     screenSkipSlot_ = -1;
-    const bool screensPointable = (multiScreenActive_ || anyWeb) && !hubOpen && !modalOpen &&
+    // (A single flat screen too: it can be dragged with the trigger.)
+    const bool screensPointable = (multiScreenActive_ || anyWeb || projectionMode_ == ProjectionMode::Flat) && !hubOpen && !modalOpen &&
                                   !actionMenuOpen && !kbOpen;
     if (!kbOpen && !hubOpen && !modalOpen && !controlBar && !actionMenuOpen &&
         !screensPointable) {
