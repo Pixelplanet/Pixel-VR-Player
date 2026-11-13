@@ -555,6 +555,8 @@ public:
         std::string title;
         std::string subtitle;
         std::vector<std::string> options;
+        // Tracks page: per option 0 = plain, 1 = audio, 2 = subtitle, 3 = video; +16 = the one in use.
+        std::vector<int> optionKinds;
         int selectedOption = -1;
         int editingRow = -1;
         int cursorPos = 0;

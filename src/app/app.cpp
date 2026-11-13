@@ -1728,6 +1728,7 @@ void App::openTracksMenu() {
     actionMenu_.subtitle = (audio.size() > 1 || video.size() > 1) ? "Audio / video: the video reloads at the same position"
                                                                   : "Subtitles";
     actionMenu_.options.clear();
+    actionMenu_.optionKinds.clear();
     trackRows_.clear();
     actionMenu_.selectedOption = 0;
     const int curAudio = cur().engine.currentAudioStream();
@@ -1741,29 +1742,34 @@ void App::openTracksMenu() {
     const int curSub = cur().engine.subtitleStream();
     for (std::size_t i = 0; i < audioRows && trackRows_.size() < 10; ++i) {
         const bool on = audio[i].index == curAudio;
-        const std::string shortName = audio[i].language.empty() ? "Audio " + std::to_string(i + 1) : upper(audio[i].language);
-        actionMenu_.options.push_back(shortName + "|" + audio[i].label + (on ? "  (playing)" : ""));
+        const std::string shortName = audio[i].language.empty() ? "#" + std::to_string(i + 1) : upper(audio[i].language);
+        actionMenu_.options.push_back(shortName + "|" + audio[i].label);
+        actionMenu_.optionKinds.push_back(1 + (on ? 16 : 0));
         if (on) actionMenu_.selectedOption = static_cast<int>(trackRows_.size());
         trackRows_.push_back({true, audio[i].index});
     }
     if (!subs.empty()) {
-        actionMenu_.options.push_back(std::string("Subs|Subtitles off") + (curSub < 0 ? "  (now)" : ""));
+        actionMenu_.options.push_back("Off|No subtitles");
+        actionMenu_.optionKinds.push_back(2 + (curSub < 0 ? 16 : 0));
         if (audioRows == 0 && curSub < 0) actionMenu_.selectedOption = static_cast<int>(trackRows_.size());
         trackRows_.push_back({false, -1, true});
         for (std::size_t i = 0; i < subs.size() && trackRows_.size() < 10; ++i) {
             const bool on = subs[i].index == curSub;
-            const std::string shortName = subs[i].language.empty() ? "Subs " + std::to_string(i + 1) : "Subs " + upper(subs[i].language);
-            actionMenu_.options.push_back(shortName + "|" + subs[i].label + (on ? "  (now)" : ""));
+            const std::string shortName = subs[i].language.empty() ? "#" + std::to_string(i + 1) : upper(subs[i].language);
+            actionMenu_.options.push_back(shortName + "|" + subs[i].label);
+            actionMenu_.optionKinds.push_back(2 + (on ? 16 : 0));
             if (audioRows == 0 && on) actionMenu_.selectedOption = static_cast<int>(trackRows_.size());
             trackRows_.push_back({false, subs[i].index, true});
         }
     }
     for (std::size_t i = 0; video.size() > 1 && i < video.size() && trackRows_.size() < 10; ++i) {
         const bool on = video[i].index == curVideo;
-        actionMenu_.options.push_back("Video " + std::to_string(i + 1) + "|" + video[i].label + (on ? "  (playing)" : ""));
+        actionMenu_.options.push_back("#" + std::to_string(i + 1) + "|" + video[i].label);
+        actionMenu_.optionKinds.push_back(3 + (on ? 16 : 0));
         trackRows_.push_back({false, video[i].index});
     }
     actionMenu_.options.push_back("Cancel");
+    actionMenu_.optionKinds.push_back(0);
     xr_.triggerHaptic(0, 0.020f, 0.0f, 0.4f);
     xr_.triggerHaptic(1, 0.020f, 0.0f, 0.4f);
 #endif
@@ -4014,6 +4020,11 @@ int App::run() {
                     es.engine.subtitleAt(es.engine.position(), subs);
                 }
                 renderer_.setScreenSubtitle(s, subs);
+                if (!subs.empty() && !es.subtitleLogged) {  // once per choice: the first line that is drawn
+                    screens_[s].subtitleLogged = true;
+                    PIXELVR_LOG_INFO("Subtitles: first line on screen %d at %.1f s (%d characters)", s + 1,
+                                     es.engine.position(), static_cast<int>(subs.size()));
+                }
             }
             if (in.select) {
                 int ks = -1;
@@ -6049,6 +6060,9 @@ int App::run() {
                                         if (tr.subtitle) {  // at once, no reload
                                             cur().engine.setSubtitleStream(tr.index);
                                             cur().subtitleChoice = cur().engine.subtitleStream();
+                                            cur().subtitleLogged = false;
+                                            PIXELVR_LOG_INFO("Subtitles: screen %d %s (track %d)", selectedScreen_ + 1,
+                                                             cur().subtitleChoice < 0 ? "off" : "on", cur().subtitleChoice);
                                             // Lines already on screen at this moment come with a tiny seek.
                                             if (cur().subtitleChoice >= 0 && cur().subtitleChoice < MediaEngine::kExternalSubtitleBase) {
                                                 cur().engine.seek(cur().engine.position());

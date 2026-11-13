@@ -1717,7 +1717,7 @@ bool MediaEngine::open(const std::string& path) {
             std::string title;
             if (AVDictionaryEntry* e = av_dict_get(s->metadata, "title", nullptr, 0)) title = e->value;
             std::string label = title.empty() ? std::string(desc ? desc->name : "subtitle") : title;
-            if (s->disposition & AV_DISPOSITION_FORCED) label += " (forced)";
+            if (s->disposition & AV_DISPOSITION_FORCED) label += " (forced: foreign-language parts only)";
             if (!text) label += " (picture subtitles: not supported yet)";
             impl_->subtitleStreamList.push_back({static_cast<int>(si), label, lang, text});
         }

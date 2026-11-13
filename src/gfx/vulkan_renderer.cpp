@@ -8712,6 +8712,34 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                                         : (isDelete ? redBorder : (isVault ? goldBorder : tabNormBord));
                 drawUiElement(vpPanel, 0.0f, cy, btnHalfW, btnHalfH,
                               UiShape::RoundedBox, bg, 1.0f, 0.06f, bord);
+                // Track rows: what kind of track it is, readable without the text. Audio = speaker in the
+                // accent colour, subtitles = a caption box in amber, video = a screen in grey; the one in
+                // use has a tick at the right.
+                const int kindRaw = (actionMenu_.page == menupage::Tracks && static_cast<std::size_t>(i) < actionMenu_.optionKinds.size())
+                                        ? actionMenu_.optionKinds[static_cast<std::size_t>(i)] : 0;
+                const int kind = kindRaw & 15;
+                if (kind != 0) {
+                    const float amber[4] = {1.0f, 0.72f, 0.30f, 1.0f};
+                    const float grey[4] = {0.72f, 0.78f, 0.88f, 1.0f};
+                    const float accent[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 1.0f};
+                    const float* kc = kind == 1 ? accent : (kind == 2 ? amber : grey);
+                    const float tile[4] = {kc[0] * 0.22f, kc[1] * 0.22f, kc[2] * 0.22f, 0.95f};
+                    const float ix = -btnHalfW + 0.034f;
+                    drawUiElement(vpPanel, ix, cy, 0.026f, btnHalfH - 0.004f, UiShape::RoundedBox, tile, 0.45f, 0.06f, kc);
+                    if (kind == 1) {
+                        drawUiElement(vpPanel, ix, cy, 0.015f, 0.015f, UiShape::Speaker, kc);
+                    } else if (kind == 3) {
+                        drawUiElement(vpPanel, ix, cy, 0.016f, 0.016f, UiShape::CurvedDisplay, kc);
+                    } else {  // a caption box: a frame with two text bars
+                        const float clear[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+                        drawUiElement(vpPanel, ix, cy, 0.0165f, 0.0120f, UiShape::RoundedBox, clear, 0.30f, 0.16f, kc);
+                        drawUiElement(vpPanel, ix - 0.0020f, cy + 0.0030f, 0.0085f, 0.0017f, UiShape::RoundedBox, kc, 1.0f);
+                        drawUiElement(vpPanel, ix + 0.0010f, cy - 0.0036f, 0.0095f, 0.0017f, UiShape::RoundedBox, kc, 1.0f);
+                    }
+                    if (kindRaw & 16) {
+                        drawUiElement(vpPanel, btnHalfW - 0.034f, cy, 0.013f, 0.013f, UiShape::Checkmark, kc);
+                    }
+                }
             }
         } else if (actionMenu_.page == menupage::Confirm) {
             // Delete confirmation
@@ -9057,7 +9085,15 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const bool hov = (actionMenuBtnHovered_ == i) || (actionMenu_.selectedOption == i);
                 const std::string& o = actionMenu_.options[static_cast<std::size_t>(i)];
                 const size_t bar = o.find('|');
-                if (bar != std::string::npos) {
+                const int kindRaw = (actionMenu_.page == menupage::Tracks && static_cast<std::size_t>(i) < actionMenu_.optionKinds.size())
+                                        ? actionMenu_.optionKinds[static_cast<std::size_t>(i)] : 0;
+                if (bar != std::string::npos && kindRaw != 0) {
+                    // A track row: its icon tile on the left (box pass), then the language, then the details.
+                    const bool inUse = (kindRaw & 16) != 0;
+                    const float* col = (hov || inUse) ? themeTextCol : slateCol;
+                    withHeadingFont([&] { drawFit(-0.305f, cy, 0.12f, sc, col, o.substr(0, bar)); });
+                    drawFit(-0.175f, cy, 0.47f, sc * 0.92f, col, o.substr(bar + 1));
+                } else if (bar != std::string::npos) {
                     // "short|full": the short name in bold on the left, what it stands for beside it.
                     withHeadingFont([&] { drawFit(-0.335f, cy, 0.20f, sc, hov ? themeTextCol : slateCol, o.substr(0, bar)); });
                     drawFit(-0.115f, cy, 0.44f, sc * 0.92f, hov ? themeTextCol : slateCol, o.substr(bar + 1));

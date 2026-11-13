@@ -349,6 +349,7 @@ private:
         bool plexEpisode = false;       // a TV episode: the next one is asked for when it ends
         std::vector<BrowserHost::PlexPlay::Marker> plexMarkers;  // intro / credits of what plays (Skip pill)
         int subtitleChoice = -1;        // the subtitle track picked for this file (kept across a track reload)
+        bool subtitleLogged = false;    // the first shown line of this choice was logged
         bool plexAwaitingNext = false;  // ended, waiting for the next episode's hand-off
         bool plexNavManual = false;     // ... asked for with the screen's arrow (keeps playing if there is none)
         std::chrono::steady_clock::time_point plexNextSince{};
