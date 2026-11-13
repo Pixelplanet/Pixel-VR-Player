@@ -2956,6 +2956,14 @@ void App::computeArrangement(const Arrangement& a,
         }
         return big;
     };
+    // A screen lower than its row (a kiosk page beside a browser with its toolbar) sits against the
+    // neighbouring row instead of in the middle of its own, so no gap opens between the rows: rows
+    // below the first one line up at their top edge, the first row (when more follow) at its bottom.
+    auto rowShift = [&](std::size_t r, int i) {
+        if (rows.size() < 2) return 0.0f;
+        const float slack = rowHalf[r] - ext[i].hy;
+        return r == 0 ? -slack : slack;
+    };
     const float* pivot = renderer_.screenPivot();
     auto put = [&](int pos, const float c[3], float yaw, float pitch, float roll = 0.0f) {
         const int slot = a.order[static_cast<std::size_t>(pos)];
@@ -3029,7 +3037,7 @@ void App::computeArrangement(const Arrangement& a,
                     o[2] = -x1 * sa + z2 * ca;
                 };
                 float lc[3], ex[3], ey[3], ez[3];
-                toWorld(0.0f, rowY, -di[k], lc);
+                toWorld(0.0f, rowY + rowShift(r, row[k]), -di[k], lc);
                 toWorld(1.0f, 0.0f, 0.0f, ex);
                 toWorld(0.0f, 1.0f, 0.0f, ey);
                 toWorld(0.0f, 0.0f, 1.0f, ez);
@@ -3074,7 +3082,7 @@ void App::computeArrangement(const Arrangement& a,
                 const float lx = xs[k] - ref;
                 float c[3];
                 for (int j = 0; j < 3; ++j) {
-                    c[j] = pivot[j] + f[j] * (a.dist - toward) + rt[j] * lx + up[j] * rowY;
+                    c[j] = pivot[j] + f[j] * (a.dist - toward) + rt[j] * lx + up[j] * (rowY + rowShift(r, row[k]));
                 }
                 put(row[k], c, a.yaw, a.pitch);
             }

@@ -15,6 +15,7 @@ layout(push_constant) uniform Push {
     vec4 stereo;      // x: mode (0 mono/1 SBS/2 TB), y: eye, z: swap, w: curvature
     vec4 extra;  // x: how far the glow reaches, in screen heights (0 = the default 0.46)
                  // y: share of the frame left out at the top and at the bottom (black bars)
+                 // z: 1 = this draw is the copy of the picture on the screen's own surface
 } pc;
 
 layout(location = 0) in vec2 vUV;
@@ -39,11 +40,12 @@ void main() {
     // No hole behind the screen: the screen covers the glow anyway, and the glow is not on the
     // screen's own surface (a curved screen comes forward at its sides, the glow does not), so the
     // edge of a hole showed as a black sliver beside the screen's edge when seen at an angle.
-    if (q.x < 0.0 && q.y < 0.0) {
+    if (pc.extra.z > 0.5) {
+        // Drawn a second time on the screen's own surface (extra.z = 1, the whole quad is the picture):
         // Behind the screen itself: a soft, opaque copy of the picture instead of glow. Where two
         // screens overlap, the front screen's soft edge lets the eye picture show through for a
         // texel; with another screen's glow there it looked like a gap between the screens.
-        vec3 own = sampleEye(p + 0.5, min(2.0, float(textureQueryLevels(video)) - 1.0));
+        vec3 own = sampleEye(vUV, min(2.0, float(textureQueryLevels(video)) - 1.0));
         if (pc.range.z > 0.5) {
             own = mix(own / 12.92, pow((own + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), own));
         }

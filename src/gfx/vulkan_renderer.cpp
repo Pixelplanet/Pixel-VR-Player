@@ -5992,10 +5992,23 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         ambPush.stereo[3] = curvature;
                         ambPush.extra[0] = ambilightReach_;
                         ambPush.extra[1] = webHere ? 0.0f : letterboxFor(slot);  // glow from the picture, not its bars
+                        if (glowAmount > 0.0f) {
+                            vkCmdPushConstants(commandBuffer_, ambLayout,
+                                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                                               sizeof(PushConstants), &ambPush);
+                            vkCmdDraw(commandBuffer_, 64 * 6, 1, 0, 0);
+                        }
+                        // The soft copy of the picture behind the screen: on the screen's own surface (same
+                        // size, curve and place, 2 mm back), so it never shows beside the screen. (On the
+                        // glow's mesh, which is flatter and further back, it stood out above a dark page.)
+                        const Mat4 backModel = multiply(multiply(translation(center + fwd * 0.002f), rot),
+                                                        scaling(Vec3{widthScale * scale, scale, widthScale * scale}));
+                        const Mat4 backMvp = multiply(vpV, backModel);
+                        std::memcpy(ambPush.mvp, backMvp.m, sizeof(ambPush.mvp));
+                        ambPush.extra[2] = 1.0f;  // the whole quad is the picture
                         vkCmdPushConstants(commandBuffer_, ambLayout,
-                                           VK_SHADER_STAGE_VERTEX_BIT |
-                                               VK_SHADER_STAGE_FRAGMENT_BIT,
-                                           0, sizeof(PushConstants), &ambPush);
+                                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                                           sizeof(PushConstants), &ambPush);
                         vkCmdDraw(commandBuffer_, 64 * 6, 1, 0, 0);
                     }
                 }
