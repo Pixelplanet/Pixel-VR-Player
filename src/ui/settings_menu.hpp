@@ -442,6 +442,7 @@ private:
     std::atomic<bool> vaultMeasureStop_{false};
     std::thread measureThread_;
     int railShortcutMask_ = (1 << 0) | (1 << 5);  // kRailShortcuts bits: YouTube + Browser
+    int shortcutDefaultsSeen_ = 8;  // how many built-in shortcuts this list was offered (8 = before the key existed)
     int curvatureIdx_ = 0;     // 0=Flat (0%), 1=Gentle (25%), 2=Cinema (50%), 3=Deep (75%), 4=IMAX (100%)
     int uiTextScaleIdx_ = 2;   // 0=90%, 1=105%, 2=120% (default), 3=140%, 4=160%
     int uiTextColorIdx_ = 0;   // 0=Pure White, 1=Ice Cyan, 2=Warm Cream, 3=Soft Gold, 4=Mint Green

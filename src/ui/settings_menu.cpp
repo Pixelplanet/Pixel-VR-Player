@@ -49,8 +49,10 @@ const DefaultShortcut kRailShortcuts[] = {
     // Appended (not sorted) so saved rail_shortcuts bitmasks keep their meaning.
     {"Plex", "https://app.plex.tv", true},
     {"Jellyfin", "", true},  // no fixed URL: the user's server, asked for on first use
+    // Added later (v1.19.4): offered switched off, also to lists saved before it existed.
+    {"YouTube Music", "https://music.youtube.com", true},
 };
-constexpr int kRailShortcutCount = 8;
+constexpr int kRailShortcutCount = 9;
 
 const char* kLangNames[] = {"Auto",    "English",  "German",  "French",
                            "Spanish", "Japanese", "Italian", "Russian",
@@ -1610,7 +1612,31 @@ void SettingsMenu::openButtons() {
 }
 
 void SettingsMenu::ensureShortcuts() {
-    if (!shortcuts_.empty()) return;
+    if (!shortcuts_.empty()) {
+        // A saved list: built-in shortcuts added since it was saved are appended once, switched off
+        // (not when the user already made one for the same address or name).
+        if (shortcutDefaultsSeen_ >= kRailShortcutCount) return;
+        auto lower = [](std::string t) {
+            for (char& c : t) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+            return t;
+        };
+        for (int i = std::max(0, shortcutDefaultsSeen_); i < kRailShortcutCount; ++i) {
+            const std::string host = std::string(kRailShortcuts[i].url).substr(std::string(kRailShortcuts[i].url).find("://") == std::string::npos
+                                                                                   ? 0 : std::string(kRailShortcuts[i].url).find("://") + 3);
+            bool have = false;
+            for (const Shortcut& sc : shortcuts_) {
+                have = have || lower(sc.name) == lower(kRailShortcuts[i].name) ||
+                       (!host.empty() && lower(sc.url).find(lower(host)) != std::string::npos);
+            }
+            if (!have && shortcuts_.size() < static_cast<size_t>(kMaxShortcuts)) {
+                shortcuts_.push_back({kRailShortcuts[i].name, kRailShortcuts[i].url, kRailShortcuts[i].kiosk, false});
+            }
+        }
+        shortcutDefaultsSeen_ = kRailShortcutCount;
+        saveConfig();
+        return;
+    }
+    shortcutDefaultsSeen_ = kRailShortcutCount;
     // First start with the shortcut list: the built-in services, with the old rail choice
     // (rail_shortcuts bits) and the old Jellyfin address carried over.
     for (int i = 0; i < kRailShortcutCount; ++i) {
@@ -1882,6 +1908,7 @@ void SettingsMenu::loadConfig() {
             else if (key == "download_dir_custom") downloadCustom_ = val;
             else if (key == "rail_shortcuts") railShortcutMask_ = std::stoi(val) & ((1 << kRailShortcutCount) - 1);
             else if (key == "jellyfin_url") legacyJellyfinUrl_ = val;
+            else if (key == "shortcut_defaults") shortcutDefaultsSeen_ = std::clamp(std::stoi(val), 0, kRailShortcutCount);
             else if (key == "shortcut") {  // onRail|kiosk|name|url
                 const size_t a = val.find('|'), b = val.find('|', a + 1), c = val.find('|', b + 1);
                 if (a != std::string::npos && b != std::string::npos && c != std::string::npos) {
@@ -1959,6 +1986,7 @@ void SettingsMenu::saveConfig() const {
             file << "download_dir=" << downloadDirIdx_ << "\n";
             if (!downloadCustom_.empty()) file << "download_dir_custom=" << downloadCustom_ << "\n";
             file << "rail_shortcuts=" << railShortcutMask_ << "\n";
+            file << "shortcut_defaults=" << shortcutDefaultsSeen_ << "\n";
             for (const Shortcut& sc : shortcuts_) {
                 file << "shortcut=" << (sc.onRail ? 1 : 0) << "|" << (sc.kiosk ? 1 : 0) << "|" << sc.name << "|" << sc.url << "\n";
             }
