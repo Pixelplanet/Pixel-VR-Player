@@ -139,9 +139,11 @@ float LetterboxDetector::measure(const std::string& path, int* framesJudged) {
         av_packet_free(&pk);
         avcodec_free_context(&cc);
         if (framesJudged) *framesJudged = judged;
-        // Needs a few judged frames; leaves a 2-row margin; small bars (< 1.5 %) are not worth a crop.
+        // Needs a few judged frames; small bars (< 1.5 %) are not worth a crop. The cut goes 2 rows into
+        // the picture: the bar's last row is usually a soft, half-dark one, and rows of bar left on
+        // the screen show as a black line along its top and bottom edge.
         if (judged >= (dur > 20.0 ? 3 : 1) && height > 0 && bar < (1 << 30) && !asymmetric) {
-            const int crop = std::max(0, bar - 2);
+            const int crop = bar + 2;
             const float frac = static_cast<float>(crop) / static_cast<float>(height);
             out = frac >= 0.015f ? std::min(frac, 0.3f) : 0.0f;
         }
@@ -156,7 +158,10 @@ float LetterboxDetector::measure(const std::string& path, int* framesJudged) {
 
 LetterboxDetector::LetterboxDetector() {
     const char* home = std::getenv("HOME");
-    file_ = std::string(home ? home : "/tmp") + "/.cache/pixelvr/letterbox.tsv";
+    const std::string dir = std::string(home ? home : "/tmp") + "/.cache/pixelvr/";
+    file_ = dir + "letterbox2.tsv";  // (2: measured with the cut 2 rows inside the picture)
+    std::error_code ec;
+    fs::remove(dir + "letterbox.tsv", ec);
     load();
     worker_ = std::thread([this] { loop(); });
 }
