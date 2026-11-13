@@ -3,6 +3,7 @@
 #include "xr/openxr_headers.hpp"
 #include "xr/render_scale.hpp"
 
+#include <chrono>
 #include <cstdint>
 #include <functional>
 #include <string>
@@ -329,6 +330,10 @@ private:
     XrSpace gripSpaces_[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
     bool actionsReady_ = false;
     bool prevFull_[2] = {false, false};  // squeeze-value full-press hysteresis
+    // Bumpers (Previous / Next): a TAP counts when the bumper is let go; held, it is a shift.
+    bool bumperDown_[2] = {false, false};
+    bool bumperUsed_[2] = {false, false};  // served as a shift (a mirrored button) or held too long
+    std::chrono::steady_clock::time_point bumperSince_[2]{};
     bool bindingsDirty_ = false;
     uint32_t bindingsGeneration_ = 0;
     std::string lastBinding_[static_cast<int>(InputAction::Count)];   // last result, logged on change

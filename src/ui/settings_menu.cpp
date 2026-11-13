@@ -25,9 +25,9 @@ const char* const kDefaultStatus = "Point + Trigger: Change Setting  |  B: Close
 const char* const kShortcutsStatus = "Shortcuts appear as tabs on the hub's rail, in this order.";
 // Buttons are assigned in SteamVR only (OpenXR can't open that page for us).
 const char* const kButtonsStatus =
-    "Change buttons in SteamOS: SteamVR Settings > Controllers > Manage Controller Bindings";
+    "Hold a bumper: this hand's buttons act as the other hand's  |  Change buttons: SteamVR > Controllers > Bindings";
 const char* const kButtonsPagesStatus =
-    "< > or Bumpers: Page  |  Change buttons: SteamVR > Controllers > Manage Controller Bindings";
+    "< > or Bumpers: Page  |  Hold a bumper: this hand's buttons act as the other hand's  |  Change buttons: SteamVR";
 const char* kDownloadDirs[] = {"~/media", "~/Downloads", "~/Videos", "SD card"};  // SD card: <card>/Downloads
 constexpr int kDownloadDirCount = 4;
 

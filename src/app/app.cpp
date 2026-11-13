@@ -4103,25 +4103,23 @@ int App::run() {
             {
                 const bool stickOff = std::fabs(in.thumbstickX) >= 0.15f || std::fabs(in.thumbstickY) >= 0.15f ||
                                       std::fabs(in.thumbstickLX) >= 0.15f || std::fabs(in.thumbstickRX) >= 0.15f;
-                if (in.next && !skipTapDown_) {
-                    skipTapDown_ = true;
-                    skipTapSpoiled_ = false;
-                    skipTapStart_ = nowT;
-                }
-                if (skipTapDown_) {
-                    const double held = std::chrono::duration<double>(nowT - skipTapStart_).count();
-                    if (stickOff || in.previousHeld || panShiftLatched_ || held > 0.40 || browser_.isOpen() ||
-                        settings_.isOpen() || downloadsWindow_ || actionMenu_.visible) {
-                        skipTapSpoiled_ = true;
+                // (in.next is the tap itself: it arrives when the bumper is let go, and not at all after
+                // a long hold or a button pressed with it.)
+                const bool blocked = stickOff || in.previousHeld || panShiftLatched_ || browser_.isOpen() ||
+                                     settings_.isOpen() || downloadsWindow_ || actionMenu_.visible;
+                if (in.nextHeld) {
+                    if (!skipTapDown_) {
+                        skipTapDown_ = true;
+                        skipTapSpoiled_ = false;
                     }
-                    if (!in.nextHeld) {
-                        skipTapDown_ = false;
-                        if (!skipTapSpoiled_) {
-                            // The selected screen first, else any screen showing the pill.
-                            bool done = skipPart(selectedScreen_);
-                            for (int s = 0; s < VulkanRenderer::kMaxVideoSlots && !done; ++s) done = skipPart(s);
-                        }
+                    if (blocked) skipTapSpoiled_ = true;
+                } else {
+                    if (in.next && !blocked && !(skipTapDown_ && skipTapSpoiled_)) {
+                        // The selected screen first, else any screen showing the pill.
+                        bool done = skipPart(selectedScreen_);
+                        for (int s = 0; s < VulkanRenderer::kMaxVideoSlots && !done; ++s) done = skipPart(s);
                     }
+                    skipTapDown_ = false;
                 }
             }
             if (in.select) {
@@ -6882,6 +6880,21 @@ int App::run() {
                 // bumper first must not turn the rest of a pan into a scrub or a 30 s step.
                 const bool sticksCentred = std::fabs(in.thumbstickX) < 0.2f && std::fabs(in.thumbstickY) < 0.2f &&
                                            std::fabs(in.thumbstickLX) < 0.2f && std::fabs(in.thumbstickRX) < 0.2f;
+                // Right stick: a push that starts up / down (distance, size, zoom) must not scrub from a
+                // little sideways drift, and a scrub must not move the screen: the other direction has a
+                // wide dead zone (0.6) until the stick is back in the middle.
+                {
+                    const float rx = std::fabs(in.thumbstickRX), ry = std::fabs(in.thumbstickRY);
+                    if (rx < 0.15f && ry < 0.15f) stickAxis_ = 0;
+                    else if (stickAxis_ == 0 && std::max(rx, ry) > 0.25f) stickAxis_ = ry > rx ? 1 : 2;
+                    if (stickAxis_ == 1 && rx < 0.6f) {
+                        if (std::fabs(in.thumbstickX - in.thumbstickRX) < 1e-4f) in.thumbstickX = 0.0f;
+                        in.thumbstickRX = 0.0f;
+                    } else if (stickAxis_ == 2 && ry < 0.6f) {
+                        if (std::fabs(in.thumbstickY - in.thumbstickRY) < 1e-4f) in.thumbstickY = 0.0f;
+                        in.thumbstickRY = 0.0f;
+                    }
+                }
                 // Flat video: the bumper turns the stick's up / down from distance into size (music keeps
                 // its bumpers for the tracks, a web page its own keys).
                 const bool flatShiftOk = !sphereMode && cur().open && !cur().web
@@ -7079,7 +7092,7 @@ int App::run() {
                     // Unified stick mapping across Flat and 360/180 (when Bumper is not held):
                     // Left stick X steps -/+30s; Right stick X scrubs continuously.
                     constexpr double kStep = 30.0;
-                    const bool stepPush = !sphereMode || std::fabs(in.thumbstickLX) >= std::fabs(in.thumbstickLY);
+                    const bool stepPush = std::fabs(in.thumbstickLX) >= std::fabs(in.thumbstickLY);
                     if (!stepPush) {
                         // a zoom push: no step
                     } else if (!bumperShift && in.thumbstickLX > 0.6f && seekStepArmed_) {

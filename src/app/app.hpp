@@ -516,7 +516,9 @@ private:
     // bumper was not used as a shift meanwhile (held long, a stick moved, the other bumper held).
     bool skipTapDown_ = false;
     bool skipTapSpoiled_ = false;
-    std::chrono::steady_clock::time_point skipTapStart_{};
+    // The right stick's gesture: 0 none, 1 up / down (distance, size, zoom), 2 left / right (scrub).
+    // The other direction needs a firm push until the stick is back in the middle.
+    int stickAxis_ = 0;
     bool panShiftLatched_ = false;       // 360/180: bumper + stick pan lasts until the sticks are centred
     void finishLoadMedia(int slot);
     void pollMediaOpens(std::chrono::steady_clock::time_point now);

@@ -838,18 +838,67 @@ void XrContext::syncActions() {
         return st.currentState && st.changedSinceLastSync;
     };
     input_.select = read_bool(act(IA::Select), &input_.selectHeld);
-    input_.togglePlay = read_bool(act(IA::PlayOk));
-    input_.back = read_bool(act(IA::Back));
+    bool playHeld = false, backHeld = false, optionsHeld = false, recenterHeld = false;
+    input_.togglePlay = read_bool(act(IA::PlayOk), &playHeld);
+    input_.back = read_bool(act(IA::Back), &backHeld);
     input_.mainMenu = read_bool(act(IA::MainMenu));
-    input_.options = read_bool(act(IA::Options));
-    input_.recenter = read_bool(act(IA::Recenter));
+    input_.options = read_bool(act(IA::Options), &optionsHeld);
+    input_.recenter = read_bool(act(IA::Recenter), &recenterHeld);
     input_.toggleUi = read_bool(act(IA::ToggleUi));
-    input_.previous = read_bool(act(IA::Previous), &input_.previousHeld);
-    input_.next = read_bool(act(IA::Next), &input_.nextHeld);
+    read_bool(act(IA::Previous), &input_.previousHeld);
+    read_bool(act(IA::Next), &input_.nextHeld);
     input_.dpadUp = read_bool(act(IA::DpadUp), &input_.dpadUpHeld);
     input_.dpadDown = read_bool(act(IA::DpadDown), &input_.dpadDownHeld);
     input_.dpadLeft = read_bool(act(IA::DpadLeft), &input_.dpadLeftHeld);
     input_.dpadRight = read_bool(act(IA::DpadRight), &input_.dpadRightHeld);
+    // One-handed use: while a bumper is held, this hand's buttons act as the other hand's, by
+    // position. Right bumper (Next): Play / Back / Recenter / Options (A B X Y) become D-pad down /
+    // right / left / up. Left bumper (Previous): the D-pad becomes those four. Both held: no swap.
+    // It swaps ACTIONS, so it follows whatever SteamVR has bound to them.
+    {
+        const bool toDpad = input_.nextHeld && !input_.previousHeld;
+        const bool toFace = input_.previousHeld && !input_.nextHeld;
+        if (toDpad) {
+            if (input_.togglePlay || input_.back || input_.recenter || input_.options) bumperUsed_[1] = true;
+            input_.dpadDown = input_.togglePlay;
+            input_.dpadRight = input_.back;
+            input_.dpadLeft = input_.recenter;
+            input_.dpadUp = input_.options;
+            input_.dpadDownHeld = playHeld;
+            input_.dpadRightHeld = backHeld;
+            input_.dpadLeftHeld = recenterHeld;
+            input_.dpadUpHeld = optionsHeld;
+            input_.togglePlay = input_.back = input_.recenter = input_.options = false;
+        } else if (toFace) {
+            if (input_.dpadDown || input_.dpadRight || input_.dpadLeft || input_.dpadUp) bumperUsed_[0] = true;
+            input_.togglePlay = input_.dpadDown;
+            input_.back = input_.dpadRight;
+            input_.recenter = input_.dpadLeft;
+            input_.options = input_.dpadUp;
+            input_.dpadUp = input_.dpadDown = input_.dpadLeft = input_.dpadRight = false;
+            input_.dpadUpHeld = input_.dpadDownHeld = input_.dpadLeftHeld = input_.dpadRightHeld = false;
+        }
+        // Previous / Next themselves: a tap, counted when the bumper is let go (pressing it must not
+        // turn a hub tab or a track before it is known to be a shift).
+        const auto now = std::chrono::steady_clock::now();
+        const bool heldNow[2] = {input_.previousHeld, input_.nextHeld};
+        bool tap[2] = {false, false};
+        for (int b = 0; b < 2; ++b) {
+            if (heldNow[b]) {
+                if (!bumperDown_[b]) {
+                    bumperDown_[b] = true;
+                    bumperUsed_[b] = false;
+                    bumperSince_[b] = now;
+                }
+                if (heldNow[1 - b] || now - bumperSince_[b] > std::chrono::milliseconds(400)) bumperUsed_[b] = true;
+            } else if (bumperDown_[b]) {
+                bumperDown_[b] = false;
+                tap[b] = !bumperUsed_[b];
+            }
+        }
+        input_.previous = tap[0];
+        input_.next = tap[1];
+    }
     input_.showControls = read_bool(act(IA::ShowControls));
     input_.mute = read_bool(act(IA::Mute));
     input_.stop = read_bool(act(IA::Stop));
