@@ -562,6 +562,8 @@ public:
     void setActionMenu(const ActionMenuData& data) { actionMenu_ = data; }
     const ActionMenuData& actionMenu() const { return actionMenu_; }
     int actionMenuBtnHovered() const { return actionMenuBtnHovered_; }
+    // The laser is on the confirm dialog's panel (a click there, off its buttons, does nothing).
+    bool actionMenuInside() const { return actionMenuInside_; }
     int actionMenuKeyHovered() const { return actionMenuKeyHovered_; }
     void setBrowserNetwork(bool onNet) { browserOnNetwork_ = onNet; }
 
@@ -1211,6 +1213,7 @@ private:
     // Action menu state
     ActionMenuData actionMenu_{};
     int actionMenuBtnHovered_ = -1;
+    bool actionMenuInside_ = false;
     int actionMenuKeyHovered_ = -1;
     int keyboardKeyHovered_ = -1;
     bool keyboardFieldHovered_ = false;

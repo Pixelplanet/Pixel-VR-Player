@@ -398,8 +398,8 @@ constexpr float kBrowserBtnHH = 0.021f;
 constexpr float kBrowserDividerY = 0.385f;  // under the button row
 constexpr float kBrowserContentTop = 0.372f;
 // List view: column captions sit in their own band between the header buttons and the first row.
-constexpr float kListCaptionY = 0.377f;
-constexpr float kListDividerY = 0.3605f;
+constexpr float kListCaptionY = 0.371f;
+constexpr float kListDividerY = 0.3525f;
 // Captions in front of Sort and View ("Sort by", "View").
 constexpr float kPickDarkText[4] = {0.03f, 0.05f, 0.09f, 1.0f};  // on the accent-filled confirm pill
 constexpr float kBrowserSortCaptionX = -0.455f;
@@ -475,7 +475,7 @@ inline CardLayout browserCard(VulkanRenderer::BrowserViewMode mode, int slot) {
     } else {  // CompactList (1 col x 8 rows)
         lay.cx = 0.20f;
         // Below the column captions (kListCaptionY) and their divider: the first row starts under them.
-        lay.cy = 0.310f - 0.094f * static_cast<float>(slot % 8);
+        lay.cy = 0.302f - 0.0925f * static_cast<float>(slot % 8);
         lay.cardHalfW = 0.65f;
         lay.cardHalfH = 0.040f;
         lay.thumbCx = -0.385f;
@@ -2923,6 +2923,7 @@ void VulkanRenderer::updatePointer() {
     downloadsBtnHovered_ = -1;
     downloadsJobBtnHovered_ = -1;
     actionMenuBtnHovered_ = -1;
+    actionMenuInside_ = false;
     actionMenuKeyHovered_ = -1;
     keyboardKeyHovered_ = -1;
     keyboardFieldHovered_ = false;
@@ -3109,6 +3110,7 @@ void VulkanRenderer::updatePointer() {
                         }
                     }
                 } else if (actionMenu_.page == menupage::Confirm) {
+                    actionMenuInside_ = std::fabs(hx) <= 0.44f && std::fabs(hyy) <= 0.24f;  // the panel (drawGlass below)
                     for (int i = 0; i < 2; ++i) {
                         if (hub::deleteConfirmButton(i).contains(hx, hyy)) actionMenuBtnHovered_ = i;
                     }
@@ -7121,21 +7123,22 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
 
             if (browserViewMode_ == BrowserViewMode::CompactList) {
                 float curRight = 0.83f;
+                // Wide enough for their captions and for the longest values ("3840x2160", "1:47:35").
                 if (listShowDuration_) {
-                    listCols.durCx = curRight - 0.065f;
-                    curRight -= 0.13f;
+                    listCols.durCx = curRight - 0.080f;
+                    curRight -= 0.16f;
                 }
                 if (listShowSize_) {
-                    listCols.sizeCx = curRight - 0.065f;
-                    curRight -= 0.13f;
+                    listCols.sizeCx = curRight - 0.070f;
+                    curRight -= 0.14f;
                 }
                 if (listShowRes_) {
-                    listCols.resCx = curRight - 0.085f;
-                    curRight -= 0.17f;
+                    listCols.resCx = curRight - 0.100f;
+                    curRight -= 0.20f;
                 }
                 if (listShowFormat_) {
-                    listCols.fmtCx = curRight - 0.070f;
-                    curRight -= 0.14f;
+                    listCols.fmtCx = curRight - 0.075f;
+                    curRight -= 0.15f;
                 }
                 listCols.nameMaxW = std::max(0.30f, (curRight - 0.02f) - (-0.315f));
             }
@@ -7458,18 +7461,18 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }  // not picking
 
             if (browserViewMode_ == BrowserViewMode::CompactList) {
-                drawFit(-0.315f, hub::kListCaptionY, listCols.nameMaxW, scBadge * 0.95f, dimCol, "NAME");
+                drawFit(-0.315f, hub::kListCaptionY, listCols.nameMaxW, scDetail * 0.92f, dimCol, "Name");
                 if (listShowFormat_) {
-                    drawFitCentered(listCols.fmtCx, hub::kListCaptionY, 0.11f, scBadge * 0.95f, dimCol, "FORMAT");
+                    drawFitCentered(listCols.fmtCx, hub::kListCaptionY, 0.14f, scDetail * 0.92f, dimCol, "Format");
                 }
                 if (listShowRes_) {
-                    drawFitCentered(listCols.resCx, hub::kListCaptionY, 0.15f, scBadge * 0.95f, dimCol, "RESOLUTION");
+                    drawFitCentered(listCols.resCx, hub::kListCaptionY, 0.19f, scDetail * 0.92f, dimCol, "Resolution");
                 }
                 if (listShowSize_) {
-                    drawFitCentered(listCols.sizeCx, hub::kListCaptionY, 0.11f, scBadge * 0.95f, dimCol, "SIZE");
+                    drawFitCentered(listCols.sizeCx, hub::kListCaptionY, 0.13f, scDetail * 0.92f, dimCol, "Size");
                 }
                 if (listShowDuration_) {
-                    drawFitCentered(listCols.durCx, hub::kListCaptionY, 0.11f, scBadge * 0.95f, dimCol, "DURATION");
+                    drawFitCentered(listCols.durCx, hub::kListCaptionY, 0.15f, scDetail * 0.92f, dimCol, "Duration");
                 }
             }
 
@@ -7534,15 +7537,15 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     }
                     if (listShowRes_) {
                         const std::string resStr = item.resolutionTag.empty() ? (item.isDir || item.isBack ? "" : "--") : item.resolutionTag;
-                        drawFitCentered(listCols.resCx, lay.cy, 0.15f, scDetail * 0.95f, slateCol, resStr);
+                        drawFitCentered(listCols.resCx, lay.cy, 0.19f, scDetail * 0.95f, slateCol, resStr);
                     }
                     if (listShowSize_) {
                         const std::string sizeStr = item.sizeTag.empty() ? (item.isDir || item.isBack ? "" : "--") : item.sizeTag;
-                        drawFitCentered(listCols.sizeCx, lay.cy, 0.11f, scDetail * 0.95f, slateCol, sizeStr);
+                        drawFitCentered(listCols.sizeCx, lay.cy, 0.13f, scDetail * 0.95f, slateCol, sizeStr);
                     }
                     if (listShowDuration_) {
                         const std::string durStr = item.durationTag.empty() ? (item.isDir || item.isBack ? "" : "--") : item.durationTag;
-                        drawFitCentered(listCols.durCx, lay.cy, 0.11f, scDetail * 0.95f, slateCol, durStr);
+                        drawFitCentered(listCols.durCx, lay.cy, 0.15f, scDetail * 0.95f, slateCol, durStr);
                     }
                 }
                 curTextVp = &vpPanel;
@@ -8988,7 +8991,34 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 }
             }
         } else if (actionMenu_.page == menupage::Confirm) {
-            drawFitCentered(0.0f, 0.035f, (mHalfW - 0.06f) * 2.0f, sc, themeTextCol, actionMenu_.subtitle);
+            {
+                // The question, wrapped at words onto up to three lines (a long name no longer cuts it off).
+                const float maxW = (mHalfW - 0.06f) * 2.0f;
+                std::vector<std::string> lines;
+                std::string line, word;
+                const std::string& text = actionMenu_.subtitle;
+                for (std::size_t i = 0; i <= text.size(); ++i) {
+                    if (i < text.size() && text[i] != ' ') {
+                        word += text[i];
+                        continue;
+                    }
+                    if (word.empty()) continue;
+                    const std::string trial = line.empty() ? word : line + " " + word;
+                    if (!line.empty() && measureString(sc, trial) > maxW && lines.size() < 2) {
+                        lines.push_back(line);
+                        line = word;
+                    } else {
+                        line = trial;
+                    }
+                    word.clear();
+                }
+                if (!line.empty()) lines.push_back(line);
+                const float lh = 0.046f;
+                const float top = 0.040f + 0.5f * lh * static_cast<float>(lines.size() - 1);
+                for (std::size_t i = 0; i < lines.size(); ++i) {
+                    drawFitCentered(0.0f, top - lh * static_cast<float>(i), maxW, sc, themeTextCol, lines[i]);
+                }
+            }
             {
                 const std::string first = actionMenu_.options.empty() ? std::string("Delete") : actionMenu_.options[0];
                 drawFitCentered(-0.15f, -0.12f, 0.13f * 1.8f, sc, themeTextCol,

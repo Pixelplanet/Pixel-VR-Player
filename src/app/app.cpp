@@ -6075,9 +6075,13 @@ int App::run() {
                         }
                         const int hov = renderer_.actionMenuBtnHovered();
                         if (hov >= 0) actionMenu_.selectedOption = hov;
+                        // The laser's click: on a button = that button; on the dialog beside the buttons =
+                        // nothing; outside the dialog = Cancel. (A answers with the highlighted button.)
+                        if (in.select && hov < 0 && renderer_.actionMenuInside()) in.select = false;
+                        const bool clickedOutside = in.select && hov < 0;  // beside the dialog, or into the room
 
                         if (in.select || in.togglePlay) {
-                            int chosen = (hov >= 0) ? hov : actionMenu_.selectedOption;
+                            int chosen = (hov >= 0) ? hov : (clickedOutside ? 1 : actionMenu_.selectedOption);
                             const Browser::Entry* del = browser_.focused();
                             if (confirmYes_) {
                                 std::function<void()> yes = std::move(confirmYes_);
