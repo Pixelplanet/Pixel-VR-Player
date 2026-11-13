@@ -39,6 +39,18 @@ void main() {
     // No hole behind the screen: the screen covers the glow anyway, and the glow is not on the
     // screen's own surface (a curved screen comes forward at its sides, the glow does not), so the
     // edge of a hole showed as a black sliver beside the screen's edge when seen at an angle.
+    if (q.x < 0.0 && q.y < 0.0) {
+        // Behind the screen itself: a soft, opaque copy of the picture instead of glow. Where two
+        // screens overlap, the front screen's soft edge lets the eye picture show through for a
+        // texel; with another screen's glow there it looked like a gap between the screens.
+        vec3 own = sampleEye(p + 0.5, min(2.0, float(textureQueryLevels(video)) - 1.0));
+        if (pc.range.z > 0.5) {
+            own = mix(own / 12.92, pow((own + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), own));
+        }
+        outColor = vec4(own, 1.0);
+        return;
+    }
+    if (pc.range.w <= 0.0) discard;  // no glow for this screen
     float d = length(max(q * vec2(kAspect, 1.0), 0.0));   // metres-ish, in screen heights
     float reach = pc.extra.x > 0.0 ? pc.extra.x : 0.46;
     float a = 1.0 - smoothstep(0.0, reach, d);

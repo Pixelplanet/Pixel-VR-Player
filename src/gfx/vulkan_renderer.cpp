@@ -5936,7 +5936,10 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         ambilightWebPipeline_ = VK_NULL_HANDLE;
                     }
                 }
-                if (pass == 0 && ambilightIntensity_ > 0.01f && glowHere) {
+                // Drawn for every screen, glow or not: behind the screen itself it is a soft copy of the
+                // picture (what shows through the soft edge of a screen in front of this one).
+                const float glowAmount = (ambilightIntensity_ > 0.01f && glowHere) ? ambilightIntensity_ : 0.0f;
+                if (pass == 0) {
                     VkPipeline ambPipe = webHere ? ambilightWebPipeline_
                                                  : (ycbcr ? v.ycbcrAmbilightPipeline : ambilightPipeline_);
                     const VkPipelineLayout ambLayout = webHere ? ambilightWebLayout_ : layout;
@@ -5957,10 +5960,10 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                             ambPush.conversion[0] = 1.0f;
                             ambPush.conversion[1] = 1.0f;
                             ambPush.range[2] = 1.0f;
-                            ambPush.range[3] = ambilightIntensity_ * 0.7f;
+                            ambPush.range[3] = glowAmount * 0.7f;
                         } else {
                             fillCommon(ambPush.conversion, ambPush.range);
-                            ambPush.range[3] = ambilightIntensity_;
+                            ambPush.range[3] = glowAmount;
                         }
                         ambPush.stereo[0] = webHere ? 0.0f : static_cast<float>(static_cast<int>(stereo));
                         ambPush.stereo[1] = static_cast<float>(viewIndex);

@@ -21,14 +21,17 @@ layout(location = 0) out vec4 outColor;
 const vec2 kScale = vec2(1.55, 1.90);
 const float kAspect = 1.7778;
 
-vec3 sampleEye(vec2 uv) {
+// `sharp` = 1: nearly the picture itself (behind the screen); 0: blurred (the glow).
+vec3 sampleEye(vec2 uv, float sharp) {
     float eye = pc.stereo.y;
     if (pc.stereo.z > 0.5) eye = 1.0 - eye;
     uv.y = pc.extra.y + uv.y * (1.0 - 2.0 * pc.extra.y);  // without the black bars
     if (pc.stereo.x > 1.5) uv.y = uv.y * 0.5 + eye * 0.5;
     else if (pc.stereo.x > 0.5) uv.x = uv.x * 0.5 + eye * 0.5;
-    float lodY = max(float(textureQueryLevels(luma)) - 4.0, 0.0);
-    float lodC = max(float(textureQueryLevels(chroma)) - 3.0, 0.0);
+    float lodY = sharp > 0.5 ? min(2.0, float(textureQueryLevels(luma)) - 1.0)
+                             : max(float(textureQueryLevels(luma)) - 4.0, 0.0);
+    float lodC = sharp > 0.5 ? min(1.0, float(textureQueryLevels(chroma)) - 1.0)
+                             : max(float(textureQueryLevels(chroma)) - 3.0, 0.0);
     float y = (textureLod(luma, uv, lodY).r - pc.range.x) * pc.range.y;
     vec2 c = textureLod(chroma, uv, lodC).rg - vec2(128.0 / 255.0);
     return clamp(vec3(y + pc.conversion.x * c.y,
@@ -42,6 +45,18 @@ void main() {
     // No hole behind the screen: the screen covers the glow anyway, and the glow is not on the
     // screen's own surface (a curved screen comes forward at its sides, the glow does not), so the
     // edge of a hole showed as a black sliver beside the screen's edge when seen at an angle.
+    if (q.x < 0.0 && q.y < 0.0) {
+        // Behind the screen itself: a soft, opaque copy of the picture instead of glow. Where two
+        // screens overlap, the front screen's soft edge lets the eye picture show through for a
+        // texel; with another screen's glow there it looked like a gap between the screens.
+        vec3 own = sampleEye(p + 0.5, 1.0);
+        if (pc.range.z > 0.5) {
+            own = mix(own / 12.92, pow((own + 0.055) / 1.055, vec3(2.4)), step(vec3(0.04045), own));
+        }
+        outColor = vec4(own, 1.0);
+        return;
+    }
+    if (pc.range.w <= 0.0) discard;  // no glow for this screen
     float d = length(max(q * vec2(kAspect, 1.0), 0.0));
     float reach = pc.extra.x > 0.0 ? pc.extra.x : 0.46;
     float a = 1.0 - smoothstep(0.0, reach, d);
@@ -52,11 +67,11 @@ void main() {
 
     vec2 uvS = clamp(p + 0.5, 0.0, 1.0);
     uvS = 0.5 + (uvS - 0.5) * 0.90;
-    vec3 rgb = sampleEye(uvS) * 0.40;
-    rgb += sampleEye(clamp(uvS + vec2(0.07, 0.0), 0.0, 1.0)) * 0.15;
-    rgb += sampleEye(clamp(uvS - vec2(0.07, 0.0), 0.0, 1.0)) * 0.15;
-    rgb += sampleEye(clamp(uvS + vec2(0.0, 0.07), 0.0, 1.0)) * 0.15;
-    rgb += sampleEye(clamp(uvS - vec2(0.0, 0.07), 0.0, 1.0)) * 0.15;
+    vec3 rgb = sampleEye(uvS, 0.0) * 0.40;
+    rgb += sampleEye(clamp(uvS + vec2(0.07, 0.0), 0.0, 1.0), 0.0) * 0.15;
+    rgb += sampleEye(clamp(uvS - vec2(0.07, 0.0), 0.0, 1.0), 0.0) * 0.15;
+    rgb += sampleEye(clamp(uvS + vec2(0.0, 0.07), 0.0, 1.0), 0.0) * 0.15;
+    rgb += sampleEye(clamp(uvS - vec2(0.0, 0.07), 0.0, 1.0), 0.0) * 0.15;
 
     if (pc.range.z > 0.5) {
         rgb = mix(rgb / 12.92, pow((rgb + 0.055) / 1.055, vec3(2.4)),
