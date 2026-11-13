@@ -98,6 +98,9 @@ private:
     std::string pendingDl_;
     std::string pendingDlName_;
     bool pendingDlFresh_ = false;  // suppress the same-frame A press
+    // Folder download waiting for its answer in the shared confirm dialog (action menu page 2).
+    bool confirmFolderDl_ = false;
+    std::string folderDlPath_;
     bool downloadsWindow_ = false;  // downloads list window toggled from the bar
     bool dlWasActive_ = false;      // edge detect: auto-open the window on start
     bool hudDismissed_ = false;     // manually dismissed player controls / HUD

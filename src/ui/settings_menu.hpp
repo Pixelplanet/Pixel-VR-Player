@@ -397,7 +397,8 @@ private:
     int heatStyle_ = 0;
     int pluginRemoveArmed_ = -1;
     int pluginPage_ = 0, pluginPages_ = 1;
-    // Long option lists (video / audio tracks, languages): pages of 11 + the Back row.
+    // Long lists (video / audio tracks, languages, the plugin list, the plugin store): pages of 12
+    // lines, a Back row / button staying on every page.
     void paginateList();
     int listPage_ = 0, listPages_ = 1;
     int listPageSection_ = -1;  // the list the page belongs to (a new list opens at its active option)

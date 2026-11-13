@@ -987,13 +987,16 @@ void SettingsMenu::refresh() {
         }
         rows_.push_back({"Back to Tracks", "", Action::Back});
     }
-    paginateList();
+    paginateList();  // (every branch above falls through to here)
 }
 
 void SettingsMenu::paginateList() {
-    constexpr int kPerPage = 11;  // + the Back row = the 12 cards a page shows
-    const bool list = section_ == 10 || section_ == 11 || section_ == 12;
-    const int n = static_cast<int>(rows_.size()) - 1;  // without the Back row
+    const bool list = section_ == 10 || section_ == 11 || section_ == 12 || section_ == kPluginsSection ||
+                      section_ == kStoreSection;
+    // The last row stays on every page when it is the way back (the plugin list has none: header button).
+    const int tail = (list && section_ != kPluginsSection && !rows_.empty()) ? 1 : 0;
+    const int kPerPage = 12 - tail;  // the 12 cards / lines a page shows
+    const int n = static_cast<int>(rows_.size()) - tail;
     if (!list || n <= kPerPage) {
         listPages_ = 1;
         listPage_ = 0;
@@ -1011,10 +1014,12 @@ void SettingsMenu::paginateList() {
     listPage_ = std::clamp(listPage_, 0, listPages_ - 1);
     std::vector<Row> page(rows_.begin() + listPage_ * kPerPage,
                           rows_.begin() + std::min(n, (listPage_ + 1) * kPerPage));
-    page.push_back(rows_.back());
+    if (tail) page.push_back(rows_.back());
     rows_ = std::move(page);
-    status_ = "Page " + std::to_string(listPage_ + 1) + " of " + std::to_string(listPages_);
-    pageHint_ = status_;
+    if (section_ == 10 || section_ == 11 || section_ == 12) {  // (the plugin pages keep their own text)
+        status_ = "Page " + std::to_string(listPage_ + 1) + " of " + std::to_string(listPages_);
+        pageHint_ = status_;
+    }
 }
 
 SettingsMenu::Action SettingsMenu::activate() {
@@ -1568,7 +1573,7 @@ bool SettingsMenu::turnButtonsPage(int delta, bool wrap) {
         refresh();
         return true;
     }
-    if (listPages_ > 1 && delta != 0 && (section_ == 10 || section_ == 11 || section_ == 12)) {
+    if (listPages_ > 1 && delta != 0 && section_ != kPluginSection && !showingButtons()) {
         int page = listPage_ + delta;
         if (wrap) page = ((page % listPages_) + listPages_) % listPages_;
         else if (page < 0 || page >= listPages_) return false;

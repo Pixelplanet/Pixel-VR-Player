@@ -415,6 +415,10 @@ inline UiRect headerButton(int id) {
         default: return {0.0f, -10.0f, 0.0f, 0.0f};  // removed buttons (pager, Up)
     }
 }
+// Settings header button ("+ Install plugins"): in the pager's place, or left of it when both show.
+inline UiRect settingsHeaderButton(bool withPager) {
+    return {withPager ? 0.34f : 0.64f, kHeaderY, 0.13f, 0.028f};
+}
 // Settings header pager (keeps the classic single-row header spots).
 inline UiRect settingsPagerButton(int id) {
     return {id == 0 ? 0.52f : 0.74f, kHeaderY, 0.035f, 0.028f};
@@ -3275,8 +3279,8 @@ void VulkanRenderer::updatePointer() {
                     }
                     if (settingsCrumbHovered_ >= 0) break;
                 }
-                if (!settingsHeaderButton_.empty() && settingsPages_ <= 1 &&
-                    UiRect{0.64f, hub::kHeaderY, 0.13f, 0.028f}.contains(hx, hyy, hub::kHitPad)) {
+                if (!settingsHeaderButton_.empty() &&
+                    hub::settingsHeaderButton(settingsPages_ > 1).contains(hx, hyy, hub::kHitPad)) {
                     settingsHeaderHovered_ = true;
                     break;
                 }
@@ -8088,9 +8092,12 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             if (pager) {
                 drawFitCentered(0.63f, 0.455f, 0.14f, scSub, themeTextCol,
                                 std::to_string(settingsPage_ + 1) + " / " + std::to_string(settingsPages_));
-            } else if (!settingsHeaderButton_.empty()) {
-                drawFitCentered(0.64f, 0.455f, 0.24f, scSub, settingsHeaderHovered_ ? themeAccentCol : themeTextCol,
-                                "+  " + settingsHeaderButton_);
+            }
+            if (!settingsHeaderButton_.empty()) {
+                drawFitCentered(hub::settingsHeaderButton(pager).cx, 0.455f, 0.24f, scSub,
+                                settingsHeaderHovered_ ? themeAccentCol : themeTextCol, "+  " + settingsHeaderButton_);
+            } else if (pager) {
+                // (the pager alone)
             } else {
                 drawFitCentered(0.64f, 0.455f, 0.41f, scDetail, slateCol,
                                 std::string("PixelVR ") + PIXELVR_VERSION_STRING + " \xB7 Steam Frame");
@@ -8611,8 +8618,13 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             const float btnHalfH = 0.042f;
             const bool delHov = (actionMenuBtnHovered_ == 0) || (actionMenu_.selectedOption == 0);
             const bool canHov = (actionMenuBtnHovered_ == 1) || (actionMenu_.selectedOption == 1);
-            drawUiElement(vpPanel, -0.15f, cy, btnHalfW, btnHalfH,
-                          UiShape::RoundedBox, delHov ? redBgHov : redBg, 1.0f, 0.05f, redBorder);
+            // Red only for a destructive answer ("Yes, Delete"); anything else ("Download") in the accent colour.
+            const bool destructive = !actionMenu_.options.empty() && actionMenu_.options[0].find("Delete") != std::string::npos;
+            const float okBg[4] = {themeAccentCol[0] * (delHov ? 0.95f : 0.72f), themeAccentCol[1] * (delHov ? 0.95f : 0.72f),
+                                   themeAccentCol[2] * (delHov ? 0.95f : 0.72f), 0.95f};
+            const float okBorder[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 1.0f};
+            drawUiElement(vpPanel, -0.15f, cy, btnHalfW, btnHalfH, UiShape::RoundedBox,
+                          destructive ? (delHov ? redBgHov : redBg) : okBg, 1.0f, 0.05f, destructive ? redBorder : okBorder);
             drawUiElement(vpPanel, 0.15f, cy, btnHalfW, btnHalfH,
                           UiShape::RoundedBox, canHov ? slateBgHov : slateBg, 1.0f, 0.05f, slateBorder);
         } else if (actionMenu_.page == 6 && pickerSpatial_) {
@@ -8951,8 +8963,13 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
         } else if (actionMenu_.page == 2) {
             drawFitCentered(0.0f, 0.035f, (mHalfW - 0.06f) * 2.0f, sc, themeTextCol, actionMenu_.subtitle);
-            drawFitCentered(-0.15f, -0.12f, 0.13f * 1.8f, sc, themeTextCol, "Delete");
-            drawFitCentered(0.15f, -0.12f, 0.13f * 1.8f, sc, themeTextCol, "Cancel");
+            {
+                const std::string first = actionMenu_.options.empty() ? std::string("Delete") : actionMenu_.options[0];
+                drawFitCentered(-0.15f, -0.12f, 0.13f * 1.8f, sc, themeTextCol,
+                                first.find("Delete") != std::string::npos ? std::string("Delete") : first);
+                drawFitCentered(0.15f, -0.12f, 0.13f * 1.8f, sc, themeTextCol,
+                                actionMenu_.options.size() > 1 ? actionMenu_.options[1] : std::string("Cancel"));
+            }
         } else if (actionMenu_.page == 6 && pickerSpatial_) {
             withHeadingFont([&] {
                 drawFitCentered(0.0f, hub::kPickHalfH - 0.050f, hub::kPickHalfW * 1.8f, sc * 1.10f,

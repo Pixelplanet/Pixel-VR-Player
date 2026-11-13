@@ -1793,10 +1793,21 @@ void App::downloadFocusedEntry() {
     if (!browser_.isOpen() || !browser_.onNetwork()) return;
     const Browser::Entry* fe = browser_.focused();
     if (fe != nullptr && fe->isDir && !fe->isBack) {
-        pendingDl_ = fe->path;
+        // The same two-button dialog as Delete (its text gets the measured size each frame).
+        folderDlPath_ = fe->path;
         pendingDlName_ = fe->label;
-        pendingDlFresh_ = true;
         browser_.measureFolder(fe->path);
+        confirmFolderDl_ = true;
+        confirmShareDelete_ = false;
+        confirmEditorDelete_ = false;
+        actionMenu_.visible = true;
+        actionMenu_.page = 2;
+        actionMenu_.title = "Download This Folder?";
+        actionMenu_.subtitle = pendingDlName_;
+        actionMenu_.options.clear();
+        actionMenu_.options.push_back("Download");
+        actionMenu_.options.push_back("Cancel");
+        actionMenu_.selectedOption = 0;
     } else {
         browser_.downloadFocused();
     }
@@ -5051,42 +5062,13 @@ int App::run() {
                     : "Stick: Scroll  |  Trigger: Play Completed  |  B: Back",
                 dbtns, djList);
 
-            // Folder-download confirmation: a modal with the size and two buttons.
-            if (!pendingDl_.empty()) {
-                bool confirmNow = false;
-                if (pendingDlFresh_) {
-                    pendingDlFresh_ = false;  // ignore the press that opened it
-                } else if (in.togglePlay) {
-                    confirmNow = true;  // (Back cancels it in the Back chain above)
-                }
-                if (!pendingDl_.empty()) {
-                    char sz[96];
-                    std::snprintf(sz, sizeof(sz), "Size: %.2f GB%s",
-                                  browser_.measuredSize() / 1073741824.0,
-                                  browser_.measuring() ? "  (scanning...)" : "");
-                    std::vector<std::string> crows{"Download this folder?",
-                                                   pendingDlName_, sz};
-                    std::vector<std::string> cbtns{"Download", "Cancel"};
-                    renderer_.setDownloadsModal(true);
-                    renderer_.setDownloads(true, "Confirm Download", crows,
-                                           "A: Download        B: Cancel", cbtns);
-                    const int cbi = renderer_.downloadsButtonHovered();
-                    if (in.select) {
-                        PIXELVR_LOG_INFO("confirm click: btn=%d hovered=%d", cbi,
-                                         renderer_.downloadsHovered());
-                    }
-                    if (in.select && cbi == 0) {
-                        confirmNow = true;
-                    } else if (in.select && cbi == 1) {
-                        pendingDl_.clear();
-                    }
-                }
-                if (confirmNow && !pendingDl_.empty()) {
-                    browser_.startDownload(pendingDl_, pendingDlName_, true);
-                    pendingDl_.clear();
-                }
-            } else {
-                renderer_.setDownloadsModal(false);
+            // Folder-download confirmation (the shared confirm dialog): its text shows the size so far.
+            if (confirmFolderDl_ && !(actionMenu_.visible && actionMenu_.page == 2)) confirmFolderDl_ = false;
+            if (confirmFolderDl_) {
+                char sz[96];
+                std::snprintf(sz, sizeof(sz), "%.2f GB%s", browser_.measuredSize() / 1073741824.0,
+                              browser_.measuring() ? " (still counting...)" : "");
+                actionMenu_.subtitle = "\"" + pendingDlName_ + "\"  -  " + sz;
             }
 
             // Publish the browser panel when Files tab is active in the Hub
@@ -5501,6 +5483,31 @@ int App::run() {
                  (curSettingsPagerHov != lastSettingsPagerHov && curSettingsPagerHov >= 0) ||
                  (curCtrlBtnHov != lastCtrlBtnHov && curCtrlBtnHov >= 0))) {
                 xr_.triggerHaptic(activeH, 0.008f, 0.0f, settings_.hoverHapticsStrength());
+            } else if (settings_.hoverHapticsEnabled()) {
+                // Everything else that reacts to the laser: one id per target, a tick when it changes to a
+                // new one (keyboard keys, dialog buttons, download cards and their buttons, path parts,
+                // the hub's close button, the header button, the parts of a settings row, the music queue).
+                int musicSlot = -1;
+                const int music = renderer_.musicHover(musicSlot);
+                auto id = [](int group, int v) { return v >= 0 ? group * 1000 + v + 1 : 0; };
+                int target = id(1, renderer_.keyboardKeyHovered());
+                if (!target && renderer_.keyboardRevealHovered()) target = 2900;
+                if (!target) target = id(3, renderer_.actionMenuBtnHovered());
+                if (!target) target = id(4, renderer_.actionMenuKeyHovered());
+                if (!target) target = id(5, renderer_.downloadsJobButtonHovered());
+                if (!target) target = id(6, renderer_.downloadsButtonHovered());
+                if (!target) target = id(7, renderer_.downloadsHovered());
+                if (!target) target = id(8, renderer_.browserCrumbHovered());
+                if (!target) target = id(9, renderer_.settingsCrumbHovered());
+                if (!target && renderer_.hubCloseHovered()) target = 10900;
+                if (!target && renderer_.settingsHeaderButtonHovered()) target = 11900;
+                if (!target && curSettingsHov >= 0) target = id(12, renderer_.settingsSegmentHovered());
+                if (!target && musicSlot >= 0 && music >= 0) target = id(13 + musicSlot, music);
+                static int lastTarget = 0;
+                if (target != lastTarget && target != 0) {
+                    xr_.triggerHaptic(activeH, 0.008f, 0.0f, settings_.hoverHapticsStrength());
+                }
+                lastTarget = target;
             }
             lastBrowserHov = curBrowserHov;
             lastPageBtnHov = curPageBtnHov;
@@ -5993,7 +6000,13 @@ int App::run() {
                         if (in.select || in.togglePlay) {
                             int chosen = (hov >= 0) ? hov : actionMenu_.selectedOption;
                             const Browser::Entry* del = browser_.focused();
-                            if (confirmEditorDelete_) {
+                            if (confirmFolderDl_) {
+                                confirmFolderDl_ = false;
+                                if (chosen == 0 && !folderDlPath_.empty()) {
+                                    browser_.startDownload(folderDlPath_, pendingDlName_, true);
+                                }
+                                actionMenu_.visible = false;
+                            } else if (confirmEditorDelete_) {
                                 confirmEditorDelete_ = false;
                                 if (chosen == 0) {
                                     deleteSmbModal();
