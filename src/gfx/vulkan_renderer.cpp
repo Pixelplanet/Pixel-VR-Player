@@ -10660,7 +10660,7 @@ bool VulkanRenderer::createVideoResources(VideoSlot& v, int width, int height) {
 
     v.videoWidth = width;
     v.videoHeight = height;
-    v.videoAspect = static_cast<float>(width) / static_cast<float>(height);
+    v.videoAspect = v.pixelAspect * static_cast<float>(width) / static_cast<float>(height);
     v.videoLayoutInitialized = false;
     return true;
 }
@@ -12585,7 +12585,7 @@ void VulkanRenderer::updateVideoDmabuf(DrmVideoFrame& frame, int slot) {
     int visibleH = frame.height - frame.crop[1] - frame.crop[3];
     if (visibleW <= 0) visibleW = frame.width;
     if (visibleH <= 0) visibleH = frame.height;
-    v.videoAspect = static_cast<float>(visibleW) / static_cast<float>(visibleH);
+    v.videoAspect = v.pixelAspect * static_cast<float>(visibleW) / static_cast<float>(visibleH);
     v.drmUvScaleX = static_cast<float>(visibleW) / static_cast<float>(frame.width);
     v.drmUvScaleY = static_cast<float>(visibleH) / static_cast<float>(frame.height);
     v.range[2] = 1.0f;  // re-encode to sRGB in the shader (matches the CPU path)

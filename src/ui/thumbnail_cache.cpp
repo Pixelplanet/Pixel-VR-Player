@@ -364,7 +364,13 @@ bool ThumbnailCache::extractThumbnailAndMeta(const std::string& videoPath,
         // instead of a squished double-eye image!
         int srcW = frame->width;
         int srcH = frame->height;
-        const float ar = static_cast<float>(srcW) / static_cast<float>(srcH);
+        // The shape as shown: non-square pixels count (1920x720 flagged 16:9 is not a side-by-side frame).
+        float ar = static_cast<float>(srcW) / static_cast<float>(srcH);
+        const AVRational sar = av_guess_sample_aspect_ratio(fmt, st, frame);
+        if (sar.num > 0 && sar.den > 0) {
+            const float pa = static_cast<float>(sar.num) / static_cast<float>(sar.den);
+            if (pa >= 0.25f && pa <= 4.0f) ar *= pa;
+        }
         std::string lowerPath = encrypted && vaultIo ? vaultIo->reader.name() : videoPath;
         for (char& c : lowerPath) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
         const bool isSbs = (lowerPath.find("sbs") != std::string::npos ||

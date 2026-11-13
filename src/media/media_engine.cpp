@@ -470,6 +470,7 @@ struct MediaEngine::Impl {
     int videoStream = -1;
     int width = 0;
     int height = 0;
+    float pixelAspect = 1.0f;
     double duration = 0.0;
     double frameRate = 0.0;
     bool httpSource = false;  // http(s): FFmpeg reconnects; read errors are retried here too
@@ -1812,6 +1813,22 @@ bool MediaEngine::open(const std::string& path) {
 
         impl_->width = impl_->codec->width * (impl_->frameSeq ? 2 : 1);  // FS3D: delivered as full SBS
         impl_->height = impl_->codec->height;
+        {
+            // Non-square pixels (anamorphic DVDs, 1920x720 flagged as 16:9, ...): container value
+            // first, else the codec's. Nonsense values (and 1 % off square) count as square.
+            const AVRational sar =
+                av_guess_sample_aspect_ratio(impl_->format, impl_->format->streams[impl_->videoStream], nullptr);
+            impl_->pixelAspect = 1.0f;
+            if (sar.num > 0 && sar.den > 0) {
+                const float a = static_cast<float>(sar.num) / static_cast<float>(sar.den);
+                if (a >= 0.25f && a <= 4.0f && std::fabs(a - 1.0f) > 0.01f) impl_->pixelAspect = a;
+            }
+            if (impl_->pixelAspect != 1.0f) {
+                PIXELVR_LOG_INFO("MediaEngine: pixel aspect %d:%d, shown as %.3f:1", sar.num, sar.den,
+                                 impl_->pixelAspect * static_cast<float>(impl_->width) /
+                                     static_cast<float>(std::max(impl_->height, 1)));
+            }
+        }
         impl_->duration = (impl_->format->duration > 0)
                               ? impl_->format->duration / static_cast<double>(AV_TIME_BASE)
                               : 0.0;
@@ -1951,6 +1968,7 @@ void MediaEngine::close() {
     impl_->card = {};
     impl_->videoStream = -1;
     impl_->width = impl_->height = 0;
+    impl_->pixelAspect = 1.0f;
     impl_->duration = 0.0;
     impl_->eof.store(false);
     impl_->paused.store(false);
@@ -1958,6 +1976,7 @@ void MediaEngine::close() {
 
 int MediaEngine::width() const { return impl_->width; }
 int MediaEngine::height() const { return impl_->height; }
+float MediaEngine::pixelAspect() const { return impl_->pixelAspect; }
 std::string MediaEngine::codecName() const { return impl_->codecName; }
 std::string MediaEngine::hardwareBlockedBy() const { return impl_->hwBlockedBy; }
 uint64_t MediaEngine::decodedFrames() const {

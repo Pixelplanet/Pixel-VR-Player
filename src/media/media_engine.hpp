@@ -71,6 +71,9 @@ public:
 
     int width() const;
     int height() const;
+    // Width of one pixel relative to its height (the file's sample aspect ratio; 1 = square).
+    // The picture is shown width() * pixelAspect() wide: 1920x720 with 2:3 pixels is 16:9.
+    float pixelAspect() const;
     double duration() const;  // seconds; 0 if unknown
     double frameRate() const;  // source frames per second; 0 if unknown (FS3D: per eye)
     // Frame-sequential 3D: -1 = detect (default), 0 = never, 1 = always (needs >= 40 fps); applies at

@@ -859,6 +859,7 @@ void App::finishLoadMedia(int slot) {
     }
     sc.projection = static_cast<int>(proj);
     sc.stereo = sc.engine.frameSequential() ? 3 : static_cast<int>(stereo);  // FS3D shows as its own format
+    renderer_.setPixelAspect(slot, sc.engine.pixelAspect());  // non-square pixels: the display shape
     // Letterbox bars: measured in the background (not for the vault or remote network shares).
     sc.letterbox = 0.0f;
     renderer_.setLetterbox(slot, 0.0f);
@@ -1350,6 +1351,7 @@ void App::closeMedia(int slot) {
     sc.letterbox = 0.0f;
     sc.letterboxPending = false;
     renderer_.setLetterbox(slot, 0.0f);
+    renderer_.setPixelAspect(slot, 1.0f);
     if (sc.webSuspended) {
 #ifdef PIXELVR_HAVE_MEDIA
         webHosts_[slot].plexTimeline("stopped", sc.openAbandoned ? 0 : static_cast<int64_t>(sc.engine.position() * 1000.0));
@@ -2863,7 +2865,8 @@ float App::screenEyeAspect(int slot) const {
 #ifdef PIXELVR_HAVE_MEDIA
     const ScreenState& sc = screens_[slot];
     if (sc.open && sc.engine.width() > 0 && sc.engine.height() > 0) {
-        aspect = static_cast<float>(sc.engine.width()) / static_cast<float>(sc.engine.height());
+        aspect = sc.engine.pixelAspect() * static_cast<float>(sc.engine.width()) /
+                 static_cast<float>(sc.engine.height());
         if ((sc.stereo == 1 || sc.stereo == 3) && aspect >= 2.6f) aspect *= 0.5f;  // full SBS (FS3D arrives as full SBS)
         else if (sc.stereo == 2 && aspect <= 1.2f) aspect *= 2.0f;  // full TB
         aspect /= std::max(0.4f, 1.0f - 2.0f * renderer_.letterboxFor(slot));  // black bars left out

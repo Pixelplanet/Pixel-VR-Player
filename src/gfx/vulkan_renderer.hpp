@@ -683,6 +683,13 @@ public:
     // Letterbox bars to leave out (share of the picture height at the top and at the bottom each, per
     // eye view). Applied to flat screens shown as compositor layers: the layer shows only the picture
     // and the screen takes its shape.
+    // Width of one video pixel relative to its height (1 = square): the screen takes the display shape.
+    void setPixelAspect(int slot, float aspect) {
+        if (slot < 0 || slot >= kMaxVideoSlots || !(aspect > 0.0f)) return;
+        VideoSlot& v = videoSlots_[slot];
+        v.videoAspect = v.videoAspect / v.pixelAspect * aspect;
+        v.pixelAspect = aspect;
+    }
     void setLetterbox(int slot, float frac) {
         if (slot >= 0 && slot < kMaxVideoSlots) letterbox_[slot] = std::clamp(frac, 0.0f, 0.3f);
     }
@@ -1474,7 +1481,8 @@ private:
         uint32_t chromaMipLevels = 1;
         bool videoLayoutInitialized = false;
         bool hasVideo = false;
-        float videoAspect = 16.0f / 9.0f;
+        float videoAspect = 16.0f / 9.0f;  // as shown: pixels wide / high, times pixelAspect
+        float pixelAspect = 1.0f;          // setPixelAspect()
 
         // YUV->RGB coefficients + luma range/scale, derived from the frame metadata.
         float conversion[4] = {1.402f, -0.344f, -0.714f, 1.772f};
