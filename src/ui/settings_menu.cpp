@@ -1008,6 +1008,7 @@ void SettingsMenu::paginateList() {
     const int tail = (list && section_ != kPluginsSection && !rows_.empty()) ? 1 : 0;
     const int kPerPage = 12 - tail;  // the 12 cards / lines a page shows
     const int n = static_cast<int>(rows_.size()) - tail;
+    const bool optionList = section_ == 10 || section_ == 11 || section_ == 12;
     if (!list || n <= kPerPage) {
         listPages_ = 1;
         listPage_ = 0;
@@ -1015,19 +1016,28 @@ void SettingsMenu::paginateList() {
         return;
     }
     listPages_ = (n + kPerPage - 1) / kPerPage;
-    if (listPageSection_ != section_) {  // just opened: the page with the active option
-        listPageSection_ = section_;
-        listPage_ = 0;
-        for (int i = 0; i < n; ++i) {
-            if (rows_[static_cast<size_t>(i)].stepIdx != 0) listPage_ = i / kPerPage;
+    if (optionList) {
+        if (listPageSection_ != section_) {  // just opened: the page with the active option
+            listPageSection_ = section_;
+            listPage_ = 0;
+            for (int i = 0; i < n; ++i) {
+                if (rows_[static_cast<size_t>(i)].stepIdx != 0) listPage_ = i / kPerPage;
+            }
         }
+    } else {
+        // The plugin list and the store: the page last shown there (stepIdx is a plugin's on / off
+        // switch on these, not "the active one"), also after a visit to a plugin's own page.
+        int& kept = section_ == kPluginsSection ? pluginsListPage_ : storeListPage_;
+        if (listPageSection_ == section_) kept = listPage_;  // the user turned the page
+        listPageSection_ = section_;
+        listPage_ = kept;
     }
     listPage_ = std::clamp(listPage_, 0, listPages_ - 1);
     std::vector<Row> page(rows_.begin() + listPage_ * kPerPage,
                           rows_.begin() + std::min(n, (listPage_ + 1) * kPerPage));
     if (tail) page.push_back(rows_.back());
     rows_ = std::move(page);
-    if (section_ == 10 || section_ == 11 || section_ == 12) {  // (the plugin pages keep their own text)
+    if (optionList && status_ == kDefaultStatus) {  // (the plugin pages keep their own text; a message stays)
         status_ = "Page " + std::to_string(listPage_ + 1) + " of " + std::to_string(listPages_);
         pageHint_ = status_;
     }
@@ -1665,12 +1675,16 @@ void SettingsMenu::shortcutMove(int from, int to) {
 bool SettingsMenu::shortcutDelete(int idx) {
     if (idx < 0 || idx >= static_cast<int>(shortcuts_.size())) return false;
     // (The app asked in the shared confirm dialog first.)
-    if (section_ == 17) section_ = 22;  // from the shortcut's own page: back to the list
-    status_ = "Removed \"" + shortcuts_[static_cast<size_t>(idx)].name + "\".";
+    const bool fromItsPage = section_ == 17;
+    if (fromItsPage) section_ = 22;  // from the shortcut's own page: back to the list
+    const std::string removed = "Removed \"" + shortcuts_[static_cast<size_t>(idx)].name + "\".";
     shortcuts_.erase(shortcuts_.begin() + idx);
     deleteArmedIdx_ = -1;
     saveConfig();
+    // The neighbour takes the selection (the row that was selected on the other page is gone).
+    if (fromItsPage) selected_ = std::clamp(idx, 0, std::max(0, static_cast<int>(shortcuts_.size()) - 1));
     refresh();
+    status_ = removed;  // (refresh() puts the page hint there)
     return true;
 }
 

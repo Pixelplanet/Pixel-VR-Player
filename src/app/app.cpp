@@ -2859,6 +2859,7 @@ void App::applyLetterbox(int slot) {
     const float lb = (settings_.removeBlackBars() && sc.open && sc.stereo != 2) ? sc.letterbox : 0.0f;
     renderer_.setLetterbox(slot, lb);
     if (lb > 0.0f) PIXELVR_LOG_INFO("Letterbox: screen %d leaves out %.1f %% top and bottom", slot + 1, lb * 100.0f);
+    if (slot == 0 && settings_.screenSizeIdx() == 3) applyScreenSize(false);  // Original Pixels: fewer rows now
     if (arrangementActive_ && inArrangement(slot)) applyArrangement(arrangement_);
 }
 
@@ -3153,6 +3154,8 @@ void App::applyScreenSize(bool resetDistance) {
             float rows = static_cast<float>(sc.engine.height());
             const float aspect = sc.engine.pixelAspect() * static_cast<float>(sc.engine.width()) / rows;
             if (sc.stereo == 2 && aspect <= 1.2f) rows *= 0.5f;  // full top-bottom: one view's rows
+            // With the black bars left out the screen shows only the picture's rows over its height.
+            rows *= std::max(0.4f, 1.0f - 2.0f * renderer_.letterboxFor(0));
             const float d = resetDistance ? dist : renderer_.screenDistance();
             scale = rows * d / (f * 1.8f);
         }
@@ -6501,7 +6504,9 @@ int App::run() {
                             applyScreenSize(true);
                         } else if (act == SettingsMenu::Action::CycleDistance) {
                             renderer_.setScreenDistance(settings_.screenDistance());
-                            applyScreenSize(true);
+                            // (The chosen distance stands, also with the Cinema size; pixel for pixel
+                            // depends on the distance, so that one is worked out again.)
+                            if (settings_.screenSizeIdx() == 3) applyScreenSize(false);
                             if (arrangementActive_) {
                                 arrangement_.dist = renderer_.screenDistance();
                                 applyArrangement(arrangement_);

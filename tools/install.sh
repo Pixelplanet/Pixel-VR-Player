@@ -651,6 +651,11 @@ if [ "$UNINSTALL" -eq 1 ]; then
             fin=""
         fi
     fi
+    # The copy goes with this script unless the detached step took it over (Ctrl-C at a question,
+    # an error on the way).
+    fin_handed_over=0
+    trap 'if [ "$fin_handed_over" -eq 0 ] && [ -n "$fin" ]; then rm -f "$fin"; fi' EXIT
+    trap 'exit 130' INT TERM
     # The vault: encrypted files can only be opened with ~/.config/pixelvr/vault.key and the unlock
     # combination. Offer to decrypt it into a normal folder first (only with a terminal to answer in).
     VAULT_KEPT=0
@@ -780,7 +785,7 @@ if [ "$UNINSTALL" -eq 1 ]; then
                 detached=1
             fi
         fi
-        [ "$detached" -eq 1 ] || [ -z "$fin" ] || rm -f "$fin" 2>/dev/null || true
+        [ "$detached" -eq 0 ] || fin_handed_over=1
         if [ "$detached" -eq 1 ]; then
             printf '\n'
             info "Steam restarts in a few seconds to take the player out of your library."

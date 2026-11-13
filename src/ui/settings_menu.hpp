@@ -391,6 +391,7 @@ private:
     // lines, a Back row / button staying on every page.
     void paginateList();
     int listPage_ = 0, listPages_ = 1;
+    int pluginsListPage_ = 0, storeListPage_ = 0;  // these two lists reopen on the page they were on
     int listPageSection_ = -1;  // the list the page belongs to (a new list opens at its active option)
     std::string storeId_;      // the repository plugin shown on the details page
     bool storeUpdate_ = false;  // details page in update mode (changelog)
