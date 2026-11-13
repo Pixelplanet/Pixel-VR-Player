@@ -860,12 +860,13 @@ void App::finishLoadMedia(int slot) {
     sc.projection = static_cast<int>(proj);
     sc.stereo = sc.engine.frameSequential() ? 3 : static_cast<int>(stereo);  // FS3D shows as its own format
     renderer_.setPixelAspect(slot, sc.engine.pixelAspect());  // non-square pixels: the display shape
-    // Letterbox bars: measured in the background (not for the vault or remote network shares).
+    // Letterbox bars: measured in the background (not for remote network shares).
     sc.letterbox = 0.0f;
     renderer_.setLetterbox(slot, 0.0f);
-    sc.letterboxPending = (!privatePath || sc.webSuspended) && !remoteStream;
-    if (VaultManager::isPrivatePath(path)) sc.letterboxPending = false;
-    if (sc.letterboxPending) letterboxDetector_.request(path);
+    // Vault files are measured too, but their result stays in memory (nothing about them on disk).
+    const bool vaultFile = VaultManager::isPrivatePath(path);
+    sc.letterboxPending = (!privatePath || sc.webSuspended || vaultFile) && !remoteStream;
+    if (sc.letterboxPending) letterboxDetector_.request(path, vaultFile);
     if (slot == 0) {
         renderer_.setProjectionMode(proj);
         renderer_.setStereoMode(stereo);

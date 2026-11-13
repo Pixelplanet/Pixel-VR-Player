@@ -1,5 +1,7 @@
 #include "media/letterbox.hpp"
 
+#include "app/vault_crypto.hpp"
+
 #include "util/logging.hpp"
 
 #include <algorithm>
@@ -17,6 +19,7 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavutil/pixdesc.h>
 }
+#include "media/vault_avio.hpp"
 #endif
 
 namespace fs = std::filesystem;
@@ -79,7 +82,11 @@ float LetterboxDetector::measure(const std::string& path, int* framesJudged) {
     if (framesJudged) *framesJudged = 0;
 #ifdef PIXELVR_HAVE_MEDIA
     AVFormatContext* fmt = nullptr;
-    if (avformat_open_input(&fmt, path.c_str(), nullptr, nullptr) < 0) return 0.0f;
+    std::unique_ptr<VaultAvio> vaultIo;  // encrypted vault file: decrypted while reading (outlives fmt)
+    if (vaultcrypto::isEncrypted(path) ? !openVaultFormat(path, fmt, vaultIo)
+                                       : avformat_open_input(&fmt, path.c_str(), nullptr, nullptr) < 0) {
+        return 0.0f;
+    }
     float out = 0.0f;
     do {
         if (avformat_find_stream_info(fmt, nullptr) < 0) break;
@@ -212,18 +219,27 @@ void LetterboxDetector::save() {
     fs::rename(file_ + ".tmp", file_, ec);
 }
 
-void LetterboxDetector::request(const std::string& path) {
+void LetterboxDetector::request(const std::string& path, bool keepPrivate) {
     if (path.empty() || !(path[0] == '/' || path.rfind("http://", 0) == 0 || path.rfind("https://", 0) == 0)) return;
     std::lock_guard<std::mutex> l(mu_);
-    if (results_.count(keyOf(path)) || std::find(queue_.begin(), queue_.end(), path) != queue_.end()) return;
+    const std::string key = keyOf(path);
+    if (results_.count(key) || privateResults_.count(key) ||
+        std::find(queue_.begin(), queue_.end(), path) != queue_.end()) {
+        return;
+    }
+    if (keepPrivate) privateQueued_.push_back(path);
     queue_.push_back(path);
     cv_.notify_all();
 }
 
 bool LetterboxDetector::result(const std::string& path, float& frac) {
     std::lock_guard<std::mutex> l(mu_);
-    const auto it = results_.find(keyOf(path));
-    if (it == results_.end()) return false;
+    const std::string key = keyOf(path);
+    auto it = results_.find(key);
+    if (it == results_.end()) {
+        it = privateResults_.find(key);
+        if (it == privateResults_.end()) return false;
+    }
     frac = it->second;
     return true;
 }
@@ -242,8 +258,14 @@ void LetterboxDetector::loop() {
         PIXELVR_LOG_INFO("Letterbox: %.1f %% top and bottom (%d frames judged)", frac * 100.0f, judged);
         std::lock_guard<std::mutex> l(mu_);
         if (!queue_.empty()) queue_.pop_front();
-        results_[keyOf(path)] = frac;
-        save();
+        const auto priv = std::find(privateQueued_.begin(), privateQueued_.end(), path);
+        if (priv != privateQueued_.end()) {  // a vault file: nothing about it goes to disk
+            privateQueued_.erase(priv);
+            privateResults_[keyOf(path)] = frac;
+        } else {
+            results_[keyOf(path)] = frac;
+            save();
+        }
     }
 }
 

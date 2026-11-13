@@ -20,7 +20,8 @@ public:
     LetterboxDetector();
     ~LetterboxDetector();
     // Starts a measurement (no-op when known or queued). Local files and http(s) streams.
-    void request(const std::string& path);
+    // `keepPrivate` (vault files): the result is kept in memory only, never written to the cache file.
+    void request(const std::string& path, bool keepPrivate = false);
     // True once measured: `frac` = share of the picture height cut at the top and at the bottom each
     // (0 = no bars).
     bool result(const std::string& path, float& frac);
@@ -38,6 +39,8 @@ private:
     std::condition_variable cv_;
     std::deque<std::string> queue_;
     std::unordered_map<std::string, float> results_;  // key: path + size/mtime stamp
+    std::unordered_map<std::string, float> privateResults_;  // vault files: this session only, never saved
+    std::deque<std::string> privateQueued_;                  // paths in queue_ that are private
     std::string file_;
     bool stop_ = false;
     std::thread worker_;
