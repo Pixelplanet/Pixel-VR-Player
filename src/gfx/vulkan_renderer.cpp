@@ -5952,6 +5952,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         ambPush.stereo[2] = swapEyes_ ? 1.0f : 0.0f;
                         ambPush.stereo[3] = curvature;
                         ambPush.extra[0] = ambilightReach_;
+                        ambPush.extra[1] = webHere ? 0.0f : letterboxFor(slot);  // glow from the picture, not its bars
                         vkCmdPushConstants(commandBuffer_, ambLayout,
                                            VK_SHADER_STAGE_VERTEX_BIT |
                                                VK_SHADER_STAGE_FRAGMENT_BIT,

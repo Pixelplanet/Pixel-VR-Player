@@ -12,6 +12,7 @@ layout(push_constant) uniform Push {
     vec4 range;  // x: luma offset, y: luma scale, z: sRGB decode flag, w: glow intensity
     vec4 stereo; // x: mode (0 mono/1 SBS/2 TB), y: eye, z: swap, w: curvature
     vec4 extra;  // x: how far the glow reaches, in screen heights (0 = the default 0.46)
+                 // y: share of the frame left out at the top and at the bottom (black bars)
 } pc;
 
 layout(location = 0) in vec2 vUV;
@@ -23,6 +24,7 @@ const float kAspect = 1.7778;
 vec3 sampleEye(vec2 uv) {
     float eye = pc.stereo.y;
     if (pc.stereo.z > 0.5) eye = 1.0 - eye;
+    uv.y = pc.extra.y + uv.y * (1.0 - 2.0 * pc.extra.y);  // without the black bars
     if (pc.stereo.x > 1.5) uv.y = uv.y * 0.5 + eye * 0.5;
     else if (pc.stereo.x > 0.5) uv.x = uv.x * 0.5 + eye * 0.5;
     float lodY = max(float(textureQueryLevels(luma)) - 4.0, 0.0);
@@ -65,5 +67,7 @@ void main() {
     float l = dot(rgb, vec3(0.2126, 0.7152, 0.0722));
     rgb = max(mix(vec3(l), rgb, 1.25), vec3(0.0));
 
-    outColor = vec4(rgb, a * clamp(pc.range.w, 0.0, 1.0));
+    // A dark edge gives no glow at all (it would only paint black over a neighbour's glow).
+    float lit = smoothstep(0.0, 0.05, max(rgb.r, max(rgb.g, rgb.b)));
+    outColor = vec4(rgb, a * lit * clamp(pc.range.w, 0.0, 1.0));
 }
