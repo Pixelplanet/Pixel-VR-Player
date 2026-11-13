@@ -126,6 +126,12 @@ public:
         int audioStream = -1;          // container index of the audio track chosen on the page (-1 = ours)
         bool episode = false;          // a TV episode: the next one starts when it ends
         std::string episodeInfo;       // "Series · S1 E2 · Name", shown as the episode starts
+        // Intro / credits ranges the server knows for this file (seconds), for "Skip Intro" / "Skip Credits".
+        struct Marker {
+            bool credits = false;  // else the intro
+            double start = 0.0, end = 0.0;
+        };
+        std::vector<Marker> markers;
     };
     void setPlexNative(bool on);
     bool takePlexPlay(PlexPlay& out);

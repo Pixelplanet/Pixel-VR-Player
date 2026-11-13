@@ -730,6 +730,16 @@ public:
     void setScreenNav(int slot, bool on) {
         if (slot >= 0 && slot < kMaxVideoSlots) screenOverlay_[slot].nav = on;
     }
+    // A pill at the screen's lower right ("Skip Intro", "Skip Credits"); empty = none.
+    void setScreenSkip(int slot, const std::string& label) {
+        if (slot >= 0 && slot < kMaxVideoSlots) screenOverlay_[slot].skip = label;
+    }
+    // The laser is on that pill.
+    bool screenSkipHit(int& slot) const {
+        if (screenSkipSlot_ < 0) return false;
+        slot = screenSkipSlot_;
+        return true;
+    }
     // The laser is on the previous (side 0) or next (side 1) arrow of an episode screen.
     bool screenNavHit(int& slot, int& side) const {
         if (screenNavSlot_ < 0 || screenNavHover_ < 0) return false;
@@ -1253,7 +1263,9 @@ private:
         std::string title;
         std::chrono::steady_clock::time_point shownAt{}, until{};
         bool nav = false;  // an episode: previous / next arrows while the laser is on it
+        std::string skip;  // "Skip Intro" / "Skip Credits" pill at the lower right (empty: none)
     };
+    int screenSkipSlot_ = -1;  // the screen whose skip pill the laser is on
     ScreenOverlay screenOverlay_[kMaxVideoSlots];
     int screenNavSlot_ = -1;   // the episode screen the laser is on
     int screenNavHover_ = -1;  // 0 = previous arrow, 1 = next arrow

@@ -453,6 +453,22 @@ void BrowserHost::handleLine(const std::string& line) {
             p.audioStream = static_cast<int>(v.getNumber("audio", -1));
             if (const pvrjson::Value* ep = v.get("episode")) p.episode = ep->boolean;
             p.episodeInfo = v.getString("info");
+            {
+                // "intro:0-88000;credits:2510000-2580000" (ms)
+                const std::string mk = v.getString("markers");
+                for (size_t at = 0; at < mk.size();) {
+                    const size_t end = std::min(mk.find(';', at), mk.size());
+                    const std::string one = mk.substr(at, end - at);
+                    at = end + 1;
+                    const size_t colon = one.find(':'), dash = one.find('-', colon == std::string::npos ? 0 : colon);
+                    if (colon == std::string::npos || dash == std::string::npos) continue;
+                    PlexPlay::Marker m;
+                    m.credits = one.compare(0, colon, "credits") == 0;
+                    m.start = std::atof(one.substr(colon + 1, dash - colon - 1).c_str()) / 1000.0;
+                    m.end = std::atof(one.substr(dash + 1).c_str()) / 1000.0;
+                    if (m.end > m.start + 1.0 && p.markers.size() < 8) p.markers.push_back(m);
+                }
+            }
             plexPlays_.push_back(std::move(p));
         }
     } else if (cmd == "plexnext") {  // "plexnext none": no next episode

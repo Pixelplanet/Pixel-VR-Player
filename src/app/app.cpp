@@ -1463,6 +1463,10 @@ void App::startPlexPlay(int slot, const BrowserHost::PlexPlay& play) {
     sc.webSuspended = true;
     sc.path.clear();
     sc.plexEpisode = play.episode;
+    sc.plexMarkers = play.markers;
+    if (!play.markers.empty()) {
+        PIXELVR_LOG_INFO("Web play: %d intro / credits marker(s) from the server", static_cast<int>(play.markers.size()));
+    }
     sc.plexService = play.service == "jellyfin" ? "jellyfin" : "plex";
     sc.plexAwaitingNext = false;
     sc.plexNavManual = false;
@@ -3972,6 +3976,42 @@ int App::run() {
             for (int s = 0; s < VulkanRenderer::kMaxVideoSlots; ++s) {
                 const ScreenState& es = screens_[s];
                 renderer_.setScreenNav(s, es.open && es.webSuspended && es.plexEpisode && !es.plexAwaitingNext);
+                // Skip Intro / Skip Credits: while the part the server marked plays (its last second left out).
+                const char* skip = "";
+                if (es.open && es.webSuspended && !es.plexAwaitingNext && !es.openAbandoned) {
+                    const double pos = es.engine.position();
+                    for (const auto& m : es.plexMarkers) {
+                        if (pos >= m.start && pos < m.end - 1.0) skip = m.credits ? "Skip Credits" : "Skip Intro";
+                    }
+                }
+                renderer_.setScreenSkip(s, skip);
+            }
+            if (in.select) {
+                int ks = -1;
+                if (renderer_.screenSkipHit(ks) && screens_[ks].open && screens_[ks].webSuspended &&
+                    !screens_[ks].plexAwaitingNext) {
+                    ScreenState& es = screens_[ks];
+                    const double pos = es.engine.position();
+                    for (const auto& m : es.plexMarkers) {
+                        if (pos < m.start || pos >= m.end) continue;
+                        const double dur = es.engine.duration();
+                        const bool toTheEnd = m.credits && (dur <= 0.0 || m.end >= dur - 5.0);
+                        if (toTheEnd && es.plexEpisode) {
+                            // Credits that run to the end of an episode: on to the next one.
+                            webHosts_[ks].plexNext(static_cast<int64_t>(pos * 1000.0));
+                            es.plexAwaitingNext = true;
+                            es.plexNavManual = true;
+                            es.plexNextSince = nowT;
+                            renderer_.setScreenTitle(ks, "Next episode...", 20.0f);
+                        } else {
+                            es.engine.seek(dur > 1.0 ? std::min(m.end, dur - 1.0) : m.end);
+                        }
+                        PIXELVR_LOG_INFO("Web play: %s skipped on screen %d", m.credits ? "credits" : "intro", ks + 1);
+                        xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.02f, 0.0f, 0.4f);
+                        break;
+                    }
+                    in.select = in.togglePlay = false;  // the pill took the trigger
+                }
             }
             if (in.select) {
                 int ns = -1, side = -1;

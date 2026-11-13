@@ -2949,6 +2949,7 @@ void VulkanRenderer::updatePointer() {
     musicHoverId_ = kMusicNone;
     screenNavSlot_ = -1;
     screenNavHover_ = -1;
+    screenSkipSlot_ = -1;
     const bool screensPointable = (multiScreenActive_ || anyWeb) && !hubOpen && !modalOpen &&
                                   !actionMenuOpen && !kbOpen;
     if (!kbOpen && !hubOpen && !modalOpen && !controlBar && !actionMenuOpen &&
@@ -3424,6 +3425,10 @@ void VulkanRenderer::updatePointer() {
                 webPointerSlot_ = screenHitSlot;
                 webPointerU_ = screenHitU;
                 webPointerV_ = screenHitV;
+            }
+            if (!screenOverlay_[screenHitSlot].skip.empty() && screenHitU > 0.725f && screenHitU < 0.985f &&
+                screenHitV > 0.795f && screenHitV < 0.935f) {
+                screenSkipSlot_ = screenHitSlot;  // the skip pill (drawScreenOverlay: lower right)
             }
             if (screenOverlay_[screenHitSlot].nav) {
                 // Episode arrows: the outer 13 % of the screen's width, middle 60 % of its height.
@@ -4914,9 +4919,12 @@ int VulkanRenderer::screenOverlayKey(int slot) const {
     // 0 = nothing on top of the picture; otherwise changes whenever the overlay looks different.
     const int alphaStep = static_cast<int>(screenTitleAlpha(slot) * 20.0f + 0.5f);
     const bool arrows = screenOverlay_[slot].nav && screenNavSlot_ == slot;
-    if (alphaStep == 0 && !arrows) return 0;
+    const std::string& skip = screenOverlay_[slot].skip;
+    if (alphaStep == 0 && !arrows && skip.empty()) return 0;
     const int hover = arrows ? (screenNavHover_ + 2) : 0;  // 1 = arrows, no hover; 2/3 = hovered side
-    return 1 + alphaStep + 32 * hover + 256 * static_cast<int>(std::hash<std::string>{}(screenOverlay_[slot].title) & 0xFFFF);
+    const int skipKey = skip.empty() ? 0 : (static_cast<int>(skip.size()) * 2 + (screenSkipSlot_ == slot ? 1 : 0)) * 8192;
+    return 1 + alphaStep + 32 * hover + 256 * static_cast<int>(std::hash<std::string>{}(screenOverlay_[slot].title) & 0x1F) +
+           skipKey;
 }
 
 void VulkanRenderer::drawCopyText(const std::string& utf8, float cx, float cy, float h, float maxW, const float color[4],
@@ -5021,6 +5029,16 @@ void VulkanRenderer::drawScreenOverlay(int slot, float ax, const math::Mat4& ort
         shape(0.0f, 0.70f, pillHw, pillHh, UiShape::RoundedBox, bg, 1.0f, 0.04f, rim);
         const float white[4] = {1.0f, 1.0f, 1.0f, a};
         drawCopyText(screenOverlay_[slot].title, 0.0f, 0.70f, textH, maxTextW, white, ax, ortho, glyphCursor);
+    }
+    // "Skip Intro" / "Skip Credits": a pill at the lower right for as long as that part plays.
+    if (!screenOverlay_[slot].skip.empty()) {
+        const bool hov = screenSkipSlot_ == slot;
+        const float cx = 1.136f, cy = -0.657f;  // drawn units (the screen is 3.2 x 1.8); hit-test: updatePointer
+        const float bg[4] = {hov ? ac[0] * 0.55f : 0.03f, hov ? ac[1] * 0.55f : 0.04f, hov ? ac[2] * 0.55f : 0.06f, hov ? 0.94f : 0.78f};
+        const float rim[4] = {hov ? ac[0] : 1.0f, hov ? ac[1] : 1.0f, hov ? ac[2] : 1.0f, hov ? 1.0f : 0.45f};
+        shape(cx / ax, cy, 0.368f / ax, 0.100f, UiShape::RoundedBox, bg, 1.0f, hov ? 0.07f : 0.05f, rim);
+        const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        drawCopyText(screenOverlay_[slot].skip, cx, cy, 0.082f, 0.62f, white, ax, ortho, glyphCursor);
     }
     // Previous / next episode arrows at the edges while the laser is on this screen.
     if (screenOverlay_[slot].nav && screenNavSlot_ == slot) {

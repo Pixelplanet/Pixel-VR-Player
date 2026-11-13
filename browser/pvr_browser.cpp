@@ -1151,13 +1151,17 @@ int runScreen(const ScreenOptions& opt) {
             "const pi=await (await fetch(b+'/Items/'+id+'/PlaybackInfo?UserId='+u+'&IsPlayback=true&AutoOpenLiveStream=true',"
             "{method:'POST',headers:h,body:" + pvrjson::quote(kProfile) + "})).json();"
             "const m=pi.MediaSources[0],v=(m.MediaStreams||[]).find(s=>s.Type==='Video')||{};"
+            "let sg='';try{const r=await fetch(b+'/MediaSegments/'+id,{headers:h});if(r.ok){const s=await r.json();"
+            "sg=(s.Items||[]).filter(x=>x.Type==='Intro'||x.Type==='Outro')"
+            ".map(x=>(x.Type==='Intro'?'intro':'credits')+':'+Math.round((x.StartTicks||0)/10000)+'-'+"
+            "Math.round((x.EndTicks||0)/10000)).join(';')}}catch(e){}"
             "return JSON.stringify({title:it.SeriesName?it.SeriesName+' - '+it.Name:it.Name,"
             "file:(m.Path||'').split(/[\\\\/]/).pop(),"
             "ticks:it.RunTimeTicks||m.RunTimeTicks||0,msid:m.Id,session:pi.PlaySessionId||'',user:u,"
             "series:it.Type==='Episode'?(it.SeriesId||''):'',aud:(m.DefaultAudioStreamIndex??-1),"
             "info:it.Type==='Episode'?[it.SeriesName,((it.ParentIndexNumber!=null?'S'+it.ParentIndexNumber:'')+"
             "(it.IndexNumber!=null?' E'+it.IndexNumber:'')).trim(),it.Name].filter(Boolean).join(' '+String.fromCharCode(183)+' '):'',"
-            "container:(m.Container||'').toLowerCase(),vcodec:(v.Codec||'').toLowerCase(),turl:m.TranscodingUrl||''})})()";
+            "container:(m.Container||'').toLowerCase(),vcodec:(v.Codec||'').toLowerCase(),turl:m.TranscodingUrl||'',mk:sg})})()";
         evalIn(session, js, [&, session, startTicks, audioIdx, next](const pvrjson::Value* v) {
             pvrjson::Value info;
             if (!v || v->type != pvrjson::Value::Type::String || !pvrjson::parse(v->str, info) ||
@@ -1204,7 +1208,8 @@ int runScreen(const ScreenOptions& opt) {
             std::fprintf(stderr, "jellyfin: %s %s/%s audio %d%s\n", plex.jfMethod.c_str(), ct.c_str(), vc.c_str(), audio,
                          plex.jfSeries.empty() ? "" : " (episode)");
             emitLine("plex {\"url\":" + pvrjson::quote(playUrl) + ",\"title\":" + pvrjson::quote(info.getString("title")) +
-                     ",\"file\":" + pvrjson::quote(info.getString("file")) + ",\"info\":" + pvrjson::quote(info.getString("info")) + ",\"offset\":" + nums);
+                     ",\"file\":" + pvrjson::quote(info.getString("file")) + ",\"info\":" + pvrjson::quote(info.getString("info")) +
+                     ",\"markers\":" + pvrjson::quote(info.getString("mk")) + ",\"offset\":" + nums);
         }, true);
     };
     // Plex: the part, title, duration and the audio track chosen in Plex for a metadata item.
@@ -1220,7 +1225,8 @@ int runScreen(const ScreenOptions& opt) {
                                                   "&download=0") +
                  ",\"title\":" + pvrjson::quote(info.getString("title")) + ",\"file\":" + pvrjson::quote(info.getString("file")) +
                  ",\"info\":" +
-                 pvrjson::quote(info.getString("info")) + ",\"offset\":" + nums);
+                 pvrjson::quote(info.getString("info")) + ",\"markers\":" + pvrjson::quote(info.getString("mk")) +
+                 ",\"offset\":" + nums);
     };
     // JS returning that info for the metadata object `m` (part `p`).
     const std::string kPlexInfoJs =
@@ -1228,6 +1234,9 @@ int runScreen(const ScreenOptions& opt) {
         "file:(p.file||'').split(/[\\\\/]/).pop(),"
         "dur:m.duration||0,off:m.viewOffset||0,rk:m.ratingKey,key:m.key,type:m.type||'',"
         "aud:((p.Stream||[]).find(s=>s.streamType===2&&s.selected)||{index:-1}).index,"
+        // Intro / credits markers (when the server has analysed the file): "intro:0-88000;credits:..." in ms.
+        "mk:(m.Marker||[]).filter(x=>x.type==='intro'||x.type==='credits')"
+        ".map(x=>x.type+':'+Math.round(x.startTimeOffset||0)+'-'+Math.round(x.endTimeOffset||0)).join(';'),"
         "info:m.type==='episode'?[m.grandparentTitle,((m.parentIndex!=null?'S'+m.parentIndex:'')+"
         "(m.index!=null?' E'+m.index:'')).trim(),m.title].filter(Boolean).join(' '+String.fromCharCode(183)+' '):''})";
 
@@ -1768,7 +1777,7 @@ int runScreen(const ScreenOptions& opt) {
             const int mediaIndex = std::max(0, std::atoi(queryParam(url, "mediaIndex").c_str()));
             plex.pauseUntil = Clock::now() + std::chrono::seconds(90);  // as long as the app waits for the server
             const std::string js =
-                "fetch(" + pvrjson::quote(plex.base + path + "?X-Plex-Token=" + token) +
+                "fetch(" + pvrjson::quote(plex.base + path + "?includeMarkers=1&X-Plex-Token=" + token) +
                 ",{headers:{Accept:'application/json'}}).then(r=>r.json()).then(j=>{const m=j.MediaContainer.Metadata[0],"
                 "p=(m.Media[" + std::to_string(mediaIndex) + "]||m.Media[0]).Part[0];"
                 "return " + kPlexInfoJs + "})";
@@ -2268,7 +2277,7 @@ int runScreen(const ScreenOptions& opt) {
             const std::string q = "?X-Plex-Token=" + plex.token;
             const std::string js =
                 "(async()=>{try{const b=" + pvrjson::quote(plex.base) + ",q=" + pvrjson::quote(q) +
-                ",H={headers:{Accept:'application/json'}},md=async k=>(await (await fetch(b+'/library/metadata/'+k+q,H)).json())"
+                ",H={headers:{Accept:'application/json'}},md=async k=>(await (await fetch(b+'/library/metadata/'+k+q+'&includeMarkers=1',H)).json())"
                 ".MediaContainer.Metadata[0];const c=await md(" + pvrjson::quote(plex.ratingKey) + ");"
                 "if(c.type!=='episode'||!c.grandparentRatingKey)return '';"
                 "const all=(await (await fetch(b+'/library/metadata/'+c.grandparentRatingKey+'/allLeaves'+q,H)).json())"
