@@ -2683,9 +2683,8 @@ void App::recenterView(const XrInputState& in) {
                                renderer_.screenPivot()[2]};
     const float oldYaw = renderer_.screenYaw();
     renderer_.recenterScreen(in.headPos, in.headForward);
-    if (!multiScreenEnabled()) return;
     // Single-screen mode: a screen dragged somewhere by hand comes back in front (its size kept).
-    if (singleMoved_ && !multiScreenEnabled()) {
+    if (!multiScreenEnabled()) {
         VulkanRenderer::ScreenPlacement pl0 = renderer_.screenPlacement(0);
         if (pl0.active) {
             renderer_.setMainScreenScale(pl0.scale);
@@ -2694,6 +2693,7 @@ void App::recenterView(const XrInputState& in) {
         }
         singleMoved_ = false;
         movingScreen_ = -1;
+        return;
     }
     // Carry free-placed screens along: rotate them about the old view pivot by
     // the change in yaw, then move them with the pivot.

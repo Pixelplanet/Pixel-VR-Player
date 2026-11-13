@@ -4695,8 +4695,11 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
         CompositionLayer cl;
         cl.swapchain = cursorSwapchain_.handle;
         cl.blend = true;
-        cl.width = 0.08f * shrink;
-        cl.height = 0.08f * shrink;
+        // Beyond 2.5 m it grows with the distance (same apparent size): on a big screen far away
+        // the 8 cm image was a few pixels wide and showed as a white speck without its ring.
+        const float farGrow = std::clamp(eyeDist / 2.5f, 1.0f, 8.0f);
+        cl.width = 0.08f * shrink * farGrow;
+        cl.height = 0.08f * shrink * farGrow;
         const Quat q = quatFromMat(m);
         cl.pose.orientation = {q.x, q.y, q.z, q.w};
         cl.pose.position = {pos.x, pos.y, pos.z};
@@ -9671,8 +9674,10 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             const Vec3 hit{pointerHit_[0], pointerHit_[1], pointerHit_[2]};
             const float cursorGlow[4] = {
                 themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.45f};
-            dot(hit, 0.040f, cursorGlow, UiShape::SoftGlow, 0.75f);
-            dot(hit, 0.020f, cursorCol, UiShape::Cursor);
+            // (Grows with the distance beyond 2.5 m, like the layer cursor: same apparent size.)
+            const float farGrow = std::clamp(length(eyePos - hit) / 2.5f, 1.0f, 8.0f);
+            dot(hit, 0.040f * farGrow, cursorGlow, UiShape::SoftGlow, 0.75f);
+            dot(hit, 0.020f * farGrow, cursorCol, UiShape::Cursor);
         }
     }
 
