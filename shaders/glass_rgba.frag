@@ -35,9 +35,9 @@ float sdRoundedBox(vec2 p, vec2 b, float r) {
 }
 
 // Screen texture coordinates behind this layer pixel; inside = how much of
-// the screen shows there. The edge fades over pc.scr.w metres inside the
-// outline: the backdrop is projected from between the eyes, and each eye sees
-// the sharp screen layer's edge that far off. Returns false where the line of
+// the screen shows there. The backdrop runs pc.scr.w metres past the outline
+// (the picture's edge repeated) and fades there: it is projected from between
+// the eyes, and each eye sees the sharp screen layer's edge that far off. Returns false where the line of
 // sight misses the screen surface.
 bool screenUv(out vec2 uv, out float inside) {
     // The layer pixel on the panel as SteamVR places it (bent onto the
@@ -77,7 +77,10 @@ bool screenUv(out vec2 uv, out float inside) {
     }
     uv = vec2(sx / (2.0 * pc.scr.x) + 0.5, -q.y / (2.0 * pc.scr.y) + 0.5);
     vec2 fade = vec2(max(pc.scr.w, 1e-4)) / (2.0 * pc.scr.xy);
-    vec2 k = smoothstep(vec2(0.0), fade, uv) * smoothstep(vec2(0.0), fade, 1.0 - uv);
+    // Full strength up to `fade` OUTSIDE the outline, then a short fade: the eye that sees the screen's
+    // edge further out must not get a strip of the sharp picture beside the blur.
+    vec2 o = max(-uv, uv - 1.0);  // how far outside the outline (negative = inside)
+    vec2 k = 1.0 - smoothstep(fade, 1.35 * fade, o);
     inside = k.x * k.y;
     return true;
 }

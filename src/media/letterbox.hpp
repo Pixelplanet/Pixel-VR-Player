@@ -19,7 +19,8 @@ class LetterboxDetector {
 public:
     LetterboxDetector();
     ~LetterboxDetector();
-    // Starts a measurement (no-op when known or queued). Local files and http(s) streams.
+    // Starts a measurement (no-op when known or queued). Local files, http(s) streams and files on
+    // network shares (smb / sftp / dav: read over a second connection of their own).
     // `keepPrivate` (vault files): the result is kept in memory only, never written to the cache file.
     void request(const std::string& path, bool keepPrivate = false);
     // True once measured: `frac` = share of the picture height cut at the top and at the bottom each

@@ -19,7 +19,9 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavutil/pixdesc.h>
 }
+#include "media/media_engine.hpp"
 #include "media/vault_avio.hpp"
+#include "net/remote_fs.hpp"
 #endif
 
 namespace fs = std::filesystem;
@@ -41,6 +43,72 @@ std::string keyOf(const std::string& path) {
 }
 
 #ifdef PIXELVR_HAVE_MEDIA
+// A file on a network share behind an AVIOContext: read straight from its own connection (a few
+// seeks and short reads; playback's read-ahead buffer is not needed here).
+struct RemoteAvio {
+    std::unique_ptr<RemoteFile> file;
+    int64_t pos = 0;
+    AVIOContext* ctx = nullptr;
+    ~RemoteAvio() {
+        if (ctx) {
+            av_freep(&ctx->buffer);
+            avio_context_free(&ctx);
+        }
+    }
+};
+
+int remoteAvioRead(void* opaque, uint8_t* buf, int size) {
+    auto* r = static_cast<RemoteAvio*>(opaque);
+    const int n = r->file->read(buf, size);
+    if (n < 0) return AVERROR(EIO);
+    if (n == 0) return AVERROR_EOF;
+    r->pos += n;
+    return n;
+}
+
+int64_t remoteAvioSeek(void* opaque, int64_t offset, int whence) {
+    auto* r = static_cast<RemoteAvio*>(opaque);
+    const int64_t size = r->file->size();
+    if (whence & AVSEEK_SIZE) return size >= 0 ? size : AVERROR(ENOSYS);
+    int64_t p;
+    switch (whence & ~AVSEEK_FORCE) {
+        case SEEK_SET: p = offset; break;
+        case SEEK_CUR: p = r->pos + offset; break;
+        case SEEK_END: if (size < 0) return -1; p = size + offset; break;
+        default: return -1;
+    }
+    if (p < 0 || !r->file->seek(p)) return -1;
+    r->pos = p;
+    return p;
+}
+
+bool openRemoteFormat(const std::string& path, AVFormatContext*& fmt, std::unique_ptr<RemoteAvio>& holder) {
+    holder = std::make_unique<RemoteAvio>();
+    std::string err;
+    holder->file = openRemoteMedia(path, err);
+    constexpr int kBuf = 1 << 18;
+    auto* buf = holder->file ? static_cast<unsigned char*>(av_malloc(kBuf)) : nullptr;
+    holder->ctx = buf ? avio_alloc_context(buf, kBuf, 0, holder.get(), &remoteAvioRead, nullptr, &remoteAvioSeek) : nullptr;
+    if (!holder->ctx) {
+        av_free(buf);
+        holder.reset();
+        return false;
+    }
+    fmt = avformat_alloc_context();
+    if (!fmt) {
+        holder.reset();
+        return false;
+    }
+    fmt->pb = holder->ctx;
+    fmt->flags |= AVFMT_FLAG_CUSTOM_IO;
+    if (avformat_open_input(&fmt, path.c_str(), nullptr, nullptr) < 0) {
+        fmt = nullptr;  // freed by avformat_open_input on failure
+        holder.reset();
+        return false;
+    }
+    return true;
+}
+
 // Black rows from the top (dir = +1) or bottom (dir = -1) of an 8/16-bit luma plane.
 int blackRows(const AVFrame* f, int dir, int shift, int blackLevel) {
     const int w = f->width, h = f->height;
@@ -83,8 +151,12 @@ float LetterboxDetector::measure(const std::string& path, int* framesJudged) {
 #ifdef PIXELVR_HAVE_MEDIA
     AVFormatContext* fmt = nullptr;
     std::unique_ptr<VaultAvio> vaultIo;  // encrypted vault file: decrypted while reading (outlives fmt)
-    if (vaultcrypto::isEncrypted(path) ? !openVaultFormat(path, fmt, vaultIo)
-                                       : avformat_open_input(&fmt, path.c_str(), nullptr, nullptr) < 0) {
+    std::unique_ptr<RemoteAvio> remoteIo;  // a file on a network share (outlives fmt)
+    const bool opened = isRemotePath(path) ? openRemoteFormat(path, fmt, remoteIo)
+                        : vaultcrypto::isEncrypted(path) ? openVaultFormat(path, fmt, vaultIo)
+                        : avformat_open_input(&fmt, path.c_str(), nullptr, nullptr) >= 0;
+    if (!opened) {
+        if (framesJudged) *framesJudged = -1;
         return 0.0f;
     }
     float out = 0.0f;
@@ -122,8 +194,13 @@ float LetterboxDetector::measure(const std::string& path, int* framesJudged) {
                 break;  // short clips: one look
             }
             bool got = false;
-            for (int k = 0; k < 400 && !got && av_read_frame(fmt, pk) >= 0; ++k) {
-                if (pk->stream_index == vs && avcodec_send_packet(cc, pk) >= 0) got = avcodec_receive_frame(cc, fr) >= 0;
+            // Up to 150 video packets (the decoder's threads hold a few back); packets of other streams
+            // are counted apart: lossless audio comes in a thousand small packets a second.
+            for (int k = 0, vk = 0; k < 40000 && vk < 150 && !got && av_read_frame(fmt, pk) >= 0; ++k) {
+                if (pk->stream_index == vs) {
+                    ++vk;
+                    if (avcodec_send_packet(cc, pk) >= 0) got = avcodec_receive_frame(cc, fr) >= 0;
+                }
                 av_packet_unref(pk);
             }
             static const bool debug = std::getenv("PIXELVR_LB_DEBUG") != nullptr;
@@ -150,13 +227,16 @@ float LetterboxDetector::measure(const std::string& path, int* framesJudged) {
         // Bars are the same size at the top and at the bottom. Judged on the smallest of each over all
         // frames: one frame with more black on one side (end credits, a dark sky) says nothing.
         const bool asymmetric = judged > 0 && std::abs(minTop - minBottom) > height / 25;
-        // Needs a few judged frames; small bars (< 1.5 %) are not worth a crop. The cut goes 2 rows into
-        // the picture: the bar's last row is usually a soft, half-dark one, and rows of bar left on
-        // the screen show as a black line along its top and bottom edge.
+        // Needs a few judged frames. Thin bars count too (films cropped to 1920x808 with 2 black rows
+        // left at each edge): they show as a black line along the screen's top and bottom. The cut goes
+        // 2 rows into the picture: the bar's last row is usually a soft, half-dark one.
         if (judged >= (dur > 20.0 ? 3 : 1) && height > 0 && bar < (1 << 30) && !asymmetric) {
-            const int crop = bar + 2;
+            // Bars that differ by a few rows (16 above, 25 below): cut the larger one on both sides. A
+            // dozen picture rows lost on one side are not seen; a black line left on the other is.
+            const int larger = std::max(minTop, minBottom);
+            const int crop = (larger - bar <= height / 60 ? larger : bar) + 2;
             const float frac = static_cast<float>(crop) / static_cast<float>(height);
-            out = frac >= 0.015f ? std::min(frac, 0.3f) : 0.0f;
+            out = bar >= 1 ? std::min(frac, 0.3f) : 0.0f;
         }
     } while (false);
     avformat_close_input(&fmt);
@@ -170,8 +250,9 @@ float LetterboxDetector::measure(const std::string& path, int* framesJudged) {
 LetterboxDetector::LetterboxDetector() {
     const char* home = std::getenv("HOME");
     const std::string dir = std::string(home ? home : "/tmp") + "/.cache/pixelvr/";
-    file_ = dir + "letterbox3.tsv";  // (3: cut 2 rows inside the picture; symmetry judged over all frames)
+    file_ = dir + "letterbox4.tsv";  // (4: thin bars are cut too; 4K films with lossless audio get judged)
     std::error_code ec;
+    fs::remove(dir + "letterbox3.tsv", ec);
     fs::remove(dir + "letterbox.tsv", ec);
     fs::remove(dir + "letterbox2.tsv", ec);
     load();
@@ -225,7 +306,10 @@ void LetterboxDetector::save() {
 }
 
 void LetterboxDetector::request(const std::string& path, bool keepPrivate) {
-    if (path.empty() || !(path[0] == '/' || path.rfind("http://", 0) == 0 || path.rfind("https://", 0) == 0)) return;
+    if (path.empty() ||
+        !(path[0] == '/' || path.rfind("http://", 0) == 0 || path.rfind("https://", 0) == 0 || isRemotePath(path))) {
+        return;
+    }
     std::lock_guard<std::mutex> l(mu_);
     const std::string key = keyOf(path);
     if (results_.count(key) || privateResults_.count(key) ||
@@ -267,6 +351,8 @@ void LetterboxDetector::loop() {
         if (priv != privateQueued_.end()) {  // a vault file: nothing about it goes to disk
             privateQueued_.erase(priv);
             privateResults_[keyOf(path)] = frac;
+        } else if (judged < 0 && isRemotePath(path)) {
+            privateResults_[keyOf(path)] = frac;  // the share did not answer: this session only, ask again next time
         } else {
             results_[keyOf(path)] = frac;
             save();

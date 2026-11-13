@@ -584,10 +584,12 @@ inline UiRect settingsSegment(const SettingsCard& L, int s, int n) {
 // Modals.
 inline UiRect confirmModalButton(int i) { return {i == 0 ? -0.15f : 0.15f, -0.15f, 0.13f, 0.046f}; }
 constexpr float kActionMenuStepY = 0.068f;
-inline UiRect actionMenuOption(int i, int count) {
+constexpr float kTracksHalfW = 0.54f;     // the track list is wider: its rows say what each track is
+constexpr float kTracksRowHalfW = 0.48f;
+inline UiRect actionMenuOption(int i, int count, float halfW = 0.38f) {
     const float span = static_cast<float>(std::max(0, count - 1)) * kActionMenuStepY;
     const float startY = -0.040f + 0.5f * span;
-    return {0.0f, startY - static_cast<float>(i) * kActionMenuStepY, 0.38f, 0.028f};
+    return {0.0f, startY - static_cast<float>(i) * kActionMenuStepY, halfW, 0.028f};
 }
 inline UiRect deleteConfirmButton(int i) { return {i == 0 ? -0.15f : 0.15f, -0.12f, 0.13f, 0.042f}; }
 // Network share editor form (action menu page 4). Option ids: 0 host, 1 share
@@ -3065,7 +3067,8 @@ void VulkanRenderer::updatePointer() {
                 if (actionMenu_.page == menupage::Main || actionMenu_.page == menupage::MoveTo || actionMenu_.page == menupage::Format || actionMenu_.page == menupage::Tracks || actionMenu_.page == menupage::Chromium ||
                     actionMenu_.page == menupage::VrQuestion) {
                     for (int i = 0; i < optCount; ++i) {
-                        if (hub::actionMenuOption(i, optCount).contains(hx, hyy, 0.002f)) {
+                        if (hub::actionMenuOption(i, optCount, actionMenu_.page == menupage::Tracks ? hub::kTracksRowHalfW : 0.38f)
+                                .contains(hx, hyy, 0.002f)) {
                             actionMenuBtnHovered_ = i;
                             break;
                         }
@@ -5502,7 +5505,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             {
                 const float dScreen = std::max(std::fabs(head.z), 0.3f);
                 const float dPanel = std::max(placement.dist, 0.3f);
-                push.scr[3] = std::clamp(0.032f * std::max(dScreen - dPanel, 0.0f) / dPanel, 0.004f, 0.15f);
+                push.scr[3] = std::clamp(0.034f * std::max(dScreen - dPanel, 0.0f) / dPanel, 0.004f, 0.40f);
             }
             // Blur to roughly 48 texels across the frame; left view of 3D content.
             const float lod = std::clamp(std::log2(std::max(texW, 48.0f) / 48.0f), 0.0f, 9.0f);
@@ -8435,7 +8438,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
 
         const float mHalfW = (actionMenu_.page == menupage::ShareEditor) ? hub::kSmbHalfW
                            : (actionMenu_.page == menupage::ScreenPicker) ? hub::kPickHalfW
-                           : (actionMenu_.page == menupage::Arrange) ? hub::kArrHalfW : 0.44f;
+                           : (actionMenu_.page == menupage::Arrange) ? hub::kArrHalfW
+                           : (actionMenu_.page == menupage::Tracks) ? hub::kTracksHalfW : 0.44f;
         const float mHalfH = (actionMenu_.page == menupage::ShareEditor) ? hub::kSmbHalfH
                            : (actionMenu_.page == menupage::ScreenPicker) ? hub::kPickHalfH
                            : (actionMenu_.page == menupage::Arrange) ? hub::kArrHalfH
@@ -8697,7 +8701,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
 
         if (actionMenu_.page == menupage::Main || actionMenu_.page == menupage::MoveTo || actionMenu_.page == menupage::Format || actionMenu_.page == menupage::Tracks || actionMenu_.page == menupage::Chromium ||
             actionMenu_.page == menupage::VrQuestion) {
-            const float btnHalfW = 0.38f;
+            const float btnHalfW = actionMenu_.page == menupage::Tracks ? hub::kTracksRowHalfW : 0.38f;
             const float btnHalfH = 0.028f;
             for (int i = 0; i < menuOptCount; ++i) {
                 const float cy = hub::actionMenuOption(i, menuOptCount).cy;
@@ -9092,8 +9096,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     // A track row: its icon tile on the left (box pass), then the language, then the details.
                     const bool inUse = (kindRaw & 16) != 0;
                     const float* col = (kindRaw & 15) == 4 ? dimCol : ((hov || inUse) ? themeTextCol : slateCol);
-                    withHeadingFont([&] { drawFit(-0.305f, cy, 0.12f, sc, col, o.substr(0, bar)); });
-                    drawFit(-0.175f, cy, 0.47f, sc * 0.92f, col, o.substr(bar + 1));
+                    const float rowL = -hub::kTracksRowHalfW;
+                    withHeadingFont([&] { drawFit(rowL + 0.075f, cy, 0.12f, sc, col, o.substr(0, bar)); });
+                    drawFit(rowL + 0.205f, cy, 2.0f * hub::kTracksRowHalfW - 0.205f - 0.075f, sc * 0.92f, col, o.substr(bar + 1));
                 } else if (bar != std::string::npos) {
                     // "short|full": the short name in bold on the left, what it stands for beside it.
                     withHeadingFont([&] { drawFit(-0.335f, cy, 0.20f, sc, hov ? themeTextCol : slateCol, o.substr(0, bar)); });

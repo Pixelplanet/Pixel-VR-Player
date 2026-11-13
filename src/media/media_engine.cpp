@@ -148,6 +148,38 @@ private:
 };
 #endif
 
+}  // namespace
+
+std::unique_ptr<RemoteFile> openRemoteMedia(const std::string& path, std::string& err) {
+    if (path.rfind("smb://", 0) != 0) return remoteOpen(path, err);
+#ifdef PIXELVR_HAVE_SMB
+    // libsmbclient is not thread-safe; serialize context setup against the
+    // browser's scans/downloads, which share Samba's global state.
+    std::lock_guard<std::mutex> smb(smbGlobalLock());
+    SMBCCTX* ctx = smbc_new_context();
+    if (ctx != nullptr) {
+        smbc_setFunctionAuthDataWithContext(ctx, &smb_auth);
+        if (smbc_init_context(ctx) == nullptr) {
+            smbc_free_context(ctx, 1);
+            ctx = nullptr;
+        }
+    }
+    smbc_open_fn openFn = (ctx != nullptr) ? smbc_getFunctionOpen(ctx) : nullptr;
+    SMBCFILE* file = (openFn != nullptr) ? openFn(ctx, path.c_str(), O_RDONLY, 0) : nullptr;
+    if (file == nullptr) {
+        if (ctx != nullptr) smbc_free_context(ctx, 1);
+        err = "the file on the share could not be opened";
+        return nullptr;
+    }
+    return std::make_unique<SmbFile>(ctx, file);
+#else
+    err = "SMB support not built";
+    return nullptr;
+#endif
+}
+
+namespace {
+
 // Streams a network file (SMB, SFTP, WebDAV) behind a FFmpeg AVIOContext. A
 // background thread prefetches the file into a ring buffer so the demux read
 // callback serves from memory; network jitter then no longer stalls decoding.
@@ -1529,51 +1561,12 @@ bool MediaEngine::open(const std::string& path) {
             return false;
         }
     } else if (isRemotePath(path)) {
-        std::unique_ptr<RemoteFile> remote;
-        if (path.rfind("smb://", 0) != 0) {
-            std::string err;
-            remote = remoteOpen(path, err);
-            if (!remote) {
-                impl_->lastError = err;
-                PIXELVR_LOG_ERROR("MediaEngine: cannot open %s: %s", path.c_str(), err.c_str());
-                return false;
-            }
-        } else {
-#ifdef PIXELVR_HAVE_SMB
-        // libsmbclient is not thread-safe; serialize context setup against the
-        // browser's scans/downloads, which share Samba's global state.
-        SMBCCTX* ctx = nullptr;
-        SMBCFILE* file = nullptr;
-        {
-            std::lock_guard<std::mutex> smb(smbGlobalLock());
-            ctx = smbc_new_context();
-            if (ctx != nullptr) {
-                smbc_setFunctionAuthDataWithContext(ctx, &smb_auth);
-                if (smbc_init_context(ctx) == nullptr) {
-                    smbc_free_context(ctx, 1);
-                    ctx = nullptr;
-                }
-            }
-            smbc_open_fn openFn =
-                (ctx != nullptr) ? smbc_getFunctionOpen(ctx) : nullptr;
-            file = (openFn != nullptr) ? openFn(ctx, path.c_str(), O_RDONLY, 0)
-                                       : nullptr;
-            if (file == nullptr && ctx != nullptr) {
-                smbc_free_context(ctx, 1);
-                ctx = nullptr;
-            }
-            if (file != nullptr) {
-                remote = std::make_unique<SmbFile>(ctx, file);
-            }
-        }
+        std::string err;
+        std::unique_ptr<RemoteFile> remote = openRemoteMedia(path, err);
         if (!remote) {
-            PIXELVR_LOG_ERROR("MediaEngine: cannot open SMB stream %s", path.c_str());
+            impl_->lastError = err;
+            PIXELVR_LOG_ERROR("MediaEngine: cannot open %s: %s", path.c_str(), err.c_str());
             return false;
-        }
-#else
-            impl_->lastError = "SMB support not built";
-            return false;
-#endif
         }
         if (impl_->openAborted.load(std::memory_order_acquire)) {
             impl_->lastError = "cancelled";

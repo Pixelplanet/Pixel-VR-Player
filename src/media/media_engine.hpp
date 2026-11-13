@@ -11,6 +11,11 @@
 
 namespace pixelvr {
 
+class RemoteFile;
+// Opens a file on a network share (smb://, sftp://, dav(s)://) for reading: its own connection, as
+// playback uses. Null on failure (`err` says why).
+std::unique_ptr<RemoteFile> openRemoteMedia(const std::string& path, std::string& err);
+
 // A decoded video frame in NV12 (8-bit luma plane + interleaved CbCr). YUV->RGB
 // conversion happens on the GPU. `serial` increases monotonically so consumers
 // can detect new frames without copying.

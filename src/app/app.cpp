@@ -864,12 +864,13 @@ void App::finishLoadMedia(int slot) {
     sc.engine.setSubtitleStream(sc.subtitleChoice);
     sc.subtitleChoice = sc.engine.subtitleStream();  // (-1 when that track is not a usable one)
     if (slot == 0 && settings_.screenSizeIdx() == 3) applyScreenSize(false);  // Original Pixels: this video's
-    // Letterbox bars: measured in the background (not for remote network shares).
+    // Letterbox bars: measured in the background (films on network shares too: a few short reads over
+    // a second connection; most films people keep on a NAS are letterboxed).
     sc.letterbox = 0.0f;
     renderer_.setLetterbox(slot, 0.0f);
     // Vault files are measured too, but their result stays in memory (nothing about them on disk).
     const bool vaultFile = VaultManager::isPrivatePath(path);
-    sc.letterboxPending = (!privatePath || sc.webSuspended || vaultFile) && !remoteStream;
+    sc.letterboxPending = !privatePath || sc.webSuspended || vaultFile;
     if (sc.letterboxPending) letterboxDetector_.request(path, vaultFile);
     if (slot == 0) {
         renderer_.setProjectionMode(proj);
