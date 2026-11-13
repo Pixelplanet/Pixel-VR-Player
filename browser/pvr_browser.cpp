@@ -1226,7 +1226,7 @@ int runScreen(const ScreenOptions& opt) {
                  ",\"title\":" + pvrjson::quote(info.getString("title")) + ",\"file\":" + pvrjson::quote(info.getString("file")) +
                  ",\"info\":" +
                  pvrjson::quote(info.getString("info")) + ",\"markers\":" + pvrjson::quote(info.getString("mk")) +
-                 ",\"offset\":" + nums);
+                 ",\"sub\":" + std::to_string(static_cast<int>(info.getNumber("sub", -1))) + ",\"offset\":" + nums);
     };
     // JS returning that info for the metadata object `m` (part `p`).
     const std::string kPlexInfoJs =
@@ -1234,6 +1234,8 @@ int runScreen(const ScreenOptions& opt) {
         "file:(p.file||'').split(/[\\\\/]/).pop(),"
         "dur:m.duration||0,off:m.viewOffset||0,rk:m.ratingKey,key:m.key,type:m.type||'',"
         "aud:((p.Stream||[]).find(s=>s.streamType===2&&s.selected)||{index:-1}).index,"
+        // The embedded subtitle track selected on the page (external ones have no stream index).
+        "sub:((p.Stream||[]).find(s=>s.streamType===3&&s.selected&&s.index!=null)||{index:-1}).index,"
         // Intro / credits markers (when the server has analysed the file): "intro:0-88000;credits:..." in ms.
         "mk:(m.Marker||[]).filter(x=>x.type==='intro'||x.type==='credits')"
         ".map(x=>x.type+':'+Math.round(x.startTimeOffset||0)+'-'+Math.round(x.endTimeOffset||0)).join(';'),"

@@ -143,9 +143,19 @@ public:
         int index = -1;        // stream index within the container
         std::string label;     // human-readable (codec + channels/size + lang)
         std::string language;  // ISO-639 code from metadata, or empty
+        bool usable = true;    // subtitles: false for picture subtitles (PGS / DVD), which are not drawn yet
     };
     std::vector<StreamInfo> videoStreams() const;
     std::vector<StreamInfo> audioStreams() const;
+    // Subtitles: the file's own text tracks (index = container stream) and .srt files next to a local
+    // file (index >= kExternalSubtitleBase). Picture subtitles are listed with usable = false.
+    static constexpr int kExternalSubtitleBase = 10000;
+    std::vector<StreamInfo> subtitleStreams() const;
+    // -1 = off. Takes effect at once; lines that began before the switch appear after the next seek.
+    void setSubtitleStream(int index);
+    int subtitleStream() const;
+    // The lines to show at `seconds` ('\n' between lines; empty: nothing right now). False: subtitles off.
+    bool subtitleAt(double seconds, std::string& out) const;
     int currentVideoStream() const;  // container index in use, or -1
     int currentAudioStream() const;  // container index in use, or -1
     // Applied on the next open(): force a container stream index (-1 = auto), or

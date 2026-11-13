@@ -451,6 +451,7 @@ void BrowserHost::handleLine(const std::string& line) {
             p.duration = v.getNumber("duration");
             if (!v.getString("service").empty()) p.service = v.getString("service");
             p.audioStream = static_cast<int>(v.getNumber("audio", -1));
+            p.subtitleStream = static_cast<int>(v.getNumber("sub", -1));
             if (const pvrjson::Value* ep = v.get("episode")) p.episode = ep->boolean;
             p.episodeInfo = v.getString("info");
             {

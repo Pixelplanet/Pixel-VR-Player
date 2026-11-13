@@ -279,6 +279,7 @@ private:
     struct TrackRow {
         bool audio = true;
         int index = -1;  // stream index within the container
+        bool subtitle = false;  // a subtitle row (index -1 = off): no reload
     };
     std::vector<TrackRow> trackRows_;
     void downloadFocusedEntry();    // network entry: download (a folder asks first)
@@ -347,6 +348,7 @@ private:
         std::string plexService;        // "plex" or "jellyfin" (told to plugins)
         bool plexEpisode = false;       // a TV episode: the next one is asked for when it ends
         std::vector<BrowserHost::PlexPlay::Marker> plexMarkers;  // intro / credits of what plays (Skip pill)
+        int subtitleChoice = -1;        // the subtitle track picked for this file (kept across a track reload)
         bool plexAwaitingNext = false;  // ended, waiting for the next episode's hand-off
         bool plexNavManual = false;     // ... asked for with the screen's arrow (keeps playing if there is none)
         std::chrono::steady_clock::time_point plexNextSince{};

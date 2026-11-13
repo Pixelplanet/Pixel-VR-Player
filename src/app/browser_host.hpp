@@ -124,6 +124,7 @@ public:
         double duration = 0.0;
         std::string service = "plex";  // plex | jellyfin (same hand-off, docs/concepts/JELLYFIN_PLAN.md)
         int audioStream = -1;          // container index of the audio track chosen on the page (-1 = ours)
+        int subtitleStream = -1;       // ... and of the subtitle track chosen there (-1 = none)
         bool episode = false;          // a TV episode: the next one starts when it ends
         std::string episodeInfo;       // "Series · S1 E2 · Name", shown as the episode starts
         // Intro / credits ranges the server knows for this file (seconds), for "Skip Intro" / "Skip Credits".

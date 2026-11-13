@@ -730,6 +730,10 @@ public:
     void setScreenNav(int slot, bool on) {
         if (slot >= 0 && slot < kMaxVideoSlots) screenOverlay_[slot].nav = on;
     }
+    // Subtitle lines for a flat screen ('\n' between lines), drawn at the bottom of the picture.
+    void setScreenSubtitle(int slot, const std::string& text) {
+        if (slot >= 0 && slot < kMaxVideoSlots) screenOverlay_[slot].subs = text;
+    }
     // A pill at the screen's lower right ("Skip Intro", "Skip Credits"); empty = none.
     void setScreenSkip(int slot, const std::string& label) {
         if (slot >= 0 && slot < kMaxVideoSlots) screenOverlay_[slot].skip = label;
@@ -1264,6 +1268,7 @@ private:
         std::chrono::steady_clock::time_point shownAt{}, until{};
         bool nav = false;  // an episode: previous / next arrows while the laser is on it
         std::string skip;  // "Skip Intro" / "Skip Credits" pill at the lower right (empty: none)
+        std::string subs;  // subtitle lines
     };
     int screenSkipSlot_ = -1;  // the screen whose skip pill the laser is on
     ScreenOverlay screenOverlay_[kMaxVideoSlots];

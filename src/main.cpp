@@ -1,3 +1,4 @@
+#include <unistd.h>
 #include "app/app.hpp"
 #include "app/bundled_ffmpeg.hpp"
 #include "app/vault_manager.hpp"
@@ -91,6 +92,32 @@ int run_probe(const std::string& path) {
                 static_cast<double>(near0) / frame.uv.size());
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(30));
+    }
+    // Subtitles: every track, and the first line each usable one shows within the first seconds.
+    for (const auto& st : media.subtitleStreams()) {
+        PIXELVR_LOG_INFO("probe: subtitle track %d  [%s] %s%s", st.index, st.language.c_str(), st.label.c_str(),
+                         st.usable ? "" : "  (not usable)");
+        if (!st.usable) continue;
+        media.setSubtitleStream(st.index);
+        media.seek(0.0);
+        // Let it play for a few seconds (frames are taken and dropped), then ask for some moments.
+        pixelvr::DrmVideoFrame drm;
+        for (int i = 0; i < 280; ++i) {
+            media.latestFrame(frame);
+            if (media.latestDrmFrame(drm) && drm.fd >= 0) {
+                ::close(drm.fd);
+                drm.fd = -1;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        }
+        for (double t : {1.7, 2.5, 5.5, 6.5}) {
+            std::string text;
+            media.subtitleAt(t, text);
+            for (char& c : text) {
+                if (c == '\n') c = '|';
+            }
+            PIXELVR_LOG_INFO("probe:   at %.1f s (playing %.1f s): %s", t, media.position(), text.empty() ? "-" : text.c_str());
+        }
     }
     media.close();
     PIXELVR_LOG_INFO("probe: done (%d frames sampled)", got);

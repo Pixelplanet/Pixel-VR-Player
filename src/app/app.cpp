@@ -858,6 +858,11 @@ void App::finishLoadMedia(int slot) {
     sc.projection = static_cast<int>(proj);
     sc.stereo = sc.engine.frameSequential() ? 3 : static_cast<int>(stereo);  // FS3D shows as its own format
     renderer_.setPixelAspect(slot, sc.engine.pixelAspect());  // non-square pixels: the display shape
+    // Subtitles: the same file again (a track switch) keeps the choice; a Plex / Jellyfin play takes the
+    // track chosen on the page; anything else starts without.
+    if (!sameFile) sc.subtitleChoice = (isPlex && sc.webSuspended) ? plexPlay.subtitleStream : -1;
+    sc.engine.setSubtitleStream(sc.subtitleChoice);
+    sc.subtitleChoice = sc.engine.subtitleStream();  // (-1 when that track is not a usable one)
     if (slot == 0 && settings_.screenSizeIdx() == 3) applyScreenSize(false);  // Original Pixels: this video's
     // Letterbox bars: measured in the background (not for remote network shares).
     sc.letterbox = 0.0f;
@@ -1712,11 +1717,16 @@ void App::openTracksMenu() {
     if (!cur().open || cur().web) return;
     const auto audio = cur().engine.audioStreams();
     const auto video = cur().engine.videoStreams();
-    if (audio.size() < 2 && video.size() < 2) return;
+    std::vector<MediaEngine::StreamInfo> subs;
+    for (const auto& s : cur().engine.subtitleStreams()) {
+        if (s.usable) subs.push_back(s);
+    }
+    if (audio.size() < 2 && video.size() < 2 && subs.empty()) return;
     actionMenu_.visible = true;
     actionMenu_.page = menupage::Tracks;
-    actionMenu_.title = video.size() > 1 ? "Tracks" : "Audio Track";
-    actionMenu_.subtitle = "The video reloads at the same position";
+    actionMenu_.title = (video.size() > 1 || !subs.empty()) ? "Tracks" : "Audio Track";
+    actionMenu_.subtitle = (audio.size() > 1 || video.size() > 1) ? "Audio / video: the video reloads at the same position"
+                                                                  : "Subtitles";
     actionMenu_.options.clear();
     trackRows_.clear();
     actionMenu_.selectedOption = 0;
@@ -1726,13 +1736,27 @@ void App::openTracksMenu() {
         for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
         return s;
     };
-    // At most 10 rows fit the menu: audio first (what people switch), then video tracks.
-    for (std::size_t i = 0; i < audio.size() && trackRows_.size() < 10; ++i) {
+    // At most 10 rows fit the menu. Subtitles get what audio leaves (at least Off + 4), video the rest.
+    const std::size_t audioRows = audio.size() > 1 ? std::min<std::size_t>(audio.size(), subs.empty() ? 10 : 5) : 0;
+    const int curSub = cur().engine.subtitleStream();
+    for (std::size_t i = 0; i < audioRows && trackRows_.size() < 10; ++i) {
         const bool on = audio[i].index == curAudio;
         const std::string shortName = audio[i].language.empty() ? "Audio " + std::to_string(i + 1) : upper(audio[i].language);
         actionMenu_.options.push_back(shortName + "|" + audio[i].label + (on ? "  (playing)" : ""));
         if (on) actionMenu_.selectedOption = static_cast<int>(trackRows_.size());
         trackRows_.push_back({true, audio[i].index});
+    }
+    if (!subs.empty()) {
+        actionMenu_.options.push_back(std::string("Subs|Subtitles off") + (curSub < 0 ? "  (now)" : ""));
+        if (audioRows == 0 && curSub < 0) actionMenu_.selectedOption = static_cast<int>(trackRows_.size());
+        trackRows_.push_back({false, -1, true});
+        for (std::size_t i = 0; i < subs.size() && trackRows_.size() < 10; ++i) {
+            const bool on = subs[i].index == curSub;
+            const std::string shortName = subs[i].language.empty() ? "Subs " + std::to_string(i + 1) : "Subs " + upper(subs[i].language);
+            actionMenu_.options.push_back(shortName + "|" + subs[i].label + (on ? "  (now)" : ""));
+            if (audioRows == 0 && on) actionMenu_.selectedOption = static_cast<int>(trackRows_.size());
+            trackRows_.push_back({false, subs[i].index, true});
+        }
     }
     for (std::size_t i = 0; video.size() > 1 && i < video.size() && trackRows_.size() < 10; ++i) {
         const bool on = video[i].index == curVideo;
@@ -3985,6 +4009,11 @@ int App::run() {
                     }
                 }
                 renderer_.setScreenSkip(s, skip);
+                std::string subs;
+                if (es.open && !es.web && !es.openAbandoned && es.projection == 0) {
+                    es.engine.subtitleAt(es.engine.position(), subs);
+                }
+                renderer_.setScreenSubtitle(s, subs);
             }
             if (in.select) {
                 int ks = -1;
@@ -6017,7 +6046,14 @@ int App::run() {
 #ifdef PIXELVR_HAVE_MEDIA
                                     if (chosen < static_cast<int>(trackRows_.size()) && cur().open) {
                                         const TrackRow tr = trackRows_[static_cast<std::size_t>(chosen)];
-                                        if (tr.audio) {
+                                        if (tr.subtitle) {  // at once, no reload
+                                            cur().engine.setSubtitleStream(tr.index);
+                                            cur().subtitleChoice = cur().engine.subtitleStream();
+                                            // Lines already on screen at this moment come with a tiny seek.
+                                            if (cur().subtitleChoice >= 0 && cur().subtitleChoice < MediaEngine::kExternalSubtitleBase) {
+                                                cur().engine.seek(cur().engine.position());
+                                            }
+                                        } else if (tr.audio) {
                                             settings_.setSelectedAudioStream(tr.index);
                                             if (tr.index != cur().engine.currentAudioStream()) switchTracks(false);
                                         } else {
@@ -7074,7 +7110,9 @@ int App::run() {
                         }
                     }
                     // Only enable audio cycling if there is more than 1 audio stream
-                    aEnabled = (aStreams.size() > 1) || cur().engine.videoStreams().size() > 1;
+                    bool haveSubs = false;
+                    for (const auto& s : cur().engine.subtitleStreams()) haveSubs = haveSubs || s.usable;
+                    aEnabled = (aStreams.size() > 1) || cur().engine.videoStreams().size() > 1 || haveSubs;
                 }
 
                 std::string sLabel = "Reset Horizon";

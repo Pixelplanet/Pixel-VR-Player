@@ -3427,7 +3427,7 @@ void VulkanRenderer::updatePointer() {
                 webPointerV_ = screenHitV;
             }
             if (!screenOverlay_[screenHitSlot].skip.empty() && screenHitU > 0.725f && screenHitU < 0.985f &&
-                screenHitV > 0.795f && screenHitV < 0.935f) {
+                screenHitV > 0.665f && screenHitV < 0.800f) {
                 screenSkipSlot_ = screenHitSlot;  // the skip pill (drawScreenOverlay: lower right)
             }
             if (screenOverlay_[screenHitSlot].nav) {
@@ -4920,11 +4920,14 @@ int VulkanRenderer::screenOverlayKey(int slot) const {
     const int alphaStep = static_cast<int>(screenTitleAlpha(slot) * 20.0f + 0.5f);
     const bool arrows = screenOverlay_[slot].nav && screenNavSlot_ == slot;
     const std::string& skip = screenOverlay_[slot].skip;
-    if (alphaStep == 0 && !arrows && skip.empty()) return 0;
+    const std::string& subs = screenOverlay_[slot].subs;
+    if (alphaStep == 0 && !arrows && skip.empty() && subs.empty()) return 0;
     const int hover = arrows ? (screenNavHover_ + 2) : 0;  // 1 = arrows, no hover; 2/3 = hovered side
-    const int skipKey = skip.empty() ? 0 : (static_cast<int>(skip.size()) * 2 + (screenSkipSlot_ == slot ? 1 : 0)) * 8192;
-    return 1 + alphaStep + 32 * hover + 256 * static_cast<int>(std::hash<std::string>{}(screenOverlay_[slot].title) & 0x1F) +
-           skipKey;
+    const int skipKey = skip.empty() ? 0 : static_cast<int>(skip.size()) * 2 + (screenSkipSlot_ == slot ? 1 : 0);
+    std::size_t h = std::hash<std::string>{}(screenOverlay_[slot].title);
+    h = h * 1000003u + std::hash<std::string>{}(subs);
+    h = h * 1000003u + static_cast<std::size_t>(alphaStep + 32 * hover + 4096 * skipKey);
+    return 1 + static_cast<int>(h & 0x3FFFFFFF);
 }
 
 void VulkanRenderer::drawCopyText(const std::string& utf8, float cx, float cy, float h, float maxW, const float color[4],
@@ -5030,10 +5033,64 @@ void VulkanRenderer::drawScreenOverlay(int slot, float ax, const math::Mat4& ort
         const float white[4] = {1.0f, 1.0f, 1.0f, a};
         drawCopyText(screenOverlay_[slot].title, 0.0f, 0.70f, textH, maxTextW, white, ax, ortho, glyphCursor);
     }
+    // Subtitles: up to three lines at the bottom, each on its own dark strip.
+    if (!screenOverlay_[slot].subs.empty()) {
+        const FontAtlas& font = fontAtlasBold_.ok ? fontAtlasBold_ : fontAtlas_;
+        const float textH = 0.088f, pitch = 0.118f, maxW = 2.7f;
+        auto widthOf = [&](const std::string& t) {
+            float w = 0.0f;
+            if (font.ok && font.lineHeight > 0.0f) {
+                for (std::size_t i = 0; i < t.size(); ++i) {
+                    const unsigned char ch = static_cast<unsigned char>(t[i]);
+                    if ((ch & 0xC0) == 0x80) continue;  // UTF-8 continuation byte: counted with its lead
+                    w += font.glyphs[ch < 0x80 ? ch : static_cast<unsigned char>('n')].advance * (textH / font.lineHeight);
+                }
+            }
+            return w * ax;
+        };
+        // The cue's own lines, each wrapped at words when it is wider than the picture allows.
+        std::vector<std::string> lines;
+        std::string cueLine;
+        const std::string& all = screenOverlay_[slot].subs;
+        for (std::size_t i = 0; i <= all.size(); ++i) {
+            if (i < all.size() && all[i] != '\n') {
+                cueLine += all[i];
+                continue;
+            }
+            std::string line, word;
+            for (std::size_t k = 0; k <= cueLine.size(); ++k) {
+                if (k < cueLine.size() && cueLine[k] != ' ') {
+                    word += cueLine[k];
+                    continue;
+                }
+                if (word.empty()) continue;
+                const std::string trial = line.empty() ? word : line + " " + word;
+                if (!line.empty() && widthOf(trial) > maxW) {
+                    lines.push_back(line);
+                    line = word;
+                } else {
+                    line = trial;
+                }
+                word.clear();
+            }
+            if (!line.empty()) lines.push_back(line);
+            cueLine.clear();
+        }
+        if (lines.size() > 3) lines.erase(lines.begin(), lines.end() - 3);  // the latest three
+        const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        const float bg[4] = {0.0f, 0.0f, 0.0f, 0.58f};
+        const float none[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+        for (std::size_t i = 0; i < lines.size(); ++i) {
+            const float y = -0.775f + pitch * static_cast<float>(lines.size() - 1 - i);
+            const float w = std::min(widthOf(lines[i]), maxW);
+            shape(0.0f, y, (0.5f * w + 0.045f) / ax, 0.5f * pitch, UiShape::RoundedBox, bg, 0.30f, 0.0f, none);
+            drawCopyText(lines[i], 0.0f, y, textH, maxW, white, ax, ortho, glyphCursor);
+        }
+    }
     // "Skip Intro" / "Skip Credits": a pill at the lower right for as long as that part plays.
     if (!screenOverlay_[slot].skip.empty()) {
         const bool hov = screenSkipSlot_ == slot;
-        const float cx = 1.136f, cy = -0.657f;  // drawn units (the screen is 3.2 x 1.8); hit-test: updatePointer
+        const float cx = 1.136f, cy = -0.42f;  // drawn units (the screen is 3.2 x 1.8), above the subtitles; hit-test: updatePointer
         const float bg[4] = {hov ? ac[0] * 0.55f : 0.03f, hov ? ac[1] * 0.55f : 0.04f, hov ? ac[2] * 0.55f : 0.06f, hov ? 0.94f : 0.78f};
         const float rim[4] = {hov ? ac[0] : 1.0f, hov ? ac[1] : 1.0f, hov ? ac[2] : 1.0f, hov ? 1.0f : 0.45f};
         shape(cx / ax, cy, 0.368f / ax, 0.100f, UiShape::RoundedBox, bg, 1.0f, hov ? 0.07f : 0.05f, rim);

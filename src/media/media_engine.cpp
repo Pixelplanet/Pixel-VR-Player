@@ -494,6 +494,21 @@ struct MediaEngine::Impl {
 
     std::vector<MediaEngine::StreamInfo> videoStreamList;
     std::vector<MediaEngine::StreamInfo> audioStreamList;
+    // Subtitles. Embedded text tracks are decoded on the decode thread as their packets pass by; .srt
+    // files next to the video are read whole when chosen.
+    struct SubCue {
+        double start = 0.0, end = 0.0;
+        std::string text;
+    };
+    std::vector<MediaEngine::StreamInfo> subtitleStreamList;
+    std::vector<std::string> subtitleFiles;      // sidecar .srt paths (index - kExternalSubtitleBase)
+    std::atomic<int> subtitleStream{-1};         // container index, an external index, or -1 = off
+    mutable std::mutex subMutex;
+    std::deque<SubCue> subCues;                  // embedded: around the playback position
+    std::vector<SubCue> subFileCues;             // external: the whole file, sorted
+    AVCodecContext* subCodec = nullptr;          // decode thread only
+    int subCodecStream = -1;
+    void decodeSubtitle(const AVPacket* packet);
     int preferredVideoStream = -1;  // container index to force, or -1 = auto
     int preferredAudioStream = -1;
     std::string preferredLanguage;  // ISO code to auto-pick audio, or empty
@@ -720,6 +735,137 @@ struct MediaEngine::Impl {
     void decodeLoop();
     void audioThreadLoop();
 };
+
+namespace {
+
+// Dialogue text without styling: ASS override blocks {\\...}, HTML-like tags, \\N / \\n / \\h.
+std::string plainSubtitleText(const std::string& in) {
+    std::string out;
+    for (size_t i = 0; i < in.size(); ++i) {
+        const char c = in[i];
+        if (c == '{') {
+            const size_t e = in.find('}', i);
+            if (e != std::string::npos) {
+                i = e;
+                continue;
+            }
+        }
+        if (c == '<') {
+            const size_t e = in.find('>', i);
+            if (e != std::string::npos && e - i <= 24) {
+                i = e;
+                continue;
+            }
+        }
+        if (c == '\\' && i + 1 < in.size()) {
+            const char n = in[i + 1];
+            if (n == 'N' || n == 'n') {
+                out += '\n';
+                ++i;
+                continue;
+            }
+            if (n == 'h') {
+                out += ' ';
+                ++i;
+                continue;
+            }
+        }
+        if (c == '\r') continue;
+        out += c;
+    }
+    while (!out.empty() && (out.back() == '\n' || out.back() == ' ')) out.pop_back();
+    size_t lead = 0;
+    while (lead < out.size() && (out[lead] == '\n' || out[lead] == ' ')) ++lead;
+    return out.substr(lead);
+}
+
+// "ReadOrder,Layer,Style,Name,MarginL,MarginR,MarginV,Effect,Text" -> Text (FFmpeg's ASS event line).
+std::string assEventText(const char* ass) {
+    if (ass == nullptr) return {};
+    const char* p = ass;
+    for (int commas = 0; commas < 8 && *p; ++p) {
+        if (*p == ',') ++commas;
+    }
+    return plainSubtitleText(p);
+}
+
+// A .srt file: blocks of "n", "hh:mm:ss,mmm --> hh:mm:ss,mmm", text lines, blank line.
+bool readSrtFile(const std::string& path, std::vector<std::pair<std::pair<double, double>, std::string>>& out) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return false;
+    std::string line, text;
+    double start = -1.0, end = -1.0;
+    auto flush = [&] {
+        const std::string t = plainSubtitleText(text);
+        if (start >= 0.0 && end > start && !t.empty()) out.push_back({{start, end}, t});
+        start = end = -1.0;
+        text.clear();
+    };
+    while (std::getline(in, line)) {
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
+        if (line.size() >= 3 && static_cast<unsigned char>(line[0]) == 0xEF) line = line.substr(3);  // BOM
+        int h1, m1, s1, ms1, h2, m2, s2, ms2;
+        if (std::sscanf(line.c_str(), "%d:%d:%d%*[,.]%d --> %d:%d:%d%*[,.]%d", &h1, &m1, &s1, &ms1, &h2, &m2, &s2, &ms2) == 8) {
+            flush();
+            start = h1 * 3600.0 + m1 * 60.0 + s1 + ms1 / 1000.0;
+            end = h2 * 3600.0 + m2 * 60.0 + s2 + ms2 / 1000.0;
+        } else if (line.empty()) {
+            flush();
+        } else if (start >= 0.0) {
+            text += (text.empty() ? "" : "\n") + line;
+        }  // (the block number before a time line is skipped)
+    }
+    flush();
+    return !out.empty();
+}
+
+}  // namespace
+
+void MediaEngine::Impl::decodeSubtitle(const AVPacket* packet) {
+    const int si = packet->stream_index;
+    if (subCodecStream != si) {  // first packet of the chosen track: its decoder
+        if (subCodec != nullptr) avcodec_free_context(&subCodec);
+        subCodecStream = si;
+        const AVCodecParameters* cp = format->streams[si]->codecpar;
+        const AVCodec* dec = avcodec_find_decoder(cp->codec_id);
+        if (dec != nullptr) {
+            subCodec = avcodec_alloc_context3(dec);
+            if (subCodec != nullptr) {
+                avcodec_parameters_to_context(subCodec, cp);
+                subCodec->pkt_timebase = format->streams[si]->time_base;
+                if (avcodec_open2(subCodec, dec, nullptr) < 0) avcodec_free_context(&subCodec);
+            }
+        }
+        if (subCodec == nullptr) PIXELVR_LOG_WARN("MediaEngine: no decoder for subtitle track %d", si);
+    }
+    if (subCodec == nullptr || packet->pts == AV_NOPTS_VALUE) return;
+    AVSubtitle sub{};
+    int got = 0;
+    if (avcodec_decode_subtitle2(subCodec, &sub, &got, packet) < 0 || !got) return;
+    const double tb = av_q2d(format->streams[si]->time_base);
+    SubCue cue;
+    cue.start = packet->pts * tb + sub.start_display_time / 1000.0;
+    double len = (sub.end_display_time != 0 && sub.end_display_time != UINT32_MAX) ? sub.end_display_time / 1000.0 : 0.0;
+    if (len <= 0.0 && packet->duration > 0) len = packet->duration * tb;
+    if (len <= 0.0) len = 4.0;
+    cue.end = packet->pts * tb + std::min(len, 20.0);
+    for (unsigned r = 0; r < sub.num_rects; ++r) {
+        const AVSubtitleRect* rect = sub.rects[r];
+        std::string t;
+        if (rect->type == SUBTITLE_ASS) t = assEventText(rect->ass);
+        else if (rect->type == SUBTITLE_TEXT && rect->text != nullptr) t = plainSubtitleText(rect->text);
+        if (!t.empty()) cue.text += (cue.text.empty() ? "" : "\n") + t;
+    }
+    avsubtitle_free(&sub);
+    if (cue.text.empty()) return;
+    std::lock_guard<std::mutex> lock(subMutex);
+    for (const SubCue& c : subCues) {  // demuxed again after a seek back
+        if (std::fabs(c.start - cue.start) < 0.01 && c.text == cue.text) return;
+    }
+    subCues.push_back(std::move(cue));
+    const double now = masterClock.load();
+    while (subCues.size() > 200 || (!subCues.empty() && subCues.front().end < now - 30.0)) subCues.pop_front();
+}
 
 void MediaEngine::Impl::decodeLoop() {
     AVPacket* packet = av_packet_alloc();
@@ -1244,6 +1390,7 @@ void MediaEngine::Impl::decodeLoop() {
             }
         }
 #endif
+        if (packet->stream_index == subtitleStream.load(std::memory_order_relaxed)) decodeSubtitle(packet);
         av_packet_unref(packet);
     }
 
@@ -1533,6 +1680,14 @@ bool MediaEngine::open(const std::string& path) {
     // can offer track + language selection.
     impl_->videoStreamList.clear();
     impl_->audioStreamList.clear();
+    impl_->subtitleStreamList.clear();
+    impl_->subtitleFiles.clear();
+    impl_->subtitleStream.store(-1);
+    {
+        std::lock_guard<std::mutex> lock(impl_->subMutex);
+        impl_->subCues.clear();
+        impl_->subFileCues.clear();
+    }
     for (unsigned si = 0; si < impl_->format->nb_streams; ++si) {
         AVStream* s = impl_->format->streams[si];
         const AVCodecParameters* cp = s->codecpar;
@@ -1556,6 +1711,47 @@ bool MediaEngine::open(const std::string& path) {
                           cp->ch_layout.nb_channels, lang.empty() ? "" : " ",
                           lang.c_str());
             impl_->audioStreamList.push_back({static_cast<int>(si), buf, lang});
+        } else if (cp->codec_type == AVMEDIA_TYPE_SUBTITLE) {
+            const AVCodecDescriptor* desc = avcodec_descriptor_get(cp->codec_id);
+            const bool text = desc != nullptr && (desc->props & AV_CODEC_PROP_TEXT_SUB) != 0 && dc != nullptr;
+            std::string title;
+            if (AVDictionaryEntry* e = av_dict_get(s->metadata, "title", nullptr, 0)) title = e->value;
+            std::string label = title.empty() ? std::string(desc ? desc->name : "subtitle") : title;
+            if (s->disposition & AV_DISPOSITION_FORCED) label += " (forced)";
+            if (!text) label += " (picture subtitles: not supported yet)";
+            impl_->subtitleStreamList.push_back({static_cast<int>(si), label, lang, text});
+        }
+    }
+    // .srt files next to a local, unencrypted video: "Movie.srt", "Movie.en.srt", "Movie.forced.de.srt".
+    if (!path.empty() && path[0] == '/' && !vaultcrypto::isEncrypted(path)) {
+        namespace fs = std::filesystem;
+        std::error_code ec;
+        const fs::path video(path);
+        const std::string base = video.stem().string();
+        std::vector<std::string> found;
+        for (const auto& e : fs::directory_iterator(video.parent_path(), ec)) {
+            std::error_code e2;
+            if (!e.is_regular_file(e2)) continue;
+            const std::string name = e.path().filename().string();
+            std::string ext = e.path().extension().string();
+            for (char& ch : ext) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            if (ext != ".srt" || name.size() <= base.size() + 3 || name.compare(0, base.size(), base) != 0 ||
+                name[base.size()] != '.') {
+                continue;
+            }
+            found.push_back(e.path().string());
+        }
+        std::sort(found.begin(), found.end());
+        for (const std::string& f : found) {
+            if (impl_->subtitleFiles.size() >= 8) break;
+            // What stands between the video's name and ".srt" ("en", "forced.de"), else just "file".
+            const std::string name = fs::path(f).filename().string();
+            std::string tag = name.substr(base.size(), name.size() - base.size() - 4);
+            if (!tag.empty() && tag[0] == '.') tag = tag.substr(1);
+            const std::string lang = (tag.size() == 2 || tag.size() == 3) ? tag : std::string();
+            impl_->subtitleStreamList.push_back({kExternalSubtitleBase + static_cast<int>(impl_->subtitleFiles.size()),
+                                                 tag.empty() || !lang.empty() ? "File next to the video" : "File: " + tag, lang, true});
+            impl_->subtitleFiles.push_back(f);
         }
     }
 
@@ -1960,6 +2156,8 @@ void MediaEngine::close() {
         impl_->thread.join();
     }
     impl_->teardown();
+    if (impl_->subCodec != nullptr) avcodec_free_context(&impl_->subCodec);  // (the decode thread is gone)
+    impl_->subCodecStream = -1;
     impl_->audioOnly = false;
     impl_->formatHint = {};
     impl_->chapters.clear();
@@ -2035,6 +2233,10 @@ void MediaEngine::seek(double seconds) {
         ++impl_->seekSerial;
     }
     impl_->queueCv.notify_all();  // wake a back-pressured decoder to handle the seek
+    {
+        std::lock_guard<std::mutex> lock(impl_->subMutex);  // lines of the old position
+        impl_->subCues.clear();
+    }
 }
 
 void MediaEngine::seekRelative(double delta) {
@@ -2053,6 +2255,54 @@ std::vector<MediaEngine::StreamInfo> MediaEngine::videoStreams() const {
 
 std::vector<MediaEngine::StreamInfo> MediaEngine::audioStreams() const {
     return impl_ ? impl_->audioStreamList : std::vector<StreamInfo>{};
+}
+
+std::vector<MediaEngine::StreamInfo> MediaEngine::subtitleStreams() const {
+    return impl_ ? impl_->subtitleStreamList : std::vector<StreamInfo>{};
+}
+
+int MediaEngine::subtitleStream() const { return impl_ ? impl_->subtitleStream.load() : -1; }
+
+void MediaEngine::setSubtitleStream(int index) {
+    if (!impl_) return;
+    bool known = index < 0;
+    for (const StreamInfo& s : impl_->subtitleStreamList) known = known || (s.index == index && s.usable);
+    if (!known) index = -1;
+    std::vector<Impl::SubCue> file;
+    if (index >= kExternalSubtitleBase) {
+        const size_t fi = static_cast<size_t>(index - kExternalSubtitleBase);
+        std::vector<std::pair<std::pair<double, double>, std::string>> cues;
+        if (fi < impl_->subtitleFiles.size() && readSrtFile(impl_->subtitleFiles[fi], cues)) {
+            for (auto& c : cues) file.push_back({c.first.first, c.first.second, std::move(c.second)});
+            std::sort(file.begin(), file.end(), [](const Impl::SubCue& a, const Impl::SubCue& b) { return a.start < b.start; });
+        } else {
+            index = -1;
+        }
+    }
+    std::lock_guard<std::mutex> lock(impl_->subMutex);
+    impl_->subCues.clear();
+    impl_->subFileCues = std::move(file);
+    impl_->subtitleStream.store(index);
+}
+
+bool MediaEngine::subtitleAt(double seconds, std::string& out) const {
+    out.clear();
+    if (!impl_) return false;
+    const int index = impl_->subtitleStream.load();
+    if (index < 0) return false;
+    std::lock_guard<std::mutex> lock(impl_->subMutex);
+    auto add = [&](const Impl::SubCue& c) {
+        if (seconds >= c.start && seconds < c.end) out += (out.empty() ? "" : "\n") + c.text;
+    };
+    if (index >= kExternalSubtitleBase) {
+        for (const Impl::SubCue& c : impl_->subFileCues) {
+            if (c.start > seconds) break;
+            add(c);
+        }
+    } else {
+        for (const Impl::SubCue& c : impl_->subCues) add(c);
+    }
+    return true;
 }
 
 int MediaEngine::currentVideoStream() const {
