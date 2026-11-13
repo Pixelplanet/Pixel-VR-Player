@@ -858,6 +858,7 @@ void App::finishLoadMedia(int slot) {
     sc.projection = static_cast<int>(proj);
     sc.stereo = sc.engine.frameSequential() ? 3 : static_cast<int>(stereo);  // FS3D shows as its own format
     renderer_.setPixelAspect(slot, sc.engine.pixelAspect());  // non-square pixels: the display shape
+    if (slot == 0 && settings_.screenSizeIdx() == 3) applyScreenSize(false);  // Original Pixels: this video's
     // Letterbox bars: measured in the background (not for remote network shares).
     sc.letterbox = 0.0f;
     renderer_.setLetterbox(slot, 0.0f);
@@ -1913,7 +1914,7 @@ void App::updateButtonLabels(std::chrono::steady_clock::time_point nowT, bool la
     st.music = cur().open && !cur().web && cur().engine.audioOnly();
 #endif
     st.sphere = settings_.projectionMode() != 0;
-    st.panShift = st.sphere && panShiftLatched_;
+    st.panShift = panShiftLatched_;  // 360 / 180: pan and tilt; flat video: size
     st.controlsVisible = cur().open && !hudDismissed_ && renderer_.controlBarVisible();
     renderer_.setButtonLabels(shown, buildButtonLabelCards(labelSources_, st));
 }
@@ -3088,6 +3089,33 @@ void App::computeArrangement(const Arrangement& a,
             }
         }
     }
+}
+
+void App::applyScreenSize(bool resetDistance) {
+    const int idx = settings_.screenSizeIdx();
+    float scale = 1.0f;
+    float dist = settings_.screenDistance();
+    if (idx == 1) {
+        scale = 1.5f;
+    } else if (idx == 2) {  // Cinema: about 10 m wide from 8 m
+        scale = 3.2f;
+        dist = 8.0f;
+    } else if (idx == 3) {
+#ifdef PIXELVR_HAVE_MEDIA
+        // One video pixel per display pixel: the screen is as tall as the picture's rows are at this distance.
+        const ScreenState& sc = screens_[0];
+        const float f = renderer_.eyePixelsPerRadian();
+        if (sc.open && !sc.web && sc.engine.height() > 0 && f > 1.0f) {
+            float rows = static_cast<float>(sc.engine.height());
+            const float aspect = sc.engine.pixelAspect() * static_cast<float>(sc.engine.width()) / rows;
+            if (sc.stereo == 2 && aspect <= 1.2f) rows *= 0.5f;  // full top-bottom: one view's rows
+            const float d = resetDistance ? dist : renderer_.screenDistance();
+            scale = rows * d / (f * 1.8f);
+        }
+#endif
+    }
+    renderer_.setMainScreenScale(scale);
+    if (resetDistance) renderer_.setScreenDistance(dist);
 }
 
 void App::applyArrangement(const Arrangement& a) {
@@ -4698,6 +4726,7 @@ int App::run() {
 #endif
             if (!didInitialRecenter_ && in.headValid) {
                 renderer_.setScreenDistance(settings_.screenDistance());
+                applyScreenSize(true);
                 renderer_.recenterScreen(in.headPos, in.headForward);  // initial
                 renderer_.setScreenCurvature(settings_.screenCurvature());
                 didInitialRecenter_ = true;
@@ -4795,7 +4824,10 @@ int App::run() {
 #endif
             const bool quietRecenter = watching && settings_.silentRecenter();
             const bool quietSkip = watching && settings_.silentScrub();
-            const bool quietBumper = watching && !musicActive && sphereNow;  // 360/180: the pan / tilt shift
+            // The bumper as a shift: 360 / 180 pans and tilts (never wakes the controls); flat video
+            // changes the screen's size (quiet when zoom / distance is set to stay quiet).
+            const bool quietBumper = watching && !musicActive &&
+                                     (sphereNow || (cur().open && !cur().web && settings_.silentZoom()));
             const bool silentPlaybackAction = (quietRecenter && recenterPressed) ||
                                               (quietSkip && (skipBackPressed || skipFwdPressed)) ||
                                               (quietBumper && (prevPressed || nextPressed));
@@ -6408,8 +6440,11 @@ int App::run() {
                                 xr_.triggerHaptic(0, 0.040f, 0.0f, 0.6f);
                                 xr_.triggerHaptic(1, 0.040f, 0.0f, 0.6f);
                             }
+                        } else if (act == SettingsMenu::Action::CycleScreenSize) {
+                            applyScreenSize(true);
                         } else if (act == SettingsMenu::Action::CycleDistance) {
                             renderer_.setScreenDistance(settings_.screenDistance());
+                            applyScreenSize(true);
                             if (arrangementActive_) {
                                 arrangement_.dist = renderer_.screenDistance();
                                 applyArrangement(arrangement_);
@@ -6617,10 +6652,17 @@ int App::run() {
                 // bumper first must not turn the rest of a pan into a scrub or a 30 s step.
                 const bool sticksCentred = std::fabs(in.thumbstickX) < 0.2f && std::fabs(in.thumbstickY) < 0.2f &&
                                            std::fabs(in.thumbstickLX) < 0.2f && std::fabs(in.thumbstickRX) < 0.2f;
-                const bool bumperHeldNow = sphereMode && (in.previousHeld || in.nextHeld);
+                // Flat video: the bumper turns the stick's up / down from distance into size (music keeps
+                // its bumpers for the tracks, a web page its own keys).
+                const bool flatShiftOk = !sphereMode && cur().open && !cur().web
+#ifdef PIXELVR_HAVE_MEDIA
+                                         && !cur().engine.audioOnly()
+#endif
+                    ;
+                const bool bumperHeldNow = (sphereMode || flatShiftOk) && (in.previousHeld || in.nextHeld);
                 if (bumperHeldNow) panShiftLatched_ = true;
-                else if (sticksCentred || !sphereMode) panShiftLatched_ = false;
-                const bool bumperShift = bumperHeldNow || (sphereMode && panShiftLatched_);
+                else if (sticksCentred || !(sphereMode || flatShiftOk)) panShiftLatched_ = false;
+                const bool bumperShift = bumperHeldNow || panShiftLatched_;
                 if (bumperShift) seekStepArmed_ = false;
                 if (in.recenter && in.headValid) {
                     recenterView(in);
@@ -6652,7 +6694,24 @@ int App::run() {
                 // immersive 360/180 uses thumbstick Y to zoom by default, and
                 // holding Bumper (Previous/Next) + thumbstick X/Y pans yaw and tilts pitch.
                 if (!sphereMode) {
-                    if (in.thumbstickY > 0.15f || in.thumbstickY < -0.15f) {
+                    if (bumperShift && std::fabs(in.thumbstickY) > 0.15f && dt > 0.0f) {
+                        // Size, at the distance it has: snapped screens grow together (their relative
+                        // sizes stay), a free screen or the single one on its own.
+                        const float k = 1.0f + in.thumbstickY * dt * 0.8f;
+                        if (groupedScreen(selectedScreen_)) {
+                            arrangement_.scale = std::clamp(arrangement_.scale * k, 0.4f, 3.0f);
+                            applyArrangement(arrangement_);
+                        } else if (selectedScreen_ > 0 || renderer_.screenPlacement(selectedScreen_).active) {
+                            VulkanRenderer::ScreenPlacement pl = renderer_.screenPlacement(selectedScreen_);
+                            pl.scale = std::clamp(pl.scale * k, 0.35f, 4.0f);
+                            renderer_.setScreenPlacement(selectedScreen_, pl);
+                        } else {
+                            renderer_.setMainScreenScale(renderer_.mainScreenScale() * k);
+                        }
+                        if (hudShown) interacted = true;
+                    } else if (bumperShift) {
+                        // (shift held: up / down is size only)
+                    } else if (in.thumbstickY > 0.15f || in.thumbstickY < -0.15f) {
                         if (groupedScreen(selectedScreen_)) {
                             // Snapped layout: the whole wall moves nearer / farther.
                             arrangement_.dist = std::clamp(arrangement_.dist + in.thumbstickY * 0.04f, 1.0f, 10.0f);

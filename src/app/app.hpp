@@ -405,6 +405,8 @@ private:
     bool groupedScreen(int slot) const { return arrangementActive_ && arrangement_.snap && inArrangement(slot); }
     // A new / closed screen joins / leaves the arrangement in use.
     void joinArrangement(int slot);
+    // Settings > Screen Size for the single main screen (`resetDistance`: also its distance).
+    void applyScreenSize(bool resetDistance);
     // Adds `slot` to `a` the way a new screen joins: a third screen makes the standard
     // "two below, one above" (the new one on top) unless the user chose three in a row.
     void addToArrangement(Arrangement& a, int slot) const;

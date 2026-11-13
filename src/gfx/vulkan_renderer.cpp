@@ -5832,6 +5832,10 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             std::tan(view.fov.angleLeft), std::tan(view.fov.angleRight),
             std::tan(view.fov.angleUp), std::tan(view.fov.angleDown), 0.05f, 100.0f);
         const Mat4 vpV = multiply(projV, viewMatV);
+        if (viewIndex == 0 && !viewTargets_.empty() && viewTargets_[0].width > 0) {
+            const float span = std::tan(view.fov.angleRight) - std::tan(view.fov.angleLeft);
+            if (span > 0.1f) eyePxPerRad_ = static_cast<float>(viewTargets_[0].width) / span;
+        }
 
         // Draw order: farther screens first so nearer ones blend over them.
         int order[kMaxVideoSlots] = {0, 1, 2};
@@ -5905,6 +5909,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                                   screenPivot_[1] + screenForward_[1] * screenDistance_,
                                   screenPivot_[2] + screenForward_[2] * screenDistance_};
                     rot = orientFromYawPitch(screenYaw_, recenterPitch_);
+                    scale = mainScreenScale_;
                 } else {
                     center = Vec3{pl.center[0], pl.center[1], pl.center[2]};
                     rot = orientFromYawPitchRoll(pl.yaw, pl.pitch, pl.roll);

@@ -217,6 +217,11 @@ public:
     const float* screenForward() const { return screenForward_; }
     // Moves the flat screen farther (positive) or nearer (negative), clamped.
     void adjustScreenDistance(float delta);
+    // Size of the single (unplaced) main screen: 1 = 3.2 m wide. Distance and size are independent.
+    float mainScreenScale() const { return mainScreenScale_; }
+    void setMainScreenScale(float s) { mainScreenScale_ = std::clamp(s, 0.35f, 4.0f); }
+    // Render-target pixels per radian at the centre of the view (for a screen shown pixel for pixel).
+    float eyePixelsPerRadian() const { return eyePxPerRad_; }
     void setScreenDistance(float d) { screenDistance_ = d < 1.0f ? 1.0f : (d > 10.0f ? 10.0f : d); }
     // Parametric curvature for cinema screen: 0.0 = flat plane, 1.0 = full cylinder wrap.
     void setScreenCurvature(float c) { screenCurvature_ = c < 0.0f ? 0.0f : (c > 1.0f ? 1.0f : c); }
@@ -1168,6 +1173,8 @@ private:
 
     float ambilightIntensity_ = 0.55f;
     float ambilightReach_ = 0.46f;
+    float mainScreenScale_ = 1.0f;
+    float eyePxPerRad_ = 0.0f;
     float themeAccentRgb_[3] = {0.35f, 0.64f, 1.0f};
     float themeTextRgb_[3] = {0.91f, 0.93f, 0.95f};
 

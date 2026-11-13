@@ -38,6 +38,7 @@ public:
         ToggleModels,
         ToggleStats,
         CycleDistance,
+        CycleScreenSize,
         CycleCurvature,
         CycleUiTextScale,
         CycleUiTextColor,
@@ -250,6 +251,7 @@ public:
     bool pluginRemoveArmed(int i);  // true: confirmed, the app removes it now
     void tickPlugins();
     float screenDistance() const { return screenDistance_; }
+    int screenSizeIdx() const { return screenSizeIdx_; }  // 0 Standard, 1 Large, 2 Cinema, 3 Original Pixels
     void setScreenDistance(float d) { screenDistance_ = d; refresh(); }
     float screenCurvature() const;
     void setCurvatureIdx(int idx);
@@ -475,6 +477,7 @@ private:
     int hoverHapticsStrengthIdx_ = 1;
     int ambilightIdx_ = 2;     // 0=Off, 1=Subtle, 2=Medium (default), 3=Strong
     bool ambilightAllScreens_ = true;  // multi-screen: glow around every screen
+    int screenSizeIdx_ = 0;
     int glowReachIdx_ = 3;     // 0=Close, 1=Short, 2=Medium, 3=Wide (default, the look before the setting)
 
     int section_ = 0;   // 0=Display, 1=UI, 2=Audio, 3=Controls, 4=Vault; 10..12, 21, 22, 23..=sub-pages; 15/16=plugins

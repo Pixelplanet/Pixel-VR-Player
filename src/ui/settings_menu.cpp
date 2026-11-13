@@ -111,6 +111,10 @@ constexpr int kPanelCurveCount = 3;
 constexpr float kDistanceMin = 2.0f;  // closer and the screen sits in front of the menus
 constexpr float kDistanceStep = 0.5f;
 constexpr int kDistanceSteps = 8;
+// Size of a single screen: 1 = 3.2 m wide. Cinema is very big and further away; Original Pixels
+// shows one video pixel per display pixel (worked out per video by the app).
+const char* kScreenSizeNames[] = {"Standard", "Large", "Cinema", "Original Pixels"};
+constexpr int kScreenSizeCount = 4;
 
 std::string getConfigPath() {
 #ifdef _WIN32
@@ -372,6 +376,8 @@ void SettingsMenu::refresh() {
             0, kDistanceSteps - 1);
         choice("Default Screen Distance", distStream.str(), kDistanceSteps, distIdx,
                Action::CycleDistance);
+        choice("Screen Size", kScreenSizeNames[screenSizeIdx_ % kScreenSizeCount], kScreenSizeCount,
+               screenSizeIdx_ % kScreenSizeCount, Action::CycleScreenSize, projectionMode_ == 0);
         toggle("Swap Left/Right Eye", swapEyes_, Action::ToggleSwapEyes);
         toggle("Multiple Screens", multiScreen_, Action::ToggleMultiScreen);
         toggle("Remove Black Bars", removeBlackBars_, Action::ToggleRemoveBlackBars);
@@ -1179,6 +1185,11 @@ SettingsMenu::Action SettingsMenu::activate() {
             refresh();
             break;
         }
+        case Action::CycleScreenSize:
+            screenSizeIdx_ = (screenSizeIdx_ + 1) % kScreenSizeCount;
+            saveConfig();
+            refresh();
+            break;
         case Action::CycleCurvature:
             curvatureIdx_ = (curvatureIdx_ + 1) % kCurvatureCount;
             saveConfig();
@@ -1887,6 +1898,7 @@ void SettingsMenu::loadConfig() {
             else if (key == "ambilight") ambilightIdx_ = std::clamp(std::stoi(val), 0, kAmbilightCount - 1);
             else if (key == "ambilight_all") ambilightAllScreens_ = (val == "1");
             else if (key == "glow_reach") glowReachIdx_ = std::clamp(std::stoi(val), 0, kGlowReachCount - 1);
+            else if (key == "screen_size") screenSizeIdx_ = std::clamp(std::stoi(val), 0, kScreenSizeCount - 1);
             else if (key == "laser_smoothing") laserSmoothing_ = std::clamp(std::stoi(val), 0, 3);
             else if (key == "room") roomIdx_ = std::clamp(std::stoi(val), 0, 3);
             else if (key == "multi_screen") multiScreen_ = (val == "1" || val == "true");
@@ -1958,6 +1970,7 @@ void SettingsMenu::saveConfig() const {
             file << "ambilight=" << ambilightIdx_ << "\n";
             file << "ambilight_all=" << (ambilightAllScreens_ ? 1 : 0) << "\n";
             file << "glow_reach=" << glowReachIdx_ << "\n";
+            file << "screen_size=" << screenSizeIdx_ << "\n";
             file << "laser_smoothing=" << laserSmoothing_ << "\n";
             file << "room=" << roomIdx_ << "\n";
             file << "panel_curve=" << panelCurveIdx_ << "\n";

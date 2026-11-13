@@ -108,6 +108,12 @@ std::string buttonLabelText(InputAction a, const ButtonLabelState& s) {
         return t->menus ? t->menus : "";
     }
     if ((t->flags & kNeedsMedia) && !s.mediaOpen) return std::string();
+    // Flat video: a held bumper turns the sticks' up / down into the screen's size.
+    const bool flatVideo = !s.sphere && s.mediaOpen && !s.music && !s.web;
+    if (flatVideo && (a == InputAction::Previous || a == InputAction::Next)) {
+        return s.panShift ? "Release: Scrub \xC2\xB7 Distance" : "Hold: Size";
+    }
+    if (flatVideo && s.panShift && (a == InputAction::StickRight || a == InputAction::StickLeft)) return "Size";
     if ((t->flags & kNeedsMusic) && !s.music && !(s.sphere && t->sphere)) return std::string();
     if ((t->flags & kNotWeb) && s.web) return std::string();
     if ((t->flags & kNotLaserOnWeb) && s.laserOnWeb) return std::string();

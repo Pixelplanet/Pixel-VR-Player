@@ -35,7 +35,7 @@ struct ButtonLabelState {
     bool web = false;              // ... and it is a web page (the D-pad leaves pages alone)
     bool music = false;            // ... and it is music (Previous / Next = tracks)
     bool sphere = false;           // 360 / 180 projection
-    bool panShift = false;         // ... with a bumper held: the sticks pan and tilt the view
+    bool panShift = false;         // a bumper held: 360 / 180 pans and tilts the view, flat video changes size
     bool controlsVisible = false;  // the player controls are shown (Back hides them)
 };
 
