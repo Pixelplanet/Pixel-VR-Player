@@ -835,7 +835,7 @@ bool readSrtFile(const std::string& path, std::vector<std::pair<std::pair<double
     };
     while (std::getline(in, line)) {
         while (!line.empty() && (line.back() == '\r' || line.back() == ' ')) line.pop_back();
-        if (line.size() >= 3 && static_cast<unsigned char>(line[0]) == 0xEF) line = line.substr(3);  // BOM
+        if (line.compare(0, 3, "\xEF\xBB\xBF") == 0) line.erase(0, 3);  // BOM (only that: many CJK marks start with EF)
         int h1, m1, s1, ms1, h2, m2, s2, ms2;
         if (std::sscanf(line.c_str(), "%d:%d:%d%*[,.]%d --> %d:%d:%d%*[,.]%d", &h1, &m1, &s1, &ms1, &h2, &m2, &s2, &ms2) == 8) {
             flush();
@@ -1756,7 +1756,10 @@ bool MediaEngine::open(const std::string& path) {
             for (char& ch : lowTag) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
             int flags = StreamInfo::kFromFile;
             if (lowTag.find("forced") != std::string::npos) flags |= StreamInfo::kForced;
-            if (lowTag.find("sdh") != std::string::npos || lowTag.find("hi") == 0) flags |= StreamInfo::kHearingImpaired;
+            // "hi" alone is Hindi; it means hearing-impaired only after a language ("en.hi", "en.hi.forced").
+            const bool hiPart = lowTag.find(".hi.") != std::string::npos ||
+                                (lowTag.size() > 3 && lowTag.compare(lowTag.size() - 3, 3, ".hi") == 0);
+            if (lowTag.find("sdh") != std::string::npos || hiPart) flags |= StreamInfo::kHearingImpaired;
             impl_->subtitleStreamList.push_back({kExternalSubtitleBase + static_cast<int>(impl_->subtitleFiles.size()),
                                                  tag.empty() || !lang.empty() ? "File next to the video" : "File: " + tag, lang, true,
                                                  flags, name});
@@ -2304,6 +2307,10 @@ bool MediaEngine::subtitleAt(double seconds, std::string& out) const {
         if (seconds >= c.start && seconds < c.end) out += (out.empty() ? "" : "\n") + c.text;
     };
     if (index >= kExternalSubtitleBase) {
+        // A file's times count from the first frame; the clock is the container's (.ts starts above 0).
+        if (impl_->format && impl_->format->start_time != AV_NOPTS_VALUE && impl_->format->start_time > 0) {
+            seconds -= impl_->format->start_time / static_cast<double>(AV_TIME_BASE);
+        }
         for (const Impl::SubCue& c : impl_->subFileCues) {
             if (c.start > seconds) break;
             add(c);

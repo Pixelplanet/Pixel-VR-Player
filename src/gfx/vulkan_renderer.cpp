@@ -3431,7 +3431,7 @@ void VulkanRenderer::updatePointer() {
                 webPointerV_ = screenHitV;
             }
             if (!screenOverlay_[screenHitSlot].skip.empty() && screenHitU > 0.695f && screenHitU < 0.985f &&
-                screenHitV > 0.665f && screenHitV < 0.800f) {
+                screenHitV > 0.632f && screenHitV < 0.767f) {
                 screenSkipSlot_ = screenHitSlot;  // the skip pill (drawScreenOverlay: lower right)
             }
             if (screenOverlay_[screenHitSlot].nav) {
@@ -3469,7 +3469,8 @@ void VulkanRenderer::updatePointer() {
         }
         // A screen the ray reaches before the dock plane is what the beam sees
         // first (the dock keeps a small lead, so grazing hits still go to it).
-        if (screenHitSlot >= 0 && bestT < length(world - origin) - 0.02f) {
+        // (Not a plain single screen: there the dock must stay clickable when the video is nearer.)
+        if ((multiScreenActive_ || anyWeb) && screenHitSlot >= 0 && bestT < length(world - origin) - 0.02f) {
             takeScreenHit();
             break;
         }
@@ -5098,7 +5099,7 @@ void VulkanRenderer::drawScreenOverlay(int slot, float ax, const math::Mat4& ort
     // "Skip Intro" / "Skip Credits": a pill at the lower right for as long as that part plays.
     if (!screenOverlay_[slot].skip.empty()) {
         const bool hov = screenSkipSlot_ == slot;
-        const float cx = 1.085f, cy = -0.42f;  // drawn units (the screen is 3.2 x 1.8), above the subtitles; hit-test: updatePointer
+        const float cx = 1.085f, cy = -0.36f;  // drawn units (the screen is 3.2 x 1.8), above the subtitles; hit-test: updatePointer
         const float bg[4] = {hov ? ac[0] * 0.55f : 0.03f, hov ? ac[1] * 0.55f : 0.04f, hov ? ac[2] * 0.55f : 0.06f, hov ? 0.94f : 0.78f};
         const float rim[4] = {hov ? ac[0] : 1.0f, hov ? ac[1] : 1.0f, hov ? ac[2] : 1.0f, hov ? 1.0f : 0.45f};
         shape(cx / ax, cy, 0.440f / ax, 0.100f, UiShape::RoundedBox, bg, 1.0f, hov ? 0.07f : 0.05f, rim);
@@ -5480,6 +5481,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             push.eye[0] = head.x;
             push.eye[1] = head.y;
             push.eye[2] = head.z;
+            push.eye[3] = web ? 0.0f : letterboxFor(slot);  // bars cut from the screen: the outline is the picture only
             push.ndc[0] = 0.5f * (c1.x - c0.x);
             push.ndc[1] = 0.5f * (c1.y - c0.y);
             push.ndc[2] = 0.5f * (c1.x + c0.x);

@@ -772,6 +772,7 @@ void XrContext::syncActions() {
             input_.gripFullPressHeld[h] = false;
             prevFull_[h] = false;
         }
+        bumperDown_[0] = bumperDown_[1] = false;  // a press cut off by losing focus is not a tap later
         return;
     }
 
@@ -780,6 +781,7 @@ void XrContext::syncActions() {
     sync.countActiveActionSets = 1;
     sync.activeActionSets = &active;
     if (XR_FAILED(xrSyncActions(session_, &sync))) {
+        bumperDown_[0] = bumperDown_[1] = false;
         return;  // Not focused yet: no input this frame.
     }
     if (bindingsDirty_) {  // bindings can be queried now that a focused sync ran
@@ -885,15 +887,17 @@ void XrContext::syncActions() {
         bool tap[2] = {false, false};
         for (int b = 0; b < 2; ++b) {
             if (heldNow[b]) {
-                if (!bumperDown_[b]) {
-                    bumperDown_[b] = true;
-                    bumperUsed_[b] = false;
+                if (!bumperDown_[b]) {  // (bumperUsed_ is cleared on release: a button pressed in the
+                    bumperDown_[b] = true;  // same frame as the bumper has already marked it)
                     bumperSince_[b] = now;
                 }
                 if (heldNow[1 - b] || now - bumperSince_[b] > std::chrono::milliseconds(400)) bumperUsed_[b] = true;
-            } else if (bumperDown_[b]) {
+            } else {
+                if (bumperDown_[b]) {
+                    tap[b] = !bumperUsed_[b] && now - bumperSince_[b] <= std::chrono::milliseconds(400);
+                }
                 bumperDown_[b] = false;
-                tap[b] = !bumperUsed_[b];
+                bumperUsed_[b] = false;
             }
         }
         input_.previous = tap[0];

@@ -2918,6 +2918,7 @@ void App::ensureScreenPlacement(int slot) {
 }
 
 void App::startGrabbingScreen(int slot, const XrInputState& in) {
+    grabStartPlacement_ = renderer_.screenPlacement(slot);
     ensureScreenPlacement(slot);
     const VulkanRenderer::ScreenPlacement& pl = renderer_.screenPlacement(slot);
     const int hand = renderer_.pointerHand() == 0 ? 0 : 1;
@@ -2928,7 +2929,8 @@ void App::startGrabbingScreen(int slot, const XrInputState& in) {
     const float dz = hit[2] - origin[2];
     // Keep the grabbed point under the laser: remember its distance along the
     // ray and the screen centre's offset from it.
-    movingDistance_ = std::clamp(std::sqrt(dx * dx + dy * dy + dz * dz), 0.8f, 8.0f);
+    // (Up to 16 m: a cinema-size screen 10 m away is hit further off than that at its edges.)
+    movingDistance_ = std::clamp(std::sqrt(dx * dx + dy * dy + dz * dz), 0.8f, 16.0f);
     for (int k = 0; k < 3; ++k) {
         grabOffset_[k] = pl.center[k] - hit[k];
         grabStart_[k] = pl.center[k];
@@ -4123,7 +4125,9 @@ int App::run() {
                                       std::fabs(in.thumbstickLX) >= 0.15f || std::fabs(in.thumbstickRX) >= 0.15f;
                 // (in.next is the tap itself: it arrives when the bumper is let go, and not at all after
                 // a long hold or a button pressed with it.)
-                const bool blocked = stickOff || in.previousHeld || panShiftLatched_ || browser_.isOpen() ||
+                // (Not panShiftLatched_: every bumper press on a video sets it. A stick off centre is
+                // what makes the bumper a shift, and that is checked here.)
+                const bool blocked = stickOff || in.previousHeld || browser_.isOpen() ||
                                      settings_.isOpen() || downloadsWindow_ || actionMenu_.visible;
                 if (in.nextHeld) {
                     if (!skipTapDown_) {
@@ -4136,6 +4140,7 @@ int App::run() {
                         // The selected screen first, else any screen showing the pill.
                         bool done = skipPart(selectedScreen_);
                         for (int s = 0; s < VulkanRenderer::kMaxVideoSlots && !done; ++s) done = skipPart(s);
+                        if (done) in.next = false;  // the skip took the tap (no Next track on a music screen too)
                     }
                     skipTapDown_ = false;
                 }
@@ -4306,12 +4311,12 @@ int App::run() {
                     if (ctl.active) {
                         const bool group = groupedScreen(movingScreen_);
                         if (std::fabs(in.thumbstickY) > 0.2f) {
-                            movingDistance_ = std::clamp(movingDistance_ + in.thumbstickY * dt * 1.5f, 1.0f, 8.0f);
+                            movingDistance_ = std::clamp(movingDistance_ + in.thumbstickY * dt * 1.5f, 1.0f, 16.0f);
                         }
                         if (std::fabs(in.thumbstickX) > 0.2f) {
                             const float k = 1.0f + in.thumbstickX * dt * 0.8f;
                             if (group) arrangement_.scale = std::clamp(arrangement_.scale * k, 0.4f, 2.2f);
-                            else pl.scale = std::clamp(pl.scale * k, 0.35f, 2.5f);
+                            else pl.scale = std::clamp(pl.scale * k, 0.35f, 4.0f);
                         }
                         const float fwdLocal[3] = {0.0f, 0.0f, -1.0f};
                         float fwd[3];
@@ -4348,6 +4353,20 @@ int App::run() {
                                 arrangementBroken_ = true;
                             }
                         }
+                        if (!multiScreenEnabled() && movingScreen_ == 0) {
+                            // Single screen, let go without a real move: it was a click. The screen goes
+                            // back exactly (the grab turned it to face the head) and the controls hide,
+                            // as a click on the picture always did.
+                            const float mx = pl.center[0] - grabStart_[0];
+                            const float my = pl.center[1] - grabStart_[1];
+                            const float mz = pl.center[2] - grabStart_[2];
+                            if (mx * mx + my * my + mz * mz <= 0.02f * 0.02f &&
+                                std::fabs(pl.scale - grabStartScale_) <= 0.01f) {
+                                renderer_.setScreenPlacement(0, grabStartPlacement_);
+                                singleMoved_ = grabStartSingleMoved_;
+                                if (!in.back && !in.mainMenu) dismissHud(in, nowT);
+                            }
+                        }
                         movingScreen_ = -1;
                         xr_.triggerHaptic(hand, 0.030f, 0.0f, 0.5f);
                     }
@@ -4357,6 +4376,8 @@ int App::run() {
                 in.clearButtons();  // the grab owns the input
                 in.thumbstickX = 0.0f;
                 in.thumbstickY = 0.0f;
+                in.thumbstickLX = in.thumbstickLY = 0.0f;  // (no scrub or 30 s step from resizing it)
+                in.thumbstickRX = in.thumbstickRY = 0.0f;
                 lastControllerActivity_ = nowT;
             }
 
@@ -4811,6 +4832,15 @@ int App::run() {
                     if (screens_[slot].open || screens_[slot].opening) closeMedia(slot);
                 }
                 if (selectedScreen_ != 0) selectScreen(0);
+                if (singleMoved_ && movingScreen_ < 0 &&
+                    (renderer_.mainScreenScale() != singleSnap_[0] || renderer_.screenDistance() != singleSnap_[1] ||
+                     renderer_.screenCurvature() != singleSnap_[2])) {
+                    // Size, distance or curve were set in Settings / on the dock: those are the standard
+                    // screen's, so the dragged one goes back in front and takes them.
+                    VulkanRenderer::ScreenPlacement pl0 = renderer_.screenPlacement(0);
+                    if (pl0.active && renderer_.mainScreenScale() == singleSnap_[0]) renderer_.setMainScreenScale(pl0.scale);
+                    singleMoved_ = false;
+                }
                 if (!singleMoved_) {  // (a screen dragged by hand in single-screen mode keeps its place)
                     if (renderer_.screenPlacement(0).active) {
                         VulkanRenderer::ScreenPlacement pl0 = renderer_.screenPlacement(0);
@@ -6768,7 +6798,8 @@ int App::run() {
             // dock (including its screen row) then controls that screen.
             // Single-screen mode has no lock: trigger-drag on the video moves it (not a web page or the
             // music view, which take the trigger themselves, and not 360 / 180).
-            if (barOk && !multiScreenEnabled() && movingScreen_ < 0 && in.select && renderer_.pointerScreen() == 0 &&
+            if (barOk && !wasHudDismissed && !multiScreenEnabled() && movingScreen_ < 0 && in.select &&
+                renderer_.pointerScreen() == 0 &&
                 renderer_.pointerButton() < 0 && !renderer_.pointerOnTimeline() && cur().open && !cur().web &&
                 settings_.projectionMode() == 0
 #ifdef PIXELVR_HAVE_MEDIA
@@ -6777,7 +6808,11 @@ int App::run() {
                 ) {
                 int hitSlot = -1;
                 if (!renderer_.screenSkipHit(hitSlot)) {
+                    grabStartSingleMoved_ = singleMoved_;
                     singleMoved_ = true;
+                    singleSnap_[0] = renderer_.mainScreenScale();
+                    singleSnap_[1] = renderer_.screenDistance();
+                    singleSnap_[2] = renderer_.screenCurvature();
                     startGrabbingScreen(0, in);
                     in.select = false;
                     interacted = true;
@@ -6926,9 +6961,13 @@ int App::run() {
                 // wide dead zone (0.6) until the stick is back in the middle.
                 {
                     const float rx = std::fabs(in.thumbstickRX), ry = std::fabs(in.thumbstickRY);
+                    const bool shiftOn = in.previousHeld || in.nextHeld || panShiftLatched_;
                     if (rx < 0.15f && ry < 0.15f) stickAxis_ = 0;
                     else if (stickAxis_ == 0 && std::max(rx, ry) > 0.25f) stickAxis_ = ry > rx ? 1 : 2;
-                    if (stickAxis_ == 1 && rx < 0.6f) {
+                    else if (stickAxis_ == 1 && rx >= 0.6f) stickAxis_ = 2;  // (no flapping at the limit)
+                    if (shiftOn) {
+                        // bumper + stick: size, or pan and tilt together: both directions as they are
+                    } else if (stickAxis_ == 1 && rx < 0.6f) {
                         if (std::fabs(in.thumbstickX - in.thumbstickRX) < 1e-4f) in.thumbstickX = 0.0f;
                         in.thumbstickRX = 0.0f;
                     } else if (stickAxis_ == 2 && ry < 0.6f) {

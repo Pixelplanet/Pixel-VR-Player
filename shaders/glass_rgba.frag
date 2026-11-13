@@ -14,7 +14,7 @@ layout(push_constant) uniform Push {
     vec4 misc;  // x: blur lod + 10 * stereo mode, y: alpha, z: corner radius, w: aspect
     vec4 tex;   // xy: crop UV scale (RGBA) or luma offset / scale (NV12), z: sRGB decode, w: panel bend radius
     vec4 scr;   // screen half width (arc), half height, bend radius (0 = flat), edge fade (metres)
-    vec4 eye;   // xyz: the head in screen-local metres
+    vec4 eye;   // xyz: the head in screen-local metres, w: letterbox share cut at the top and bottom each
 } pc;
 
 layout(location = 0) in vec2 vCoord;
@@ -108,6 +108,7 @@ void main() {
     float lod = mod(pc.misc.x, 10.0);
     int stereo = int(pc.misc.x / 10.0 + 0.5);
     vec2 suv = clamp(uv, 0.0, 1.0);
+    suv.y = mix(pc.eye.w, 1.0 - pc.eye.w, suv.y);  // without the black bars (per eye view, so before the halving)
     if (stereo == 2) suv.y *= 0.5;        // top/bottom: left view
     else if (stereo == 1) suv.x *= 0.5;   // side-by-side: left view
     vec3 rgb = sampleVideo(suv, lod);

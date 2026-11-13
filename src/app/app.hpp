@@ -401,6 +401,11 @@ private:
     void startGrabbingScreen(int slot, const XrInputState& in);
     float grabStart_[3] = {0.0f, 0.0f, 0.0f};  // grabbed screen centre at grab start
     float grabStartScale_ = 1.0f;
+    // Single-screen drag: what to go back to when the trigger is let go without a real move (a click).
+    VulkanRenderer::ScreenPlacement grabStartPlacement_{};
+    bool grabStartSingleMoved_ = false;
+    // What Settings had for the screen when it was dragged: a change there puts it back in front.
+    float singleSnap_[3] = {0.0f, 0.0f, 0.0f};
     // Screen arrangements. A layout (preset + which screen sits in which
     // position + snap / style) becomes screen poses in computeArrangement(),
     // which feeds both the Arrange menu's live preview and the real screens.
