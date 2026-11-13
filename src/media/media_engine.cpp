@@ -1719,7 +1719,17 @@ bool MediaEngine::open(const std::string& path) {
             std::string label = title.empty() ? std::string(desc ? desc->name : "subtitle") : title;
             if (s->disposition & AV_DISPOSITION_FORCED) label += " (forced: foreign-language parts only)";
             if (!text) label += " (picture subtitles: not supported yet)";
-            impl_->subtitleStreamList.push_back({static_cast<int>(si), label, lang, text});
+            // What it is for: the container's flags first; many files only say it in the track's name.
+            std::string lowTitle = title;
+            for (char& ch : lowTitle) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            auto named = [&](const char* word) { return lowTitle.find(word) != std::string::npos; };
+            int flags = 0;
+            if ((s->disposition & AV_DISPOSITION_FORCED) || named("forced") || named("erzwungen")) flags |= StreamInfo::kForced;
+            if ((s->disposition & AV_DISPOSITION_HEARING_IMPAIRED) || named("sdh") || named("hearing") || named("geh\xC3\xB6rlos")) {
+                flags |= StreamInfo::kHearingImpaired;
+            }
+            if ((s->disposition & AV_DISPOSITION_COMMENT) || named("comment") || named("kommentar")) flags |= StreamInfo::kCommentary;
+            impl_->subtitleStreamList.push_back({static_cast<int>(si), label, lang, text, flags, title});
         }
     }
     // .srt files next to a local, unencrypted video: "Movie.srt", "Movie.en.srt", "Movie.forced.de.srt".
@@ -1749,8 +1759,14 @@ bool MediaEngine::open(const std::string& path) {
             std::string tag = name.substr(base.size(), name.size() - base.size() - 4);
             if (!tag.empty() && tag[0] == '.') tag = tag.substr(1);
             const std::string lang = (tag.size() == 2 || tag.size() == 3) ? tag : std::string();
+            std::string lowTag = tag;
+            for (char& ch : lowTag) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+            int flags = StreamInfo::kFromFile;
+            if (lowTag.find("forced") != std::string::npos) flags |= StreamInfo::kForced;
+            if (lowTag.find("sdh") != std::string::npos || lowTag.find("hi") == 0) flags |= StreamInfo::kHearingImpaired;
             impl_->subtitleStreamList.push_back({kExternalSubtitleBase + static_cast<int>(impl_->subtitleFiles.size()),
-                                                 tag.empty() || !lang.empty() ? "File next to the video" : "File: " + tag, lang, true});
+                                                 tag.empty() || !lang.empty() ? "File next to the video" : "File: " + tag, lang, true,
+                                                 flags, name});
             impl_->subtitleFiles.push_back(f);
         }
     }

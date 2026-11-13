@@ -1717,16 +1717,18 @@ void App::openTracksMenu() {
     if (!cur().open || cur().web) return;
     const auto audio = cur().engine.audioStreams();
     const auto video = cur().engine.videoStreams();
+    // Subtitles: the ones that can be shown first, then picture subtitles (listed, not selectable).
     std::vector<MediaEngine::StreamInfo> subs;
-    for (const auto& s : cur().engine.subtitleStreams()) {
-        if (s.usable) subs.push_back(s);
+    for (const bool usable : {true, false}) {
+        for (const auto& s : cur().engine.subtitleStreams()) {
+            if (s.usable == usable) subs.push_back(s);
+        }
     }
     if (audio.size() < 2 && video.size() < 2 && subs.empty()) return;
     actionMenu_.visible = true;
     actionMenu_.page = menupage::Tracks;
     actionMenu_.title = (video.size() > 1 || !subs.empty()) ? "Tracks" : "Audio Track";
-    actionMenu_.subtitle = (audio.size() > 1 || video.size() > 1) ? "Audio / video: the video reloads at the same position"
-                                                                  : "Subtitles";
+    actionMenu_.subtitle.clear();  // (the selected row's explanation, set while the menu is open)
     actionMenu_.options.clear();
     actionMenu_.optionKinds.clear();
     trackRows_.clear();
@@ -1745,28 +1747,58 @@ void App::openTracksMenu() {
         const std::string shortName = audio[i].language.empty() ? "#" + std::to_string(i + 1) : upper(audio[i].language);
         actionMenu_.options.push_back(shortName + "|" + audio[i].label);
         actionMenu_.optionKinds.push_back(1 + (on ? 16 : 0));
+        const std::string help = on ? "Audio track: this one is playing." : "Audio track. The video reloads at the same position.";
         if (on) actionMenu_.selectedOption = static_cast<int>(trackRows_.size());
-        trackRows_.push_back({true, audio[i].index});
+        trackRows_.push_back({true, audio[i].index, false, false, help});
     }
     if (!subs.empty()) {
         actionMenu_.options.push_back("Off|No subtitles");
         actionMenu_.optionKinds.push_back(2 + (curSub < 0 ? 16 : 0));
         if (audioRows == 0 && curSub < 0) actionMenu_.selectedOption = static_cast<int>(trackRows_.size());
-        trackRows_.push_back({false, -1, true});
+        trackRows_.push_back({false, -1, true, false, "Subtitles are switched off."});
+        using SI = MediaEngine::StreamInfo;
         for (std::size_t i = 0; i < subs.size() && trackRows_.size() < 10; ++i) {
-            const bool on = subs[i].index == curSub;
-            const std::string shortName = subs[i].language.empty() ? "#" + std::to_string(i + 1) : upper(subs[i].language);
-            actionMenu_.options.push_back(shortName + "|" + subs[i].label);
-            actionMenu_.optionKinds.push_back(2 + (on ? 16 : 0));
+            const SI& st = subs[i];
+            const bool on = st.index == curSub;
+            // What it is, in plain words (people don't know what "forced" or "SDH" means), and a sentence
+            // about it for the line under the title.
+            std::string what, help;
+            if (!st.usable) {
+                what = "Picture subtitles (can't be shown yet)";
+                help = "Stored as pictures (Blu-ray / DVD). The player shows text subtitles only so far.";
+            } else if (st.flags & SI::kForced) {
+                what = "Foreign-language parts only";
+                help = "Lines appear only when someone speaks another language than the film's (\"forced\" subtitles).";
+            } else if (st.flags & SI::kHearingImpaired) {
+                what = "Full, with sound descriptions";
+                help = "Everything that is said, plus sounds and who is speaking (for the hard of hearing, \"SDH\").";
+            } else if (st.flags & SI::kCommentary) {
+                what = "Commentary";
+                help = "Subtitles for the commentary track, not for the film's dialogue.";
+            } else {
+                what = "Full subtitles";
+                help = "Everything that is said in the film.";
+            }
+            if (st.flags & SI::kFromFile) {
+                what += "  (file)";
+                help += " From the file \"" + st.title + "\" next to the video.";
+            } else if (!st.title.empty() && st.usable && st.title.size() <= 28) {
+                what += "  (" + st.title + ")";  // the file's own name for the track, when it is short
+            }
+            const std::string shortName = st.language.empty() ? "#" + std::to_string(i + 1) : upper(st.language);
+            actionMenu_.options.push_back(shortName + "|" + what);
+            actionMenu_.optionKinds.push_back((st.usable ? 2 : 4) + (on ? 16 : 0));
             if (audioRows == 0 && on) actionMenu_.selectedOption = static_cast<int>(trackRows_.size());
-            trackRows_.push_back({false, subs[i].index, true});
+            trackRows_.push_back({false, st.index, true, !st.usable, help});
         }
     }
     for (std::size_t i = 0; video.size() > 1 && i < video.size() && trackRows_.size() < 10; ++i) {
         const bool on = video[i].index == curVideo;
         actionMenu_.options.push_back("#" + std::to_string(i + 1) + "|" + video[i].label);
         actionMenu_.optionKinds.push_back(3 + (on ? 16 : 0));
-        trackRows_.push_back({false, video[i].index});
+        trackRows_.push_back({false, video[i].index, false, false,
+                              on ? std::string("Video track: this one is playing.")
+                                 : std::string("Video track. The video reloads at the same position.")});
     }
     actionMenu_.options.push_back("Cancel");
     actionMenu_.optionKinds.push_back(0);
@@ -5851,6 +5883,11 @@ int App::run() {
                         }
                         const int hov = renderer_.actionMenuBtnHovered();
                         if (hov >= 0) actionMenu_.selectedOption = hov;
+                        if (actionMenu_.page == menupage::Tracks) {  // what the selected row is, in a sentence
+                            const int selRow = actionMenu_.selectedOption;
+                            actionMenu_.subtitle = (selRow >= 0 && selRow < static_cast<int>(trackRows_.size()))
+                                                       ? trackRows_[static_cast<std::size_t>(selRow)].help : std::string();
+                        }
 
                         if (in.select || in.togglePlay) {
                             int chosen = (hov >= 0) ? hov : actionMenu_.selectedOption;
@@ -6057,7 +6094,9 @@ int App::run() {
 #ifdef PIXELVR_HAVE_MEDIA
                                     if (chosen < static_cast<int>(trackRows_.size()) && cur().open) {
                                         const TrackRow tr = trackRows_[static_cast<std::size_t>(chosen)];
-                                        if (tr.subtitle) {  // at once, no reload
+                                        if (tr.unusable) {
+                                            renderer_.setScreenTitle(selectedScreen_, "Picture subtitles can't be shown yet (text subtitles only)", 5.0f);
+                                        } else if (tr.subtitle) {  // at once, no reload
                                             cur().engine.setSubtitleStream(tr.index);
                                             cur().subtitleChoice = cur().engine.subtitleStream();
                                             cur().subtitleLogged = false;
@@ -7124,8 +7163,7 @@ int App::run() {
                         }
                     }
                     // Only enable audio cycling if there is more than 1 audio stream
-                    bool haveSubs = false;
-                    for (const auto& s : cur().engine.subtitleStreams()) haveSubs = haveSubs || s.usable;
+                    const bool haveSubs = !cur().engine.subtitleStreams().empty();  // also ones that only explain themselves
                     aEnabled = (aStreams.size() > 1) || cur().engine.videoStreams().size() > 1 || haveSubs;
                 }
 

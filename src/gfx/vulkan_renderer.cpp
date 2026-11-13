@@ -8722,7 +8722,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     const float amber[4] = {1.0f, 0.72f, 0.30f, 1.0f};
                     const float grey[4] = {0.72f, 0.78f, 0.88f, 1.0f};
                     const float accent[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 1.0f};
-                    const float* kc = kind == 1 ? accent : (kind == 2 ? amber : grey);
+                    const float dim[4] = {0.42f, 0.46f, 0.54f, 1.0f};
+                    const float* kc = kind == 1 ? accent : (kind == 2 ? amber : (kind == 4 ? dim : grey));
                     const float tile[4] = {kc[0] * 0.22f, kc[1] * 0.22f, kc[2] * 0.22f, 0.95f};
                     const float ix = -btnHalfW + 0.034f;
                     drawUiElement(vpPanel, ix, cy, 0.026f, btnHalfH - 0.004f, UiShape::RoundedBox, tile, 0.45f, 0.06f, kc);
@@ -9090,7 +9091,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 if (bar != std::string::npos && kindRaw != 0) {
                     // A track row: its icon tile on the left (box pass), then the language, then the details.
                     const bool inUse = (kindRaw & 16) != 0;
-                    const float* col = (hov || inUse) ? themeTextCol : slateCol;
+                    const float* col = (kindRaw & 15) == 4 ? dimCol : ((hov || inUse) ? themeTextCol : slateCol);
                     withHeadingFont([&] { drawFit(-0.305f, cy, 0.12f, sc, col, o.substr(0, bar)); });
                     drawFit(-0.175f, cy, 0.47f, sc * 0.92f, col, o.substr(bar + 1));
                 } else if (bar != std::string::npos) {

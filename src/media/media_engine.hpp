@@ -144,6 +144,10 @@ public:
         std::string label;     // human-readable (codec + channels/size + lang)
         std::string language;  // ISO-639 code from metadata, or empty
         bool usable = true;    // subtitles: false for picture subtitles (PGS / DVD), which are not drawn yet
+        // Subtitles: what the track is for (from the file's flags, else its title).
+        enum : int { kForced = 1, kHearingImpaired = 2, kCommentary = 4, kFromFile = 8 };
+        int flags = 0;
+        std::string title;     // the track's own name in the file, or the sidecar's file name
     };
     std::vector<StreamInfo> videoStreams() const;
     std::vector<StreamInfo> audioStreams() const;

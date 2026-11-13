@@ -280,6 +280,8 @@ private:
         bool audio = true;
         int index = -1;  // stream index within the container
         bool subtitle = false;  // a subtitle row (index -1 = off): no reload
+        bool unusable = false;  // a picture subtitle track: listed so people see why it can't be picked
+        std::string help;       // what this row is, in a sentence (shown under the title while it is selected)
     };
     std::vector<TrackRow> trackRows_;
     void downloadFocusedEntry();    // network entry: download (a folder asks first)
