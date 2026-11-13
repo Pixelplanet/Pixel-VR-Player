@@ -512,6 +512,11 @@ private:
     void loadMedia(const std::string& path, int slot = -1, bool fromQueue = false);
     void cancelPendingOpen(int slot, bool wait = false);  // wait: join even a stuck open (exit only)
     bool startingDeferredLoad_ = false;  // the UI part of loadMedia already ran when it was requested
+    // Skip Intro / Credits with a TAP on the right bumper: counted on release, and only when the
+    // bumper was not used as a shift meanwhile (held long, a stick moved, the other bumper held).
+    bool skipTapDown_ = false;
+    bool skipTapSpoiled_ = false;
+    std::chrono::steady_clock::time_point skipTapStart_{};
     bool panShiftLatched_ = false;       // 360/180: bumper + stick pan lasts until the sticks are centred
     void finishLoadMedia(int slot);
     void pollMediaOpens(std::chrono::steady_clock::time_point now);

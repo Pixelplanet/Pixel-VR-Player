@@ -3429,7 +3429,7 @@ void VulkanRenderer::updatePointer() {
                 webPointerU_ = screenHitU;
                 webPointerV_ = screenHitV;
             }
-            if (!screenOverlay_[screenHitSlot].skip.empty() && screenHitU > 0.725f && screenHitU < 0.985f &&
+            if (!screenOverlay_[screenHitSlot].skip.empty() && screenHitU > 0.695f && screenHitU < 0.985f &&
                 screenHitV > 0.665f && screenHitV < 0.800f) {
                 screenSkipSlot_ = screenHitSlot;  // the skip pill (drawScreenOverlay: lower right)
             }
@@ -5093,12 +5093,17 @@ void VulkanRenderer::drawScreenOverlay(int slot, float ax, const math::Mat4& ort
     // "Skip Intro" / "Skip Credits": a pill at the lower right for as long as that part plays.
     if (!screenOverlay_[slot].skip.empty()) {
         const bool hov = screenSkipSlot_ == slot;
-        const float cx = 1.136f, cy = -0.42f;  // drawn units (the screen is 3.2 x 1.8), above the subtitles; hit-test: updatePointer
+        const float cx = 1.085f, cy = -0.42f;  // drawn units (the screen is 3.2 x 1.8), above the subtitles; hit-test: updatePointer
         const float bg[4] = {hov ? ac[0] * 0.55f : 0.03f, hov ? ac[1] * 0.55f : 0.04f, hov ? ac[2] * 0.55f : 0.06f, hov ? 0.94f : 0.78f};
         const float rim[4] = {hov ? ac[0] : 1.0f, hov ? ac[1] : 1.0f, hov ? ac[2] : 1.0f, hov ? 1.0f : 0.45f};
-        shape(cx / ax, cy, 0.368f / ax, 0.100f, UiShape::RoundedBox, bg, 1.0f, hov ? 0.07f : 0.05f, rim);
+        shape(cx / ax, cy, 0.440f / ax, 0.100f, UiShape::RoundedBox, bg, 1.0f, hov ? 0.07f : 0.05f, rim);
         const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-        drawCopyText(screenOverlay_[slot].skip, cx, cy, 0.082f, 0.62f, white, ax, ortho, glyphCursor);
+        // The button that does the same without pointing: a tap on the right bumper.
+        const float tagBg[4] = {1.0f, 1.0f, 1.0f, 0.16f};
+        const float tagRim[4] = {1.0f, 1.0f, 1.0f, 0.70f};
+        shape((cx - 0.315f) / ax, cy, 0.082f / ax, 0.056f, UiShape::RoundedBox, tagBg, 0.55f, 0.07f, tagRim);
+        drawCopyText("RB", cx - 0.315f, cy, 0.060f, 0.14f, white, ax, ortho, glyphCursor);
+        drawCopyText(screenOverlay_[slot].skip, cx + 0.070f, cy, 0.082f, 0.60f, white, ax, ortho, glyphCursor);
     }
     // Previous / next episode arrows at the edges while the laser is on this screen.
     if (screenOverlay_[slot].nav && screenNavSlot_ == slot) {

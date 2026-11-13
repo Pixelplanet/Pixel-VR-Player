@@ -4059,10 +4059,13 @@ int App::run() {
                                      es.engine.position(), static_cast<int>(subs.size()));
                 }
             }
-            if (in.select) {
-                int ks = -1;
-                if (renderer_.screenSkipHit(ks) && screens_[ks].open && screens_[ks].webSuspended &&
-                    !screens_[ks].plexAwaitingNext) {
+            // Skips the marked part playing on screen `ks`; false when there is none.
+            const auto skipPart = [&](int ks) {
+                if (ks < 0 || ks >= VulkanRenderer::kMaxVideoSlots || !screens_[ks].open || !screens_[ks].webSuspended ||
+                    screens_[ks].plexAwaitingNext) {
+                    return false;
+                }
+                {
                     ScreenState& es = screens_[ks];
                     const double pos = es.engine.position();
                     for (const auto& m : es.plexMarkers) {
@@ -4081,9 +4084,44 @@ int App::run() {
                         }
                         PIXELVR_LOG_INFO("Web play: %s skipped on screen %d", m.credits ? "credits" : "intro", ks + 1);
                         xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.02f, 0.0f, 0.4f);
-                        break;
+                        return true;
                     }
+                }
+                return false;
+            };
+            if (in.select) {
+                int ks = -1;
+                if (renderer_.screenSkipHit(ks) && screens_[ks].open && screens_[ks].webSuspended &&
+                    !screens_[ks].plexAwaitingNext) {
+                    skipPart(ks);
                     in.select = in.togglePlay = false;  // the pill took the trigger
+                }
+            }
+            // A tap on the right bumper skips too (one-handed, no pointing). Counted when the bumper
+            // is let go, and never after it served as a shift: held longer than a tap, a stick off
+            // centre at any moment, or the other bumper held. Resizing or panning must not end in a skip.
+            {
+                const bool stickOff = std::fabs(in.thumbstickX) >= 0.15f || std::fabs(in.thumbstickY) >= 0.15f ||
+                                      std::fabs(in.thumbstickLX) >= 0.15f || std::fabs(in.thumbstickRX) >= 0.15f;
+                if (in.next && !skipTapDown_) {
+                    skipTapDown_ = true;
+                    skipTapSpoiled_ = false;
+                    skipTapStart_ = nowT;
+                }
+                if (skipTapDown_) {
+                    const double held = std::chrono::duration<double>(nowT - skipTapStart_).count();
+                    if (stickOff || in.previousHeld || panShiftLatched_ || held > 0.40 || browser_.isOpen() ||
+                        settings_.isOpen() || downloadsWindow_ || actionMenu_.visible) {
+                        skipTapSpoiled_ = true;
+                    }
+                    if (!in.nextHeld) {
+                        skipTapDown_ = false;
+                        if (!skipTapSpoiled_) {
+                            // The selected screen first, else any screen showing the pill.
+                            bool done = skipPart(selectedScreen_);
+                            for (int s = 0; s < VulkanRenderer::kMaxVideoSlots && !done; ++s) done = skipPart(s);
+                        }
+                    }
                 }
             }
             if (in.select) {
