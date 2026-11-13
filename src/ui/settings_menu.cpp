@@ -771,7 +771,11 @@ void SettingsMenu::refresh() {
         if (!p.manifestError.empty()) {
             lines.push_back({"Cannot run: " + p.manifestError, "", Action::None, false});
         } else {
+            // options[0] names the control a plain list line shows: "switch" (stepIdx 1 = on), "pill"
+            // (a value that changes on a press) or "button" (runs something / opens the keyboard).
             Row en{"Enabled", p.enabled ? "On" : "Off", Action::TogglePluginEnabled};
+            en.options = {"switch"};
+            en.stepIdx = p.enabled ? 1 : 0;
             lines.push_back(en);
             for (size_t si = 0; si < p.settings.size(); ++si) {
                 const PluginHost::Setting& st = p.settings[si];
@@ -780,12 +784,28 @@ void SettingsMenu::refresh() {
                 Row r{st.label, value, st.type == "text" ? Action::EditPluginText : Action::PluginSetting,
                       p.enabled};
                 r.data = static_cast<int>(si);
-                lines.push_back(r);  // plain lines: a press cycles the value / runs the action / edits the text
+                if (st.type == "toggle") {
+                    r.options = {"switch"};
+                    r.stepIdx = value == "On" ? 1 : 0;
+                } else if (st.type == "action") {
+                    r.options = {"button"};
+                    if (p.enabled) r.value = "Run";
+                } else if (st.type == "text") {
+                    r.options = {"button"};
+                } else {
+                    r.options = {"pill"};
+                }
+                lines.push_back(r);  // a press cycles the value / runs the action / edits the text
             }
             if (VaultManager::instance().isUnlocked() && p.hasPermission("playback")) {
-                lines.push_back({"Use with vault videos", p.vaultGrant ? "On" : "Off", Action::PluginVaultGrant, p.enabled});
+                Row vg{"Use with vault videos", p.vaultGrant ? "On" : "Off", Action::PluginVaultGrant, p.enabled};
+                vg.options = {"switch"};
+                vg.stepIdx = p.vaultGrant ? 1 : 0;
+                lines.push_back(vg);
             }
-            lines.push_back({"Restart plugin", p.pid > 0 ? "" : "not running", Action::PluginRestart, p.pid > 0});
+            Row rs{"Restart plugin", p.pid > 0 ? "Restart" : "not running", Action::PluginRestart, p.pid > 0};
+            if (p.pid > 0) rs.options = {"button"};
+            lines.push_back(rs);
         }
         std::string perms;
         for (const std::string& perm : p.permissions) perms += (perms.empty() ? "" : ", ") + perm;
@@ -947,7 +967,6 @@ void SettingsMenu::refresh() {
         rows_.push_back({"Back to UI & Appearance", "", Action::BackToUI});
         hint("Downloads are saved to the folder marked In use.");
     } else if (section_ == 10) {
-        title_ = "Settings > Tracks > Video Track";    } else if (section_ == 10) {
         title_ = "Settings > Tracks > Video Track";
         for (std::size_t i = 0; i < videoStreams_.size(); ++i) {
             option(videoStreams_[i].second, static_cast<int>(i) == videoSel_,
@@ -968,6 +987,34 @@ void SettingsMenu::refresh() {
         }
         rows_.push_back({"Back to Tracks", "", Action::Back});
     }
+    paginateList();
+}
+
+void SettingsMenu::paginateList() {
+    constexpr int kPerPage = 11;  // + the Back row = the 12 cards a page shows
+    const bool list = section_ == 10 || section_ == 11 || section_ == 12;
+    const int n = static_cast<int>(rows_.size()) - 1;  // without the Back row
+    if (!list || n <= kPerPage) {
+        listPages_ = 1;
+        listPage_ = 0;
+        if (!list) listPageSection_ = -1;
+        return;
+    }
+    listPages_ = (n + kPerPage - 1) / kPerPage;
+    if (listPageSection_ != section_) {  // just opened: the page with the active option
+        listPageSection_ = section_;
+        listPage_ = 0;
+        for (int i = 0; i < n; ++i) {
+            if (rows_[static_cast<size_t>(i)].stepIdx != 0) listPage_ = i / kPerPage;
+        }
+    }
+    listPage_ = std::clamp(listPage_, 0, listPages_ - 1);
+    std::vector<Row> page(rows_.begin() + listPage_ * kPerPage,
+                          rows_.begin() + std::min(n, (listPage_ + 1) * kPerPage));
+    page.push_back(rows_.back());
+    rows_ = std::move(page);
+    status_ = "Page " + std::to_string(listPage_ + 1) + " of " + std::to_string(listPages_);
+    pageHint_ = status_;
 }
 
 SettingsMenu::Action SettingsMenu::activate() {
@@ -1517,6 +1564,15 @@ bool SettingsMenu::turnButtonsPage(int delta, bool wrap) {
         if (wrap) page = ((page % pluginPages_) + pluginPages_) % pluginPages_;
         else if (page < 0 || page >= pluginPages_) return false;
         pluginPage_ = page;
+        selected_ = 0;
+        refresh();
+        return true;
+    }
+    if (listPages_ > 1 && delta != 0 && (section_ == 10 || section_ == 11 || section_ == 12)) {
+        int page = listPage_ + delta;
+        if (wrap) page = ((page % listPages_) + listPages_) % listPages_;
+        else if (page < 0 || page >= listPages_) return false;
+        listPage_ = page;
         selected_ = 0;
         refresh();
         return true;

@@ -27,7 +27,10 @@ inline bool isAudioFile(const std::string& name) {
 // Anything the player opens: videos and audio files (shown with cover art).
 inline bool isPlayableFile(const std::string& name) {
     return isAudioFile(name) || hasExtension(name, {".mp4", ".mkv", ".mov", ".webm", ".m4v", ".avi", ".ts", ".m2ts",
-                                                    ".wmv", ".flv", ".mpg", ".m3u8"});
+                                                    ".wmv", ".flv", ".mpg", ".m3u8",
+                                                    // older containers FFmpeg reads just as well
+                                                    ".divx", ".xvid", ".mpeg", ".mpe", ".vob", ".mts", ".asf",
+                                                    ".3gp", ".ogv", ".f4v"});
 }
 
 }  // namespace pixelvr

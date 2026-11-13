@@ -250,8 +250,9 @@ public:
                section_ == kStoreItemSection || section_ == kVaultMoveSection;
     }
     // A plugin's page turns pages with the header pager when its lines do not fit.
-    int pluginPage() const { return section_ == kPluginSection ? pluginPage_ : -1; }
-    int pluginPages() const { return section_ == kPluginSection ? pluginPages_ : 0; }
+    // (Also the track / language lists, which page the same way when they are long.)
+    int pluginPage() const { return section_ == kPluginSection ? pluginPage_ : (listPages_ > 1 ? listPage_ : -1); }
+    int pluginPages() const { return section_ == kPluginSection ? pluginPages_ : (listPages_ > 1 ? listPages_ : 0); }
     // A plugin's message (e.g. a device scan): on the plugin pages' status line for a few seconds.
     void showPluginNotice(const std::string& s);
     // Plugin list lines (index into the installed plugins): switch, Edit, Remove (asks once more).
@@ -396,6 +397,10 @@ private:
     int heatStyle_ = 0;
     int pluginRemoveArmed_ = -1;
     int pluginPage_ = 0, pluginPages_ = 1;
+    // Long option lists (video / audio tracks, languages): pages of 11 + the Back row.
+    void paginateList();
+    int listPage_ = 0, listPages_ = 1;
+    int listPageSection_ = -1;  // the list the page belongs to (a new list opens at its active option)
     std::string storeId_;      // the repository plugin shown on the details page
     bool storeUpdate_ = false;  // details page in update mode (changelog)
     bool pluginStatusShown_ = false;  // the plugin pages' status text is up (cleared on other pages)

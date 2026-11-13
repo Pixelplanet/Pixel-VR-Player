@@ -7857,7 +7857,35 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         const float* lineBord = dragged ? selBord : (lhov ? tabActiveBord : kGlassRimFaint);
                         drawUiElement(vpPanel, hc.cx, hc.cy, hw, hh, UiShape::RoundedBox, lineBg, 0.014f / hh,
                                       (lhov || dragged ? 0.0019f : 0.0012f) / hh, lineBord);
-                        if (lr.kind != kSettingsKindShortcut && lr.kind != kSettingsKindPluginLine) return;
+                        if (lr.kind != kSettingsKindShortcut && lr.kind != kSettingsKindPluginLine) {
+                            // A plain line that is a control (a plugin's settings): show which kind.
+                            const std::string ctl = lr.options.empty() ? std::string() : lr.options[0];
+                            if (ctl == "switch") {
+                                const float sx = hc.cx - hc.halfW + hub::kShortcutUrlX + 0.030f;
+                                const bool on = lr.stepIdx != 0;
+                                const float a = lr.enabled ? 1.0f : 0.45f;
+                                const float track[4] = {(on ? switchOnTrack : switchOffTrack)[0], (on ? switchOnTrack : switchOffTrack)[1],
+                                                        (on ? switchOnTrack : switchOffTrack)[2], (on ? switchOnTrack : switchOffTrack)[3] * a};
+                                const float knob[4] = {(on ? knobOn : switchOffKnob)[0], (on ? knobOn : switchOffKnob)[1],
+                                                       (on ? knobOn : switchOffKnob)[2], (on ? knobOn : switchOffKnob)[3] * a};
+                                drawUiElement(vpPanel, sx, hc.cy, 0.030f, 0.0145f, UiShape::RoundedBox, track, 1.0f);
+                                drawUiElement(vpPanel, sx + (on ? 0.0155f : -0.0155f), hc.cy, 0.0115f, 0.0115f, UiShape::RoundedBox,
+                                              knob, 1.0f);
+                            } else if ((ctl == "pill" || ctl == "button") && !lr.value.empty()) {
+                                const float ts = setCard(r).textSc * 0.90f;
+                                const float tw = std::min(measureString(ts, lr.value), 0.46f);
+                                const float bw = tw * 0.5f + 0.018f, bh = hc.halfH - 0.008f;
+                                const float bx = hc.cx - hc.halfW + hub::kShortcutUrlX + tw * 0.5f;
+                                drawUiElement(vpPanel, bx, hc.cy, bw, bh, UiShape::RoundedBox,
+                                              lhov ? glassCardHoverT.data() : kGlassVeil, ctl == "pill" ? 1.0f : 0.012f / bh,
+                                              0.0012f / bh, lhov ? tabActiveBord : kGlassRim);
+                                if (ctl == "pill") {  // changes on a press: a small arrow says so
+                                    drawUiElement(vpPanel, bx + bw + 0.016f, hc.cy, 0.008f, 0.008f, UiShape::Chevron,
+                                                  lr.enabled ? slateCol : dimCol);
+                                }
+                            }
+                            return;
+                        }
                         const bool noHandle = lr.kind == kSettingsKindPluginLine;
                         const int seg = lhov ? settingsSegmentHovered_ : -1;
                         if (!noHandle) {
@@ -8161,8 +8189,13 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                             // Up to the value column (a long label shrinks instead of running into the value).
                             const float labelW = lr.value.empty() ? 0.90f : hub::kShortcutUrlX - 0.045f - 0.02f;
                             withHeadingFont([&] { drawFit(left + 0.045f, hc.cy, labelW, sc, lc, lr.label); });
-                            if (!lr.value.empty()) {
-                                drawFit(left + hub::kShortcutUrlX, hc.cy, 0.50f, sc * 0.90f, slateCol, lr.value);
+                            const std::string ctl = lr.options.empty() ? std::string() : lr.options[0];
+                            if (ctl == "switch") {
+                                // the switch says it
+                            } else if (!lr.value.empty()) {
+                                const bool boxed = ctl == "pill" || ctl == "button";
+                                drawFit(left + hub::kShortcutUrlX, hc.cy, boxed ? 0.46f : 0.50f, sc * 0.90f,
+                                        boxed && lr.enabled ? themeTextCol : slateCol, lr.value);
                             }
                         }
                     };

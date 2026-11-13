@@ -253,16 +253,17 @@ bool XrContext::createReferenceSpace() {
     PIXELVR_XR_CHECK(instance_,
                      xrCreateReferenceSpace(session_, &createInfo, &appSpace_));
 
-    // Create STAGE reference space (floor level tracking bounds, matching SteamVR TrackingUniverseStanding)
-    XrReferenceSpaceCreateInfo stageInfo{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
-    stageInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_STAGE;
-    stageInfo.poseInReferenceSpace.orientation.w = 1.0f;
-    XrResult stageRes = xrCreateReferenceSpace(session_, &stageInfo, &stageSpace_);
-    if (XR_SUCCEEDED(stageRes)) {
-        PIXELVR_LOG_INFO("XrContext: Successfully created STAGE reference space");
-    } else {
-        PIXELVR_LOG_WARN("XrContext: STAGE reference space not available (%d), using calibrated standing fallback", static_cast<int>(stageRes));
-        stageSpace_ = XR_NULL_HANDLE;
+    // No STAGE space: nothing uses it any more (it placed SteamVR's own keyboard; text entry is in-app
+    // now). A STAGE space is the room-scale one that the runtime may ask the user to define, and the
+    // player sometimes started with SteamVR's "Set up your play area" prompt; LOCAL alone is the
+    // seated-scale space. PIXELVR_STAGE_SPACE=1 creates it again (to compare).
+    stageSpace_ = XR_NULL_HANDLE;
+    if (const char* e = std::getenv("PIXELVR_STAGE_SPACE"); e && e[0] == '1') {
+        XrReferenceSpaceCreateInfo stageInfo{XR_TYPE_REFERENCE_SPACE_CREATE_INFO};
+        stageInfo.referenceSpaceType = XR_REFERENCE_SPACE_TYPE_STAGE;
+        stageInfo.poseInReferenceSpace.orientation.w = 1.0f;
+        if (XR_FAILED(xrCreateReferenceSpace(session_, &stageInfo, &stageSpace_))) stageSpace_ = XR_NULL_HANDLE;
+        PIXELVR_LOG_INFO("XrContext: STAGE reference space %s", stageSpace_ != XR_NULL_HANDLE ? "created" : "not available");
     }
     return true;
 }
