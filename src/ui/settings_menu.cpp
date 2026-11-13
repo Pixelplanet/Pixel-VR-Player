@@ -921,7 +921,8 @@ void SettingsMenu::refresh() {
         segmented("Opens as", {"Page only", "Full browser"}, sc.kiosk ? 0 : 1, Action::CycleShortcutKiosk);
         {
             const bool armed = deleteArmedIdx_ == shortcutIdx_ && std::chrono::steady_clock::now() < deleteArmedUntil_;
-            rows_.push_back({"Delete Shortcut", armed ? "Press again to delete" : "Asks once more first", Action::RemoveShortcut});
+            (void)armed;
+            rows_.push_back({"Delete Shortcut", "Asks first", Action::RemoveShortcut});
         }
         rows_.push_back({"Back to Shortcuts", "", Action::BackToShortcuts});
     } else if (section_ == 21) {
@@ -1099,14 +1100,7 @@ SettingsMenu::Action SettingsMenu::activate() {
             const size_t i = static_cast<size_t>(shortcutIdx_);
             if (act == Action::ToggleShortcutRail) shortcuts_[i].onRail ^= true;
             if (act == Action::CycleShortcutKiosk) shortcuts_[i].kiosk ^= true;
-            if (act == Action::RemoveShortcut) {
-                if (shortcutDelete(shortcutIdx_)) {
-                    section_ = 22;
-                    selected_ = std::min(static_cast<int>(i), static_cast<int>(shortcuts_.size()));
-                }
-                refresh();
-                break;  // shortcutDelete() saved already
-            }
+            if (act == Action::RemoveShortcut) break;  // the app asks first, then calls shortcutDelete()
             saveConfig();
             refresh();
             break;
@@ -1663,14 +1657,8 @@ void SettingsMenu::shortcutMove(int from, int to) {
 
 bool SettingsMenu::shortcutDelete(int idx) {
     if (idx < 0 || idx >= static_cast<int>(shortcuts_.size())) return false;
-    const auto now = std::chrono::steady_clock::now();
-    if (deleteArmedIdx_ != idx || now >= deleteArmedUntil_) {  // first press: ask
-        deleteArmedIdx_ = idx;
-        deleteArmedUntil_ = now + std::chrono::seconds(4);
-        refresh();  // (refresh() resets the status line to the page hint)
-        status_ = "Press Delete again to remove \"" + shortcuts_[static_cast<size_t>(idx)].name + "\".";
-        return false;
-    }
+    // (The app asked in the shared confirm dialog first.)
+    if (section_ == 17) section_ = 22;  // from the shortcut's own page: back to the list
     status_ = "Removed \"" + shortcuts_[static_cast<size_t>(idx)].name + "\".";
     shortcuts_.erase(shortcuts_.begin() + idx);
     deleteArmedIdx_ = -1;

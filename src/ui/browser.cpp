@@ -841,6 +841,7 @@ bool Browser::deleteFocused(std::string& deletedName) {
     deletedName = e->label;
     fs::path p(e->path);
     VaultManager::instance().cleanPublicThumbs(e->path);
+    VaultManager::instance().cleanVaultThumbs(e->path);  // a deleted vault file takes its thumbnail along
     if (fs::is_directory(p, ec)) {
         fs::remove_all(p, ec);
     } else {

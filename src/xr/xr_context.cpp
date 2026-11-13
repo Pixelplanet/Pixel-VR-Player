@@ -141,7 +141,15 @@ bool XrContext::createInstanceAndSystem(const char* appName) {
     createInfo.enabledExtensionCount = static_cast<uint32_t>(enabledExts.size());
     createInfo.enabledExtensionNames = enabledExts.data();
 
-    PIXELVR_XR_CHECK(XR_NULL_HANDLE, xrCreateInstance(&createInfo, &instance_));
+    if (const XrResult res = xrCreateInstance(&createInfo, &instance_); XR_FAILED(res)) {
+        char buf[XR_MAX_RESULT_STRING_SIZE];
+        PIXELVR_LOG_ERROR("xrCreateInstance failed: %s", ::pixelvr::xr_result_string(XR_NULL_HANDLE, res, buf));
+        // The usual reason on a fresh system: no OpenXR runtime is set up yet, or SteamVR is not running.
+        PIXELVR_LOG_ERROR("No VR runtime answered. Pixel VR Player needs SteamVR: start SteamVR once (on the Steam "
+                          "Frame: start the player from Gaming Mode, not from the desktop), then start the player "
+                          "again. If it still fails, this file (PixelVRPlayer/logs/run.log) says why.");
+        return false;
+    }
 
     XrInstanceProperties instanceProps{XR_TYPE_INSTANCE_PROPERTIES};
     if (XR_SUCCEEDED(xrGetInstanceProperties(instance_, &instanceProps))) {

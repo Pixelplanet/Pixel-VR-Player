@@ -319,7 +319,6 @@ Hold **Full Grip Click** and press:
   pulling the card while it is unlocked locks it.
 - **Safe Persistence:** Media inside the vault is never deleted when updating or uninstalling the app.
 
-For full architecture and security details, see the [Hidden Vault Technical Specification](docs/HIDDEN_VAULT_SPEC.md).
 </details>
 
 

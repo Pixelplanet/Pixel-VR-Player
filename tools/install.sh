@@ -1010,6 +1010,11 @@ fi
 if [ ! -f /opt/steamvr/steamxr_linuxarm64.json ]; then
     warn "SteamVR not found - install it from Steam before launching"
 fi
+# The player talks to SteamVR through OpenXR: without an active runtime it exits at once.
+if [ -z "${XR_RUNTIME_JSON:-}" ] && [ ! -e "$HOME/.config/openxr/1/active_runtime.json" ] &&
+   [ ! -e /etc/xdg/openxr/1/active_runtime.json ]; then
+    warn "no active OpenXR runtime yet - start SteamVR once, then start the player"
+fi
 
 # ---------------------------------------------------------------------------
 # Steam library entry

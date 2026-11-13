@@ -98,6 +98,11 @@ private:
     std::string pendingDlName_;
     // Folder download waiting for its answer in the shared confirm dialog (action menu page 2).
     bool confirmFolderDl_ = false;
+    // The shared two-button dialog with any question: `onYes` runs when the first button is chosen.
+    void askConfirm(const std::string& title, const std::string& text, const std::string& yesLabel,
+                    std::function<void()> onYes);
+    std::function<void()> confirmYes_;
+    void askShortcutDelete(int idx);  // Settings > Shortcuts: asks, then deletes
     std::string folderDlPath_;
     bool downloadsWindow_ = false;  // downloads list window toggled from the bar
     bool dlWasActive_ = false;      // edge detect: auto-open the window on start

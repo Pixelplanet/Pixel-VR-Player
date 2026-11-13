@@ -413,6 +413,29 @@ void VaultManager::cleanPublicThumbs(const std::string& path) {
     }
 }
 
+void VaultManager::cleanVaultThumbs(const std::string& path) {
+    if (thumbsDir_.empty()) return;
+    auto removeThumbFor = [&](const fs::path& f) {
+        // As ThumbnailCache::handlePrivate names them: encrypted files by their random name, plain
+        // leftovers in the vault by path.
+        const std::string key = vaultcrypto::hasExtension(f.string()) ? f.filename().string() : f.string();
+        const std::string base = thumbsDir_ + "/" + std::to_string(fnv1a64(key));
+        std::error_code e;
+        fs::remove(base + ".rgba", e);
+        e.clear();
+        fs::remove(base + ".meta", e);
+    };
+    std::error_code ec;
+    if (fs::is_directory(path, ec)) {
+        for (const auto& it : fs::recursive_directory_iterator(path, ec)) {
+            std::error_code e;
+            if (it.is_regular_file(e)) removeThumbFor(it.path());
+        }
+    } else {
+        removeThumbFor(fs::path(path));
+    }
+}
+
 void VaultManager::setAutoLockHeadsetOff(bool enable) {
     autoLockHeadsetOff_ = enable;
     saveConfig();

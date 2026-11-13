@@ -519,9 +519,38 @@ void ThumbnailCache::handlePrivate(const std::string& path) {
     else failed_[path] = fileStamp(path);
 }
 
+// Once: thumbnails of very wide frames made before v1.19.2 may show only the left half (a wide frame with
+// non-square pixels was taken for side-by-side 3D). They are dropped and made again on the next visit.
+static void dropWideThumbnailsOnce(const std::string& dir) {
+    std::error_code ec;
+    if (dir.empty() || !fs::is_directory(dir, ec)) return;
+    const std::string stamp = dir + "/.wide-redone";
+    if (fs::exists(stamp, ec)) return;
+    std::vector<fs::path> metas;
+    for (const auto& e : fs::directory_iterator(dir, ec)) {
+        if (e.path().extension() == ".meta") metas.push_back(e.path());
+    }
+    int dropped = 0;
+    for (const fs::path& m : metas) {
+        DiskMetaHeader hdr{};
+        {
+            std::ifstream in(m, std::ios::binary);
+            if (!in.read(reinterpret_cast<char*>(&hdr), sizeof(hdr))) continue;
+        }
+        if (hdr.height <= 0 || static_cast<float>(hdr.width) / static_cast<float>(hdr.height) < 2.6f) continue;
+        std::error_code te;
+        fs::remove(fs::path(m).replace_extension(".rgba"), te);
+        fs::remove(m, te);
+        ++dropped;
+    }
+    std::ofstream(stamp) << "1";
+    if (dropped > 0) PIXELVR_LOG_INFO("Thumbnails: %d of very wide videos are made again", dropped);
+}
+
 void ThumbnailCache::workerLoop() {
     // Once per start, before any thumbnails are made.
     pruneThumbnails(cacheDir_);
+    dropWideThumbnailsOnce(cacheDir_);
     pruneVaultThumbs(VaultManager::instance().thumbsDir());
     {
         // Before v1.19 vault thumbnails were plain pictures inside the vault folder: gone for good.

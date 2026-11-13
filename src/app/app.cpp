@@ -3091,6 +3091,32 @@ void App::computeArrangement(const Arrangement& a,
     }
 }
 
+void App::askConfirm(const std::string& title, const std::string& text, const std::string& yesLabel,
+                     std::function<void()> onYes) {
+    confirmYes_ = std::move(onYes);
+    confirmFolderDl_ = false;
+    confirmShareDelete_ = false;
+    confirmEditorDelete_ = false;
+    actionMenu_.visible = true;
+    actionMenu_.page = menupage::Confirm;
+    actionMenu_.title = title;
+    actionMenu_.subtitle = text;
+    actionMenu_.options.clear();
+    actionMenu_.options.push_back(yesLabel);
+    actionMenu_.options.push_back("Cancel");
+    actionMenu_.selectedOption = 1;  // a stray press cancels
+}
+
+void App::askShortcutDelete(int idx) {
+    const auto& list = settings_.shortcuts();
+    if (idx < 0 || idx >= static_cast<int>(list.size())) return;
+    const std::string name = list[static_cast<size_t>(idx)].name;
+    askConfirm("Delete Shortcut?", "Delete the shortcut \"" + name + "\"?", "Yes, Delete", [this, idx, name] {
+        const auto& now = settings_.shortcuts();  // still the same one?
+        if (idx < static_cast<int>(now.size()) && now[static_cast<size_t>(idx)].name == name) settings_.shortcutDelete(idx);
+    });
+}
+
 void App::applyScreenSize(bool resetDistance) {
     const int idx = settings_.screenSizeIdx();
     float scale = 1.0f;
@@ -5096,6 +5122,7 @@ int App::run() {
 
             // Folder-download confirmation (the shared confirm dialog): its text shows the size so far.
             if (confirmFolderDl_ && !(actionMenu_.visible && actionMenu_.page == menupage::Confirm)) confirmFolderDl_ = false;
+            if (confirmYes_ && !(actionMenu_.visible && actionMenu_.page == menupage::Confirm)) confirmYes_ = nullptr;
             if (confirmFolderDl_) {
                 char sz[96];
                 std::snprintf(sz, sizeof(sz), "%.2f GB%s", browser_.measuredSize() / 1073741824.0,
@@ -6032,7 +6059,15 @@ int App::run() {
                         if (in.select || in.togglePlay) {
                             int chosen = (hov >= 0) ? hov : actionMenu_.selectedOption;
                             const Browser::Entry* del = browser_.focused();
-                            if (confirmFolderDl_) {
+                            if (confirmYes_) {
+                                std::function<void()> yes = std::move(confirmYes_);
+                                confirmYes_ = nullptr;
+                                actionMenu_.visible = false;
+                                if (chosen == 0) {
+                                    yes();
+                                    xr_.triggerHaptic(1, 0.050f, 0.0f, 0.7f);
+                                }
+                            } else if (confirmFolderDl_) {
                                 confirmFolderDl_ = false;
                                 if (chosen == 0 && !folderDlPath_.empty()) {
                                     browser_.startDownload(folderDlPath_, pendingDlName_, true);
@@ -6394,14 +6429,24 @@ int App::run() {
                     switch (renderer_.settingsSegmentHovered()) {
                         case 1: settings_.pluginToggle(idx); break;
                         case 4: settings_.openPluginUpdate(idx); break;  // the green update icon
-                        case 3:
-                            if (settings_.pluginRemoveArmed(idx)) {
-                                std::string message;
-                                plugins_.uninstall(idx, message);
-                                settings_.openPluginsPage();
-                                settings_.showStatus(message);
-                            }
+                        case 3: {
+                            const auto& plist = plugins_.plugins();
+                            if (idx < 0 || idx >= static_cast<int>(plist.size())) break;
+                            const std::string id = plist[static_cast<size_t>(idx)].id;
+                            askConfirm("Remove Plugin?", "Remove \"" + plist[static_cast<size_t>(idx)].name + "\" from the player?",
+                                       "Remove", [this, id] {
+                                           const auto& now = plugins_.plugins();  // (the list may have changed meanwhile)
+                                           for (size_t k = 0; k < now.size(); ++k) {
+                                               if (now[k].id != id) continue;
+                                               std::string message;
+                                               plugins_.uninstall(static_cast<int>(k), message);
+                                               settings_.openPluginsPage();
+                                               settings_.showStatus(message);
+                                               break;
+                                           }
+                                       });
                             break;
+                        }
                         default: settings_.pluginEdit(idx); break;  // Edit, or the name / status
                     }
                     xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.02f, 0.0f, 0.4f);
@@ -6412,7 +6457,7 @@ int App::run() {
                     switch (renderer_.settingsSegmentHovered()) {
                         case 0: shortcutDragFrom_ = shortcutDragTo_ = hovered; break;  // the grab handle
                         case 1: settings_.shortcutToggle(idx); break;
-                        case 3: settings_.shortcutDelete(idx); break;
+                        case 3: askShortcutDelete(idx); break;
                         default: settings_.shortcutEdit(idx); break;  // Edit, or the name / address
                     }
                     xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.02f, 0.0f, 0.4f);
@@ -6440,6 +6485,8 @@ int App::run() {
                                 xr_.triggerHaptic(0, 0.040f, 0.0f, 0.6f);
                                 xr_.triggerHaptic(1, 0.040f, 0.0f, 0.6f);
                             }
+                        } else if (act == SettingsMenu::Action::RemoveShortcut) {
+                            askShortcutDelete(settings_.shortcutIdx());
                         } else if (act == SettingsMenu::Action::CycleScreenSize) {
                             applyScreenSize(true);
                         } else if (act == SettingsMenu::Action::CycleDistance) {

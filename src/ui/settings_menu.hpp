@@ -231,7 +231,7 @@ public:
     static constexpr int kMaxShortcuts = 10;  // what the list page has room for
     void shortcutToggle(int idx);
     void shortcutMove(int from, int to);  // drag and drop; the list order is the rail order
-    bool shortcutDelete(int idx);         // first press asks ("Sure?"), a second one within 4 s deletes
+    bool shortcutDelete(int idx);         // deletes it (the app asks in the confirm dialog first)
     void shortcutEdit(int idx);           // the shortcut's own page (name, address, ...)
     void tickShortcuts();                 // per frame: an unconfirmed Delete times out
     // Dense line lists: the shortcut list and the plugin list.

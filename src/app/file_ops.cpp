@@ -147,6 +147,7 @@ struct Job {
             return false;
         }
         if (dstVault) VaultManager::instance().cleanPublicThumbs(src);
+        else VaultManager::instance().cleanVaultThumbs(src);  // left the vault: its encrypted thumbnail goes
         return true;
     }
 

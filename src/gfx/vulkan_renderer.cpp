@@ -295,7 +295,7 @@ inline CtrlButtonRect get_ctrl_button_rect(int b) {
 
         // Left flank pills: HUB, RECENTER, VOLUME (rows match the right flank)
         case Btn::Files:        return {-0.62f, kBarY + 0.040f, 0.185f, 0.036f};
-        case Btn::Recenter:     return {-0.62f, kBarY - 0.044f, 0.185f, 0.036f};
+        case Btn::Recenter:     return {-0.62f, kBarY - 0.044f, 0.0f, 0.0f};  // removed (X recenters); the place is kept free
         case Btn::Volume:       return {-0.62f, kBarY - 0.128f, 0.185f, 0.036f};
 
         // Right flank pills: Projection/Format, Audio, Screen
@@ -397,6 +397,9 @@ constexpr float kBrowserBtnY = 0.418f;
 constexpr float kBrowserBtnHH = 0.021f;
 constexpr float kBrowserDividerY = 0.385f;  // under the button row
 constexpr float kBrowserContentTop = 0.372f;
+// List view: column captions sit in their own band between the header buttons and the first row.
+constexpr float kListCaptionY = 0.377f;
+constexpr float kListDividerY = 0.3605f;
 // Captions in front of Sort and View ("Sort by", "View").
 constexpr float kPickDarkText[4] = {0.03f, 0.05f, 0.09f, 1.0f};  // on the accent-filled confirm pill
 constexpr float kBrowserSortCaptionX = -0.455f;
@@ -471,7 +474,8 @@ inline CardLayout browserCard(VulkanRenderer::BrowserViewMode mode, int slot) {
         lay.thumbCy = lay.cy + lay.cardHalfH - 0.010f - lay.thumbHalfH;
     } else {  // CompactList (1 col x 8 rows)
         lay.cx = 0.20f;
-        lay.cy = 0.318f - 0.094f * static_cast<float>(slot % 8);
+        // Below the column captions (kListCaptionY) and their divider: the first row starts under them.
+        lay.cy = 0.310f - 0.094f * static_cast<float>(slot % 8);
         lay.cardHalfW = 0.65f;
         lay.cardHalfH = 0.040f;
         lay.thumbCx = -0.385f;
@@ -6336,6 +6340,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             const auto cb = static_cast<CtrlButton>(b);
             if (is_screen_row_button(b) && !screenControlsVisible_) continue;
             CtrlButtonRect r = get_ctrl_button_rect(b);
+            if (r.hw <= 0.0f) continue;  // a place without a button
             const bool hovered = (pointerButton_ == b);
             // Eased hover: the button grows 5% and its colours cross-fade.
             const float ha = (b < 32) ? dockHoverAnim_[b] : (hovered ? 1.0f : 0.0f);
@@ -6777,8 +6782,6 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             // Left flank pills: HUB and RECENTER
             const CtrlButtonRect rHub = get_ctrl_button_rect(static_cast<int>(CtrlButton::Files));
             drawFitCentered(rHub.cx + 0.012f, rHub.cy, rHub.hw * 1.6f, pillSc, themeTextCol, "Hub");
-            const CtrlButtonRect rRec = get_ctrl_button_rect(static_cast<int>(CtrlButton::Recenter));
-            drawFitCentered(rRec.cx + 0.012f, rRec.cy, rRec.hw * 1.6f, pillSc, themeTextCol, "Recenter");
             {
                 const CtrlButtonRect rV = get_ctrl_button_rect(static_cast<int>(CtrlButton::Volume));
                 char vol[16];
@@ -7364,7 +7367,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
 
             if (browserViewMode_ == BrowserViewMode::CompactList) {
-                drawUiElement(vpPanel, 0.20f, 0.355f, 0.65f, 0.0010f, UiShape::RoundedBox, kGlassDivider, 1.0f);
+                drawUiElement(vpPanel, 0.20f, hub::kListDividerY, 0.65f, 0.0010f, UiShape::RoundedBox, kGlassDivider, 1.0f);
             }
 
             // Right-edge vertical scrollbar
@@ -7455,18 +7458,18 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }  // not picking
 
             if (browserViewMode_ == BrowserViewMode::CompactList) {
-                drawFit(-0.315f, 0.364f, listCols.nameMaxW, scBadge * 0.95f, dimCol, "NAME");
+                drawFit(-0.315f, hub::kListCaptionY, listCols.nameMaxW, scBadge * 0.95f, dimCol, "NAME");
                 if (listShowFormat_) {
-                    drawFitCentered(listCols.fmtCx, 0.364f, 0.11f, scBadge * 0.95f, dimCol, "FORMAT");
+                    drawFitCentered(listCols.fmtCx, hub::kListCaptionY, 0.11f, scBadge * 0.95f, dimCol, "FORMAT");
                 }
                 if (listShowRes_) {
-                    drawFitCentered(listCols.resCx, 0.364f, 0.15f, scBadge * 0.95f, dimCol, "RESOLUTION");
+                    drawFitCentered(listCols.resCx, hub::kListCaptionY, 0.15f, scBadge * 0.95f, dimCol, "RESOLUTION");
                 }
                 if (listShowSize_) {
-                    drawFitCentered(listCols.sizeCx, 0.364f, 0.11f, scBadge * 0.95f, dimCol, "SIZE");
+                    drawFitCentered(listCols.sizeCx, hub::kListCaptionY, 0.11f, scBadge * 0.95f, dimCol, "SIZE");
                 }
                 if (listShowDuration_) {
-                    drawFitCentered(listCols.durCx, 0.364f, 0.11f, scBadge * 0.95f, dimCol, "DURATION");
+                    drawFitCentered(listCols.durCx, hub::kListCaptionY, 0.11f, scBadge * 0.95f, dimCol, "DURATION");
                 }
             }
 
@@ -8627,7 +8630,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             const bool delHov = (actionMenuBtnHovered_ == 0) || (actionMenu_.selectedOption == 0);
             const bool canHov = (actionMenuBtnHovered_ == 1) || (actionMenu_.selectedOption == 1);
             // Red only for a destructive answer ("Yes, Delete"); anything else ("Download") in the accent colour.
-            const bool destructive = !actionMenu_.options.empty() && actionMenu_.options[0].find("Delete") != std::string::npos;
+            const bool destructive = !actionMenu_.options.empty() &&
+                                     (actionMenu_.options[0].find("Delete") != std::string::npos ||
+                                      actionMenu_.options[0].find("Remove") != std::string::npos);
             const float okBg[4] = {themeAccentCol[0] * (delHov ? 0.95f : 0.72f), themeAccentCol[1] * (delHov ? 0.95f : 0.72f),
                                    themeAccentCol[2] * (delHov ? 0.95f : 0.72f), 0.95f};
             const float okBorder[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 1.0f};

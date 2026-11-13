@@ -76,6 +76,9 @@ public:
 
     // Clean up cached public thumbnails for a file or directory
     void cleanPublicThumbs(const std::string& path);
+    // Removes the encrypted thumbnail(s) of a vault file, or of every file under a folder, that is
+    // about to be deleted or leaves the vault (call it while the files still exist).
+    void cleanVaultThumbs(const std::string& path);
 
     // Command line (install.sh --uninstall): "--vault-info" prints the vault's place and size;
     // "--vault-export <dir>" decrypts every file into <dir> (keeping folders), deleting each encrypted
