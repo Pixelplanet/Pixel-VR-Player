@@ -12720,6 +12720,10 @@ void VulkanRenderer::updateVideoTexture(int width, int height, const uint8_t* y,
             return;
         }
     }
+    // The shape of what is shown now. (The hardware path sets it per frame; without this a frame of the
+    // same size as the last software one - a music card after a film - kept the film's shape, and the
+    // screen overlapped its neighbours in an arrangement.)
+    v.videoAspect = v.pixelAspect * static_cast<float>(width) / static_cast<float>(height);
 
     const std::size_t lumaBytes = static_cast<std::size_t>(width) * height;
     const std::size_t chromaBytes = static_cast<std::size_t>(width) * (height / 2);

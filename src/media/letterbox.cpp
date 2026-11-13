@@ -112,7 +112,7 @@ float LetterboxDetector::measure(const std::string& path, int* framesJudged) {
         AVPacket* pk = av_packet_alloc();
         AVFrame* fr = av_frame_alloc();
         int judged = 0, bar = 1 << 30, height = 0;
-        bool asymmetric = false;
+        int minTop = 1 << 30, minBottom = 1 << 30;
         const double spots[] = {0.12, 0.25, 0.38, 0.5, 0.62, 0.75, 0.88, 0.95};
         for (double at : spots) {
             if (dur > 20.0) {
@@ -139,13 +139,17 @@ float LetterboxDetector::measure(const std::string& path, int* framesJudged) {
             const int top = blackRows(fr, +1, wide, black), bottom = blackRows(fr, -1, wide, black);
             height = fr->height;
             ++judged;
-            if (std::abs(top - bottom) > fr->height / 25) asymmetric = true;
+            minTop = std::min(minTop, top);
+            minBottom = std::min(minBottom, bottom);
             bar = std::min(bar, std::min(top, bottom));
         }
         av_frame_free(&fr);
         av_packet_free(&pk);
         avcodec_free_context(&cc);
         if (framesJudged) *framesJudged = judged;
+        // Bars are the same size at the top and at the bottom. Judged on the smallest of each over all
+        // frames: one frame with more black on one side (end credits, a dark sky) says nothing.
+        const bool asymmetric = judged > 0 && std::abs(minTop - minBottom) > height / 25;
         // Needs a few judged frames; small bars (< 1.5 %) are not worth a crop. The cut goes 2 rows into
         // the picture: the bar's last row is usually a soft, half-dark one, and rows of bar left on
         // the screen show as a black line along its top and bottom edge.
@@ -166,9 +170,10 @@ float LetterboxDetector::measure(const std::string& path, int* framesJudged) {
 LetterboxDetector::LetterboxDetector() {
     const char* home = std::getenv("HOME");
     const std::string dir = std::string(home ? home : "/tmp") + "/.cache/pixelvr/";
-    file_ = dir + "letterbox2.tsv";  // (2: measured with the cut 2 rows inside the picture)
+    file_ = dir + "letterbox3.tsv";  // (3: cut 2 rows inside the picture; symmetry judged over all frames)
     std::error_code ec;
     fs::remove(dir + "letterbox.tsv", ec);
+    fs::remove(dir + "letterbox2.tsv", ec);
     load();
     worker_ = std::thread([this] { loop(); });
 }
