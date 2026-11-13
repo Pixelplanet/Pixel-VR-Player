@@ -33,6 +33,7 @@ struct PushConstants {
     float conversion[4];
     float range[4];
     float stereo[4];  // x: mode (0 mono/1 SBS/2 TB), y: eye index, z: swap eyes
+    float extra[4];   // glow shaders: x = how far the glow reaches, in screen heights (0 = default)
 };
 
 struct SpherePush {
@@ -5950,6 +5951,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         ambPush.stereo[1] = static_cast<float>(viewIndex);
                         ambPush.stereo[2] = swapEyes_ ? 1.0f : 0.0f;
                         ambPush.stereo[3] = curvature;
+                        ambPush.extra[0] = ambilightReach_;
                         vkCmdPushConstants(commandBuffer_, ambLayout,
                                            VK_SHADER_STAGE_VERTEX_BIT |
                                                VK_SHADER_STAGE_FRAGMENT_BIT,

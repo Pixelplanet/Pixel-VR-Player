@@ -4530,6 +4530,7 @@ int App::run() {
                                       settings_.uiAccentColorIdx(),
                                       settings_.uiDistance());
             renderer_.setAmbilightIntensity(settings_.ambilightIntensity());
+            renderer_.setAmbilightReach(settings_.glowReach());
             renderer_.setAmbilightAllScreens(settings_.ambilightAllScreens());
             renderer_.setRoomColor(settings_.roomColor());
             {

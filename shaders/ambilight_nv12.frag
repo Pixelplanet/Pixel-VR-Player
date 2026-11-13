@@ -11,6 +11,7 @@ layout(push_constant) uniform Push {
     vec4 conversion;
     vec4 range;  // x: luma offset, y: luma scale, z: sRGB decode flag, w: glow intensity
     vec4 stereo; // x: mode (0 mono/1 SBS/2 TB), y: eye, z: swap, w: curvature
+    vec4 extra;  // x: how far the glow reaches, in screen heights (0 = the default 0.46)
 } pc;
 
 layout(location = 0) in vec2 vUV;
@@ -42,7 +43,8 @@ void main() {
         discard;
     }
     float d = length(max(q * vec2(kAspect, 1.0), 0.0));
-    float a = 1.0 - smoothstep(0.0, 0.46, d);
+    float reach = pc.extra.x > 0.0 ? pc.extra.x : 0.46;
+    float a = 1.0 - smoothstep(0.0, reach, d);
     a *= a;
     if (a <= 0.003) {
         discard;

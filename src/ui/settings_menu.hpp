@@ -90,6 +90,7 @@ public:
         CycleBrowserSort,
         BackToUI,
         CycleAmbilightScope,
+        CycleGlowReach,
         CycleLaserSmoothing,
         CycleRoom,
         EnterButtons,       // Controls & Input > Buttons (read-only binding pages)
@@ -346,6 +347,7 @@ public:
     // Ambient screen glow ("ambilight") behind the flat cinema screen.
     int ambilightIdx() const { return ambilightIdx_; }
     float ambilightIntensity() const;  // 0 = off
+    float glowReach() const;           // how far the glow reaches, in screen heights
     // Room around the screens (the projection layer's clear colour), RGB.
     const float* roomColor() const;
     int roomIdx() const { return roomIdx_; }  // 0 Midnight, 1 Black, 2 Slate, 3 Warm
@@ -481,6 +483,7 @@ private:
     int hoverHapticsStrengthIdx_ = 1;
     int ambilightIdx_ = 2;     // 0=Off, 1=Subtle, 2=Medium (default), 3=Strong
     bool ambilightAllScreens_ = true;  // multi-screen: glow around every screen
+    int glowReachIdx_ = 3;     // 0=Close, 1=Short, 2=Medium, 3=Wide (default, the look before the setting)
 
     int section_ = 0;   // 0=Display, 1=UI, 2=Audio, 3=Controls, 4=Vault; 10..12, 21, 22, 23..=sub-pages; 15/16=plugins
     std::vector<std::pair<int, std::string>> videoStreams_;  // (index, label)

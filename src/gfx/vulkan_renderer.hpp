@@ -398,6 +398,8 @@ public:
         ambilightIntensity_ = intensity < 0.0f ? 0.0f : (intensity > 1.0f ? 1.0f : intensity);
     }
     float ambilightIntensity() const { return ambilightIntensity_; }
+    // How far the glow reaches from the screen's edge, in screen heights.
+    void setAmbilightReach(float reach) { ambilightReach_ = std::clamp(reach, 0.08f, 0.46f); }
 
     enum class BrowserViewMode : int {
         BigCards = 0,    // 3x2, 6 per page (Large cards with full 16:9 thumbnail)
@@ -1147,6 +1149,7 @@ private:
     VkPipeline uiPipelineDepth_ = VK_NULL_HANDLE;
 
     float ambilightIntensity_ = 0.55f;
+    float ambilightReach_ = 0.46f;
 
     ProjectionMode projectionMode_ = ProjectionMode::Flat;
     StereoMode stereoMode_ = StereoMode::Mono;

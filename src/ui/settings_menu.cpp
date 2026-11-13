@@ -94,6 +94,10 @@ constexpr int kHoverHapticsStrengthCount = 4;
 const char* kAmbilightNames[] = {"Off", "Subtle", "Medium", "Strong"};
 const float kAmbilightValues[] = {0.0f, 0.30f, 0.55f, 0.85f};
 constexpr int kAmbilightCount = 4;
+// How far the glow reaches from the screen's edge (in screen heights; Wide = as before).
+const char* kGlowReachNames[] = {"Close", "Short", "Medium", "Wide"};
+const float kGlowReachValues[] = {0.14f, 0.24f, 0.34f, 0.46f};
+constexpr int kGlowReachCount = 4;
 
 // Panel style: Solid = opaque; Frosted = the screens behind, blurred, under a
 // tinted slab; Glass = see-through (the compositor blends it over everything).
@@ -356,6 +360,9 @@ void SettingsMenu::refresh() {
         choice("Ambient Screen Glow", kAmbilightNames[ambilightIdx_ % kAmbilightCount],
                kAmbilightCount, ambilightIdx_ % kAmbilightCount, Action::CycleAmbilight,
                projectionMode_ == 0);
+        choice("Glow Distance", kGlowReachNames[glowReachIdx_ % kGlowReachCount], kGlowReachCount,
+               glowReachIdx_ % kGlowReachCount, Action::CycleGlowReach,
+               projectionMode_ == 0 && (ambilightIdx_ % kAmbilightCount > 0));
         segmented("Glow Around", {"Selected Screen", "All Screens"}, ambilightAllScreens_ ? 1 : 0,
                   Action::CycleAmbilightScope,
                   projectionMode_ == 0 && multiScreen_ && (ambilightIdx_ % kAmbilightCount > 0));
@@ -1197,6 +1204,11 @@ SettingsMenu::Action SettingsMenu::activate() {
             saveConfig();
             refresh();
             break;
+        case Action::CycleGlowReach:
+            glowReachIdx_ = (glowReachIdx_ + 1) % kGlowReachCount;
+            saveConfig();
+            refresh();
+            break;
         case Action::CycleAmbilightScope:
             ambilightAllScreens_ = !ambilightAllScreens_;
             saveConfig();
@@ -1760,6 +1772,8 @@ const char* SettingsMenu::hoverHapticsStrengthStr() const {
     return kHoverHapticsStrengthNames[hoverHapticsStrengthIdx_ % kHoverHapticsStrengthCount];
 }
 
+float SettingsMenu::glowReach() const { return kGlowReachValues[glowReachIdx_ % kGlowReachCount]; }
+
 float SettingsMenu::ambilightIntensity() const {
     return kAmbilightValues[ambilightIdx_ % kAmbilightCount];
 }
@@ -1844,6 +1858,7 @@ void SettingsMenu::loadConfig() {
             else if (key == "hover_haptics_strength") hoverHapticsStrengthIdx_ = std::clamp(std::stoi(val), 0, kHoverHapticsStrengthCount - 1);
             else if (key == "ambilight") ambilightIdx_ = std::clamp(std::stoi(val), 0, kAmbilightCount - 1);
             else if (key == "ambilight_all") ambilightAllScreens_ = (val == "1");
+            else if (key == "glow_reach") glowReachIdx_ = std::clamp(std::stoi(val), 0, kGlowReachCount - 1);
             else if (key == "laser_smoothing") laserSmoothing_ = std::clamp(std::stoi(val), 0, 3);
             else if (key == "room") roomIdx_ = std::clamp(std::stoi(val), 0, 3);
             else if (key == "multi_screen") multiScreen_ = (val == "1" || val == "true");
@@ -1915,6 +1930,7 @@ void SettingsMenu::saveConfig() const {
             file << "hover_haptics_strength=" << hoverHapticsStrengthIdx_ << "\n";
             file << "ambilight=" << ambilightIdx_ << "\n";
             file << "ambilight_all=" << (ambilightAllScreens_ ? 1 : 0) << "\n";
+            file << "glow_reach=" << glowReachIdx_ << "\n";
             file << "laser_smoothing=" << laserSmoothing_ << "\n";
             file << "room=" << roomIdx_ << "\n";
             file << "panel_curve=" << panelCurveIdx_ << "\n";
