@@ -548,7 +548,6 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
             browser_.setOpen(false);
 #endif
             downloadsWindow_ = false;
-            pendingDl_.clear();
             selectScreen(slot);
         }
         return;
@@ -634,7 +633,6 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
         browser_.setOpen(false);
 #endif
         downloadsWindow_ = false;
-        pendingDl_.clear();
         selectScreen(slot);
     }
 
@@ -1638,7 +1636,6 @@ void App::closeHub() {
 #endif
     settings_.close();
     downloadsWindow_ = false;
-    pendingDl_.clear();
     actionMenu_.visible = false;
     smbModal_.active = false;
     smbModal_.editingField = SmbModalState::Field::None;
@@ -1712,7 +1709,7 @@ void App::openTracksMenu() {
     const auto video = cur().engine.videoStreams();
     if (audio.size() < 2 && video.size() < 2) return;
     actionMenu_.visible = true;
-    actionMenu_.page = 11;
+    actionMenu_.page = menupage::Tracks;
     actionMenu_.title = video.size() > 1 ? "Tracks" : "Audio Track";
     actionMenu_.subtitle = "The video reloads at the same position";
     actionMenu_.options.clear();
@@ -1764,7 +1761,7 @@ void App::chooseFormat(int projection, int stereo) {
 void App::openFormatMenu() {
     formatMenuPath_.clear();  // from the dock: the playing screen
     actionMenu_.visible = true;
-    actionMenu_.page = 5;
+    actionMenu_.page = menupage::Format;
     actionMenu_.title = "Playback Format";
     actionMenu_.subtitle = "Select 3D / VR Projection";
     actionMenu_.options.clear();
@@ -1801,7 +1798,7 @@ void App::downloadFocusedEntry() {
         confirmShareDelete_ = false;
         confirmEditorDelete_ = false;
         actionMenu_.visible = true;
-        actionMenu_.page = 2;
+        actionMenu_.page = menupage::Confirm;
         actionMenu_.title = "Download This Folder?";
         actionMenu_.subtitle = pendingDlName_;
         actionMenu_.options.clear();
@@ -1887,26 +1884,25 @@ void App::updateButtonLabels(std::chrono::steady_clock::time_point nowT, bool la
     }
 
     ButtonLabelState st;
-    bool menus = settings_.isOpen() || downloadsWindow_ || actionMenu_.visible || !pendingDl_.empty() ||
+    bool menus = settings_.isOpen() || downloadsWindow_ || actionMenu_.visible ||
                  smbModal_.active;
 #ifdef PIXELVR_HAVE_FREETYPE
     menus = menus || browser_.isOpen();
 #endif
     st.context = textEntry_.active ? ButtonLabelState::Context::Keyboard
                                    : (menus ? ButtonLabelState::Context::Menus : ButtonLabelState::Context::Watching);
-    st.dialog = actionMenu_.visible || !pendingDl_.empty() || smbModal_.active;
+    st.dialog = actionMenu_.visible || smbModal_.active;
     // Only the two-button delete confirm takes left / right; the other dialogs
     // step up / down only.
-    st.dialogLeftRight = actionMenu_.visible && actionMenu_.page == 2 && pendingDl_.empty();
+    st.dialogLeftRight = actionMenu_.visible && actionMenu_.page == menupage::Confirm;
 #ifdef PIXELVR_HAVE_FREETYPE
     // Options opens File Actions on the Files tab and closes an open action
     // menu; it does nothing in Settings, Downloads or the download confirm.
-    st.optionsWork = !settings_.isOpen() && !downloadsWindow_ && pendingDl_.empty() &&
+    st.optionsWork = !settings_.isOpen() && !downloadsWindow_ &&
                      (actionMenu_.visible || browser_.isOpen());
     st.recenterWorks = browser_.isOpen() || downloadsWindow_ || settings_.isOpen();
-    // Downloads (laser only) and the download confirm read neither stick nor D-pad.
-    st.noStick = !pendingDl_.empty() ||
-                 (downloadsWindow_ && !settings_.isOpen() && !actionMenu_.visible);
+    // Downloads (laser only) reads neither stick nor D-pad.
+    st.noStick = downloadsWindow_ && !settings_.isOpen() && !actionMenu_.visible;
 #else
     st.recenterWorks = settings_.isOpen();
 #endif
@@ -1991,7 +1987,7 @@ void App::openSmbModal(bool isNew, const std::string& smbPath) {
     }
 
     actionMenu_.visible = true;
-    actionMenu_.page = 4;
+    actionMenu_.page = menupage::ShareEditor;
     actionMenu_.selectedOption = 0;
     updateSmbModalMenu();
 #endif
@@ -2677,7 +2673,7 @@ bool App::decoderBudgetAllows(const std::string& path) const {
 void App::openPlayTargetMenu(const std::string& path) {
     pendingPlayPath_ = path;
     actionMenu_.visible = true;
-    actionMenu_.page = 6;
+    actionMenu_.page = menupage::ScreenPicker;
     actionMenu_.title = "Play on which screen?";
     actionMenu_.subtitle = std::filesystem::path(path).filename().string();
     // One entry per screen slot ("Replace" = playing now, "Add" = empty), then
@@ -2793,7 +2789,7 @@ void App::playFromBrowser(const std::string& path) {
         // 180/360 plays alone, so there is no screen to pick: say what happens.
         pendingPlayPath_ = path;
         actionMenu_.visible = true;
-        actionMenu_.page = 10;
+        actionMenu_.page = menupage::VrQuestion;
         actionMenu_.title = "Play the VR video?";
         actionMenu_.subtitle = openScreenCount() > 1
                                    ? "180° and 360° videos play on their own, so the other screens close."
@@ -3171,7 +3167,7 @@ void App::moveArrangementTo(int slot, const float target[3]) {
 
 void App::showChromiumDialog() {
     actionMenu_.visible = true;
-    actionMenu_.page = 9;
+    actionMenu_.page = menupage::Chromium;
     actionMenu_.title = "Chromium needed";
     actionMenu_.options.clear();
     switch (chromiumInstaller_.state()) {
@@ -3235,6 +3231,8 @@ void App::loadWeb(int slot, const std::string& url, bool kiosk, bool forceIncogn
     BrowserHost::Options opt;
     opt.kiosk = kiosk;
     opt.incognito = wantIncognito;
+    opt.accent = renderer_.themeHex(true);  // the toolbar in the UI's colours
+    opt.text = renderer_.themeHex(false);
     if (!webHosts_[slot].start(url, 1280, 720, opt)) {
         PIXELVR_LOG_WARN("Web screen: browser helper unavailable");
         return;
@@ -3297,7 +3295,7 @@ void App::openArrangeMenu() {
     }
     selectArrangePreset(start);
     actionMenu_.visible = true;
-    actionMenu_.page = 8;
+    actionMenu_.page = menupage::Arrange;
     actionMenu_.title = "Arrange Screens";
     actionMenu_.subtitle = n >= 2 ? "Pick a layout, use the arrows to swap screens, then Apply"
                                   : "Open a second screen to use a layout";
@@ -3359,10 +3357,9 @@ void App::openActionMenu() {
 #ifdef PIXELVR_HAVE_FREETYPE
     const Browser::Entry* fe = browser_.focused();
     actionMenu_.visible = true;
-    actionMenu_.page = 0;
+    actionMenu_.page = menupage::Main;
     actionMenu_.selectedOption = 0;
     actionMenu_.options.clear();
-    actionMenu_.renameBuffer.clear();
     pendingActionPath_ = fe ? fe->path : std::string();  // the row the menu is for (the list may change)
     if (FileOps::instance().relocationPending() && browser_.inVault()) {
         actionMenu_.title = "Vault";
@@ -4125,7 +4122,7 @@ int App::run() {
                 const ChromiumInstaller::State before = chromiumInstaller_.state();
                 chromiumInstaller_.poll();
                 const ChromiumInstaller::State now = chromiumInstaller_.state();
-                const bool dialogUp = actionMenu_.visible && actionMenu_.page == 9;
+                const bool dialogUp = actionMenu_.visible && actionMenu_.page == menupage::Chromium;
                 if (now == ChromiumInstaller::State::Done) {
                     chromiumInstaller_.reset();
                     if (dialogUp) actionMenu_.visible = false;
@@ -4143,7 +4140,7 @@ int App::run() {
                             openWebScreen(installWebUrl_, installWebKiosk_);  // which screen?
                         } else {
                             actionMenu_.visible = true;
-                            actionMenu_.page = 9;
+                            actionMenu_.page = menupage::Chromium;
                             actionMenu_.title = "Chromium is installed";
                             actionMenu_.subtitle = installWebKiosk_ ? "Open YouTube now? It replaces what is playing."
                                                                     : "Open the browser now? It replaces what is playing.";
@@ -4270,7 +4267,7 @@ int App::run() {
 #endif
             // In menus the D-pad steps like the stick: a full stick push while
             // held, so navStep / navStepX give it the same first step and repeat.
-            if ((hubShown || actionMenu_.visible || !pendingDl_.empty()) && !textEntry_.active &&
+            if ((hubShown || actionMenu_.visible) && !textEntry_.active &&
                 movingScreen_ < 0) {
                 const float dy = in.dpadUpHeld ? 1.0f : (in.dpadDownHeld ? -1.0f : 0.0f);
                 const float dx = in.dpadRightHeld ? 1.0f : (in.dpadLeftHeld ? -1.0f : 0.0f);
@@ -4638,7 +4635,7 @@ int App::run() {
             renderer_.setScreenControls(multiScreenEnabled() && (cur().open || cur().opening), selectedScreen_ + 1,
                                         cur().muted, screensUnlocked_, settings_.screenNumbers());
             renderer_.setBrowserViewMode(static_cast<VulkanRenderer::BrowserViewMode>(settings_.browserViewMode()));
-            renderer_.setBrowserQuickPath(browser_.isCurrentBookmarked());
+            renderer_.setBrowserBookmarked(browser_.isCurrentBookmarked());
             renderer_.setBrowserCanCreateFolder(browser_.canCreateFolder());
 #ifdef PIXELVR_HAVE_FREETYPE
             drainFileOps();
@@ -4743,7 +4740,7 @@ int App::run() {
             // stick actions (scrub, +-30s step, screen distance, 180/360 zoom/tilt/pan),
             // Recenter (X), +-30s skip, and Bumper hold (pan/tilt shift) execute silently
             // without waking the HUD or clearing hudDismissed_.
-            const bool watching = !hubShown && !actionMenu_.visible && pendingDl_.empty() && !textEntry_.active;
+            const bool watching = !hubShown && !actionMenu_.visible && !textEntry_.active;
             const bool hudCurrentlyShown = !hudDismissed_ && renderer_.controlBarVisible();
             const bool rawStickX = std::fabs(in.thumbstickX) > 0.25f || std::fabs(in.thumbstickLX) > 0.25f ||
                                    std::fabs(in.thumbstickRX) > 0.25f;
@@ -4843,7 +4840,7 @@ int App::run() {
                 performVaultLock();
             }
             // Show / Hide UI: the player HUD on / off (ignored with the hub open).
-            if (toggleUiPressed && !hubShown && !actionMenu_.visible && pendingDl_.empty()) {
+            if (toggleUiPressed && !hubShown && !actionMenu_.visible) {
                 if (!hudDismissed_ && renderer_.controlBarVisible()) {
                     dismissHud(in, nowT);
                 } else {  // shown like any wake
@@ -4859,8 +4856,7 @@ int App::run() {
             // Main Menu: open the hub, or close everything that is open.
             if (in.mainMenu) {
                 in.mainMenu = false;
-                if (browser_.isOpen() || settings_.isOpen() || downloadsWindow_ || actionMenu_.visible ||
-                    !pendingDl_.empty()) {
+                if (browser_.isOpen() || settings_.isOpen() || downloadsWindow_ || actionMenu_.visible) {
                     closeHub();
                 } else {
                     browser_.open();  // last tab / location
@@ -4878,9 +4874,7 @@ int App::run() {
             // a web page under the laser took theirs already.)
             if (in.back) {
                 in.back = false;
-                if (!pendingDl_.empty()) {
-                    pendingDl_.clear();  // just the confirmation, the hub stays
-                } else if (actionMenu_.visible) {
+                if (actionMenu_.visible) {
                     actionMenu_.visible = false;
                     smbModal_.active = false;
                     smbModal_.editingField = SmbModalState::Field::None;
@@ -4925,7 +4919,7 @@ int App::run() {
             // Settings, then the web shortcuts), wrapping. On the Buttons pages
             // they turn the page first, then move on past the first / last one.
             if ((in.previous || in.next) && (browser_.isOpen() || settings_.isOpen() || downloadsWindow_) &&
-                pendingDl_.empty() && !actionMenu_.visible) {
+                !actionMenu_.visible) {
                 const int dir = in.next ? 1 : -1;
                 if (!(settings_.isOpen() && settings_.turnButtonsPage(dir, false))) cycleHubTab(dir);
                 in.previous = in.next = false;
@@ -4968,7 +4962,6 @@ int App::run() {
             // The head-locked line carries short notices instead (software
             // decoding because another process holds the hardware decoder).
             // (No head-locked text line: messages go on their screen or above the control panel.)
-            renderer_.setDownloadStatus(false, std::string());
             renderer_.setDownloadsBadge(dlAnyActive,
                                         !dlAnyActive &&
                                             browser_.hasDownloads() && dlRecent,
@@ -5052,8 +5045,7 @@ int App::run() {
                 }
             }
             renderer_.setActiveDownloadCount(activeDlCount);
-            const bool dlWin = downloadsWindow_ && !settings_.isOpen() &&
-                               pendingDl_.empty();
+            const bool dlWin = downloadsWindow_ && !settings_.isOpen();
             renderer_.setDownloadsModal(false);
             renderer_.setDownloads(
                 dlWin, "Downloads", drows,
@@ -5063,7 +5055,7 @@ int App::run() {
                 dbtns, djList);
 
             // Folder-download confirmation (the shared confirm dialog): its text shows the size so far.
-            if (confirmFolderDl_ && !(actionMenu_.visible && actionMenu_.page == 2)) confirmFolderDl_ = false;
+            if (confirmFolderDl_ && !(actionMenu_.visible && actionMenu_.page == menupage::Confirm)) confirmFolderDl_ = false;
             if (confirmFolderDl_) {
                 char sz[96];
                 std::snprintf(sz, sizeof(sz), "%.2f GB%s", browser_.measuredSize() / 1073741824.0,
@@ -5392,11 +5384,11 @@ int App::run() {
                     }
                 }
                 const bool uiPanelActive = browserOpen || settingsOpen ||
-                                           downloadsWindow_ || !pendingDl_.empty() || actionMenu_.visible || smbModal_.active;
+                                           downloadsWindow_ || actionMenu_.visible || smbModal_.active;
                 // The Transport HUD is only visible during playback when the
                 // Unified Spatial Hub and modals are closed.
                 const bool barBlocked = browserOpen || settingsOpen || downloadsWindow_ ||
-                                        !pendingDl_.empty() || actionMenu_.visible || smbModal_.active;
+                                        actionMenu_.visible || smbModal_.active;
                 // Controls (buttons + timeline) show only while a controller is
                 // actively moving; they fade after a few seconds of stillness.
                 renderer_.setControlBar(!barBlocked && controllersEngaged && !hudDismissed_ &&
@@ -5519,7 +5511,7 @@ int App::run() {
 #ifdef PIXELVR_HAVE_FREETYPE
             // Unified Spatial Hub left navigation rail clicks (shared across Files, Downloads, Settings)
             const bool hubActive = (browserOpen || settingsOpen || downloadsWindow_) &&
-                                   pendingDl_.empty() && !actionMenu_.visible;
+                                   !actionMenu_.visible;
             const int sbHover = renderer_.browserSidebarHovered();
             // The hub's close button (top right): like the Menu button, for laser-only use.
             if (hubActive && (in.togglePlay || in.select) && renderer_.hubCloseHovered()) {
@@ -5607,7 +5599,7 @@ int App::run() {
 
             // Downloads view interaction inside Unified Spatial Hub
             // More than four downloads: the stick scrolls the list.
-            if (dlWin && sbHover < 0 && pendingDl_.empty() && !actionMenu_.visible) {
+            if (dlWin && sbHover < 0 && !actionMenu_.visible) {
                 if (const int d = navStep(in.thumbstickY, nowT)) renderer_.scrollDownloads(d);
             }
             if (dlWin && (in.select || in.togglePlay) && sbHover < 0) {
@@ -5669,9 +5661,9 @@ int App::run() {
 
             // File Action Submenu or Files view interaction inside Unified Spatial Hub
             if (actionMenu_.visible) {
-                if ((!browser_.isOpen() && actionMenu_.page != 5 && actionMenu_.page != 8 && actionMenu_.page != 9 &&
-                     actionMenu_.page != 11) ||
-                    downloadsWindow_ || settings_.isOpen() || !pendingDl_.empty()) {
+                if ((!browser_.isOpen() && actionMenu_.page != menupage::Format && actionMenu_.page != menupage::Arrange && actionMenu_.page != menupage::Chromium &&
+                     actionMenu_.page != menupage::Tracks) ||
+                    downloadsWindow_ || settings_.isOpen()) {
                     actionMenu_.visible = false;
                 } else {
                     const Browser::Entry* fe = browser_.focused();
@@ -5679,7 +5671,7 @@ int App::run() {
                     // Button Y (or configured move button) toggles/cancels
                     if (actionBtnPressed) {
                         actionMenu_.visible = false;
-                    } else if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page >= 5) {
+                    } else if (actionMenu_.page == menupage::Main || actionMenu_.page == menupage::MoveTo || actionMenu_.page >= menupage::Format) {
                         const int dy = navStep(in.thumbstickY, nowT);
                         if (dy != 0) {
                             actionMenu_.selectedOption += dy;
@@ -5692,7 +5684,7 @@ int App::run() {
 
                         if (in.select || in.togglePlay) {
                             int chosen = (hov >= 0) ? hov : actionMenu_.selectedOption;
-                            if (actionMenu_.page == 8 && chosen >= 100) {
+                            if (actionMenu_.page == menupage::Arrange && chosen >= 100) {
                                 // Swap arrow between two screens in the preview.
                                 const int sa = (chosen - 100) / 3;
                                 const int sb = (chosen - 100) % 3;
@@ -5709,7 +5701,7 @@ int App::run() {
                             }
                             if (chosen >= 0 && chosen < static_cast<int>(actionMenu_.options.size())) {
                                 const std::string opt = actionMenu_.options[chosen];
-                                if (actionMenu_.page == 0) {
+                                if (actionMenu_.page == menupage::Main) {
                                     if (opt == "Download" || opt == "Download Folder") {
                                         actionMenu_.visible = false;
                                         downloadFocusedEntry();
@@ -5728,7 +5720,7 @@ int App::run() {
                                         if (fe && fe->path == pendingActionPath_) {
                                             confirmShareDelete_ = true;
                                             confirmEditorDelete_ = false;
-                                            actionMenu_.page = 2;
+                                            actionMenu_.page = menupage::Confirm;
                                             actionMenu_.title = "Delete Network Share?";
                                             actionMenu_.subtitle = "Remove the saved share \"" + fe->label + "\" and its login?";
                                             actionMenu_.options.clear();
@@ -5782,7 +5774,7 @@ int App::run() {
                                         }
                                     } else if (opt == "Change 3D / VR Format") {
                                         formatMenuPath_ = pendingActionPath_;  // this file, not the playing one
-                                        actionMenu_.page = 5;
+                                        actionMenu_.page = menupage::Format;
                                         actionMenu_.title = "3D & VR Format";
                                         actionMenu_.subtitle = fe ? fe->label : "";
                                         actionMenu_.options.clear();
@@ -5843,7 +5835,7 @@ int App::run() {
                                         confirmShareDelete_ = false;
                                         confirmEditorDelete_ = false;
                                         pendingActionPath_ = fe ? fe->path : std::string();
-                                        actionMenu_.page = 2;
+                                        actionMenu_.page = menupage::Confirm;
                                         actionMenu_.title = (fe && fe->isDir) ? "Delete Folder?" : "Delete File?";
                                         actionMenu_.subtitle = "Permanently delete \"" + (fe ? fe->label : "") + "\"" +
                                                                ((fe && fe->isDir) ? " and all contents?" : "?");
@@ -5854,7 +5846,7 @@ int App::run() {
                                     } else if (opt == "Cancel") {
                                         actionMenu_.visible = false;
                                     }
-                                } else if (actionMenu_.page == 10) {
+                                } else if (actionMenu_.page == menupage::VrQuestion) {
                                     // 180/360 with other screens open.
                                     actionMenu_.visible = false;
                                     if (opt == "Play") {
@@ -5868,7 +5860,7 @@ int App::run() {
                                         if (!lastLoadFailed_) browser_.setOpen(false);
 #endif
                                     }
-                                } else if (actionMenu_.page == 9) {
+                                } else if (actionMenu_.page == menupage::Chromium) {
                                     // Chromium install dialog.
                                     if (opt == "Open YouTube" || opt == "Open browser") {
                                         actionMenu_.visible = false;
@@ -5889,7 +5881,7 @@ int App::run() {
                                         }
                                         actionMenu_.visible = false;
                                     }
-                                } else if (actionMenu_.page == 11) {
+                                } else if (actionMenu_.page == menupage::Tracks) {
                                     // Tracks: pick one; the file reloads at the same position.
                                     actionMenu_.visible = false;
 #ifdef PIXELVR_HAVE_MEDIA
@@ -5905,7 +5897,7 @@ int App::run() {
                                         xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.02f, 0.0f, 0.5f);
                                     }
 #endif
-                                } else if (actionMenu_.page == 5) {
+                                } else if (actionMenu_.page == menupage::Format) {
                                     if (opt == "2D|Flat, standard video") {
                                         chooseFormat(0, 0);
                                     } else if (opt == "3D SBS|Side-by-side 3D") {
@@ -5938,7 +5930,7 @@ int App::run() {
                                     xr_.triggerHaptic(0, 0.040f, 0.0f, 0.6f);
                                     xr_.triggerHaptic(1, 0.040f, 0.0f, 0.6f);
                                     actionMenu_.visible = false;
-                                } else if (actionMenu_.page == 8) {
+                                } else if (actionMenu_.page == menupage::Arrange) {
                                     // 0..P-1 = presets, then Snap, Style, Apply, Cancel.
                                     const int presetCount = static_cast<int>(arrangePresets_.size());
                                     const int id = chosen - presetCount;
@@ -5964,7 +5956,7 @@ int App::run() {
                                     } else {
                                         actionMenu_.visible = false;
                                     }
-                                } else if (actionMenu_.page == 6) {
+                                } else if (actionMenu_.page == menupage::ScreenPicker) {
                                     // Screen picker: 0..2 = screen slot tile, 3 = Cancel.
                                     if (chosen < VulkanRenderer::kMaxVideoSlots) {
                                         const bool occupied = screens_[chosen].open || screens_[chosen].opening;
@@ -5988,7 +5980,7 @@ int App::run() {
                             }
                             interacted = true;
                         }
-                    } else if (actionMenu_.page == 2) {
+                    } else if (actionMenu_.page == menupage::Confirm) {
                         const int dx = navStepX(in.thumbstickX, nowT);
                         const int dy = navStep(in.thumbstickY, nowT);
                         if (dx != 0 || dy != 0) {
@@ -6012,7 +6004,7 @@ int App::run() {
                                     deleteSmbModal();
                                     xr_.triggerHaptic(1, 0.050f, 0.0f, 0.7f);
                                 } else {  // back to the editor
-                                    actionMenu_.page = 4;
+                                    actionMenu_.page = menupage::ShareEditor;
                                     actionMenu_.subtitle.clear();
                                     updateSmbModalMenu();
                                     actionMenu_.selectedOption = 9;
@@ -6040,7 +6032,7 @@ int App::run() {
                             }
                             interacted = true;
                         }
-                    } else if (actionMenu_.page == 4) {
+                    } else if (actionMenu_.page == menupage::ShareEditor) {
                         // SMB Share Editor Modal
                         const int dy = navStep(in.thumbstickY, nowT);
                         const int maxOpt = static_cast<int>(actionMenu_.options.size()) - 1;
@@ -6154,7 +6146,7 @@ int App::run() {
                                     // Cancel comes back to the editor as it was.
                                     confirmEditorDelete_ = true;
                                     confirmShareDelete_ = false;
-                                    actionMenu_.page = 2;
+                                    actionMenu_.page = menupage::Confirm;
                                     actionMenu_.title = "Delete Network Share?";
                                     actionMenu_.subtitle = "Remove the saved share \"" + smbModal_.host +
                                                            (smbModal_.share.empty() ? "" : "/" + smbModal_.share) + "\" and its login?";
@@ -6182,12 +6174,12 @@ int App::run() {
                     }
                 }
             } else if (actionBtnPressed && browser_.isOpen() && !downloadsWindow_ &&
-                       !settings_.isOpen() && pendingDl_.empty()) {
+                       !settings_.isOpen()) {
                 if (picking()) cancelPick();
                 else openActionMenu();
                 interacted = true;
             } else if (browser_.isOpen() && !browser_.isScanning() && !downloadsWindow_ &&
-                       !settings_.isOpen() && pendingDl_.empty()) {
+                       !settings_.isOpen()) {
                 // 2D grid thumbstick navigation: row steps depend on columns per row
                 const int cols = (renderer_.browserViewMode() == VulkanRenderer::BrowserViewMode::MiniCards) ? 4 :
                                  (renderer_.browserViewMode() == VulkanRenderer::BrowserViewMode::CompactList) ? 1 : 3;
@@ -6242,11 +6234,11 @@ int App::run() {
                         if (cur != "bookmarks://") {
                             if (browser_.isBookmarked(cur)) {
                                 browser_.removeBookmark(cur);
-                                renderer_.setBrowserQuickPath(false);
+                                renderer_.setBrowserBookmarked(false);
                                 xr_.triggerHaptic(1, 0.040f, 0.0f, 0.5f);
                             } else {
                                 browser_.addBookmark(cur);
-                                renderer_.setBrowserQuickPath(true);
+                                renderer_.setBrowserBookmarked(true);
                                 xr_.triggerHaptic(1, 0.040f, 0.0f, 0.7f);
                             }
                         }
@@ -6479,7 +6471,7 @@ int App::run() {
 
             // Cinema Transport Dock is only active when the Unified Spatial Hub is closed.
             const bool barOk = !browserOpen && !settingsOpen && !downloadsWindow_ &&
-                               pendingDl_.empty() && !actionMenu_.visible && !smbModal_.active;
+                               !actionMenu_.visible && !smbModal_.active;
             // Multi-screen: point at a screen and pull the trigger to select it; the
             // dock (including its screen row) then controls that screen.
             if (barOk && multiScreenEnabled() && movingScreen_ < 0) {

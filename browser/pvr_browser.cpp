@@ -581,6 +581,7 @@ struct ScreenOptions {
     int height = 720;  // page viewport; the toolbar adds to the frame
     bool kiosk = false;
     bool incognito = false;
+    std::string accent, text;  // the player's UI theme as "rrggbb" (empty: the toolbar's own colours)
 };
 
 struct Tab {
@@ -2007,7 +2008,20 @@ int runScreen(const ScreenOptions& opt) {
              "{\"format\":\"jpeg\",\"quality\":92,\"maxWidth\":" + std::to_string(W) +
                  ",\"maxHeight\":" + std::to_string(kBrowserMaxHeight) + "}",
              toolbar);
-        const std::string html = pvrbrowser::kToolbarHtml;
+        std::string html = pvrbrowser::kToolbarHtml;
+        {
+            // The player's theme: its accent and text colour replace the toolbar's (regular windows only
+            // for the accent: incognito keeps its own purple, which is how you tell it apart).
+            auto isHex = [](const std::string& h) {
+                return h.size() == 6 && h.find_first_not_of("0123456789abcdefABCDEF") == std::string::npos;
+            };
+            auto swap = [&](const std::string& from, const std::string& to) {
+                const size_t at = html.find(from);
+                if (at != std::string::npos) html.replace(at, from.size(), to);
+            };
+            if (isHex(opt.accent)) swap("--acc:#5aa2ff", "--acc:#" + opt.accent);
+            if (isHex(opt.text)) swap("--text:#e8ecf3", "--text:#" + opt.text);
+        }
         send("Page.navigate",
              "{\"url\":" +
                  pvrjson::quote("data:text/html;base64," +
@@ -2540,6 +2554,8 @@ int pvrBrowserMain(int argc, char** argv) {
         else if (a == "--height") opt.height = std::atoi(argv[++i]);
         else if (a == "--port") opt.port = std::atoi(argv[++i]);
         else if (a == "--profile") opt.profile = argv[++i];
+        else if (a == "--accent") opt.accent = argv[++i];
+        else if (a == "--text") opt.text = argv[++i];
     }
     opt.width = std::clamp(opt.width, 320, kBrowserMaxWidth);
     // Room for the toolbar above the page.

@@ -3056,15 +3056,15 @@ void VulkanRenderer::updatePointer() {
             if (inPanel) {
                 hitHere(world.x, world.y, world.z);
                 const int optCount = static_cast<int>(actionMenu_.options.size());
-                if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5 || actionMenu_.page == 11 || actionMenu_.page == 9 ||
-                    actionMenu_.page == 10) {
+                if (actionMenu_.page == menupage::Main || actionMenu_.page == menupage::MoveTo || actionMenu_.page == menupage::Format || actionMenu_.page == menupage::Tracks || actionMenu_.page == menupage::Chromium ||
+                    actionMenu_.page == menupage::VrQuestion) {
                     for (int i = 0; i < optCount; ++i) {
                         if (hub::actionMenuOption(i, optCount).contains(hx, hyy, 0.002f)) {
                             actionMenuBtnHovered_ = i;
                             break;
                         }
                     }
-                } else if (actionMenu_.page == 6 && pickerSpatial_) {
+                } else if (actionMenu_.page == menupage::ScreenPicker && pickerSpatial_) {
                     for (int slot = 0; slot < kMaxVideoSlots; ++slot) {
                         const float* tr = arrangeTileRect_[slot];
                         if (arrangeTileValid_[slot] && hx >= tr[0] - 0.006f && hx <= tr[1] + 0.006f &&
@@ -3081,14 +3081,14 @@ void VulkanRenderer::updatePointer() {
                         }
                     }
                     if (hub::pickerCancel().contains(hx, hyy, 0.004f)) actionMenuBtnHovered_ = 3;
-                } else if (actionMenu_.page == 6) {
+                } else if (actionMenu_.page == menupage::ScreenPicker) {
                     int order[kMaxVideoSlots];
                     screenOrderLeftToRight(order);
                     for (int i = 0; i < kMaxVideoSlots; ++i) {
                         if (hub::pickerTile(i).contains(hx, hyy, 0.012f)) actionMenuBtnHovered_ = order[i];
                     }
                     if (hub::pickerCancel().contains(hx, hyy, 0.004f)) actionMenuBtnHovered_ = 3;
-                } else if (actionMenu_.page == 8) {
+                } else if (actionMenu_.page == menupage::Arrange) {
                     const int presetCount = std::max(0, optCount - hub::kArrangeButtons);
                     for (int i = 0; i < presetCount; ++i) {
                         if (hub::arrangeOption(i).contains(hx, hyy, 0.004f)) actionMenuBtnHovered_ = i;
@@ -3104,11 +3104,11 @@ void VulkanRenderer::updatePointer() {
                             actionMenuBtnHovered_ = hub::kSwapIdBase + sa.slotA * 3 + sa.slotB;
                         }
                     }
-                } else if (actionMenu_.page == 2) {
+                } else if (actionMenu_.page == menupage::Confirm) {
                     for (int i = 0; i < 2; ++i) {
                         if (hub::deleteConfirmButton(i).contains(hx, hyy)) actionMenuBtnHovered_ = i;
                     }
-                } else if (actionMenu_.page == 4) {
+                } else if (actionMenu_.page == menupage::ShareEditor) {
                     // SMB share editor form (fixed option ids, see hub::smbFieldWell)
                     for (int i : {0, 1, 2, 3, 4, 5, 6, 10}) {
                         if (i < optCount && hub::smbFieldHit(i).contains(hx, hyy)) {
@@ -5794,6 +5794,23 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
     const int acIdx = std::clamp(uiAccentColorIdx_, 0, 4);
     const float* themeTextCol = kTextPalettes[tcIdx];
     const float* themeAccentCol = kAccentPalettes[acIdx];
+    for (int k = 0; k < 3; ++k) {  // (themeHex(): the browser toolbar follows the theme)
+        themeTextRgb_[k] = themeTextCol[k];
+        themeAccentRgb_[k] = themeAccentCol[k];
+    }
+    // One scrollbar for every list (file browser, Downloads, music queue): a recessed track with an
+    // accent thumb. `first` = index of the first visible item, `visible` of `total` items shown.
+    auto drawScrollbar = [&](const Mat4& mvp, float cx, float cy, float halfW, float halfH, int first, int visible,
+                             int total) {
+        if (total <= visible || visible <= 0) return;
+        drawUiElement(mvp, cx, cy, halfW, halfH, UiShape::RoundedBox, glassWellT.data(), 1.0f);
+        const float frac = std::clamp(static_cast<float>(visible) / static_cast<float>(total), 0.12f, 0.90f);
+        const float thumbHalfH = halfH * frac;
+        const float prog = std::clamp(static_cast<float>(first) / static_cast<float>(std::max(1, total - visible)), 0.0f, 1.0f);
+        const float thumbCy = (cy + halfH - thumbHalfH) - prog * (halfH - thumbHalfH) * 2.0f;
+        const float thumbCol[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.85f};
+        drawUiElement(mvp, cx, thumbCy, halfW * 1.4f, thumbHalfH, UiShape::RoundedBox, thumbCol, 1.0f);
+    };
 
     // Video screens (drawn here so each one's frame can follow it far-to-near).
     // Draw each video slot that has a frame; otherwise the render pass just
@@ -6089,13 +6106,11 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         }
                     }
                     // Scroll position when the queue is longer than the list.
-                    if (mv.count > kMusicRows) {
+                    {
                         const float trackH = kMusicRows * hub::musicui::kRowH;
-                        const float thumbH = std::max(0.06f, trackH * kMusicRows / mv.count);
-                        const float t = static_cast<float>(mv.first) / static_cast<float>(mv.count - kMusicRows);
-                        const float x = hub::musicui::kPanel.cx + hub::musicui::kPanel.hw - 0.022f;
-                        const float y = hub::musicui::kRowsTop - 0.5f * thumbH - t * (trackH - thumbH);
-                        drawUiElement(mvpUi, x, y, 0.007f, 0.5f * thumbH, UiShape::RoundedBox, off, 1.0f);
+                        drawScrollbar(mvpUi, hub::musicui::kPanel.cx + hub::musicui::kPanel.hw - 0.022f,
+                                      hub::musicui::kRowsTop - 0.5f * trackH, 0.005f, 0.5f * trackH, mv.first, kMusicRows,
+                                      mv.count);
                     }
                     // Buttons: shuffle, previous, play/pause, next, repeat.
                     for (int i = 0; i < 5; ++i) {
@@ -7159,9 +7174,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 drawUiElement(vpPanel, headerIconX(r), r.cy, 0.012f, 0.012f, UiShape::List, slateIconCol);
             }
             {
-                const UiRect r = headerBtn(3, browserIsQuickPath_);  // bookmark
+                const UiRect r = headerBtn(3, browserBookmarked_);  // bookmark
                 drawUiElement(vpPanel, headerIconX(r), r.cy, 0.014f, 0.014f, UiShape::Star,
-                              browserIsQuickPath_ ? themeAccentCol : slateIconCol);
+                              browserBookmarked_ ? themeAccentCol : slateIconCol);
             }
             {
                 const UiRect r = headerBtn(5, false);  // sort order
@@ -7335,23 +7350,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
 
             // Right-edge vertical scrollbar
-            if (total > perPage) {
-                const float trackCx = 0.880f;
-                const float trackCy = -0.030f;
-                const float trackHalfW = 0.0035f;
-                const float trackHalfH = 0.400f;
-                drawUiElement(vpPanel, trackCx, trackCy, trackHalfW, trackHalfH,
-                              UiShape::RoundedBox, glassWellT.data(), 1.0f);
-
-                const float thumbFraction = std::clamp(static_cast<float>(perPage) / static_cast<float>(total), 0.12f, 0.90f);
-                const float thumbHalfH = trackHalfH * thumbFraction;
-                const float scrollProgress = std::clamp(static_cast<float>(first) / static_cast<float>(std::max(1, total - perPage)), 0.0f, 1.0f);
-                const float availableTravel = (trackHalfH - thumbHalfH) * 2.0f;
-                const float thumbCy = (trackCy + trackHalfH - thumbHalfH) - scrollProgress * availableTravel;
-                const float thumbCol[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.85f};
-                drawUiElement(vpPanel, trackCx, thumbCy, trackHalfW * 1.4f, thumbHalfH,
-                              UiShape::RoundedBox, thumbCol, 1.0f);
-            }
+            drawScrollbar(vpPanel, 0.880f, -0.030f, 0.0035f, 0.400f, first, perPage, total);
 
             // Breadcrumb trail (chevrons drawn now, segment text in the text pass)
             const float breadX = -0.460f;  // the path has the whole top row
@@ -7423,10 +7422,10 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             const UiRect viewR = hub::headerButton(2);
             drawFitCentered(viewR.cx + 0.014f, viewR.cy, viewR.hw * 2.0f - 0.05f, scSub * 0.90f,
                             themeTextCol, vModeLabels[static_cast<int>(browserViewMode_) % 3]);
-            const char* qpLabel = browserIsQuickPath_ ? "Bookmarked" : "Bookmark";
+            const char* qpLabel = browserBookmarked_ ? "Bookmarked" : "Bookmark";
             const UiRect bmR = hub::headerButton(3);
             drawFitCentered(bmR.cx + 0.014f, bmR.cy, bmR.hw * 2.0f - 0.05f, scSub * 0.90f,
-                            browserIsQuickPath_ ? themeAccentCol : themeTextCol, qpLabel);
+                            browserBookmarked_ ? themeAccentCol : themeTextCol, qpLabel);
             const UiRect sortR = hub::headerButton(5);
             drawFitCentered(sortR.cx + 0.014f, sortR.cy, sortR.hw * 2.0f - 0.05f, scSub * 0.90f,
                             themeTextCol, browserSortLabel_);
@@ -7581,16 +7580,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 }
                 visJobs.push_back(i);
             }
-            if (dlShown > hub::kMaxDownloadCards) {  // scrollbar, like the file browser's
-                const float trackCx = 0.880f, trackCy = -0.030f, trackHalfW = 0.0035f, trackHalfH = 0.345f;
-                drawUiElement(vpPanel, trackCx, trackCy, trackHalfW, trackHalfH, UiShape::RoundedBox, glassWellT.data(), 1.0f);
-                const float frac = std::clamp(static_cast<float>(hub::kMaxDownloadCards) / static_cast<float>(dlShown), 0.12f, 0.90f);
-                const float thumbHalfH = trackHalfH * frac;
-                const float prog = static_cast<float>(downloadsFirst_) / static_cast<float>(std::max(1, dlShown - hub::kMaxDownloadCards));
-                const float thumbCy = (trackCy + trackHalfH - thumbHalfH) - prog * (trackHalfH - thumbHalfH) * 2.0f;
-                const float thumbCol[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.85f};
-                drawUiElement(vpPanel, trackCx, thumbCy, trackHalfW * 1.4f, thumbHalfH, UiShape::RoundedBox, thumbCol, 1.0f);
-            }
+            drawScrollbar(vpPanel, 0.880f, -0.030f, 0.0035f, 0.345f, downloadsFirst_, hub::kMaxDownloadCards, dlShown);
             // Which per-job buttons a job shows: 0 = pause/resume or Play, 1 = X.
             auto jobHasButton = [](int state, int which) {
                 return which == 1 || state == 0 || state == 1 || state == 2 || state == 3;  // 2/3: Retry
@@ -8331,13 +8321,13 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         const float menuSpanY = static_cast<float>(std::max(0, menuOptCount - 1)) * menuStepY;
         const float menuDynHalfH = std::max(0.22f, 0.5f * menuSpanY + 0.125f);
 
-        const float mHalfW = (actionMenu_.page == 4) ? hub::kSmbHalfW
-                           : (actionMenu_.page == 6) ? hub::kPickHalfW
-                           : (actionMenu_.page == 8) ? hub::kArrHalfW : 0.44f;
-        const float mHalfH = (actionMenu_.page == 4) ? hub::kSmbHalfH
-                           : (actionMenu_.page == 6) ? hub::kPickHalfH
-                           : (actionMenu_.page == 8) ? hub::kArrHalfH
-                           : ((actionMenu_.page == 2) ? 0.24f : menuDynHalfH);
+        const float mHalfW = (actionMenu_.page == menupage::ShareEditor) ? hub::kSmbHalfW
+                           : (actionMenu_.page == menupage::ScreenPicker) ? hub::kPickHalfW
+                           : (actionMenu_.page == menupage::Arrange) ? hub::kArrHalfW : 0.44f;
+        const float mHalfH = (actionMenu_.page == menupage::ShareEditor) ? hub::kSmbHalfH
+                           : (actionMenu_.page == menupage::ScreenPicker) ? hub::kPickHalfH
+                           : (actionMenu_.page == menupage::Arrange) ? hub::kArrHalfH
+                           : ((actionMenu_.page == menupage::Confirm) ? 0.24f : menuDynHalfH);
         const float modalBg[4] = {0.032f, 0.045f, 0.075f, 0.98f * (0.55f + 0.45f * op)};
         drawGlass(0.0f, 0.0f, mHalfW, mHalfH, modalBg, 0.10f, 0.010f, themeAccentCol);
 
@@ -8448,8 +8438,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         };
         ArrangeTile arrTiles[kMaxVideoSlots];
         int arrOrder[kMaxVideoSlots] = {0, 1, 2};
-        if (actionMenu_.page == 8 || (actionMenu_.page == 6 && pickerSpatial_)) {
-            const UiRect box = (actionMenu_.page == 8) ? hub::arrangePreview() : hub::pickerPreview(pickerAddCardShown());
+        if (actionMenu_.page == menupage::Arrange || (actionMenu_.page == menupage::ScreenPicker && pickerSpatial_)) {
+            const UiRect box = (actionMenu_.page == menupage::Arrange) ? hub::arrangePreview() : hub::pickerPreview(pickerAddCardShown());
             const float hy = 0.5f * arrangeYaw_;
             const float hp = 0.5f * arrangePitch_;
             const Mat4 toView = multiply(
@@ -8561,7 +8551,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 arrangeTileRect_[slot][3] = ty1[slot];
             }
             arrangeArrowCount_ = 0;
-            if (actionMenu_.page == 8)
+            if (actionMenu_.page == menupage::Arrange)
             for (int a = 0; a < kMaxVideoSlots; ++a) {
                 for (int b = a + 1; b < kMaxVideoSlots; ++b) {
                     if (!arrTiles[a].valid || !arrTiles[b].valid || arrangeArrowCount_ >= 4) continue;
@@ -8593,8 +8583,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                       [&](int a, int b) { return arrTiles[a].depth < arrTiles[b].depth; });
         }
 
-        if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5 || actionMenu_.page == 11 || actionMenu_.page == 9 ||
-            actionMenu_.page == 10) {
+        if (actionMenu_.page == menupage::Main || actionMenu_.page == menupage::MoveTo || actionMenu_.page == menupage::Format || actionMenu_.page == menupage::Tracks || actionMenu_.page == menupage::Chromium ||
+            actionMenu_.page == menupage::VrQuestion) {
             const float btnHalfW = 0.38f;
             const float btnHalfH = 0.028f;
             for (int i = 0; i < menuOptCount; ++i) {
@@ -8611,7 +8601,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 drawUiElement(vpPanel, 0.0f, cy, btnHalfW, btnHalfH,
                               UiShape::RoundedBox, bg, 1.0f, 0.06f, bord);
             }
-        } else if (actionMenu_.page == 2) {
+        } else if (actionMenu_.page == menupage::Confirm) {
             // Delete confirmation
             const float cy = -0.12f;
             const float btnHalfW = 0.13f;
@@ -8627,7 +8617,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                           destructive ? (delHov ? redBgHov : redBg) : okBg, 1.0f, 0.05f, destructive ? redBorder : okBorder);
             drawUiElement(vpPanel, 0.15f, cy, btnHalfW, btnHalfH,
                           UiShape::RoundedBox, canHov ? slateBgHov : slateBg, 1.0f, 0.05f, slateBorder);
-        } else if (actionMenu_.page == 6 && pickerSpatial_) {
+        } else if (actionMenu_.page == menupage::ScreenPicker && pickerSpatial_) {
             // "Play on which screen?" while a layout is in use: the screens as
             // they are arranged (point at one to replace it) plus an "Add" card.
             const float tileGlow[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.30f};
@@ -8708,7 +8698,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             drawUiElement(vpPanel, cr.cx, cr.cy, cr.hw, cr.hh, UiShape::RoundedBox,
                           cHov ? glassCardHoverT.data() : glassControlT.data(), 1.0f, 0.06f,
                           cHov ? kGlassRim : kGlassRimFaint);
-        } else if (actionMenu_.page == 6) {
+        } else if (actionMenu_.page == menupage::ScreenPicker) {
             // "Play on which screen?" picker: live preview tiles in the order the
             // screens sit around the viewer; empty slots show a "+".
             int order[kMaxVideoSlots];
@@ -8744,7 +8734,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             drawUiElement(vpPanel, cr.cx, cr.cy, cr.hw, cr.hh, UiShape::RoundedBox,
                           cHov ? glassCardHoverT.data() : glassControlT.data(), 1.0f, 0.06f,
                           cHov ? kGlassRim : kGlassRimFaint);
-        } else if (actionMenu_.page == 8) {
+        } else if (actionMenu_.page == menupage::Arrange) {
             // Arrange screens: presets (left), live preview (right), toggles + Apply.
             const int presetCount = std::max(0, menuOptCount - hub::kArrangeButtons);
             const float activeBg[4] = {themeAccentCol[0] * 0.24f, themeAccentCol[1] * 0.24f,
@@ -8812,7 +8802,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 drawUiElement(vpPanel, sa.x, sa.y, 0.017f, 0.017f, sa.vertical ? UiShape::SwapV : UiShape::SwapH,
                               hov ? themeTextCol : themeAccentCol);
             }
-        } else if (actionMenu_.page == 4) {
+        } else if (actionMenu_.page == menupage::ShareEditor) {
             // SMB share editor: two-column glass form (layout in hub::smbFieldWell)
             const int optCount = static_cast<int>(actionMenu_.options.size());
             const bool anon = optCount > 2 && actionMenu_.options[2] == "guest";
@@ -8919,13 +8909,13 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                                 textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
         const float sc = (0.032f * tScale) / fontAtlas_.lineHeight;
 
-        if (actionMenu_.page != 4 && actionMenu_.page != 6 && actionMenu_.page != 8) {  // own header
+        if (actionMenu_.page != menupage::ShareEditor && actionMenu_.page != menupage::ScreenPicker && actionMenu_.page != menupage::Arrange) {  // own header
             withHeadingFont([&] {
                 drawFitCentered(0.0f, mHalfH - 0.045f, mHalfW * 1.8f, sc * 1.15f, themeAccentCol, actionMenu_.title);
             });
         }
-        if (!actionMenu_.subtitle.empty() && actionMenu_.page != 2 && actionMenu_.page != 4 &&
-            actionMenu_.page != 6 && actionMenu_.page != 8) {
+        if (!actionMenu_.subtitle.empty() && actionMenu_.page != menupage::Confirm && actionMenu_.page != menupage::ShareEditor &&
+            actionMenu_.page != menupage::ScreenPicker && actionMenu_.page != menupage::Arrange) {
             // Too long for one line: break at the space nearest the middle and
             // use a second line (then cut, if even that is too long).
             const std::string& sub = actionMenu_.subtitle;
@@ -8946,8 +8936,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
         }
 
-        if (actionMenu_.page == 0 || actionMenu_.page == 1 || actionMenu_.page == 5 || actionMenu_.page == 11 || actionMenu_.page == 9 ||
-            actionMenu_.page == 10) {
+        if (actionMenu_.page == menupage::Main || actionMenu_.page == menupage::MoveTo || actionMenu_.page == menupage::Format || actionMenu_.page == menupage::Tracks || actionMenu_.page == menupage::Chromium ||
+            actionMenu_.page == menupage::VrQuestion) {
             for (int i = 0; i < menuOptCount; ++i) {
                 const float cy = hub::actionMenuOption(i, menuOptCount).cy;
                 const bool hov = (actionMenuBtnHovered_ == i) || (actionMenu_.selectedOption == i);
@@ -8961,7 +8951,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     drawFitCentered(0.0f, cy, 0.38f * 1.85f, sc, hov ? themeTextCol : slateCol, o);
                 }
             }
-        } else if (actionMenu_.page == 2) {
+        } else if (actionMenu_.page == menupage::Confirm) {
             drawFitCentered(0.0f, 0.035f, (mHalfW - 0.06f) * 2.0f, sc, themeTextCol, actionMenu_.subtitle);
             {
                 const std::string first = actionMenu_.options.empty() ? std::string("Delete") : actionMenu_.options[0];
@@ -8970,7 +8960,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 drawFitCentered(0.15f, -0.12f, 0.13f * 1.8f, sc, themeTextCol,
                                 actionMenu_.options.size() > 1 ? actionMenu_.options[1] : std::string("Cancel"));
             }
-        } else if (actionMenu_.page == 6 && pickerSpatial_) {
+        } else if (actionMenu_.page == menupage::ScreenPicker && pickerSpatial_) {
             withHeadingFont([&] {
                 drawFitCentered(0.0f, hub::kPickHalfH - 0.050f, hub::kPickHalfW * 1.8f, sc * 1.10f,
                                 themeTextCol, actionMenu_.title);
@@ -9010,7 +9000,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
             const UiRect cr = hub::pickerCancel();
             drawFitCentered(cr.cx, cr.cy, cr.hw * 2.0f - 0.02f, scCap * 1.05f, themeTextCol, "Cancel");
-        } else if (actionMenu_.page == 6) {
+        } else if (actionMenu_.page == menupage::ScreenPicker) {
             int order[kMaxVideoSlots];
             screenOrderLeftToRight(order);
             withHeadingFont([&] {
@@ -9036,7 +9026,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
             const UiRect cr = hub::pickerCancel();
             drawFitCentered(cr.cx, cr.cy, cr.hw * 2.0f - 0.02f, scCap * 1.05f, themeTextCol, "Cancel");
-        } else if (actionMenu_.page == 8) {
+        } else if (actionMenu_.page == menupage::Arrange) {
             const int presetCount = std::max(0, menuOptCount - hub::kArrangeButtons);
             withHeadingFont([&] {
                 drawFitCentered(0.0f, hub::kArrHalfH - 0.050f, hub::kArrHalfW * 1.8f, sc * 1.10f,
@@ -9063,7 +9053,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                                     std::to_string(slot + 1));
                 });
             }
-        } else if (actionMenu_.page == 4) {
+        } else if (actionMenu_.page == menupage::ShareEditor) {
             const int optCount = static_cast<int>(actionMenu_.options.size());
             const bool anon = optCount > 2 && actionMenu_.options[2] == "guest";
             const float labelSc = ((0.021f * tScale) / fontAtlas_.lineHeight);
@@ -9519,23 +9509,6 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             lineY -= fontAtlas_.lineHeight * scale * 1.35f;
         }
         flushText();  // statMvp goes out of scope
-    }
-
-    // Background download status: one head-locked line near the bottom edge, so
-    // an in-progress download stays visible after the browser panel is closed.
-    if (drawWorld && downloadStatusVisible_ && textReady_ && !downloadStatusText_.empty()) {
-        bindPipe(textPipeline_);
-        vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                                textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
-        const Mat4 mvp = multiply(proj, translation(Vec3{-0.28f, -0.30f, -1.0f}));
-        const float scale = 0.030f / fontAtlas_.lineHeight;
-        const float col[4] = {0.55f, 0.85f, 1.0f, 1.0f};
-        curTextVp = &mvp;
-        curTextBend = 0.0f;
-        curFont = &fontAtlas_;
-        curTextSet = textSet_;
-        drawString(0.0f, 0.0f, scale, col, downloadStatusText_);
-        flushText();
     }
 
     flushText();

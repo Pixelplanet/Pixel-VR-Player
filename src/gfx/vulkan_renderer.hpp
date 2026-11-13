@@ -19,6 +19,22 @@
 
 namespace pixelvr {
 
+// Pages of the action menu (ActionMenuData::page). The numbers are part of nothing outside the code.
+namespace menupage {
+enum : int {
+    Main = 0,          // File Actions
+    MoveTo = 1,        // (old fixed destinations list; plain list page)
+    Confirm = 2,       // two buttons: delete, share delete, folder download
+    ShareEditor = 4,   // network share form
+    Format = 5,        // Change 3D / VR Format (and every page from here on is a plain list unless named)
+    ScreenPicker = 6,  // "Play on which screen?"
+    Arrange = 8,       // Arrange Screens
+    Chromium = 9,      // install the browser engine
+    VrQuestion = 10,   // "play as VR?"
+    Tracks = 11,       // audio / video tracks
+};
+}  // namespace menupage
+
 struct DrmVideoFrame;
 struct GltfMesh;
 
@@ -190,10 +206,6 @@ public:
 
     // Background download status line, drawn head-locked near the bottom edge so
     // downloads are visible after the browser panel is closed.
-    void setDownloadStatus(bool visible, const std::string& text) {
-        downloadStatusVisible_ = visible;
-        downloadStatusText_ = text;
-    }
 
     // Repositions the flat screen in front of the given head pose (headForward is
     // a world-space direction); the current viewing distance is kept.
@@ -398,6 +410,15 @@ public:
         ambilightIntensity_ = intensity < 0.0f ? 0.0f : (intensity > 1.0f ? 1.0f : intensity);
     }
     float ambilightIntensity() const { return ambilightIntensity_; }
+    // The UI theme's accent / text colour as "rrggbb" (as last drawn).
+    std::string themeHex(bool accent) const {
+        const float* c = accent ? themeAccentRgb_ : themeTextRgb_;
+        char b[8];
+        std::snprintf(b, sizeof(b), "%02x%02x%02x", static_cast<int>(std::clamp(c[0], 0.0f, 1.0f) * 255.0f + 0.5f),
+                      static_cast<int>(std::clamp(c[1], 0.0f, 1.0f) * 255.0f + 0.5f),
+                      static_cast<int>(std::clamp(c[2], 0.0f, 1.0f) * 255.0f + 0.5f));
+        return b;
+    }
     // How far the glow reaches from the screen's edge, in screen heights.
     void setAmbilightReach(float reach) { ambilightReach_ = std::clamp(reach, 0.08f, 0.46f); }
 
@@ -408,9 +429,7 @@ public:
     };
     void setBrowserViewMode(BrowserViewMode mode) { browserViewMode_ = mode; }
     BrowserViewMode browserViewMode() const { return browserViewMode_; }
-    void setBrowserQuickPath(bool isCurrentQuickPath) { browserIsQuickPath_ = isCurrentQuickPath; }
-    void setBrowserBookmarked(bool isCurrentBookmarked) { browserIsQuickPath_ = isCurrentBookmarked; }
-    bool browserIsQuickPath() const { return browserIsQuickPath_; }
+    void setBrowserBookmarked(bool isCurrentBookmarked) { browserBookmarked_ = isCurrentBookmarked; }
     void setBrowserCanCreateFolder(bool can) { browserCanCreateFolder_ = can; }
     // Move / Copy: choosing the target folder. Replaces Sort / View / Bookmark in the header row with
     // "Moving X..." and [Move here] [Cancel] (ids 7 / 8 of browserPageBtnHovered()).
@@ -427,7 +446,7 @@ public:
         browserNotice_ = text;
         browserNoticeWarn_ = warn;
     }
-    bool browserIsBookmarked() const { return browserIsQuickPath_; }
+    bool browserIsBookmarked() const { return browserBookmarked_; }
     void setListColumnVisibility(bool showFormat, bool showRes, bool showSize, bool showDuration) {
         listShowFormat_ = showFormat;
         listShowRes_ = showRes;
@@ -527,14 +546,13 @@ public:
     // File Action Submenu (opened by button Y in file browser)
     struct ActionMenuData {
         bool visible = false;
-        int page = 0; // 0: Main, 1: MoveDestinations, 2: DeleteConfirm, 3: Rename
+        int page = 0;  // a menupage:: value
         std::string title;
         std::string subtitle;
         std::vector<std::string> options;
         int selectedOption = -1;
         int editingRow = -1;
         int cursorPos = 0;
-        std::string renameBuffer;
     };
     void setActionMenu(const ActionMenuData& data) { actionMenu_ = data; }
     const ActionMenuData& actionMenu() const { return actionMenu_; }
@@ -1150,6 +1168,8 @@ private:
 
     float ambilightIntensity_ = 0.55f;
     float ambilightReach_ = 0.46f;
+    float themeAccentRgb_[3] = {0.35f, 0.64f, 1.0f};
+    float themeTextRgb_[3] = {0.91f, 0.93f, 0.95f};
 
     ProjectionMode projectionMode_ = ProjectionMode::Flat;
     StereoMode stereoMode_ = StereoMode::Mono;
@@ -1158,8 +1178,6 @@ private:
 
     bool statsVisible_ = false;
     std::vector<std::string> statsLines_;
-    bool downloadStatusVisible_ = false;
-    std::string downloadStatusText_;
 
     // Downloads overlay (list of jobs).
     bool downloadsVisible_ = false;
@@ -1311,7 +1329,7 @@ private:
     VkPipeline thumbPipeline_ = VK_NULL_HANDLE;
     VkDescriptorPool thumbPool_ = VK_NULL_HANDLE;
     BrowserViewMode browserViewMode_ = BrowserViewMode::BigCards;
-    bool browserIsQuickPath_ = false;
+    bool browserBookmarked_ = false;
     bool browserCanCreateFolder_ = false;
     BrowserPickBar browserPick_;
     std::string browserNotice_;

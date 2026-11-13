@@ -51,9 +51,6 @@ const DefaultShortcut kRailShortcuts[] = {
     {"Jellyfin", "", true},  // no fixed URL: the user's server, asked for on first use
 };
 constexpr int kRailShortcutCount = 8;
-static_assert(static_cast<int>(SettingsMenu::Action::ToggleRailShortcut0) + kRailShortcutCount - 1 ==
-                  static_cast<int>(SettingsMenu::Action::ToggleRailShortcut7),
-              "one ToggleRailShortcutN action per shortcut");
 
 const char* kLangNames[] = {"Auto",    "English",  "German",  "French",
                            "Spanish", "Japanese", "Italian", "Russian",
@@ -1039,11 +1036,6 @@ SettingsMenu::Action SettingsMenu::activate() {
             selected_ = 0;
             refresh();
             break;
-        case Action::CycleHeatStyle:
-            heatStyle_ = (heatStyle_ + 1) % 2;
-            saveConfig();
-            refresh();
-            break;
         case Action::InstallRepoPlugin:
             repoEntryToInstall_ = rows_[static_cast<size_t>(selected_)].data;  // index into the repository entries
             break;  // the app downloads and installs it
@@ -1079,20 +1071,6 @@ SettingsMenu::Action SettingsMenu::activate() {
             selected_ = 0;
             refresh();
             break;
-        case Action::ToggleRailShortcut0:
-        case Action::ToggleRailShortcut1:
-        case Action::ToggleRailShortcut2:
-        case Action::ToggleRailShortcut3:
-        case Action::ToggleRailShortcut4:
-        case Action::ToggleRailShortcut5:
-        case Action::ToggleRailShortcut6:
-        case Action::ToggleRailShortcut7: {
-            const int i = static_cast<int>(act) - static_cast<int>(Action::ToggleRailShortcut0);
-            if (i < static_cast<int>(shortcuts_.size())) shortcuts_[static_cast<size_t>(i)].onRail ^= true;
-            saveConfig();
-            refresh();
-            break;
-        }
         case Action::OpenShortcut:
             shortcutIdx_ = rows_[static_cast<size_t>(selected_)].data;
             section_ = 17;
@@ -1110,21 +1088,11 @@ SettingsMenu::Action SettingsMenu::activate() {
             break;
         case Action::ToggleShortcutRail:
         case Action::CycleShortcutKiosk:
-        case Action::RemoveShortcut:
-        case Action::MoveShortcutUp:
-        case Action::MoveShortcutDown: {
+        case Action::RemoveShortcut: {
             if (shortcutIdx_ < 0 || shortcutIdx_ >= static_cast<int>(shortcuts_.size())) break;
             const size_t i = static_cast<size_t>(shortcutIdx_);
             if (act == Action::ToggleShortcutRail) shortcuts_[i].onRail ^= true;
             if (act == Action::CycleShortcutKiosk) shortcuts_[i].kiosk ^= true;
-            if (act == Action::MoveShortcutUp && i > 0) {
-                std::swap(shortcuts_[i], shortcuts_[i - 1]);
-                --shortcutIdx_;
-            }
-            if (act == Action::MoveShortcutDown && i + 1 < shortcuts_.size()) {
-                std::swap(shortcuts_[i], shortcuts_[i + 1]);
-                ++shortcutIdx_;
-            }
             if (act == Action::RemoveShortcut) {
                 if (shortcutDelete(shortcutIdx_)) {
                     section_ = 22;
@@ -1894,7 +1862,6 @@ void SettingsMenu::loadConfig() {
             else if (key == "download_dir_custom") downloadCustom_ = val;
             else if (key == "rail_shortcuts") railShortcutMask_ = std::stoi(val) & ((1 << kRailShortcutCount) - 1);
             else if (key == "jellyfin_url") legacyJellyfinUrl_ = val;
-            else if (key == "heat_style") heatStyle_ = std::stoi(val) % 2;
             else if (key == "shortcut") {  // onRail|kiosk|name|url
                 const size_t a = val.find('|'), b = val.find('|', a + 1), c = val.find('|', b + 1);
                 if (a != std::string::npos && b != std::string::npos && c != std::string::npos) {
@@ -1971,7 +1938,6 @@ void SettingsMenu::saveConfig() const {
             file << "download_dir=" << downloadDirIdx_ << "\n";
             if (!downloadCustom_.empty()) file << "download_dir_custom=" << downloadCustom_ << "\n";
             file << "rail_shortcuts=" << railShortcutMask_ << "\n";
-            file << "heat_style=" << heatStyle_ << "\n";
             for (const Shortcut& sc : shortcuts_) {
                 file << "shortcut=" << (sc.onRail ? 1 : 0) << "|" << (sc.kiosk ? 1 : 0) << "|" << sc.name << "|" << sc.url << "\n";
             }

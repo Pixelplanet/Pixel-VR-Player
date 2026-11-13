@@ -95,9 +95,7 @@ private:
     std::chrono::steady_clock::time_point downloadToast_{};
     std::string downloadToastText_;
     // Pending folder-download confirmation (SMB): uri + display name.
-    std::string pendingDl_;
     std::string pendingDlName_;
-    bool pendingDlFresh_ = false;  // suppress the same-frame A press
     // Folder download waiting for its answer in the shared confirm dialog (action menu page 2).
     bool confirmFolderDl_ = false;
     std::string folderDlPath_;

@@ -292,6 +292,14 @@ bool BrowserHost::spawnPage(int port) {
         }
         if (options_.kiosk) args.push_back("--kiosk");
         if (options_.incognito) args.push_back("--incognito");
+        if (options_.accent.size() == 6) {
+            args.push_back("--accent");
+            args.push_back(options_.accent);
+        }
+        if (options_.text.size() == 6) {
+            args.push_back("--text");
+            args.push_back(options_.text);
+        }
         pid_ = spawnHelper(args, toHelper_, fromHelper_);
     }
     if (pid_ <= 0) return false;

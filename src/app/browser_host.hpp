@@ -25,6 +25,7 @@ public:
     struct Options {
         bool kiosk = false;      // just the page (YouTube), no toolbar
         bool incognito = false;  // private browser context
+        std::string accent, text;  // the UI theme as "rrggbb" for the toolbar (empty: its own colours)
     };
     // Opens a page of width x height pixels on `url` (a full browser adds its
     // toolbar above the page). Returns at once; the window appears once the

@@ -24,14 +24,6 @@ public:
         EnterDownloadFolder,  // opens the Download Folder page (one option per line, like the track lists)
         PickDownloadPreset,   // a preset on that page (data = index)
         MoveVault,            // Vault location: move the vault to / from the SD card (App, after a 2nd click)
-        ToggleRailShortcut0,
-        ToggleRailShortcut1,
-        ToggleRailShortcut2,
-        ToggleRailShortcut3,
-        ToggleRailShortcut4,
-        ToggleRailShortcut5,
-        ToggleRailShortcut6,
-        ToggleRailShortcut7,
         // Shortcuts (UI & Appearance > Shortcuts): a list of name + address entries, each
         // editable; row.data carries the shortcut index.
         OpenShortcut,
@@ -41,8 +33,6 @@ public:
         ToggleShortcutRail,
         CycleShortcutKiosk,
         RemoveShortcut,
-        MoveShortcutUp,       // the list order is the rail order
-        MoveShortcutDown,
         BackToShortcuts,
         ToggleSwapEyes,
         ToggleModels,
@@ -110,7 +100,6 @@ public:
         InstallRepoPlugin,  // from the plugin repository; the app downloads repoEntryToInstall()
         OpenStore,          // the Install plugins page
         OpenStorePlugin,    // one repository plugin's details
-        CycleHeatStyle,  // plugins' timeline graph: bars / line  // a .pvrplugin found in Downloads; the app installs pluginPackageToInstall()
     };
 
     // How a row's value is presented: the renderer draws a stepped slider for
@@ -356,8 +345,6 @@ public:
 
     // OpenXR swapchain supersampling / render resolution scale.
 
-    void onKeyboardSubmit(const std::string& text) { (void)text; }
-    void onKeyboardCancel() {}
 
     // Plugins page. The host outlives the menu (both belong to App).
     void setPluginHost(PluginHost* host) { plugins_ = host; }
@@ -394,7 +381,6 @@ private:
     int pluginIdx_ = 0;
     std::vector<std::string> pluginPackages_;  // .pvrplugin files found in the download folders
     std::string pluginPackageToInstall_;
-    int heatStyle_ = 0;
     int pluginRemoveArmed_ = -1;
     int pluginPage_ = 0, pluginPages_ = 1;
     // Long lists (video / audio tracks, languages, the plugin list, the plugin store): pages of 12
