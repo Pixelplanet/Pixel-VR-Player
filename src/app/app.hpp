@@ -404,6 +404,10 @@ private:
     bool groupedScreen(int slot) const { return arrangementActive_ && arrangement_.snap && inArrangement(slot); }
     // A new / closed screen joins / leaves the arrangement in use.
     void joinArrangement(int slot);
+    // Adds `slot` to `a` the way a new screen joins: a third screen makes the standard
+    // "two below, one above" (the new one on top) unless the user chose three in a row.
+    void addToArrangement(Arrangement& a, int slot) const;
+    bool rowOfThreeChosen_ = false;  // Side by side was applied with three screens
     void leaveArrangement(int slot);
     // Re-anchors the whole (snapped) arrangement so `slot` lands on `target`.
     void moveArrangementTo(int slot, const float target[3]);

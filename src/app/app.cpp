@@ -2731,14 +2731,7 @@ void App::openPlayTargetMenu(const std::string& path) {
         }
         if (freeSlot >= 0 && !inArrangement(freeSlot)) {
             Arrangement joined = arrangement_;
-            // In TwoBelowOneAbove with 2 screens open (sitting side by side),
-            // place the next "+" screen on top (index 0) so the two playing
-            // screens stay side by side at {1, 2} and the preview matches.
-            if (joined.preset == ArrangePreset::TwoBelowOneAbove && joined.order.size() == 2) {
-                joined.order.insert(joined.order.begin(), freeSlot);
-            } else {
-                joined.order.push_back(freeSlot);
-            }
+            addToArrangement(joined, freeSlot);  // as joinArrangement will: the preview matches
             computeArrangement(joined, pls);
         }
     }
@@ -3112,14 +3105,21 @@ void App::joinArrangement(int slot) {
         arrangement_.scale = 1.0f;
         arrangement_.curvature = renderer_.screenCurvature();
     }
-    if (!inArrangement(slot)) {
-        if (arrangement_.preset == ArrangePreset::TwoBelowOneAbove && arrangement_.order.size() == 2) {
-            arrangement_.order.insert(arrangement_.order.begin(), slot);
-        } else {
-            arrangement_.order.push_back(slot);
-        }
-    }
+    if (!inArrangement(slot)) addToArrangement(arrangement_, slot);
     applyArrangement(arrangement_);
+}
+
+void App::addToArrangement(Arrangement& a, int slot) const {
+    // A third screen: two below, one above is the standard (three in a row is wide and small).
+    if (a.order.size() == 2 && a.preset == ArrangePreset::SideBySide && !rowOfThreeChosen_) {
+        a.preset = ArrangePreset::TwoBelowOneAbove;
+    }
+    if (a.preset == ArrangePreset::TwoBelowOneAbove && a.order.size() == 2) {
+        // On top (position 0): the two playing screens stay side by side at {1, 2}.
+        a.order.insert(a.order.begin(), slot);
+    } else {
+        a.order.push_back(slot);
+    }
 }
 
 void App::leaveArrangement(int slot) {
@@ -3262,8 +3262,8 @@ void App::openArrangeMenu() {
     for (int slot : order) n += screens_[slot].open ? 1 : 0;
     arrangePresets_.clear();
     if (n >= 2) {
+        if (n == 3) arrangePresets_.push_back(ArrangePreset::TwoBelowOneAbove);  // the standard for three
         arrangePresets_.push_back(ArrangePreset::SideBySide);
-        if (n == 3) arrangePresets_.push_back(ArrangePreset::TwoBelowOneAbove);
         arrangePresets_.push_back(ArrangePreset::Stacked);
         arrangePresets_.push_back(ArrangePreset::Cinema);
     }
@@ -5946,6 +5946,10 @@ int App::run() {
                                     } else if (id == 2) {
                                         if (presetCount > 0) {
                                             applyArrangement(arrangeDraft_);
+                                            if (arrangeDraft_.order.size() == 3) {  // what a third screen joins next time
+                                                if (arrangeDraft_.preset == ArrangePreset::SideBySide) rowOfThreeChosen_ = true;
+                                                else if (arrangeDraft_.preset == ArrangePreset::TwoBelowOneAbove) rowOfThreeChosen_ = false;
+                                            }
                                             xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.030f, 0.0f, 0.5f);
                                         }
                                         actionMenu_.visible = false;
