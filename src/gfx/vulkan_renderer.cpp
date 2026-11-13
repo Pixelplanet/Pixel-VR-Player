@@ -4232,10 +4232,16 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
                 const int half = ((eye == 0) != swapEyes_) ? 0 : 1;
                 CompositionLayer e = cl;
                 e.eye = (eye == 0) ? XR_EYE_VISIBILITY_LEFT : XR_EYE_VISIBILITY_RIGHT;
+                // A little is left out along the seam between the two views, and the same at the view's
+                // other side (both eyes keep the same shape): the compositor's filtering mixes in the
+                // other view's first column there, and many 3D encodes have a black column or two at
+                // the seam - both showed as a dark line down one side of the screen.
                 if (st == StereoMode::SideBySide) {
-                    e.imageRect = cropRows({{half * (fullW / 2), 0}, {fullW / 2, fullH}});
+                    const int32_t in = std::clamp<int32_t>(static_cast<int32_t>(std::lround(fullW * 0.0015f)), 2, 12);
+                    e.imageRect = cropRows({{half * (fullW / 2) + in, 0}, {fullW / 2 - 2 * in, fullH}});
                 } else {
-                    e.imageRect = cropRows({{0, half * (fullH / 2)}, {fullW, fullH / 2}});
+                    const int32_t in = std::clamp<int32_t>(static_cast<int32_t>(std::lround(fullH * 0.0015f)), 2, 12);
+                    e.imageRect = cropRows({{0, half * (fullH / 2) + in}, {fullW, fullH / 2 - 2 * in}});
                 }
                 out.push_back(e);
             }
