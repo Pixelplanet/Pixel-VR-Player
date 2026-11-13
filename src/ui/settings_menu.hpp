@@ -39,6 +39,7 @@ public:
         ToggleStats,
         CycleDistance,
         CycleScreenSize,
+        RemovePlugin,         // "Delete Plugin" on a plugin's page: the app asks first
         CycleCurvature,
         CycleUiTextScale,
         CycleUiTextColor,
@@ -241,6 +242,7 @@ public:
     }
     // A plugin's page turns pages with the header pager when its lines do not fit.
     // (Also the track / language lists, which page the same way when they are long.)
+    int pluginIndex() const { return pluginIdx_; }  // the plugin whose page is open
     int pluginPage() const { return section_ == kPluginSection ? pluginPage_ : (listPages_ > 1 ? listPage_ : -1); }
     int pluginPages() const { return section_ == kPluginSection ? pluginPages_ : (listPages_ > 1 ? listPages_ : 0); }
     // A plugin's message (e.g. a device scan): on the plugin pages' status line for a few seconds.

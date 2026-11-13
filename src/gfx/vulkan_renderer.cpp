@@ -7777,6 +7777,11 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             };
             // A row with no value that is not a toggle/option is a plain navigation
             // row ("Back to ..."), drawn as a single-line card with a back chevron.
+            // Destructive rows and buttons (Delete): the same red on every page.
+            const float dangerBg[4] = {0.46f, 0.10f, 0.15f, 0.94f};
+            const float dangerBgHov[4] = {0.74f, 0.17f, 0.23f, 1.0f};
+            const float dangerRim[4] = {0.95f, 0.35f, 0.42f, 0.95f};
+            auto isDanger = [](const SettingsRowVis& row) { return !row.options.empty() && row.options[0] == "danger"; };
             auto isNavRow = [&](const SettingsRowVis& row) {
                 return row.kind == kAction && row.value.empty();
             };
@@ -7868,8 +7873,10 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         } else if (lhov) {
                             drawGlow(vpPanel, hc.cx, hc.cy, hw, hh, 0.010f, hovGlow, 0.014f / hh);
                         }
-                        const float* lineBg = (lhov || dragged) ? glassCardHoverT.data() : glassCardT.data();
-                        const float* lineBord = dragged ? selBord : (lhov ? tabActiveBord : kGlassRimFaint);
+                        const bool danger = !lr.options.empty() && lr.options[0] == "danger";
+                        const float* lineBg = danger ? (lhov ? dangerBgHov : dangerBg)
+                                                     : ((lhov || dragged) ? glassCardHoverT.data() : glassCardT.data());
+                        const float* lineBord = danger ? dangerRim : (dragged ? selBord : (lhov ? tabActiveBord : kGlassRimFaint));
                         drawUiElement(vpPanel, hc.cx, hc.cy, hw, hh, UiShape::RoundedBox, lineBg, 0.014f / hh,
                                       (lhov || dragged ? 0.0019f : 0.0012f) / hh, lineBord);
                         if (lr.kind != kSettingsKindShortcut && lr.kind != kSettingsKindPluginLine) {
@@ -7927,13 +7934,12 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                             drawUiElement(vpPanel, u.cx, u.cy, u.hw, u.hh, UiShape::RoundedBox, green, 1.0f);
                             drawUiElement(vpPanel, u.cx, u.cy, u.hw * 0.55f, u.hh * 0.55f, UiShape::UpArrow, white);
                         }
-                        const float delArmed[4] = {0.72f, 0.20f, 0.20f, 0.95f};
-                        for (int z = 2; z <= 3; ++z) {
+                        for (int z = 2; z <= 3; ++z) {  // Edit, Delete (red: the same on every list)
                             const UiRect bz = hub::shortcutZone(hc, z, noHandle);
-                            const bool armed = (z == 3 && lr.steps != 0);
-                            const float* bBg = armed ? delArmed : (seg == z ? glassCardHoverT.data() : kGlassVeil);
+                            const float* bBg = z == 3 ? (seg == z ? dangerBgHov : dangerBg)
+                                                      : (seg == z ? glassCardHoverT.data() : kGlassVeil);
                             drawUiElement(vpPanel, bz.cx, bz.cy, bz.hw, bz.hh, UiShape::RoundedBox, bBg, 0.012f / bz.hh,
-                                          0.0012f / bz.hh, seg == z ? tabActiveBord : kGlassRimFaint);
+                                          0.0012f / bz.hh, z == 3 ? dangerRim : (seg == z ? tabActiveBord : kGlassRimFaint));
                         }
                     };
                     if (i != settingsDragFrom_) drawListLine(i);
@@ -7946,9 +7952,11 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 if (hov) {
                     drawGlow(vpPanel, L.cx, L.cy, kSetCardHalfW, L.halfH, 0.016f, hovGlow, cardR * 0.6f);
                 }
-                const float* cBg = hov ? glassCardHoverT.data() : (optActive ? activeOptBg : glassCardT.data());
-                const float* cBord = hov ? tabActiveBord
-                                         : ((sel || optActive) ? selBord : kGlassRimFaint);
+                const bool dangerRow = isDanger(row);
+                const float* cBg = dangerRow ? (hov ? dangerBgHov : dangerBg)
+                                             : (hov ? glassCardHoverT.data() : (optActive ? activeOptBg : glassCardT.data()));
+                const float* cBord = dangerRow ? dangerRim
+                                               : (hov ? tabActiveBord : ((sel || optActive) ? selBord : kGlassRimFaint));
                 drawUiElement(vpPanel, L.cx, L.cy, kSetCardHalfW, L.halfH,
                               UiShape::RoundedBox, cBg, cardR,
                               hov ? cardBw * 1.6f : cardBw, cBord);
@@ -7961,6 +7969,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     }
                     continue;
                 }
+                if (dangerRow) continue;  // just the red card and its text
                 if (isNavRow(row)) {
                     drawUiElement(vpPanel, L.cx - kSetCtrlHalfW + 0.010f, L.cy, -0.011f, 0.011f,
                                   UiShape::Chevron, en ? themeTextCol : dimCol);
@@ -8192,8 +8201,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                             const UiRect e = hub::shortcutZone(hc, 2, true);
                             drawFitCentered(e.cx, e.cy, e.hw * 2.0f - 0.012f, sc * 0.88f, themeTextCol, "Edit");
                             const UiRect d = hub::shortcutZone(hc, 3, true);
-                            drawFitCentered(d.cx, d.cy, d.hw * 2.0f - 0.012f, sc * 0.88f, themeTextCol,
-                                            lr.steps != 0 ? "Sure?" : "Remove");
+                            drawFitCentered(d.cx, d.cy, d.hw * 2.0f - 0.012f, sc * 0.88f, themeTextCol, "Delete");
                         } else if (lr.kind == kSettingsKindShortcut) {
                             withHeadingFont([&] { drawFit(left + hub::kShortcutNameX, hc.cy, 0.30f, sc, lc, lr.label); });
                             drawFit(left + hub::kShortcutUrlX, hc.cy, 0.50f, sc * 0.90f, lr.value.empty() ? dimCol : slateCol,
@@ -8201,13 +8209,13 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                             const UiRect e = hub::shortcutZone(hc, 2);
                             drawFitCentered(e.cx, e.cy, e.hw * 2.0f - 0.012f, sc * 0.88f, themeTextCol, "Edit");
                             const UiRect d = hub::shortcutZone(hc, 3);
-                            drawFitCentered(d.cx, d.cy, d.hw * 2.0f - 0.012f, sc * 0.88f, themeTextCol,
-                                            lr.steps != 0 ? "Sure?" : "Delete");
+                            drawFitCentered(d.cx, d.cy, d.hw * 2.0f - 0.012f, sc * 0.88f, themeTextCol, "Delete");
                         } else {
                             // Up to the value column (a long label shrinks instead of running into the value).
                             const float labelW = lr.value.empty() ? 0.90f : hub::kShortcutUrlX - 0.045f - 0.02f;
-                            withHeadingFont([&] { drawFit(left + 0.045f, hc.cy, labelW, sc, lc, lr.label); });
                             const std::string ctl = lr.options.empty() ? std::string() : lr.options[0];
+                            const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+                            withHeadingFont([&] { drawFit(left + 0.045f, hc.cy, labelW, sc, ctl == "danger" ? white : lc, lr.label); });
                             if (ctl == "switch") {
                                 // the switch says it
                             } else if (!lr.value.empty()) {
@@ -8227,6 +8235,11 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 if (row.kind == kOption) {
                     drawFit(ctrlLeft, L.cy, 0.50f, L.textSc,
                             row.stepIdx != 0 ? themeTextCol : slateCol, row.label);
+                    continue;
+                }
+                if (isDanger(row)) {
+                    const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+                    withHeadingFont([&] { drawFit(ctrlLeft, L.cy, 0.55f, L.textSc, white, row.label); });
                     continue;
                 }
                 if (isNavRow(row)) {

@@ -813,6 +813,11 @@ void SettingsMenu::refresh() {
         std::string perms;
         for (const std::string& perm : p.permissions) perms += (perms.empty() ? "" : ", ") + perm;
         lines.push_back({"Permissions", perms.empty() ? "none" : perms, Action::None, false});
+        {
+            Row del{"Delete Plugin", "", Action::RemovePlugin};
+            del.options = {"danger"};  // drawn in red: the one destructive row of the page
+            lines.push_back(del);
+        }
         constexpr int kPerPage = 11;  // + "Back to Plugins" = the 12 compact lines
         pluginPages_ = std::max(1, (static_cast<int>(lines.size()) + kPerPage - 1) / kPerPage);
         pluginPage_ = std::clamp(pluginPage_, 0, pluginPages_ - 1);
@@ -922,7 +927,9 @@ void SettingsMenu::refresh() {
         {
             const bool armed = deleteArmedIdx_ == shortcutIdx_ && std::chrono::steady_clock::now() < deleteArmedUntil_;
             (void)armed;
-            rows_.push_back({"Delete Shortcut", "Asks first", Action::RemoveShortcut});
+            Row del{"Delete Shortcut", "", Action::RemoveShortcut};
+            del.options = {"danger"};  // drawn in red: the one destructive row of the page
+            rows_.push_back(del);
         }
         rows_.push_back({"Back to Shortcuts", "", Action::BackToShortcuts});
     } else if (section_ == 21) {

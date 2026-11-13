@@ -3107,6 +3107,24 @@ void App::askConfirm(const std::string& title, const std::string& text, const st
     actionMenu_.selectedOption = 1;  // a stray press cancels
 }
 
+void App::askPluginDelete(int idx) {
+    const auto& plist = plugins_.plugins();
+    if (idx < 0 || idx >= static_cast<int>(plist.size())) return;
+    const std::string id = plist[static_cast<size_t>(idx)].id;
+    askConfirm("Delete Plugin?", "Delete the plugin \"" + plist[static_cast<size_t>(idx)].name + "\" from the player?",
+               "Yes, Delete", [this, id] {
+                   const auto& now = plugins_.plugins();  // (the list may have changed meanwhile)
+                   for (size_t k = 0; k < now.size(); ++k) {
+                       if (now[k].id != id) continue;
+                       std::string message;
+                       plugins_.uninstall(static_cast<int>(k), message);
+                       settings_.openPluginsPage();
+                       settings_.showStatus(message);
+                       break;
+                   }
+               });
+}
+
 void App::askShortcutDelete(int idx) {
     const auto& list = settings_.shortcuts();
     if (idx < 0 || idx >= static_cast<int>(list.size())) return;
@@ -5728,9 +5746,11 @@ int App::run() {
 
             // File Action Submenu or Files view interaction inside Unified Spatial Hub
             if (actionMenu_.visible) {
-                if ((!browser_.isOpen() && actionMenu_.page != menupage::Format && actionMenu_.page != menupage::Arrange && actionMenu_.page != menupage::Chromium &&
-                     actionMenu_.page != menupage::Tracks) ||
-                    downloadsWindow_ || settings_.isOpen()) {
+                // (A question asked with askConfirm() belongs to whatever page asked it, Settings included.)
+                if (!confirmYes_ &&
+                    ((!browser_.isOpen() && actionMenu_.page != menupage::Format && actionMenu_.page != menupage::Arrange && actionMenu_.page != menupage::Chromium &&
+                      actionMenu_.page != menupage::Tracks) ||
+                     downloadsWindow_ || settings_.isOpen())) {
                     actionMenu_.visible = false;
                 } else {
                     const Browser::Entry* fe = browser_.focused();
@@ -6067,6 +6087,7 @@ int App::run() {
                                     yes();
                                     xr_.triggerHaptic(1, 0.050f, 0.0f, 0.7f);
                                 }
+                                in.select = in.togglePlay = false;  // the page under the dialog must not get this press
                             } else if (confirmFolderDl_) {
                                 confirmFolderDl_ = false;
                                 if (chosen == 0 && !folderDlPath_.empty()) {
@@ -6368,7 +6389,7 @@ int App::run() {
 
 #endif
 
-            if (settings_.isOpen() && sbHover < 0) {
+            if (settings_.isOpen() && sbHover < 0 && !actionMenu_.visible) {  // (a dialog over it takes the input)
                 if (const int d = navStep(in.thumbstickY, nowT)) {
                     settings_.move(d * (settings_.compactPage() ? 1 : 2));  // list pages have one column
                 }
@@ -6429,24 +6450,7 @@ int App::run() {
                     switch (renderer_.settingsSegmentHovered()) {
                         case 1: settings_.pluginToggle(idx); break;
                         case 4: settings_.openPluginUpdate(idx); break;  // the green update icon
-                        case 3: {
-                            const auto& plist = plugins_.plugins();
-                            if (idx < 0 || idx >= static_cast<int>(plist.size())) break;
-                            const std::string id = plist[static_cast<size_t>(idx)].id;
-                            askConfirm("Remove Plugin?", "Remove \"" + plist[static_cast<size_t>(idx)].name + "\" from the player?",
-                                       "Remove", [this, id] {
-                                           const auto& now = plugins_.plugins();  // (the list may have changed meanwhile)
-                                           for (size_t k = 0; k < now.size(); ++k) {
-                                               if (now[k].id != id) continue;
-                                               std::string message;
-                                               plugins_.uninstall(static_cast<int>(k), message);
-                                               settings_.openPluginsPage();
-                                               settings_.showStatus(message);
-                                               break;
-                                           }
-                                       });
-                            break;
-                        }
+                        case 3: askPluginDelete(idx); break;
                         default: settings_.pluginEdit(idx); break;  // Edit, or the name / status
                     }
                     xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.02f, 0.0f, 0.4f);
@@ -6487,6 +6491,8 @@ int App::run() {
                             }
                         } else if (act == SettingsMenu::Action::RemoveShortcut) {
                             askShortcutDelete(settings_.shortcutIdx());
+                        } else if (act == SettingsMenu::Action::RemovePlugin) {
+                            askPluginDelete(settings_.pluginIndex());
                         } else if (act == SettingsMenu::Action::CycleScreenSize) {
                             applyScreenSize(true);
                         } else if (act == SettingsMenu::Action::CycleDistance) {

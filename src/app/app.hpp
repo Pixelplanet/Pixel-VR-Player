@@ -103,6 +103,7 @@ private:
                     std::function<void()> onYes);
     std::function<void()> confirmYes_;
     void askShortcutDelete(int idx);  // Settings > Shortcuts: asks, then deletes
+    void askPluginDelete(int idx);    // Settings > Plugins: asks, then removes the plugin
     std::string folderDlPath_;
     bool downloadsWindow_ = false;  // downloads list window toggled from the bar
     bool dlWasActive_ = false;      // edge detect: auto-open the window on start
