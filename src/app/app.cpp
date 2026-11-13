@@ -1400,6 +1400,13 @@ void App::closeMedia(int slot) {
     if (slot == 0) {
         renderer_.setProjectionMode(VulkanRenderer::ProjectionMode::Flat);
         renderer_.setStereoMode(VulkanRenderer::StereoMode::Mono);
+        if (singleMoved_) {  // single-screen mode: the next video starts in front again
+            VulkanRenderer::ScreenPlacement pl0 = renderer_.screenPlacement(0);
+            if (pl0.active) renderer_.setMainScreenScale(pl0.scale);
+            pl0.active = false;
+            renderer_.setScreenPlacement(0, pl0);
+            singleMoved_ = false;
+        }
     } else {
         VulkanRenderer::ScreenPlacement pl = renderer_.screenPlacement(slot);
         pl.active = false;
@@ -2677,6 +2684,17 @@ void App::recenterView(const XrInputState& in) {
     const float oldYaw = renderer_.screenYaw();
     renderer_.recenterScreen(in.headPos, in.headForward);
     if (!multiScreenEnabled()) return;
+    // Single-screen mode: a screen dragged somewhere by hand comes back in front (its size kept).
+    if (singleMoved_ && !multiScreenEnabled()) {
+        VulkanRenderer::ScreenPlacement pl0 = renderer_.screenPlacement(0);
+        if (pl0.active) {
+            renderer_.setMainScreenScale(pl0.scale);
+            pl0.active = false;
+            renderer_.setScreenPlacement(0, pl0);
+        }
+        singleMoved_ = false;
+        movingScreen_ = -1;
+    }
     // Carry free-placed screens along: rotate them about the old view pivot by
     // the change in yaw, then move them with the pivot.
     const float* newPivot = renderer_.screenPivot();
@@ -2892,7 +2910,7 @@ void App::ensureScreenPlacement(int slot) {
     for (int k = 0; k < 3; ++k) pl.center[k] = pv[k] + fw[k] * d;
     pl.yaw = renderer_.screenYaw();
     pl.pitch = renderer_.recenterPitch();
-    pl.scale = 1.0f;
+    pl.scale = renderer_.mainScreenScale();  // (the size it has, e.g. from bumper + stick)
     pl.curvature = renderer_.screenCurvature();
     pl.stereo = rendererStereo(screens_[slot].stereo);
     pl.active = true;
@@ -4793,12 +4811,14 @@ int App::run() {
                     if (screens_[slot].open || screens_[slot].opening) closeMedia(slot);
                 }
                 if (selectedScreen_ != 0) selectScreen(0);
-                if (renderer_.screenPlacement(0).active) {
-                    VulkanRenderer::ScreenPlacement pl0 = renderer_.screenPlacement(0);
-                    pl0.active = false;
-                    renderer_.setScreenPlacement(0, pl0);
+                if (!singleMoved_) {  // (a screen dragged by hand in single-screen mode keeps its place)
+                    if (renderer_.screenPlacement(0).active) {
+                        VulkanRenderer::ScreenPlacement pl0 = renderer_.screenPlacement(0);
+                        pl0.active = false;
+                        renderer_.setScreenPlacement(0, pl0);
+                    }
+                    movingScreen_ = -1;
                 }
-                movingScreen_ = -1;
                 arrangementActive_ = false;
                 arrangementBroken_ = false;
                 arrangement_.order.clear();
@@ -4865,7 +4885,8 @@ int App::run() {
             renderer_.setMultiScreen(multiScreenEnabled() && openScreenCount() > 0, selectedScreen_);
             if (!multiScreenEnabled() || openScreenCount() == 0) screensUnlocked_ = false;
             renderer_.setScreenControls(multiScreenEnabled() && (cur().open || cur().opening), selectedScreen_ + 1,
-                                        cur().muted, screensUnlocked_, settings_.screenNumbers());
+                                        cur().muted, screensUnlocked_,
+                                        screensUnlocked_ ? numbersWhileUnlocked_ : settings_.screenNumbers());
             renderer_.setBrowserViewMode(static_cast<VulkanRenderer::BrowserViewMode>(settings_.browserViewMode()));
             renderer_.setBrowserBookmarked(browser_.isCurrentBookmarked());
             renderer_.setBrowserCanCreateFolder(browser_.canCreateFolder());
@@ -6745,6 +6766,24 @@ int App::run() {
                                !actionMenu_.visible && !smbModal_.active;
             // Multi-screen: point at a screen and pull the trigger to select it; the
             // dock (including its screen row) then controls that screen.
+            // Single-screen mode has no lock: trigger-drag on the video moves it (not a web page or the
+            // music view, which take the trigger themselves, and not 360 / 180).
+            if (barOk && !multiScreenEnabled() && movingScreen_ < 0 && in.select && renderer_.pointerScreen() == 0 &&
+                renderer_.pointerButton() < 0 && !renderer_.pointerOnTimeline() && cur().open && !cur().web &&
+                settings_.projectionMode() == 0
+#ifdef PIXELVR_HAVE_MEDIA
+                && !cur().engine.audioOnly()
+#endif
+                ) {
+                int hitSlot = -1;
+                if (!renderer_.screenSkipHit(hitSlot)) {
+                    singleMoved_ = true;
+                    startGrabbingScreen(0, in);
+                    in.select = false;
+                    interacted = true;
+                }
+            }
+            if (multiScreenEnabled()) singleMoved_ = false;  // multi-screen has its own lock
             if (barOk && multiScreenEnabled() && movingScreen_ < 0) {
                 const int ps = renderer_.pointerScreen();
                 if (ps >= 0 && renderer_.pointerButton() < 0 && !renderer_.pointerOnTimeline()) {
@@ -6847,8 +6886,10 @@ int App::run() {
                         }
                     } else if (cb == VulkanRenderer::CtrlButton::ScreenLock) {
                         screensUnlocked_ = !screensUnlocked_;
+                        numbersWhileUnlocked_ = true;
                     } else if (cb == VulkanRenderer::CtrlButton::ScreenNumbers) {
-                        settings_.setScreenNumbers(!settings_.screenNumbers());
+                        if (screensUnlocked_) numbersWhileUnlocked_ = !numbersWhileUnlocked_;  // for this move only
+                        else settings_.setScreenNumbers(!settings_.screenNumbers());
                     } else if (cb == VulkanRenderer::CtrlButton::ScreenLayout) {
                         openArrangeMenu();
                     } else if (cb == VulkanRenderer::CtrlButton::ScreenClose) {
@@ -7064,6 +7105,7 @@ int App::run() {
                 }
                 if (in.lockScreens && multiScreenEnabled() && cur().open) {
                     screensUnlocked_ = !screensUnlocked_;
+                    numbersWhileUnlocked_ = true;
                     interacted = true;
                 }
                 if (in.audioTrack && !cur().web) {

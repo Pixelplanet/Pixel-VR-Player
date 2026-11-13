@@ -391,6 +391,12 @@ private:
     void ensureScreenPlacement(int slot);
     // Unlocked screens can be grabbed with the laser (hold trigger) and dragged.
     bool screensUnlocked_ = false;
+    // Numbers on the screens while they are unlocked: on when unlocking (which screen is which while
+    // moving them), and the dock's numbers button switches them for that time. Locked: the saved setting.
+    bool numbersWhileUnlocked_ = true;
+    // Single-screen mode: the screen was dragged somewhere by hand (it is always movable there, no
+    // lock button). Recenter or closing the video puts it back in front.
+    bool singleMoved_ = false;
     float grabOffset_[3] = {0.0f, 0.0f, 0.0f};  // screen centre minus grab point
     void startGrabbingScreen(int slot, const XrInputState& in);
     float grabStart_[3] = {0.0f, 0.0f, 0.0f};  // grabbed screen centre at grab start

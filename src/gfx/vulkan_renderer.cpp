@@ -4188,7 +4188,7 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
         L.web = web;
         // Screen number (dock toggle, and while screens are unlocked to move):
         // drawn into the copy, so a change also needs one.
-        const bool numbers = multiScreenActive_ && (screenNumbersOn_ || screensUnlocked_);
+        const bool numbers = multiScreenActive_ && screenNumbersOn_;
         const int badge = numbers ? (slot + 1) + (slot == selectedScreen_ ? 10 : 0) : 0;
         // Its look also depends on the 3D layout and the accent colour.
         const int badgeKey = badge == 0 ? 0
@@ -6287,7 +6287,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 }
                 // Screen number on a screen drawn in-scene (layer screens get it
                 // in their copy, recordScreenCopy).
-                if (!screenLayerLive_[slot] && multiScreenActive_ && (screenNumbersOn_ || screensUnlocked_) &&
+                if (!screenLayerLive_[slot] && multiScreenActive_ && screenNumbersOn_ &&
                     uiPipeline_ != VK_NULL_HANDLE && textReady_ && glyphOut != nullptr) {
                     const bool sel = (slot == selectedScreen_);
                     // Undo the screen's width scale so the disc is round; a
