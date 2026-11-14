@@ -1,4 +1,5 @@
 #include "ui/settings_menu.hpp"
+#include "ui/ui_colors.hpp"
 #include "util/sdcard.hpp"
 #include "app/vault_manager.hpp"
 #include "net/smb_credentials.hpp"
@@ -72,13 +73,11 @@ const char* kUiTextScaleNames[] = {"Compact (90%)", "Standard (105%)",
 const float kUiTextScaleValues[] = {0.90f, 1.05f, 1.20f, 1.40f, 1.60f};
 constexpr int kUiTextScaleCount = 5;
 
-const char* kUiTextColorNames[] = {"Pure White", "Ice Cyan", "Warm Cream",
-                                   "Soft Gold", "Mint Green"};
-constexpr int kUiTextColorCount = 5;
-
-const char* kUiAccentColorNames[] = {"Cyber Cyan", "Emerald Green", "Amber Gold",
-                                     "Royal Purple", "Crimson Red"};
-constexpr int kUiAccentColorCount = 5;
+// A colour row's value: the hex value, then the swatch's name or "Custom".
+std::string colorRowValue(bool accent, uint32_t rgb) {
+    const int i = uicolor::swatchIndex(accent, rgb);
+    return "#" + uicolor::toHex(rgb) + "  " + (i >= 0 ? uicolor::swatches(accent)[i].name : "Custom");
+}
 
 const char* kUiDistanceNames[] = {"Near (1.5 m)", "Comfort (1.9 m)",
                                   "Medium (2.3 m)", "Far (2.8 m)"};
@@ -193,6 +192,7 @@ void SettingsMenu::open() {
     // Vault section is only reachable while the vault is unlocked.
     if (section_ == kPluginSection) section_ = kPluginsSection;  // a plugin's page reopens at the plugin list
     if (section_ == kVaultMoveSection) section_ = 4;
+    if (colorPickerTarget() >= 0) section_ = 1;
     if (section_ == kPluginsSection && plugins_) plugins_->rescan();
     if (section_ < 0 || (section_ > 4 && section_ != kPluginsSection) ||
         (section_ == 4 && !VaultManager::instance().isUnlocked())) {
@@ -242,6 +242,7 @@ int SettingsMenu::parentOf(int s) const {
     if (s >= kButtonsSection && s < kButtonsSection + buttonsPages()) return 3;  // Controller Buttons -> Controls & Input
     if (s == 10 || s == 11 || s == 12) return 2;  // track lists -> Audio & Video Tracks
     if (s == 13 || s == 21 || s == 22) return 1;  // Download Folder, List Columns, Shortcuts -> UI & Appearance
+    if (s == kTextColorSection || s == kAccentColorSection) return 1;  // colour pickers -> UI & Appearance
     if (s == 17) return 22;                       // one shortcut -> Shortcuts
     if (s == kPluginSection || s == kStoreSection) return kPluginsSection;
     if (s == kStoreItemSection) return storeUpdate_ ? kPluginsSection : kStoreSection;
@@ -276,6 +277,7 @@ bool SettingsMenu::navigateBack() {
     const int p = parentSection();
     if (p < 0) return false;
     const int from = section_;
+    pickerCommit();  // Back on a colour picker page keeps the colour
     if (p == kPluginsSection && plugins_) plugins_->rescan();
     if (p == kStoreSection) {  // the list as it is (the header button refreshes it)
         section_ = kStoreSection;
@@ -285,6 +287,8 @@ bool SettingsMenu::navigateBack() {
     }
     section_ = p;
     selected_ = from == 17 ? shortcutIdx_ : (from == kVaultMoveSection ? 4 : 0);
+    if (from == kTextColorSection) selected_ = 1;  // back on the row the picker was opened from
+    if (from == kAccentColorSection) selected_ = 2;
     deleteArmedIdx_ = -1;
     vaultMoveArmed_ = false;
     refresh();
@@ -390,11 +394,9 @@ void SettingsMenu::refresh() {
         title_ = "Settings > UI & Appearance";
         choice("UI Text Size", kUiTextScaleNames[uiTextScaleIdx_ % kUiTextScaleCount],
                kUiTextScaleCount, uiTextScaleIdx_ % kUiTextScaleCount, Action::CycleUiTextScale);
-        color("UI Text Color", kUiTextColorNames[uiTextColorIdx_ % kUiTextColorCount],
-              kUiTextColorCount, uiTextColorIdx_ % kUiTextColorCount, Action::CycleUiTextColor);
-        color("UI Accent Theme", kUiAccentColorNames[uiAccentColorIdx_ % kUiAccentColorCount],
-              kUiAccentColorCount, uiAccentColorIdx_ % kUiAccentColorCount,
-              Action::CycleUiAccentColor);
+        // (The renderer draws a swatch of the colour in these two rows; a click opens the picker.)
+        color("UI Text Color", colorRowValue(false, uiTextRgb_), 0, 0, Action::OpenUiTextColor);
+        color("UI Accent Theme", colorRowValue(true, uiAccentRgb_), 0, 0, Action::OpenUiAccentColor);
         choice("UI Panel Distance", kUiDistanceNames[uiDistanceIdx_ % kUiDistanceCount],
                kUiDistanceCount, uiDistanceIdx_ % kUiDistanceCount, Action::CycleUiDistance);
         segmented("Main Panel Shape",
@@ -934,6 +936,11 @@ void SettingsMenu::refresh() {
             rows_.push_back(del);
         }
         rows_.push_back({"Back to Shortcuts", "", Action::BackToShortcuts});
+    } else if (colorPickerTarget() >= 0) {
+        // No rows: the renderer draws the picker (suggested colours, square, hue strip, Reset, Back).
+        title_ = section_ == kTextColorSection ? "Settings > UI & Appearance > Text Color"
+                                               : "Settings > UI & Appearance > Accent Color";
+        hint("Trigger: Pick  |  Hold Trigger and drag: Adjust  |  B: Back (the color is kept)");
     } else if (section_ == 21) {
         title_ = "Settings > UI & Appearance > List Columns";
         toggle("Format / VR Badge", listShowFormat_, Action::ToggleListColFormat);
@@ -1213,14 +1220,11 @@ SettingsMenu::Action SettingsMenu::activate() {
             saveConfig();
             refresh();
             break;
-        case Action::CycleUiTextColor:
-            uiTextColorIdx_ = (uiTextColorIdx_ + 1) % kUiTextColorCount;
-            saveConfig();
-            refresh();
-            break;
-        case Action::CycleUiAccentColor:
-            uiAccentColorIdx_ = (uiAccentColorIdx_ + 1) % kUiAccentColorCount;
-            saveConfig();
+        case Action::OpenUiTextColor:
+        case Action::OpenUiAccentColor:
+            section_ = act == Action::OpenUiTextColor ? kTextColorSection : kAccentColorSection;
+            selected_ = 0;
+            pickerLoad();
             refresh();
             break;
         case Action::CycleUiDistance:
@@ -1589,8 +1593,61 @@ bool SettingsMenu::turnButtonsPage(int delta, bool wrap) {
     return true;
 }
 
+// Colour picker pages. The markers (hue, saturation, brightness) are kept as the user set them;
+// the colour the UI uses is the one they give, brightened when it would be too dark on the panels.
+void SettingsMenu::pickerLoad() {
+    const int t = colorPickerTarget();
+    if (t < 0) return;
+    float c[3];
+    uicolor::toFloat(t == 1 ? uiAccentRgb_ : uiTextRgb_, c);
+    uicolor::rgbToHsv(c, pickH_, pickS_, pickV_);  // (a grey keeps the hue the strip was on)
+    pickAdjusted_ = false;
+}
+
+void SettingsMenu::pickerApply() {
+    const int t = colorPickerTarget();
+    if (t < 0) return;
+    float c[3];
+    uicolor::hsvToRgb(pickH_, pickS_, pickV_, c);
+    const uint32_t picked = uicolor::fromFloat(c);
+    const uint32_t used = uicolor::usable(t == 1, picked);
+    pickAdjusted_ = used != picked;
+    uint32_t& dst = t == 1 ? uiAccentRgb_ : uiTextRgb_;
+    if (dst != used) pickDirty_ = true;
+    dst = used;
+}
+
+void SettingsMenu::pickerSetHue(float h) {
+    pickH_ = std::clamp(h, 0.0f, 1.0f);
+    pickerApply();
+}
+
+void SettingsMenu::pickerSetSatVal(float s, float v) {
+    pickS_ = std::clamp(s, 0.0f, 1.0f);
+    pickV_ = std::clamp(v, 0.0f, 1.0f);
+    pickerApply();
+}
+
+void SettingsMenu::pickerCommit() {
+    if (!pickDirty_) return;
+    pickDirty_ = false;
+    saveConfig();
+}
+
+void SettingsMenu::pickerPickSwatch(int i) {
+    const int t = colorPickerTarget();
+    if (t < 0 || i < 0 || i >= uicolor::kSwatchCount) return;
+    (t == 1 ? uiAccentRgb_ : uiTextRgb_) = uicolor::swatches(t == 1)[i].rgb;
+    pickerLoad();
+    pickDirty_ = true;
+    pickerCommit();
+}
+
+void SettingsMenu::pickerReset() { pickerPickSwatch(0); }
+
 void SettingsMenu::close() {
     open_ = false;
+    pickerCommit();
     // A combo recording only makes sense on the Vault page: leaving Settings by
     // any route (Main Menu, a rail tab, a web shortcut) cancels it, so later face
     // presses during playback are never saved as a new unlock combo.
@@ -1871,6 +1928,16 @@ void SettingsMenu::loadConfig() {
         return;
     }
     std::string line;
+    // Before the colour picker the two UI colours were saved as an index into five fixed colours.
+    int oldTextColorIdx = -1, oldAccentColorIdx = -1;
+    bool textRgbSeen = false, accentRgbSeen = false;
+    auto readRgb = [](std::string v, bool accent, uint32_t& rgb) {
+        while (!v.empty() && (v.back() == '\r' || v.back() == ' ')) v.pop_back();
+        uint32_t c = 0;
+        if (!uicolor::parseHex(v, c)) return false;
+        rgb = uicolor::usable(accent, c);  // also a hand-edited value stays readable
+        return true;
+    };
     bool panelStyleSeen = false;
     int oldOpacityIdx = -1;
     auto noteLegacyBinding = [this](bool custom) {
@@ -1919,8 +1986,10 @@ void SettingsMenu::loadConfig() {
             else if (key == "audio_lang") audioLangIdx_ = std::clamp(std::stoi(val), 0, kLangCount - 1);
             else if (key == "curvature") curvatureIdx_ = std::clamp(std::stoi(val), 0, kCurvatureCount - 1);
             else if (key == "ui_text_scale") uiTextScaleIdx_ = std::clamp(std::stoi(val), 0, kUiTextScaleCount - 1);
-            else if (key == "ui_text_color") uiTextColorIdx_ = std::clamp(std::stoi(val), 0, kUiTextColorCount - 1);
-            else if (key == "ui_accent_color") uiAccentColorIdx_ = std::clamp(std::stoi(val), 0, kUiAccentColorCount - 1);
+            else if (key == "ui_text_color") oldTextColorIdx = std::clamp(std::stoi(val), 0, uicolor::kSwatchCount - 1);
+            else if (key == "ui_accent_color") oldAccentColorIdx = std::clamp(std::stoi(val), 0, uicolor::kSwatchCount - 1);
+            else if (key == "ui_text_rgb") textRgbSeen = readRgb(val, false, uiTextRgb_) || textRgbSeen;
+            else if (key == "ui_accent_rgb") accentRgbSeen = readRgb(val, true, uiAccentRgb_) || accentRgbSeen;
             else if (key == "ui_distance") uiDistanceIdx_ = std::clamp(std::stoi(val), 0, kUiDistanceCount - 1);
             else if (key == "ui_follow_mode") uiFollowMode_ = std::clamp(std::stoi(val), 0, 1);
             else if (key == "browser_view_mode") browserViewMode_ = std::clamp(std::stoi(val), 0, 2);
@@ -1962,6 +2031,9 @@ void SettingsMenu::loadConfig() {
     // translucent ones faked): keep an explicit Solid, everyone else gets
     // the new default Frosted.
     if (!panelStyleSeen) uiOpacityIdx_ = (oldOpacityIdx == 0) ? 0 : 1;
+    // A file from before the picker: the saved choice becomes its colour (written as RGB from the next save on).
+    if (!textRgbSeen && oldTextColorIdx >= 0) uiTextRgb_ = uicolor::kTextSwatches[oldTextColorIdx].rgb;
+    if (!accentRgbSeen && oldAccentColorIdx >= 0) uiAccentRgb_ = uicolor::kAccentSwatches[oldAccentColorIdx].rgb;
     PIXELVR_LOG_INFO("Loaded settings from %s", path.c_str());
 }
 
@@ -1993,8 +2065,8 @@ void SettingsMenu::saveConfig() const {
             file << "audio_lang=" << audioLangIdx_ << "\n";
             file << "curvature=" << curvatureIdx_ << "\n";
             file << "ui_text_scale=" << uiTextScaleIdx_ << "\n";
-            file << "ui_text_color=" << uiTextColorIdx_ << "\n";
-            file << "ui_accent_color=" << uiAccentColorIdx_ << "\n";
+            file << "ui_text_rgb=" << uicolor::toHex(uiTextRgb_) << "\n";
+            file << "ui_accent_rgb=" << uicolor::toHex(uiAccentRgb_) << "\n";
             file << "ui_distance=" << uiDistanceIdx_ << "\n";
             file << "ui_follow_mode=" << uiFollowMode_ << "\n";
             file << "browser_view_mode=" << browserViewMode_ << "\n";

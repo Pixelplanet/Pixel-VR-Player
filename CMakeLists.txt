@@ -349,6 +349,8 @@ if(PIXELVR_BUILD_TOOLS)
     target_link_libraries(vault_crypto_test PRIVATE pixelvr_core)
     add_executable(fileops_test tools/fileops_test.cpp)
     target_link_libraries(fileops_test PRIVATE pixelvr_core)
+    add_executable(ui_color_test tools/ui_color_test.cpp)
+    target_link_libraries(ui_color_test PRIVATE pixelvr_core)
 endif()
 
 # First-party plugins (docs/concepts/PLUGIN_SYSTEM_SPEC.md). Each lands in

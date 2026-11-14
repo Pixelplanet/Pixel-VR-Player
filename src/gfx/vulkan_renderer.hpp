@@ -2,6 +2,7 @@
 
 #include "gfx/text_atlas.hpp"
 #include "ui/button_labels.hpp"
+#include "ui/ui_colors.hpp"
 #include "util/chapter.hpp"
 #include "util/math.hpp"
 #include "xr/openxr_headers.hpp"
@@ -382,13 +383,39 @@ public:
     void setPointerSuppressed(bool s) { pointerSuppressed_ = s; }
     bool pointerSuppressed() const { return pointerSuppressed_; }
     uint64_t ycbcrRebuildCount() const { return ycbcrRebuildCount_; }
-    void setUiAppearance(float textScale, int textColorIdx, int accentColorIdx,
+    // textRgb / accentRgb: the theme's colours as 0xRRGGBB (too dark ones are brightened).
+    void setUiAppearance(float textScale, uint32_t textRgb, uint32_t accentRgb,
                          float uiDistance) {
         uiTextScale_ = textScale;
-        uiTextColorIdx_ = textColorIdx;
-        uiAccentColorIdx_ = accentColorIdx;
+        uicolor::toFloat(uicolor::usable(false, textRgb), themeTextRgb_);
+        uicolor::toFloat(uicolor::usable(true, accentRgb), themeAccentRgb_);
         uiDistance_ = uiDistance;
     }
+    // The theme's accent / text colour (RGBA, alpha 1): every place that draws in them reads these.
+    const float* themeAccentColor() const { return themeAccentRgb_; }
+    const float* themeTextColor() const { return themeTextRgb_; }
+    // Colour picker page (Settings > UI & Appearance > Text Color / Accent Color), drawn in place of
+    // the settings rows. target: 0 = text, 1 = accent, -1 = not shown. h, s, v: where its markers
+    // are. adjusted: that spot is too dark, the UI uses a brightened colour. dragZone: the square
+    // or the hue strip is being dragged (-1 = neither).
+    static constexpr int kColorPickerSquare = 5;  // zones 0..4 are the suggested colours
+    static constexpr int kColorPickerHue = 6;
+    static constexpr int kColorPickerReset = 7;
+    static constexpr int kColorPickerBack = 8;
+    void setColorPicker(int target, float h, float s, float v, bool adjusted, int dragZone) {
+        colorPickerTarget_ = target;
+        colorPickerHsv_[0] = h;
+        colorPickerHsv_[1] = s;
+        colorPickerHsv_[2] = v;
+        colorPickerAdjusted_ = adjusted;
+        colorPickerDrag_ = dragZone;
+    }
+    // The picker control under the laser (a zone above), or -1.
+    int colorPickerZone() const { return colorPickerZone_; }
+    // Where the laser is along a dragged control, 0..1, also when it has slid off it: the square
+    // gives a = saturation (left to right) and b = brightness (bottom to top), the hue strip
+    // a = hue (top to bottom). False while the laser is not on the panel.
+    bool colorPickerPointer(int zone, float& a, float& b) const;
     // A browser screen keeps the 16:9 width and grows taller by its toolbar:
     // the factor its height has over a video screen of the same scale (1 when
     // the slot shows no page yet).
@@ -415,7 +442,7 @@ public:
         ambilightIntensity_ = intensity < 0.0f ? 0.0f : (intensity > 1.0f ? 1.0f : intensity);
     }
     float ambilightIntensity() const { return ambilightIntensity_; }
-    // The UI theme's accent / text colour as "rrggbb" (as last drawn).
+    // The UI theme's accent / text colour as "rrggbb" (for the browser toolbar).
     std::string themeHex(bool accent) const {
         const float* c = accent ? themeAccentRgb_ : themeTextRgb_;
         char b[8];
@@ -654,6 +681,8 @@ public:
         FlatBox = 40,       // rounded box in its flat colours (no top light, no rim light)
         HideDock = 41,      // chevron down onto a bar: hide the player controls
         UpArrow = 42,       // arrow up: an update is available
+        HueStrip = 43,      // colour picker: rounded box filled with all hues, top to bottom
+        SatValSquare = 44,  // colour picker: rounded box, saturation left to right, brightness bottom to top
         GlassPanel = 25, // rounded box with bevel + eye-dependent reflection sheen
     };
 
@@ -1197,8 +1226,21 @@ private:
     float ambilightReach_ = 0.46f;
     float mainScreenScale_ = 1.0f;
     float eyePxPerRad_ = 0.0f;
-    float themeAccentRgb_[3] = {0.35f, 0.64f, 1.0f};
-    float themeTextRgb_[3] = {0.91f, 0.93f, 0.95f};
+    float themeAccentRgb_[4] = {0.25f, 0.78f, 1.0f, 1.0f};  // RGBA (alpha stays 1)
+    float themeTextRgb_[4] = {0.97f, 0.98f, 1.0f, 1.0f};
+    // The accent colour in 18 bits, for cache keys of things drawn in it.
+    int themeAccentKey() const {
+        const uint32_t c = uicolor::fromFloat(themeAccentRgb_);
+        return static_cast<int>(((c >> 18) & 0x3F) << 12 | ((c >> 10) & 0x3F) << 6 | ((c >> 2) & 0x3F));
+    }
+    int colorPickerTarget_ = -1;
+    float colorPickerHsv_[3] = {0.0f, 0.0f, 1.0f};
+    bool colorPickerAdjusted_ = false;
+    int colorPickerDrag_ = -1;
+    int colorPickerZone_ = -1;
+    float colorPickerPtr_[2] = {0.0f, 0.0f};  // the laser on the panel (panel units)
+    bool colorPickerPtrValid_ = false;
+    void colorPickerHitTest(float hx, float hy);
 
     ProjectionMode projectionMode_ = ProjectionMode::Flat;
     StereoMode stereoMode_ = StereoMode::Mono;
@@ -1444,8 +1486,6 @@ private:
     int activeDownloadCount_ = 0;
     int settingsSection_ = 0;
     float uiTextScale_ = 1.20f;
-    int uiTextColorIdx_ = 0;
-    int uiAccentColorIdx_ = 0;
     float uiDistance_ = 1.9f;
     std::vector<RailShortcut> railShortcuts_ = {{"YouTube", true}, {"Browser", false}};
 

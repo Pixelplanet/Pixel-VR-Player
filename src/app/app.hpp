@@ -154,6 +154,8 @@ private:
     int plexAudioStream_ = -1;  // the page's audio track for the hand-off being loaded
     int shortcutDragFrom_ = -1;  // settings row of the shortcut being dragged (list page)
     int shortcutDragTo_ = -1;    // the row it would land on
+    int colorDragZone_ = -1;     // colour picker: the square / hue strip being dragged (-1 = none)
+    void updateColorPicker(XrInputState& in);  // the laser on the colour picker page
     bool returnFromPlex(int slot);  // false when the slot is not playing a Plex hand-off
     bool updatePlexPlayback(int slot);  // true once it ended and the page is back
     bool plexLoading_ = false;

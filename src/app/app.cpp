@@ -1633,6 +1633,44 @@ void App::performVaultLock() {
     PIXELVR_LOG_INFO("Vault locked and sanitized");
 }
 
+// The colour picker page (Settings > UI & Appearance): a click picks a suggested colour, Reset or
+// Back; the square and the hue strip follow the laser for as long as the trigger stays held (read
+// every frame, also when the laser slides off them), the whole UI showing the colour at once.
+void App::updateColorPicker(XrInputState& in) {
+    if (settings_.colorPickerTarget() < 0) {
+        settings_.pickerCommit();  // the page was left another way (a rail tab) mid-drag
+        colorDragZone_ = -1;
+        return;
+    }
+    const int hand = renderer_.pointerHand() == 0 ? 0 : 1;
+    if (colorDragZone_ >= 0 && !in.selectHeld) {  // let go: the colour is saved
+        settings_.pickerCommit();
+        colorDragZone_ = -1;
+    }
+    const int zone = renderer_.colorPickerZone();
+    if (in.select && zone >= 0) {
+        if (zone == VulkanRenderer::kColorPickerSquare || zone == VulkanRenderer::kColorPickerHue) {
+            colorDragZone_ = zone;
+        } else if (zone == VulkanRenderer::kColorPickerReset) {
+            settings_.pickerReset();
+        } else if (zone == VulkanRenderer::kColorPickerBack) {
+            settings_.navigateBack();
+        } else {
+            settings_.pickerPickSwatch(zone);
+        }
+        xr_.triggerHaptic(hand, 0.02f, 0.0f, 0.4f);
+        in.select = in.togglePlay = false;
+    }
+    if (colorDragZone_ >= 0) {
+        float a = 0.0f, b = 0.0f;
+        if (renderer_.colorPickerPointer(colorDragZone_, a, b)) {
+            if (colorDragZone_ == VulkanRenderer::kColorPickerHue) settings_.pickerSetHue(a);
+            else settings_.pickerSetSatVal(a, b);
+        }
+        in.select = in.togglePlay = false;  // the drag owns the trigger
+    }
+}
+
 void App::dismissHud(const XrInputState& in, std::chrono::steady_clock::time_point nowT) {
     hudDismissed_ = true;
     hudDismissTime_ = nowT;
@@ -4819,8 +4857,8 @@ int App::run() {
             renderer_.setSwapEyes(settings_.swapEyes());
             renderer_.setDrawModels(settings_.drawModels());
             renderer_.setUiAppearance(settings_.uiTextScale(),
-                                      settings_.uiTextColorIdx(),
-                                      settings_.uiAccentColorIdx(),
+                                      settings_.uiTextRgb(),
+                                      settings_.uiAccentRgb(),
                                       settings_.uiDistance());
             renderer_.setAmbilightIntensity(settings_.ambilightIntensity());
             renderer_.setAmbilightReach(settings_.glowReach());
@@ -5656,6 +5694,8 @@ int App::run() {
                 }
                 renderer_.setSettingsSection(settings_.section());
                 renderer_.setSettingsCompact(settings_.compactPage());
+                renderer_.setColorPicker(settings_.colorPickerTarget(), settings_.pickerHue(), settings_.pickerSat(),
+                                         settings_.pickerVal(), settings_.pickerAdjusted(), colorDragZone_);
                 renderer_.setSettingsHeaderButton(settings_.headerButton());
                 renderer_.setSettingsCrumbTargets(settings_.crumbTargets());
                 renderer_.setSettings(true, settings_.title(), sRows,
@@ -5795,6 +5835,7 @@ int App::run() {
                 if (!target && renderer_.hubCloseHovered()) target = 10900;
                 if (!target && renderer_.settingsHeaderButtonHovered()) target = 11900;
                 if (!target && curSettingsHov >= 0) target = id(12, renderer_.settingsSegmentHovered());
+                if (!target) target = id(19, renderer_.colorPickerZone());
                 if (!target && musicSlot >= 0 && music >= 0) target = id(13 + musicSlot, music);
                 static int lastTarget = 0;
                 if (target != lastTarget && target != 0) {
@@ -6626,6 +6667,7 @@ int App::run() {
 
 #endif
 
+            if (settings_.isOpen() && !actionMenu_.visible) updateColorPicker(in);  // (also with the laser on the rail: a drag goes on)
             if (settings_.isOpen() && sbHover < 0 && !actionMenu_.visible) {  // (a dialog over it takes the input)
                 if (const int d = navStep(in.thumbstickY, nowT)) {
                     settings_.move(d * (settings_.compactPage() ? 1 : 2));  // list pages have one column

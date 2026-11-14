@@ -42,8 +42,8 @@ public:
         RemovePlugin,         // "Delete Plugin" on a plugin's page: the app asks first
         CycleCurvature,
         CycleUiTextScale,
-        CycleUiTextColor,
-        CycleUiAccentColor,
+        OpenUiTextColor,      // the colour picker page for the UI text colour
+        OpenUiAccentColor,    // ... and for the accent colour
         CycleUiDistance,
         CycleUiFollowMode,
         EnterVideoList,
@@ -259,8 +259,28 @@ public:
     void setCurvatureIdx(int idx);
     int curvatureIdx() const { return curvatureIdx_; }
     float uiTextScale() const;
-    int uiTextColorIdx() const { return uiTextColorIdx_; }
-    int uiAccentColorIdx() const { return uiAccentColorIdx_; }
+    // The UI's text and accent colour as 0xRRGGBB (never too dark for the panels: ui/ui_colors.hpp).
+    uint32_t uiTextRgb() const { return uiTextRgb_; }
+    uint32_t uiAccentRgb() const { return uiAccentRgb_; }
+    // The colour picker pages (UI & Appearance > Text Color / Accent Color). They have no rows:
+    // the renderer draws the picker, the app routes the laser to the calls below.
+    static constexpr int kTextColorSection = 8;
+    static constexpr int kAccentColorSection = 9;
+    int colorPickerTarget() const {  // 0 = text, 1 = accent, -1 = not on a picker page
+        return section_ == kTextColorSection ? 0 : (section_ == kAccentColorSection ? 1 : -1);
+    }
+    // Where the picker's markers are: hue, saturation, brightness (0..1), as the user set them.
+    float pickerHue() const { return pickH_; }
+    float pickerSat() const { return pickS_; }
+    float pickerVal() const { return pickV_; }
+    // The spot the markers are on is too dark for the panels: the UI uses a brightened colour.
+    bool pickerAdjusted() const { return pickAdjusted_; }
+    // While dragging: the colour changes at once (live preview), the file is written by pickerCommit().
+    void pickerSetHue(float h);
+    void pickerSetSatVal(float s, float v);
+    void pickerCommit();           // the drag ended: save
+    void pickerPickSwatch(int i);  // one of the suggested colours (saved)
+    void pickerReset();            // the default colour (saved)
     float uiDistance() const;
     int uiFollowMode() const { return uiFollowMode_; }
     void setUiFollowMode(int m) { uiFollowMode_ = m; saveConfig(); refresh(); }
@@ -445,8 +465,13 @@ private:
     int shortcutDefaultsSeen_ = 8;  // how many built-in shortcuts this list was offered (8 = before the key existed)
     int curvatureIdx_ = 0;     // 0=Flat (0%), 1=Gentle (25%), 2=Cinema (50%), 3=Deep (75%), 4=IMAX (100%)
     int uiTextScaleIdx_ = 2;   // 0=90%, 1=105%, 2=120% (default), 3=140%, 4=160%
-    int uiTextColorIdx_ = 0;   // 0=Pure White, 1=Ice Cyan, 2=Warm Cream, 3=Soft Gold, 4=Mint Green
-    int uiAccentColorIdx_ = 0; // 0=Cyber Cyan, 1=Emerald, 2=Amber Gold, 3=Royal Purple, 4=Crimson
+    uint32_t uiTextRgb_ = 0xF7FAFF;    // ui_text_rgb (default: Pure White)
+    uint32_t uiAccentRgb_ = 0x40C7FF;  // ui_accent_rgb (default: Cyber Cyan)
+    float pickH_ = 0.0f, pickS_ = 0.0f, pickV_ = 1.0f;  // the picker's markers
+    bool pickAdjusted_ = false;
+    bool pickDirty_ = false;  // changed by a drag, not saved yet
+    void pickerLoad();        // markers from the current colour (on opening the page)
+    void pickerApply();       // the colour from the markers
     int uiDistanceIdx_ = 1;    // 0=Near (1.5m), 1=Comfort (1.9m), 2=Mid (2.3m), 3=Far (2.8m)
     int uiFollowMode_ = 0;     // 0=World Lock (default, zero drift/tilt), 1=Smooth Gaze Follow
     int browserViewMode_ = 0;  // 0=Large Cards (3x2), 1=Smaller Cards (4x3), 2=Compact List (1-Col)
@@ -484,7 +509,7 @@ private:
     int screenSizeIdx_ = 0;
     int glowReachIdx_ = 3;     // 0=Close, 1=Short, 2=Medium, 3=Wide (default, the look before the setting)
 
-    int section_ = 0;   // 0=Display, 1=UI, 2=Audio, 3=Controls, 4=Vault; 10..12, 21, 22, 23..=sub-pages; 15/16=plugins
+    int section_ = 0;   // 0=Display, 1=UI, 2=Audio, 3=Controls, 4=Vault; 8, 9, 10..12, 21, 22, 23..=sub-pages; 15/16=plugins
     std::vector<std::pair<int, std::string>> videoStreams_;  // (index, label)
     std::vector<std::pair<int, std::string>> audioStreams_;
     int videoSel_ = 0;      // position within videoStreams_
