@@ -2418,24 +2418,37 @@ void VulkanRenderer::setScreenSubtitlePicture(int slot, uint64_t id, const uint8
     }
     if (sp.id == id) return;
     updateCardThumbnail(kSubPicThumbSlot + slot, "sub#" + std::to_string(id), rgba, w, h);
-    sp = cardThumbs_[kSubPicThumbSlot + slot].ready ? SubPicture{id, canvasW, canvasH, x, y, w, h, false} : SubPicture{};
-    // Two copies, one per half? The canvas's middle lies well inside the picture and the columns
-    // around it are clear from top to bottom.
-    const int mid = canvasW / 2 - x;
-    const int gap = std::max(2, canvasW / 200);
-    if (sp.id != 0 && mid - gap > w / 8 && mid + gap < w - w / 8) {
-        bool clear = true;
-        for (int yy = 0; yy < h && clear; ++yy) {
-            const uint8_t* row = rgba + (static_cast<size_t>(yy) * w + (mid - gap)) * 4;
-            for (int xx = 0; xx < 2 * gap; ++xx) {
-                if (row[xx * 4 + 3] > 8) {
-                    clear = false;
-                    break;
-                }
-            }
+    sp = cardThumbs_[kSubPicThumbSlot + slot].ready ? SubPicture{id, canvasW, canvasH, x, y, w, h, 0} : SubPicture{};
+    if (sp.id == 0) return;
+    // Two copies, one per half of the canvas? Along `axis` (0 = columns, 1 = rows) the canvas's middle
+    // lies inside the picture with a clear band around it, and what is on either side sits at the same
+    // place in its half (a 3D track shifts the copies by a little depth only). A normal line with a
+    // word gap at the middle fails that: its two parts start at very different places in their halves.
+    auto lineClear = [&](int axis, int i) {  // column i (axis 0) or row i (axis 1) of the picture
+        const int n = axis == 0 ? h : w;
+        for (int k = 0; k < n; ++k) {
+            const int px = axis == 0 ? i : k, py = axis == 0 ? k : i;
+            if (rgba[(static_cast<size_t>(py) * w + px) * 4 + 3] > 8) return false;
         }
-        sp.twoHalves = clear;
-    }
+        return true;
+    };
+    auto copies = [&](int axis) {
+        const int canvas = axis == 0 ? canvasW : canvasH, at = axis == 0 ? x : y, len = axis == 0 ? w : h;
+        const int mid = canvas / 2 - at;  // the canvas's middle, in picture pixels
+        const int gap = std::max(2, canvas / 200);
+        if (mid - gap < 4 || mid + gap > len - 4) return false;
+        for (int i = mid - gap; i < mid + gap; ++i) {
+            if (!lineClear(axis, i)) return false;
+        }
+        int firstEnd = mid - gap, secondStart = mid + gap;  // where the first copy ends / the second begins
+        while (firstEnd > 0 && lineClear(axis, firstEnd - 1)) --firstEnd;
+        while (secondStart < len && lineClear(axis, secondStart)) ++secondStart;
+        const int tol = std::max(4, canvas / 25);
+        const int startA = at, endA = at + firstEnd;                                // on the canvas
+        const int startB = at + secondStart - canvas / 2, endB = at + len - canvas / 2;  // in the second half's terms
+        return std::abs(startA - startB) <= tol && std::abs(endA - endB) <= tol;
+    };
+    sp.twoHalves = copies(0) ? 1 : (copies(1) ? 2 : 0);
 }
 
 void VulkanRenderer::updateCardThumbnail(int slot, const std::string& path,
@@ -4931,7 +4944,8 @@ void VulkanRenderer::recordScreenCopy(int slot, const ScreenLayer& L, uint32_t i
             vkCmdSetViewport(commandBuffer_, 0, 1, &hv);
             const ScreenHitInfo& shb = screenHit_[slot];
             const float dispAspect = (shb.valid && shb.halfH > 0.0f) ? shb.halfW / shb.halfH : hv.width / hv.height;
-            drawScreenOverlay(slot, (16.0f / 9.0f) / dispAspect, ortho, glyphCursor, e, st == StereoMode::SideBySide);
+            drawScreenOverlay(slot, (16.0f / 9.0f) / dispAspect, ortho, glyphCursor, e,
+                              st == StereoMode::SideBySide ? 1 : (st == StereoMode::TopBottom ? 2 : 0));
         }
     }
     vkCmdEndRenderPass(commandBuffer_);
@@ -5034,7 +5048,7 @@ void VulkanRenderer::drawCopyText(const std::string& utf8, float cx, float cy, f
 }
 
 void VulkanRenderer::drawScreenOverlay(int slot, float ax, const math::Mat4& ortho, uint32_t& glyphCursor, int eye,
-                                       bool sideBySide) {
+                                       int stereo) {
     using namespace math;
     static const float kAccents[5][3] = {{0.25f, 0.78f, 1.00f}, {0.18f, 0.85f, 0.52f}, {1.00f, 0.68f, 0.20f},
                                          {0.68f, 0.42f, 1.00f}, {0.96f, 0.28f, 0.36f}};
@@ -5087,8 +5101,9 @@ void VulkanRenderer::drawScreenOverlay(int slot, float ax, const math::Mat4& ort
         const float cw = static_cast<float>(sp.canvasW), ch = static_cast<float>(sp.canvasH);
         float w = 3.2f * static_cast<float>(sp.w) / cw;
         float x = -1.6f + 3.2f * static_cast<float>(sp.x) / cw;
-        float u0 = 0.0f, u1 = 1.0f;
-        if (sideBySide && sp.twoHalves) {
+        float u0 = 0.0f, u1 = 1.0f, v0 = 0.0f, v1 = 1.0f;
+        const bool ownRows = stereo == 2 && sp.twoHalves == 2;  // top / bottom copies: this eye's rows
+        if (stereo == 1 && sp.twoHalves == 1) {
             // This eye's half of the canvas fills its view: the part of the picture in that half.
             const float half = 0.5f * cw, h0 = half * static_cast<float>(eye);
             const float p0 = std::max(static_cast<float>(sp.x), h0);
@@ -5099,7 +5114,16 @@ void VulkanRenderer::drawScreenOverlay(int slot, float ax, const math::Mat4& ort
             w = 3.2f * std::max(p1 - p0, 0.0f) / half;
         }
         float h, yTop;
-        if (sp.canvasH >= 720) {
+        if (ownRows) {
+            // This eye's half of the canvas (its upper or lower half) fills its view.
+            const float half = 0.5f * ch, h0 = half * static_cast<float>(eye);
+            const float p0 = std::max(static_cast<float>(sp.y), h0);
+            const float p1 = std::min(static_cast<float>(sp.y + sp.h), h0 + half);
+            v0 = (p0 - static_cast<float>(sp.y)) / static_cast<float>(sp.h);
+            v1 = (p1 - static_cast<float>(sp.y)) / static_cast<float>(sp.h);
+            h = 1.8f * std::max(p1 - p0, 0.0f) / half;
+            yTop = 0.9f - 1.8f * (p0 - h0) / half;
+        } else if (sp.canvasH >= 720) {
             const float perPx = (3.2f / ax) / cw;  // model height of one canvas pixel
             h = static_cast<float>(sp.h) * perPx;
             yTop = (0.5f * ch - static_cast<float>(sp.y)) * perPx;
@@ -5128,8 +5152,9 @@ void VulkanRenderer::drawScreenOverlay(int slot, float ax, const math::Mat4& ort
         tp.rect[2] = w;
         tp.rect[3] = h;
         tp.uv[0] = u0;
+        tp.uv[1] = v0;
         tp.uv[2] = u1;
-        tp.uv[3] = 1.0f;
+        tp.uv[3] = v1;
         tp.bend[2] = 1.0f;  // plain picture: no rounded corners, no scrims
         vkCmdPushConstants(commandBuffer_, textPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
                            0, sizeof(TextPush), &tp);

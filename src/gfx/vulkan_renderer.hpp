@@ -1285,7 +1285,7 @@ private:
     void drawCopyText(const std::string& utf8, float cx, float cy, float h, float maxW, const float color[4], float ax,
                       const math::Mat4& ortho, uint32_t& glyphCursor);
     void drawScreenOverlay(int slot, float ax, const math::Mat4& ortho, uint32_t& glyphCursor, int eye = 0,
-                           bool sideBySide = false);
+                           int stereo = 0);  // stereo: 0 mono, 1 side by side, 2 top / bottom
     int musicHoverId_ = kMusicNone;
     std::string hudFormat_ = "2D Flat";
     std::string hudAudio_ = "Audio";
@@ -1311,9 +1311,10 @@ private:
     struct SubPicture {
         uint64_t id = 0;  // 0 = none
         int canvasW = 0, canvasH = 0, x = 0, y = 0, w = 0, h = 0;
-        // A 3D subtitle track: the picture has one copy in each half of the canvas (clear columns at
-        // the canvas's middle between them). On a side-by-side screen each eye gets its own copy.
-        bool twoHalves = false;
+        // A 3D subtitle track: the picture has one copy in each half of the canvas, side by side (1)
+        // or one above the other (2), with a clear band at the canvas's middle. On a screen with that
+        // 3D layout each eye gets its own copy.
+        int twoHalves = 0;
     };
     SubPicture subPictures_[kMaxVideoSlots];
     void releaseThumbSlot(int slot);
