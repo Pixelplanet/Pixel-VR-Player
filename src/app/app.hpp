@@ -352,6 +352,7 @@ private:
         std::vector<BrowserHost::PlexPlay::Marker> plexMarkers;  // intro / credits of what plays (Skip pill)
         int subtitleChoice = -1;        // the subtitle track picked for this file (kept across a track reload)
         bool subtitleLogged = false;    // the first shown line of this choice was logged
+        bool subtitleAuto = false;      // nothing chosen for this file: the preferred-subtitles setting decides
         bool plexAwaitingNext = false;  // ended, waiting for the next episode's hand-off
         bool plexNavManual = false;     // ... asked for with the screen's arrow (keeps playing if there is none)
         std::chrono::steady_clock::time_point plexNextSince{};
@@ -560,6 +561,10 @@ private:
     void updateMusicView(int slot);
     float musicScrollAccum_ = 0.0f;
     void switchTracks(bool byLanguage);  // reload current media at its position
+    // Preferred subtitles (Settings > Audio & Video Tracks): the track the setting picks for what is open
+    // on `slot` (-1: none), and the note shown on the screen when it switched one on.
+    int preferredSubtitleTrack(int slot);
+    void noteAutoSubtitle(int slot, int track);
 #endif
 
     std::atomic<bool> watchdogRunning_{false};

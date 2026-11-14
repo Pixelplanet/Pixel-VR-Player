@@ -44,14 +44,16 @@ void PlaybackMemory::load() {
         std::stringstream ss(line);
         std::string part;
         while (std::getline(ss, part, '\t')) f.push_back(part);
-        if ((f.size() != 5 && f.size() != 6) || f[0].empty()) continue;
+        // (a 7th field, only on lines that have one: the subtitle track picked by hand)
+        if (f.size() < 5 || f.size() > 7 || f[0].empty()) continue;
         try {
             Entry e;
             e.position = std::stod(f[1]);
             e.projection = std::clamp(std::stoi(f[2]), -1, 2);
             e.stereo = std::clamp(std::stoi(f[3]), -1, 3);  // 3 = frame-sequential
             e.touched = std::stoll(f[4]);
-            if (f.size() == 6) e.fingerprint = f[5];
+            if (f.size() >= 6) e.fingerprint = f[5];
+            if (f.size() == 7) e.subtitle = std::max(std::stoi(f[6]), kNoSubtitleChoice);
             entries_[f[0]] = e;
         } catch (const std::exception&) {
             continue;  // skip malformed lines
@@ -75,7 +77,10 @@ void PlaybackMemory::save() {
             for (const auto& [file, e] : rows) {
                 if (file.find('\t') != std::string::npos || file.find('\n') != std::string::npos) continue;
                 out << file << '\t' << e.position << '\t' << e.projection << '\t' << e.stereo
-                    << '\t' << e.touched << '\t' << e.fingerprint << '\n';
+                    << '\t' << e.touched << '\t' << e.fingerprint;
+                // (only for files with a subtitle choice: the other lines stay readable for older versions)
+                if (e.subtitle != kNoSubtitleChoice) out << '\t' << e.subtitle;
+                out << '\n';
             }
         }
         std::filesystem::rename(tmp, path);  // atomic replace
@@ -168,6 +173,13 @@ void PlaybackMemory::setFormat(const std::string& path, int projection, int ster
     Entry& e = touch(path);
     e.projection = projection;
     e.stereo = stereo;
+    if (!fingerprint.empty()) e.fingerprint = fingerprint;
+}
+
+void PlaybackMemory::setSubtitle(const std::string& path, int track, const std::string& fingerprint) {
+    if (path.empty()) return;
+    Entry& e = touch(path);
+    e.subtitle = std::max(track, -1);
     if (!fingerprint.empty()) e.fingerprint = fingerprint;
 }
 

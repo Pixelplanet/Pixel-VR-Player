@@ -11,12 +11,14 @@ namespace pixelvr {
 // Callers must not record hidden-vault paths (nothing about them is persisted).
 class PlaybackMemory {
 public:
+    static constexpr int kNoSubtitleChoice = -2;  // nothing picked by hand: the preferred-subtitles setting decides
     struct Entry {
         double position = 0.0;  // seconds; 0 = start from the beginning
         int projection = -1;    // -1 = auto-detect, else ProjectionMode index
         int stereo = -1;        // -1 = auto-detect, else StereoMode index
         long long touched = 0;  // unix seconds of the last update (for pruning)
         std::string fingerprint;  // file identity, so renamed / moved files are found again
+        int subtitle = kNoSubtitleChoice;  // the subtitle track picked by hand: a track index, -1 = off by hand
     };
 
     // Size plus a hash of the start and end of a local file (empty for
@@ -33,6 +35,8 @@ public:
     // cleared so a finished file starts over next time.
     void setPosition(const std::string& path, double position, double duration, const std::string& fingerprint = {});
     void setFormat(const std::string& path, int projection, int stereo, const std::string& fingerprint = {});
+    // The subtitle track picked by hand in the track list (-1 = switched off by hand).
+    void setSubtitle(const std::string& path, int track, const std::string& fingerprint = {});
     // Drops what is known about `path` and everything under it (e.g. moved into the vault).
     void forgetUnder(const std::string& path);
 

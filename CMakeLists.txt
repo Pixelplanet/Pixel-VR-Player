@@ -141,6 +141,7 @@ add_library(pixelvr_core STATIC
     src/ui/thumbnail_cache.cpp
     src/app/vault_manager.cpp
     src/app/playback_memory.cpp
+    src/app/subtitle_pick.cpp
     src/app/browser_host.cpp
     src/plugins/plugin_host.cpp
     src/plugins/plugin_files.cpp
@@ -349,6 +350,8 @@ if(PIXELVR_BUILD_TOOLS)
     target_link_libraries(vault_crypto_test PRIVATE pixelvr_core)
     add_executable(fileops_test tools/fileops_test.cpp)
     target_link_libraries(fileops_test PRIVATE pixelvr_core)
+    add_executable(subtitle_pick_test tools/subtitle_pick_test.cpp)
+    target_link_libraries(subtitle_pick_test PRIVATE pixelvr_core)
 endif()
 
 # First-party plugins (docs/concepts/PLUGIN_SYSTEM_SPEC.md). Each lands in
