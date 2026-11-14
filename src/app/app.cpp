@@ -4069,14 +4069,15 @@ int App::run() {
                     }
                 }
                 renderer_.setScreenSkip(s, skip);
+                // (A flat screen carries its subtitle in its picture; 360 / 180 floats it below the view centre.)
                 std::string subs;
-                if (es.open && !es.web && !es.openAbandoned && es.projection == 0) {
+                if (es.open && !es.web && !es.openAbandoned) {
                     es.engine.subtitleAt(es.engine.position(), subs);
                 }
                 renderer_.setScreenSubtitle(s, subs);
                 // Picture subtitles (Blu-ray / DVD tracks): the picture that is on right now.
                 std::shared_ptr<const MediaEngine::SubtitlePicture> pic;
-                if (es.open && !es.web && !es.openAbandoned && es.projection == 0) {
+                if (es.open && !es.web && !es.openAbandoned) {
                     pic = es.engine.subtitlePictureAt(es.engine.position());
                 }
                 if (pic) {

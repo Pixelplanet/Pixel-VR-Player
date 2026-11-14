@@ -1294,6 +1294,25 @@ private:
     bool hudAudioEnabled_ = true;
     float sphereFollowYaw_ = 0.0f;
     bool sphereFollowInit_ = false;
+    // 360 / 180: the subtitle of the main video floats below the view centre, 2 m away, and follows
+    // the head lazily. Placed once per frame (updateSphereSubtitle), drawn by both eye passes.
+    struct SphereSubtitle {
+        bool on = false;       // something to draw this frame
+        bool picture = false;  // the subtitle picture; otherwise the text lines
+        math::Mat4 model;      // the quad's centre and facing (its local x / y are metres)
+        float w = 0.0f, h = 0.0f;                 // size of the quad, metres
+        float uv[4] = {0.0f, 0.0f, 1.0f, 1.0f};   // part of the picture shown: u0, v0, u1, v1
+        std::string text;                         // the text the lines below were wrapped from
+        std::vector<std::string> lines;
+        std::vector<float> lineW;                 // width of each line, metres
+        bool seeded = false;                      // the three angles below hold a place
+        float yaw = 0.0f, pitch = 0.0f;           // direction it follows the head with (radians)
+        float elev = 0.0f;                        // elevation of the quad's centre (radians)
+        std::chrono::steady_clock::time_point lastT{};
+    };
+    SphereSubtitle sphereSub_;
+    void updateSphereSubtitle(const XrView* views, uint32_t viewCount);
+    void drawSphereSubtitlePicture(const math::Mat4& viewProj);
 
     struct CardThumbnail {
         VkImage image = VK_NULL_HANDLE;
