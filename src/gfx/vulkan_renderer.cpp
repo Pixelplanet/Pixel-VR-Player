@@ -58,7 +58,7 @@ struct TextPush {
     float color[4];
     float rect[4];  // x, y, w, h in panel-local metres (thumbnails)
     float uv[4];    // u0, v0, u1, v1
-    float bend[4];  // x: bend radius (0 = flat), y: vertical strips
+    float bend[4];  // x: bend radius (0 = flat), y: vertical strips, z: 1 = plain picture (thumb.frag)
 };
 static_assert(sizeof(TextPush) <= 128, "TextPush exceeds the guaranteed push-constant size");
 
@@ -1038,6 +1038,7 @@ VulkanRenderer::~VulkanRenderer() {
             webTex_[slot].set = VK_NULL_HANDLE;  // freed with the pool
         }
         releaseThumbSlot(kScrubThumbSlot);
+        for (int s = 0; s < kMaxVideoSlots; ++s) releaseThumbSlot(kSubPicThumbSlot + s);
         if (thumbPipeline_ != VK_NULL_HANDLE)
             vkDestroyPipeline(device_, thumbPipeline_, nullptr);
         if (textPipeline_ != VK_NULL_HANDLE)
@@ -2407,9 +2408,22 @@ void VulkanRenderer::clearScrubPreview() {
     if (device_ != VK_NULL_HANDLE) releaseThumbSlot(kScrubThumbSlot);
 }
 
+void VulkanRenderer::setScreenSubtitlePicture(int slot, uint64_t id, const uint8_t* rgba, int w, int h, int x, int y,
+                                              int canvasW, int canvasH) {
+    if (slot < 0 || slot >= kMaxVideoSlots) return;
+    SubPicture& sp = subPictures_[slot];
+    if (id == 0 || rgba == nullptr || w <= 0 || h <= 0 || canvasW <= 0 || canvasH <= 0) {
+        sp.id = 0;  // (the texture stays for the next one)
+        return;
+    }
+    if (sp.id == id) return;
+    updateCardThumbnail(kSubPicThumbSlot + slot, "sub#" + std::to_string(id), rgba, w, h);
+    sp = cardThumbs_[kSubPicThumbSlot + slot].ready ? SubPicture{id, canvasW, canvasH, x, y, w, h} : SubPicture{};
+}
+
 void VulkanRenderer::updateCardThumbnail(int slot, const std::string& path,
                                          const uint8_t* rgba, int width, int height) {
-    if (slot < 0 || slot > kScrubThumbSlot || !rgba || width <= 0 || height <= 0 ||
+    if (slot < 0 || slot >= kSubPicThumbSlot + kMaxVideoSlots || !rgba || width <= 0 || height <= 0 ||
         textPool_ == VK_NULL_HANDLE || textSetLayout_ == VK_NULL_HANDLE) {
         return;
     }
@@ -2550,6 +2564,7 @@ void VulkanRenderer::updateCardThumbnail(int slot, const std::string& path,
     vkUpdateDescriptorSets(device_, 1, &wr, 0, nullptr);
 
     cardThumbs_[slot].ready = true;
+    if (slot >= kSubPicThumbSlot) return;  // (a subtitle picture every few seconds: no log line each)
     PIXELVR_LOG_INFO("VulkanRenderer: uploaded card thumbnail slot %d -> %s", slot, path.c_str());
 }
 
@@ -4930,11 +4945,13 @@ int VulkanRenderer::screenOverlayKey(int slot) const {
     const bool arrows = screenOverlay_[slot].nav && screenNavSlot_ == slot;
     const std::string& skip = screenOverlay_[slot].skip;
     const std::string& subs = screenOverlay_[slot].subs;
-    if (alphaStep == 0 && !arrows && skip.empty() && subs.empty()) return 0;
+    const uint64_t pic = subPictures_[slot].id;
+    if (alphaStep == 0 && !arrows && skip.empty() && subs.empty() && pic == 0) return 0;
     const int hover = arrows ? (screenNavHover_ + 2) : 0;  // 1 = arrows, no hover; 2/3 = hovered side
     const int skipKey = skip.empty() ? 0 : static_cast<int>(skip.size()) * 2 + (screenSkipSlot_ == slot ? 1 : 0);
     std::size_t h = std::hash<std::string>{}(screenOverlay_[slot].title);
     h = h * 1000003u + std::hash<std::string>{}(subs);
+    h = h * 1000003u + static_cast<std::size_t>(pic);
     h = h * 1000003u + static_cast<std::size_t>(alphaStep + 32 * hover + 4096 * skipKey);
     return 1 + static_cast<int>(h & 0x3FFFFFFF);
 }
@@ -5042,8 +5059,54 @@ void VulkanRenderer::drawScreenOverlay(int slot, float ax, const math::Mat4& ort
         const float white[4] = {1.0f, 1.0f, 1.0f, a};
         drawCopyText(screenOverlay_[slot].title, 0.0f, 0.70f, textH, maxTextW, white, ax, ortho, glyphCursor);
     }
+    // A picture subtitle (Blu-ray / DVD): drawn where its track puts it. An HD canvas has square pixels
+    // and is as wide as the picture, centred on it (a 1920x1080 canvas over a film cropped to 1920x800
+    // reaches into the bars); an SD canvas (DVD) covers the frame as the video does. A picture that
+    // would land in bars that are cut off is moved up into the picture.
+    const SubPicture& sp = subPictures_[slot];
+    const bool subPicOn = sp.id != 0 && cardThumbs_[kSubPicThumbSlot + slot].ready && thumbPipelineLayer_ != VK_NULL_HANDLE;
+    if (subPicOn) {
+        const float cw = static_cast<float>(sp.canvasW), ch = static_cast<float>(sp.canvasH);
+        float w = 3.2f * static_cast<float>(sp.w) / cw;
+        float x = -1.6f + 3.2f * static_cast<float>(sp.x) / cw;
+        float h, yTop;
+        if (sp.canvasH >= 720) {
+            const float perPx = (3.2f / ax) / cw;  // model height of one canvas pixel
+            h = static_cast<float>(sp.h) * perPx;
+            yTop = (0.5f * ch - static_cast<float>(sp.y)) * perPx;
+        } else {
+            const float keep = std::max(0.4f, 1.0f - 2.0f * letterboxFor(slot));
+            h = 1.8f * static_cast<float>(sp.h) / (ch * keep);
+            yTop = 0.9f - 1.8f * (static_cast<float>(sp.y) / ch - letterboxFor(slot)) / keep;
+        }
+        const float margin = 0.035f;
+        if (h > 1.8f - 2.0f * margin) {  // (never taller than the screen)
+            const float k = (1.8f - 2.0f * margin) / h;
+            x += 0.5f * w * (1.0f - k);
+            w *= k;
+            h *= k;
+        }
+        yTop = std::clamp(yTop, -0.9f + margin + h, 0.9f - margin);
+        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, thumbPipelineLayer_);
+        vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipelineLayout_, 0, 1,
+                                &cardThumbs_[kSubPicThumbSlot + slot].set, 0, nullptr);
+        TextPush tp{};
+        std::memcpy(tp.mvp, ortho.m, sizeof(tp.mvp));
+        const float white4[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        std::memcpy(tp.color, white4, sizeof(tp.color));
+        tp.rect[0] = x;
+        tp.rect[1] = yTop - h;
+        tp.rect[2] = w;
+        tp.rect[3] = h;
+        tp.uv[2] = 1.0f;
+        tp.uv[3] = 1.0f;
+        tp.bend[2] = 1.0f;  // plain picture: no rounded corners, no scrims
+        vkCmdPushConstants(commandBuffer_, textPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,
+                           0, sizeof(TextPush), &tp);
+        vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
+    }
     // Subtitles: up to three lines at the bottom, each on its own dark strip.
-    if (!screenOverlay_[slot].subs.empty()) {
+    if (!subPicOn && !screenOverlay_[slot].subs.empty()) {
         const FontAtlas& font = fontAtlasBold_.ok ? fontAtlasBold_ : fontAtlas_;
         const float textH = 0.088f, pitch = 0.118f, maxW = 2.7f;
         auto widthOf = [&](const std::string& t) {

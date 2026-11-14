@@ -99,7 +99,10 @@ int run_probe(const std::string& path) {
                          st.usable ? "" : "  (not usable)");
         if (!st.usable) continue;
         media.setSubtitleStream(st.index);
-        media.seek(0.0);
+        // PIXELVR_PROBE_SUB_AT=<seconds>: look there instead of at the start (films start without lines).
+        const char* atEnv = std::getenv("PIXELVR_PROBE_SUB_AT");
+        const double base = atEnv ? std::atof(atEnv) : 0.0;
+        media.seek(base);
         // Let it play for a few seconds (frames are taken and dropped), then ask for some moments.
         pixelvr::DrmVideoFrame drm;
         for (int i = 0; i < 280; ++i) {
@@ -110,9 +113,14 @@ int run_probe(const std::string& path) {
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(25));
         }
-        for (double t : {1.7, 2.5, 5.5, 6.5}) {
+        for (double off : {1.7, 2.5, 3.5, 4.5, 5.5, 6.5}) {
+            const double t = base + off;
             std::string text;
             media.subtitleAt(t, text);
+            if (const auto pic = media.subtitlePictureAt(t)) {
+                text = "picture " + std::to_string(pic->w) + "x" + std::to_string(pic->h) + " at " + std::to_string(pic->x) +
+                       "," + std::to_string(pic->y) + " on " + std::to_string(pic->canvasW) + "x" + std::to_string(pic->canvasH);
+            }
             for (char& c : text) {
                 if (c == '\n') c = '|';
             }

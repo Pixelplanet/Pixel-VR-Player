@@ -1772,8 +1772,8 @@ void App::openTracksMenu() {
             // about it for the line under the title.
             std::string what, help;
             if (!st.usable) {
-                what = "Picture subtitles (can't be shown yet)";
-                help = "Stored as pictures (Blu-ray / DVD). The player shows text subtitles only so far.";
+                what = "Unknown format (can't be shown)";
+                help = "The player has no decoder for this subtitle format.";
             } else if (st.flags & SI::kForced) {
                 what = "Foreign-language parts only";
                 help = "Lines appear only when someone speaks another language than the film's (\"forced\" subtitles).";
@@ -4073,6 +4073,18 @@ int App::run() {
                     es.engine.subtitleAt(es.engine.position(), subs);
                 }
                 renderer_.setScreenSubtitle(s, subs);
+                // Picture subtitles (Blu-ray / DVD tracks): the picture that is on right now.
+                std::shared_ptr<const MediaEngine::SubtitlePicture> pic;
+                if (es.open && !es.web && !es.openAbandoned && es.projection == 0) {
+                    pic = es.engine.subtitlePictureAt(es.engine.position());
+                }
+                if (pic) {
+                    renderer_.setScreenSubtitlePicture(s, pic->id, pic->rgba.data(), pic->w, pic->h, pic->x, pic->y,
+                                                       pic->canvasW, pic->canvasH);
+                    if (subs.empty()) subs = "#";  // (for the log line below)
+                } else {
+                    renderer_.setScreenSubtitlePicture(s, 0, nullptr, 0, 0, 0, 0, 0, 0);
+                }
                 if (!subs.empty() && !es.subtitleLogged) {  // once per choice: the first line that is drawn
                     screens_[s].subtitleLogged = true;
                     PIXELVR_LOG_INFO("Subtitles: first line on screen %d at %.1f s (%d characters)", s + 1,
@@ -6183,7 +6195,7 @@ int App::run() {
                                     if (chosen < static_cast<int>(trackRows_.size()) && cur().open) {
                                         const TrackRow tr = trackRows_[static_cast<std::size_t>(chosen)];
                                         if (tr.unusable) {
-                                            renderer_.setScreenTitle(selectedScreen_, "Picture subtitles can't be shown yet (text subtitles only)", 5.0f);
+                                            renderer_.setScreenTitle(selectedScreen_, "This subtitle format can't be shown", 5.0f);
                                         } else if (tr.subtitle) {  // at once, no reload
                                             cur().engine.setSubtitleStream(tr.index);
                                             cur().subtitleChoice = cur().engine.subtitleStream();

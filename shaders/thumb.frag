@@ -7,7 +7,7 @@ layout(push_constant) uniform Push {
     vec4 color;
     vec4 rect;  // x, y (bottom-left), w, h in panel-local units
     vec4 uv;    // u0, v0, u1, v1
-    vec4 bend;  // vertex stage only
+    vec4 bend;  // xy: vertex stage; z: 1 = plain picture (no rounded corners, no scrims)
 } pc;
 
 layout(location = 0) in vec2 vUV;
@@ -15,6 +15,10 @@ layout(location = 0) out vec4 outColor;
 
 void main() {
     vec4 col = texture(thumbTex, vUV);
+    if (pc.bend.z > 0.5) {  // a plain picture (subtitle pictures): as it is
+        outColor = vec4(pow(max(col.rgb, vec3(0.0)), vec3(2.2)) * pc.color.rgb, col.a * pc.color.a);
+        return;
+    }
 
     // Exact metric rounded rectangle SDF matching panel styling with screen-space AA
     vec2 p = abs(vUV - 0.5) * pc.rect.zw;

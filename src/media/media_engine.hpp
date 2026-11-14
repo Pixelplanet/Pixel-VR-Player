@@ -148,7 +148,7 @@ public:
         int index = -1;        // stream index within the container
         std::string label;     // human-readable (codec + channels/size + lang)
         std::string language;  // ISO-639 code from metadata, or empty
-        bool usable = true;    // subtitles: false for picture subtitles (PGS / DVD), which are not drawn yet
+        bool usable = true;    // subtitles: false when FFmpeg has no decoder for the track's format
         // Subtitles: what the track is for (from the file's flags, else its title).
         enum : int { kForced = 1, kHearingImpaired = 2, kCommentary = 4, kFromFile = 8 };
         int flags = 0;
@@ -156,8 +156,8 @@ public:
     };
     std::vector<StreamInfo> videoStreams() const;
     std::vector<StreamInfo> audioStreams() const;
-    // Subtitles: the file's own text tracks (index = container stream) and .srt files next to a local
-    // file (index >= kExternalSubtitleBase). Picture subtitles are listed with usable = false.
+    // Subtitles: the file's own tracks (index = container stream; text and picture formats) and subtitle
+    // files next to a local file (.srt .ass .ssa .vtt .sup .idx; index >= kExternalSubtitleBase).
     static constexpr int kExternalSubtitleBase = 10000;
     std::vector<StreamInfo> subtitleStreams() const;
     // -1 = off. Takes effect at once; lines that began before the switch appear after the next seek.
@@ -165,6 +165,15 @@ public:
     int subtitleStream() const;
     // The lines to show at `seconds` ('\n' between lines; empty: nothing right now). False: subtitles off.
     bool subtitleAt(double seconds, std::string& out) const;
+    // Picture subtitles (Blu-ray PGS, DVD, DVB): the picture to show at `seconds`, else null. Its place is
+    // given on the track's own canvas (1920x1080 for a Blu-ray, whatever the video was cropped to).
+    struct SubtitlePicture {
+        uint64_t id = 0;               // changes with the picture
+        int canvasW = 0, canvasH = 0;
+        int x = 0, y = 0, w = 0, h = 0;
+        std::vector<uint8_t> rgba;     // w * h * 4, straight alpha
+    };
+    std::shared_ptr<const SubtitlePicture> subtitlePictureAt(double seconds) const;
     int currentVideoStream() const;  // container index in use, or -1
     int currentAudioStream() const;  // container index in use, or -1
     // Applied on the next open(): force a container stream index (-1 = auto), or

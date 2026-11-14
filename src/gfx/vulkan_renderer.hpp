@@ -733,6 +733,10 @@ public:
         if (slot >= 0 && slot < kMaxVideoSlots) screenOverlay_[slot].nav = on;
     }
     // Subtitle lines for a flat screen ('\n' between lines), drawn at the bottom of the picture.
+    // A picture subtitle (Blu-ray / DVD) for that screen, placed on the subtitle track's canvas;
+    // id 0 = none. The pixels (RGBA, straight alpha) are only read when the id is a new one.
+    void setScreenSubtitlePicture(int slot, uint64_t id, const uint8_t* rgba, int w, int h, int x, int y, int canvasW,
+                                  int canvasH);
     void setScreenSubtitle(int slot, const std::string& text) {
         if (slot >= 0 && slot < kMaxVideoSlots) screenOverlay_[slot].subs = text;
     }
@@ -1301,7 +1305,13 @@ private:
     // Slots 0..11: file browser cards; slot 12: timeline scrub preview.
     static constexpr int kCardThumbSlots = 12;
     static constexpr int kScrubThumbSlot = 12;
-    CardThumbnail cardThumbs_[13];
+    static constexpr int kSubPicThumbSlot = 13;  // + screen slot: that screen's subtitle picture
+    CardThumbnail cardThumbs_[13 + kMaxVideoSlots];
+    struct SubPicture {
+        uint64_t id = 0;  // 0 = none
+        int canvasW = 0, canvasH = 0, x = 0, y = 0, w = 0, h = 0;
+    };
+    SubPicture subPictures_[kMaxVideoSlots];
     void releaseThumbSlot(int slot);
     void releaseWebTexture(int slot);
     struct WebTexture {
