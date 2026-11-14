@@ -2420,6 +2420,7 @@ void VulkanRenderer::setScreenSubtitlePicture(int slot, uint64_t id, const uint8
     updateCardThumbnail(kSubPicThumbSlot + slot, "sub#" + std::to_string(id), rgba, w, h);
     sp = cardThumbs_[kSubPicThumbSlot + slot].ready ? SubPicture{id, canvasW, canvasH, x, y, w, h, 0} : SubPicture{};
     if (sp.id == 0) return;
+    if (id >= (1ull << 62)) return;  // text drawn by libass: one picture for the whole view, never two copies
     // Two copies, one per half of the canvas? Along `axis` (0 = columns, 1 = rows) the canvas's middle
     // lies inside the picture with a clear band around it, and what is on either side sits at the same
     // place in its half (a 3D track shifts the copies by a little depth only). A normal line with a

@@ -161,11 +161,13 @@ public:
     // files next to a local file (.srt .ass .ssa .vtt .sup .idx; index >= kExternalSubtitleBase).
     static constexpr int kExternalSubtitleBase = 10000;
     std::vector<StreamInfo> subtitleStreams() const;
-    // -1 = off. Takes effect at once; lines that began before the switch appear after the next seek.
+    // -1 = off. Takes effect at once; what is on at that moment is fetched from the file in the background.
     void setSubtitleStream(int index);
     int subtitleStream() const;
     // The lines to show at `seconds` ('\n' between lines; empty: nothing right now). False: subtitles off.
-    bool subtitleAt(double seconds, std::string& out) const;
+    // A text track that libass draws comes as a picture instead (subtitlePictureAt) and gives no lines
+    // here, unless evenIfDrawn asks for the plain text all the same.
+    bool subtitleAt(double seconds, std::string& out, bool evenIfDrawn = false) const;
     // Picture subtitles (Blu-ray PGS, DVD, DVB): the picture to show at `seconds`, else null. Its place is
     // given on the track's own canvas (1920x1080 for a Blu-ray, whatever the video was cropped to).
     struct SubtitlePicture {
@@ -174,7 +176,13 @@ public:
         int x = 0, y = 0, w = 0, h = 0;
         std::vector<uint8_t> rgba;     // w * h * 4, straight alpha
     };
-    std::shared_ptr<const SubtitlePicture> subtitlePictureAt(double seconds) const;
+    // Text tracks (with libass built in) come the same way: drawn on a canvas of the shape given to
+    // setSubtitleFrame, by a worker thread, so the answer can be one display frame behind.
+    // wait: until the picture for this very moment is drawn (headless checks).
+    std::shared_ptr<const SubtitlePicture> subtitlePictureAt(double seconds, bool wait = false) const;
+    // The visible picture's shape in pixels (black bars that are cut off left out): text subtitles are
+    // laid out inside it. 1920 x 1080 until told otherwise.
+    void setSubtitleFrame(int width, int height);
     int currentVideoStream() const;  // container index in use, or -1
     int currentAudioStream() const;  // container index in use, or -1
     // Applied on the next open(): force a container stream index (-1 = auto), or

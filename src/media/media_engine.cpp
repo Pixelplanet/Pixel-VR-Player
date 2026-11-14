@@ -2,6 +2,8 @@
 
 #include "media/vault_avio.hpp"
 #include "media/cover_art.hpp"
+#include "media/subtitle_source.hpp"
+#include "media/subtitle_text.hpp"
 
 #include "util/logging.hpp"
 #include "util/smb_lock.hpp"
@@ -20,6 +22,7 @@
 #include <fstream>
 #include <deque>
 #include <functional>
+#include <map>
 #include <mutex>
 #include <thread>
 #include <unistd.h>
@@ -531,6 +534,10 @@ struct MediaEngine::Impl {
     struct SubCue {
         double start = 0.0, end = 0.0;
         std::string text;
+        // Text cues, for libass: the same line(s) as FFmpeg's ASS events (styling kept), one per row,
+        // and the end the track gives (`end` is cut to 20 s for the plain lines).
+        std::string ass;
+        double textEnd = 0.0;
         // A picture cue (text empty): run-length packed (count, pixel) pairs of RGBA pixels, row after
         // row. Subtitle pictures are mostly transparent, so a whole film's worth stays small.
         std::vector<uint32_t> rle;
@@ -561,6 +568,52 @@ struct MediaEngine::Impl {
     AVCodecContext* subCodec = nullptr;          // decode thread only
     int subCodecStream = -1;
     void decodeSubtitle(const AVPacket* packet);
+    // Text tracks drawn by libass (null: plain lines, drawn by the renderer's own font). subMutex.
+    std::shared_ptr<SubtitleText> subText;
+    std::atomic<int> subFrameW{1920}, subFrameH{1080};  // the visible picture's shape (setSubtitleFrame)
+    static void feedSubtitleText(SubtitleText& text, const SubCue& cue);
+    // Sets libass up for the chosen track when it is a text track (`text` stays null otherwise, or
+    // without libass). `file`: the cues of a subtitle file read through FFmpeg.
+    void prepareSubtitleText(int index, const std::vector<SubCue>& file, std::shared_ptr<SubtitleText>& text);
+    // Every entry of the chosen embedded track goes through here (decode thread and catch-up reader).
+    // has: the entry shows something (`cue`); else it only ends what was on. gen: the catch-up
+    // reader's request (dropped when a seek or track switch came after it); 0 = the decode thread.
+    void addSubtitleEntry(int stream, uint64_t gen, bool has, SubCue&& cue, double start);
+    uint64_t subGen = 1;          // subMutex; counts seeks and track switches
+    std::deque<double> subMarks;  // subMutex; when the track's latest entries began (each ends an open picture)
+    // After a seek or a track switch the subtitles that began before the playback position are
+    // missing: the decode thread only sees packets from there on. A reader of its own on the same file
+    // fetches them. It reads nothing but the chosen subtitle stream, around the position, and never
+    // holds playback up: its thread is not waited for (a read on a dead connection may hang).
+    struct SubCatchUp {
+        std::mutex mutex;
+        std::condition_variable wake;
+        Impl* owner = nullptr;            // null once the engine closed the file (mutex)
+        std::atomic<bool> quit{false};
+        std::atomic<uint64_t> newest{0};  // the latest request: work for an older one is given up
+        struct Job {
+            uint64_t serial = 0;
+            uint64_t gen = 0;             // subGen when it was asked for
+            int stream = -1;
+            int codecId = 0;
+            bool text = false;
+            double position = 0.0;        // playback position
+            double ahead = 0.0;           // also this far past it (what the decode thread already went by)
+        };
+        Job job;                          // mutex
+        uint64_t taken = 0;               // mutex; the request the thread has picked up
+        std::string path;
+        bool network = false;             // fewer bytes may be spent
+        int fallbackW = 0, fallbackH = 0;
+    };
+    std::mutex subCatchMutex;
+    std::shared_ptr<SubCatchUp> subCatch;  // subCatchMutex
+    std::string sourcePath;                // what open() was given
+    void requestSubtitleCatchUp(double position, double ahead);
+    void stopSubtitleCatchUp();
+    static void subtitleCatchUpLoop(std::shared_ptr<SubCatchUp> st);
+    static void subtitleCatchUpJob(SubCatchUp& st, const SubCatchUp::Job& job, AVFormatContext* f, AVPacket* pk,
+                                   std::map<int, bool>& indexed);
     int preferredVideoStream = -1;  // container index to force, or -1 = auto
     int preferredAudioStream = -1;
     std::string preferredLanguage;  // ISO code to auto-pick audio, or empty
@@ -900,15 +953,329 @@ void MediaEngine::Impl::decodeSubtitle(const AVPacket* packet) {
     const bool has = cueFromSubtitle(subCodec, sub, packet->pts * tb, packet->duration > 0 ? packet->duration * tb : 0.0,
                                      codec ? codec->width : 0, codec ? codec->height : 0, cue);
     avsubtitle_free(&sub);
+    addSubtitleEntry(si, 0, has, std::move(cue), start);
+}
+
+void MediaEngine::Impl::addSubtitleEntry(int stream, uint64_t gen, bool has, SubCue&& cue, double start) {
     std::lock_guard<std::mutex> lock(subMutex);
+    if (stream != subtitleStream.load() || (gen != 0 && gen != subGen)) return;  // another track's / an older request's
+    subMarks.push_back(start);
+    while (subMarks.size() > 64) subMarks.pop_front();
     closeOpenCues(subCues, start);  // (an entry without content clears the screen: Blu-ray subtitles end that way)
     if (!has) return;
-    for (const SubCue& c : subCues) {  // demuxed again after a seek back
+    for (const SubCue& c : subCues) {  // read again after a seek back, or by both readers
         if (std::fabs(c.start - cue.start) < 0.01 && c.text == cue.text && c.rle == cue.rle) return;
     }
+    if (cue.open) {  // fetched after later entries were seen already: the first of them ends it
+        for (const double m : subMarks) {
+            if (m > cue.start + 0.001 && m < cue.end) {
+                cue.end = m;
+                cue.open = false;
+            }
+        }
+    }
+    if (subText && cue.picId == 0) feedSubtitleText(*subText, cue);
     subCues.push_back(std::move(cue));
-    const double now = masterClock.load();
+    // Where a seek is heading counts as "now": the clock shows the old place until the first frame there.
+    const double pending = displayPos.load();
+    const double now = pending >= 0.0 ? pending : masterClock.load();
     while (subCues.size() > 200 || (!subCues.empty() && subCues.front().end < now - 30.0)) subCues.pop_front();
+}
+
+void MediaEngine::Impl::feedSubtitleText(SubtitleText& text, const SubCue& cue) {
+    const double len = (cue.textEnd > cue.start ? cue.textEnd : cue.end) - cue.start;
+    if (cue.ass.empty()) {
+        text.addEvent(subtitleEventFromPlain(cue.text), cue.start, len);
+        return;
+    }
+    for (size_t at = 0; at < cue.ass.size();) {
+        size_t e = cue.ass.find('\n', at);
+        if (e == std::string::npos) e = cue.ass.size();
+        std::string line = cue.ass.substr(at, e - at);
+        while (!line.empty() && (line.back() == '\r' || line.back() == ' ' || line.back() == '\0')) line.pop_back();
+        text.addEvent(line, cue.start, len);
+        at = e + 1;
+    }
+}
+
+void MediaEngine::Impl::prepareSubtitleText(int index, const std::vector<SubCue>& file, std::shared_ptr<SubtitleText>& text) {
+    std::string language;
+    for (const MediaEngine::StreamInfo& s : subtitleStreamList) {
+        if (s.index == index) language = s.language;
+    }
+    if (index >= MediaEngine::kExternalSubtitleBase) {
+        if (text == nullptr) {  // (an .ass file libass read itself is ready)
+            bool lines = false;
+            for (const SubCue& c : file) lines = lines || (c.picId == 0 && !c.text.empty());
+            if (!lines) return;
+            text = SubtitleText::create();
+            if (text == nullptr) return;
+            text->openTrack(std::string(), true, language);
+            for (const SubCue& c : file) {
+                if (c.picId == 0) feedSubtitleText(*text, c);
+            }
+        }
+    } else {
+        if (format == nullptr || index < 0 || index >= static_cast<int>(format->nb_streams)) return;
+        const AVCodecParameters* cp = format->streams[index]->codecpar;
+        const AVCodecDescriptor* desc = avcodec_descriptor_get(cp->codec_id);
+        if (desc == nullptr || (desc->props & AV_CODEC_PROP_TEXT_SUB) == 0) return;
+        text = SubtitleText::create();
+        if (text == nullptr) return;
+        // Fonts that come with the file (Matroska attachments): styled tracks name them.
+        for (unsigned i = 0; i < format->nb_streams; ++i) {
+            const AVStream* as = format->streams[i];
+            const AVCodecParameters* ap = as->codecpar;
+            if (ap->codec_type != AVMEDIA_TYPE_ATTACHMENT || ap->extradata == nullptr || ap->extradata_size <= 0) continue;
+            const AVDictionaryEntry* mime = av_dict_get(as->metadata, "mimetype", nullptr, 0);
+            const AVDictionaryEntry* name = av_dict_get(as->metadata, "filename", nullptr, 0);
+            const bool font = ap->codec_id == AV_CODEC_ID_TTF || ap->codec_id == AV_CODEC_ID_OTF ||
+                              (mime != nullptr && std::strstr(mime->value, "font") != nullptr);
+            if (font) text->addFont(name ? name->value : "", ap->extradata, static_cast<size_t>(ap->extradata_size));
+        }
+        // The track's script header (styles; FFmpeg writes one for plain formats too) comes from its decoder.
+        std::string header;
+        const AVCodec* dec = avcodec_find_decoder(cp->codec_id);
+        AVCodecContext* cc = dec ? avcodec_alloc_context3(dec) : nullptr;
+        if (cc != nullptr) {
+            avcodec_parameters_to_context(cc, cp);
+            cc->pkt_timebase = format->streams[index]->time_base;
+            if (avcodec_open2(cc, dec, nullptr) >= 0 && cc->subtitle_header != nullptr && cc->subtitle_header_size > 0) {
+                header.assign(reinterpret_cast<const char*>(cc->subtitle_header), static_cast<size_t>(cc->subtitle_header_size));
+            }
+            avcodec_free_context(&cc);
+        }
+        text->openTrack(header, cp->codec_id != AV_CODEC_ID_ASS && cp->codec_id != AV_CODEC_ID_SSA, language);
+    }
+    text->setVideoSize(static_cast<int>(std::lround(width * pixelAspect)), height);
+}
+
+void MediaEngine::Impl::requestSubtitleCatchUp(double position, double ahead) {
+    const int si = subtitleStream.load();
+    if (si < 0 || si >= MediaEngine::kExternalSubtitleBase || format == nullptr || sourcePath.empty() || !running.load()) return;
+    if (si >= static_cast<int>(format->nb_streams) || duration <= 0.0) return;  // (a live stream has nothing to go back to)
+    // A stream that comes in pieces from a playlist is not a file a second reader can jump around in.
+    const char* container = format->iformat != nullptr ? format->iformat->name : "";
+    if (std::strstr(container, "hls") != nullptr || std::strstr(container, "dash") != nullptr) return;
+    const AVCodecParameters* cp = format->streams[si]->codecpar;
+    const AVCodecDescriptor* desc = avcodec_descriptor_get(cp->codec_id);
+    uint64_t gen = 0;
+    {
+        std::lock_guard<std::mutex> lock(subMutex);
+        gen = subGen;
+    }
+    std::lock_guard<std::mutex> lock(subCatchMutex);
+    if (subCatch == nullptr) {
+        subCatch = std::make_shared<SubCatchUp>();
+        subCatch->owner = this;
+        subCatch->path = sourcePath;
+        subCatch->network = httpSource || isRemotePath(sourcePath);
+        subCatch->fallbackW = width;
+        subCatch->fallbackH = height;
+        std::thread(&Impl::subtitleCatchUpLoop, subCatch).detach();
+    }
+    {
+        std::lock_guard<std::mutex> jobLock(subCatch->mutex);
+        SubCatchUp::Job& job = subCatch->job;
+        job.serial = subCatch->newest.load() + 1;
+        job.gen = gen;
+        job.stream = si;
+        job.codecId = static_cast<int>(cp->codec_id);
+        job.text = desc != nullptr && (desc->props & AV_CODEC_PROP_TEXT_SUB) != 0;
+        job.position = position;
+        job.ahead = ahead;
+        subCatch->newest.store(job.serial);
+    }
+    subCatch->wake.notify_one();
+}
+
+void MediaEngine::Impl::stopSubtitleCatchUp() {
+    std::shared_ptr<SubCatchUp> st;
+    {
+        std::lock_guard<std::mutex> lock(subCatchMutex);
+        st.swap(subCatch);
+    }
+    if (st == nullptr) return;
+    {
+        std::lock_guard<std::mutex> lock(st->mutex);  // (waits for an entry that is being handed over)
+        st->owner = nullptr;
+        st->quit.store(true);
+    }
+    st->wake.notify_all();
+}
+
+void MediaEngine::Impl::subtitleCatchUpLoop(std::shared_ptr<SubCatchUp> st) {
+    SubtitleSource src;       // opened at the first request, kept for the next seeks
+    int failures = 0;
+    std::map<int, bool> indexed;  // per subtitle stream: the file lists where its entries are
+    AVPacket* pk = av_packet_alloc();
+    while (pk != nullptr) {
+        SubCatchUp::Job job;
+        {
+            std::unique_lock<std::mutex> lock(st->mutex);
+            st->wake.wait(lock, [&] { return st->quit.load() || st->job.serial != st->taken; });
+            if (st->quit.load()) break;
+            job = st->job;
+            st->taken = job.serial;
+            // While someone scrubs, seeks come many a second: only the one that stays is worked on
+            // (reads on a share also slow playback's own connection down).
+            const auto settle = std::chrono::milliseconds(st->network ? 200 : 60);
+            if (st->wake.wait_for(lock, settle, [&] { return st->quit.load() || st->job.serial != st->taken; })) continue;
+        }
+        if (src.fmt == nullptr) {
+            if (failures >= 3) continue;
+            const bool ok = src.open(st->path, [](void* o) -> int { return static_cast<SubCatchUp*>(o)->quit.load() ? 1 : 0; },
+                                     st.get());
+            if (!ok) {
+                ++failures;
+                continue;
+            }
+        }
+        subtitleCatchUpJob(*st, job, src.fmt, pk, indexed);
+    }
+    av_packet_free(&pk);
+}
+
+void MediaEngine::Impl::subtitleCatchUpJob(SubCatchUp& st, const SubCatchUp::Job& job, AVFormatContext* f, AVPacket* pk,
+                                           std::map<int, bool>& indexed) {
+    if (job.stream < 0 || job.stream >= static_cast<int>(f->nb_streams)) return;
+    AVStream* s = f->streams[job.stream];
+    // (the same stream as in playback's reader: containers without a header could number theirs differently)
+    if (s->codecpar->codec_type != AVMEDIA_TYPE_SUBTITLE || static_cast<int>(s->codecpar->codec_id) != job.codecId) return;
+    const AVCodec* dec = avcodec_find_decoder(s->codecpar->codec_id);
+    AVCodecContext* cc = dec ? avcodec_alloc_context3(dec) : nullptr;
+    if (cc == nullptr) return;
+    avcodec_parameters_to_context(cc, s->codecpar);
+    cc->pkt_timebase = s->time_base;
+    if (avcodec_open2(cc, dec, nullptr) < 0) {
+        avcodec_free_context(&cc);
+        return;
+    }
+    // Only the subtitle stream is read; of the video just the key frames' packets, which tell how far
+    // the reader has come when no subtitle turns up.
+    int video = -1;
+    for (unsigned i = 0; i < f->nb_streams; ++i) {
+        AVStream* o = f->streams[i];
+        o->discard = AVDISCARD_ALL;
+        if (video < 0 && o->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && !(o->disposition & AV_DISPOSITION_ATTACHED_PIC)) {
+            video = static_cast<int>(i);
+        }
+    }
+    s->discard = AVDISCARD_DEFAULT;
+    if (video >= 0) f->streams[video]->discard = AVDISCARD_NONKEY;
+    const double tb = av_q2d(s->time_base);
+    const double vtb = video >= 0 ? av_q2d(f->streams[video]->time_base) : 0.0;
+    const double pos = std::max(0.0, job.position);
+    auto alive = [&] { return !st.quit.load() && st.newest.load() == job.serial; };
+    // (Matroska reads its list of entries at the first seek.)
+    av_seek_frame(f, -1, std::llround(pos * AV_TIME_BASE), AVSEEK_FLAG_BACKWARD);
+    const int64_t budget = st.network ? (24ll << 20) : (64ll << 20);
+    const int64_t bytes0 = f->pb != nullptr ? f->pb->bytes_read : 0;
+    double last = -1.0e18;  // the latest entry of the track that was read
+    int entries = 0;
+    const auto began = std::chrono::steady_clock::now();
+    // Reads on until the track's entry at `until` came by, or the video is past `giveUp`. False: the
+    // file's end, an error, too much read, or the request is no longer wanted.
+    auto readTo = [&](double until, double giveUp) {
+        while (alive()) {
+            if (av_read_frame(f, pk) < 0) return false;
+            bool reached = false;
+            if (pk->stream_index == job.stream && pk->pts != AV_NOPTS_VALUE) {
+                const double pts = pk->pts * tb;
+                AVSubtitle sub{};
+                int got = 0;
+                if (avcodec_decode_subtitle2(cc, &sub, &got, pk) >= 0 && got) {
+                    SubCue cue;
+                    const bool has = cueFromSubtitle(cc, sub, pts, pk->duration > 0 ? pk->duration * tb : 0.0, st.fallbackW,
+                                                     st.fallbackH, cue);
+                    const double start = pts + sub.start_display_time / 1000.0;
+                    avsubtitle_free(&sub);
+                    std::lock_guard<std::mutex> lock(st.mutex);
+                    if (st.owner == nullptr) {
+                        av_packet_unref(pk);
+                        return false;
+                    }
+                    st.owner->addSubtitleEntry(job.stream, job.gen, has, std::move(cue), start);
+                    ++entries;
+                }
+                last = pts;
+                reached = pts >= until - 0.0005;
+            } else if (pk->stream_index == video && pk->pts != AV_NOPTS_VALUE) {
+                reached = pk->pts * vtb > giveUp;
+            }
+            av_packet_unref(pk);
+            if (reached) return true;
+            if (f->pb != nullptr && f->pb->bytes_read - bytes0 > budget) return false;
+        }
+        return false;
+    };
+    // Lines last seconds; a Blu-ray picture stays until the next entry (a minute at most, see cueFromSubtitle).
+    const double from = pos - (job.text ? 30.0 : 75.0), to = pos + job.ahead;
+    // Matroska's cues and MP4's sample tables list every entry of a stream. (What other containers
+    // gather while they are read is no such list, and a Matroska file may leave subtitles out of its cues.)
+    const char* container = f->iformat != nullptr ? f->iformat->name : "";
+    const bool lists = std::strstr(container, "matroska") != nullptr || std::strstr(container, "mov") != nullptr;
+    auto known = indexed.find(job.stream);
+    if (known == indexed.end()) known = indexed.emplace(job.stream, lists && avformat_index_get_entries_count(s) > 0).first;
+    if (known->second) {
+        // The file says where each entry is (Matroska cues, MP4 sample tables): go to those only.
+        struct Entry {
+            double t;
+            int64_t ts, at;
+            bool lastOne;
+        };
+        std::vector<Entry> wanted;
+        size_t before = 0;
+        const int n = avformat_index_get_entries_count(s);
+        for (int i = 0; i < n; ++i) {
+            const AVIndexEntry* e = avformat_index_get_entry(s, i);
+            const double t = e->timestamp * tb;
+            if (t < from) continue;
+            if (t > to) break;
+            wanted.push_back({t, e->timestamp, e->pos, i == n - 1});
+            if (t <= pos) ++before;
+        }
+        // (a picture track's entries build on each other within a scene: a few before the one that is on)
+        const size_t keep = job.text ? 40 : 8;
+        if (before > keep) wanted.erase(wanted.begin(), wanted.begin() + static_cast<long>(before - keep));
+        int64_t soughtTo = -1;
+        for (const Entry& e : wanted) {
+            if (!alive()) break;
+            if (e.t <= last + 0.0005) continue;  // came by already
+            const int64_t here = f->pb != nullptr ? avio_tell(f->pb) : -1;
+            const bool closeBy = e.at == soughtTo || (here >= 0 && e.at >= here && e.at - here < (1 << 20));
+            if (!closeBy) {
+                // (Matroska reads on to the file's end when asked for a stream's last listed entry: the
+                // video's list is used for that one.)
+                const int rc = e.lastOne ? av_seek_frame(f, -1, av_rescale_q(e.ts, s->time_base, AV_TIME_BASE_Q), AVSEEK_FLAG_BACKWARD)
+                                         : av_seek_frame(f, job.stream, e.ts, AVSEEK_FLAG_BACKWARD);
+                if (rc < 0) continue;
+                soughtTo = e.at;
+            }
+            if (!readTo(e.t, e.t + 3.0)) break;
+        }
+    } else {
+        // No list: from a little before the position, on to it; not further back than what may be read
+        // (the file's size over its length says how much a second is).
+        double back = job.text ? 12.0 : 20.0;
+        const int64_t size = f->pb != nullptr ? avio_size(f->pb) : -1;
+        if (size > 0 && f->duration > 0) {
+            const double perSecond = static_cast<double>(size) / (static_cast<double>(f->duration) / AV_TIME_BASE);
+            back = std::min(back, 0.7 * static_cast<double>(budget) / std::max(perSecond, 1.0) - job.ahead);
+        }
+        back = std::max(back, 2.0);
+        if (av_seek_frame(f, -1, std::llround(std::max(0.0, pos - back) * AV_TIME_BASE), AVSEEK_FLAG_BACKWARD) >= 0) {
+            readTo(to, to);
+        }
+    }
+    avcodec_free_context(&cc);
+    if (alive()) {
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - began).count();
+        PIXELVR_LOG_INFO("Subtitles: %d entries around %.1f s fetched for track %d (%s, %lld KiB read, %lld ms)", entries, pos,
+                         job.stream, known->second ? "by the file's list" : "read through",
+                         static_cast<long long>((f->pb != nullptr ? f->pb->bytes_read - bytes0 : 0) >> 10),
+                         static_cast<long long>(ms));
+    }
 }
 
 bool MediaEngine::Impl::cueFromSubtitle(const AVCodecContext* ctx, const AVSubtitle& sub, double pts, double packetLen,
@@ -931,6 +1298,7 @@ bool MediaEngine::Impl::cueFromSubtitle(const AVCodecContext* ctx, const AVSubti
             continue;
         }
         std::string t;
+        if (rect->type == SUBTITLE_ASS && rect->ass != nullptr) cue.ass += (cue.ass.empty() ? "" : "\n") + std::string(rect->ass);
         if (rect->type == SUBTITLE_ASS) t = assEventText(rect->ass);
         else if (rect->type == SUBTITLE_TEXT && rect->text != nullptr) t = plainSubtitleText(rect->text);
         if (!t.empty()) cue.text += (cue.text.empty() ? "" : "\n") + t;
@@ -938,6 +1306,7 @@ bool MediaEngine::Impl::cueFromSubtitle(const AVCodecContext* ctx, const AVSubti
     const bool picture = x1 > x0 && y1 > y0 && x1 - x0 <= 4096 && y1 - y0 <= 2304;
     if (picture) {
         cue.text.clear();
+        cue.ass.clear();
         const int w = x1 - x0, h = y1 - y0;
         std::vector<uint32_t> px(static_cast<size_t>(w) * h, 0u);  // RGBA bytes in memory order
         for (unsigned r = 0; r < sub.num_rects; ++r) {
@@ -980,6 +1349,7 @@ bool MediaEngine::Impl::cueFromSubtitle(const AVCodecContext* ctx, const AVSubti
     if (cue.text.empty()) return false;
     if (len <= 0.0) len = 4.0;
     cue.end = pts + std::min(len, 20.0);
+    cue.textEnd = pts + len;
     return true;
 }
 
@@ -1675,6 +2045,7 @@ void MediaEngine::abortOpen() {
     if (!impl_) return;
     impl_->openAborted.store(true, std::memory_order_release);
     impl_->remoteReader.abort();
+    impl_->stopSubtitleCatchUp();  // (its reads are broken off too)
 }
 
 bool MediaEngine::open(const std::string& path) {
@@ -1810,6 +2181,7 @@ bool MediaEngine::open(const std::string& path) {
     impl_->subtitleStreamList.clear();
     impl_->subtitleFiles.clear();
     impl_->subtitleStream.store(-1);
+    impl_->sourcePath = path;
     {
         std::lock_guard<std::mutex> lock(impl_->subMutex);
         impl_->subCues.clear();
@@ -2299,6 +2671,14 @@ void MediaEngine::close() {
         return;
     }
     impl_->running.store(false);
+    impl_->stopSubtitleCatchUp();
+    {
+        std::shared_ptr<SubtitleText> text;  // (let go of outside the lock: its worker is waited for)
+        std::lock_guard<std::mutex> lock(impl_->subMutex);
+        text.swap(impl_->subText);
+        impl_->subMarks.clear();
+        ++impl_->subGen;
+    }
     {
         std::lock_guard<std::mutex> lock(impl_->mutex);
         impl_->releaseReq.store(false);  // wake a decode thread in the seek handshake
@@ -2396,7 +2776,10 @@ void MediaEngine::seek(double seconds) {
     {
         std::lock_guard<std::mutex> lock(impl_->subMutex);  // lines of the old position
         impl_->subCues.clear();
+        impl_->subMarks.clear();
+        ++impl_->subGen;
     }
+    impl_->requestSubtitleCatchUp(seconds, 0.0);  // what began before the target and is still on
 }
 
 void MediaEngine::seekRelative(double delta) {
@@ -2429,6 +2812,7 @@ void MediaEngine::setSubtitleStream(int index) {
     for (const StreamInfo& s : impl_->subtitleStreamList) known = known || (s.index == index && s.usable);
     if (!known) index = -1;
     std::vector<Impl::SubCue> file;
+    std::shared_ptr<SubtitleText> text;  // libass, when this is a text track and libass is built in
     if (index >= kExternalSubtitleBase) {
         const size_t fi = static_cast<size_t>(index - kExternalSubtitleBase);
         std::vector<std::pair<std::pair<double, double>, std::string>> cues;
@@ -2436,7 +2820,20 @@ void MediaEngine::setSubtitleStream(int index) {
         std::string ext = std::filesystem::path(path).extension().string();
         for (char& ch : ext) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
         bool read = false;
-        if (ext == ".srt") {
+        // With libass: an .ass / .ssa file is read by libass itself (its styles and fonts), and an .srt
+        // file through FFmpeg first, which keeps italics and colours (it wants UTF-8; else the plain reader).
+        std::shared_ptr<SubtitleText> drawn = path.empty() ? nullptr : SubtitleText::create();
+        if (drawn != nullptr && (ext == ".ass" || ext == ".ssa") && drawn->openFile(path)) {
+            text = drawn;
+            read = true;
+        } else if (drawn != nullptr && ext == ".srt") {
+            read = Impl::readSubtitleFileAv(path, impl_->width, impl_->height, file);
+            if (!read) file.clear();
+        }
+        drawn.reset();
+        if (read) {
+            // (done above)
+        } else if (ext == ".srt") {
             read = readSrtFile(path, cues);
             for (auto& c : cues) {
                 Impl::SubCue cue;
@@ -2455,18 +2852,35 @@ void MediaEngine::setSubtitleStream(int index) {
             index = -1;
         }
     }
-    std::lock_guard<std::mutex> lock(impl_->subMutex);
-    impl_->subCues.clear();
-    impl_->subFileCues = std::move(file);
-    impl_->subtitleStream.store(index);
+    if (index >= 0) impl_->prepareSubtitleText(index, file, text);
+    {
+        std::shared_ptr<SubtitleText> old;  // (let go of outside the lock)
+        std::lock_guard<std::mutex> lock(impl_->subMutex);
+        old.swap(impl_->subText);
+        impl_->subText = text;
+        impl_->subMarks.clear();
+        ++impl_->subGen;
+        impl_->subCues.clear();
+        impl_->subFileCues = std::move(file);
+        impl_->subtitleStream.store(index);
+    }
+    // What is on right now began before the switch, and the decode thread is a little ahead of the picture.
+    impl_->requestSubtitleCatchUp(position(), 2.0);
 }
 
-bool MediaEngine::subtitleAt(double seconds, std::string& out) const {
+void MediaEngine::setSubtitleFrame(int width, int height) {
+    if (!impl_ || width <= 0 || height <= 0) return;
+    impl_->subFrameW.store(width);
+    impl_->subFrameH.store(height);
+}
+
+bool MediaEngine::subtitleAt(double seconds, std::string& out, bool evenIfDrawn) const {
     out.clear();
     if (!impl_) return false;
     const int index = impl_->subtitleStream.load();
     if (index < 0) return false;
     std::lock_guard<std::mutex> lock(impl_->subMutex);
+    if (impl_->subText && !evenIfDrawn) return true;  // libass draws this track (subtitlePictureAt)
     auto add = [&](const Impl::SubCue& c) {
         if (seconds >= c.start && seconds < c.end && !c.text.empty()) out += (out.empty() ? "" : "\n") + c.text;
     };
@@ -2485,10 +2899,23 @@ bool MediaEngine::subtitleAt(double seconds, std::string& out) const {
     return true;
 }
 
-std::shared_ptr<const MediaEngine::SubtitlePicture> MediaEngine::subtitlePictureAt(double seconds) const {
+std::shared_ptr<const MediaEngine::SubtitlePicture> MediaEngine::subtitlePictureAt(double seconds, bool wait) const {
     if (!impl_) return nullptr;
     const int index = impl_->subtitleStream.load();
     if (index < 0) return nullptr;
+    std::shared_ptr<SubtitleText> text;
+    {
+        std::lock_guard<std::mutex> lock(impl_->subMutex);
+        text = impl_->subText;
+    }
+    if (text) {  // a text track: what libass drew for this moment
+        if (index >= kExternalSubtitleBase && impl_->format && impl_->format->start_time != AV_NOPTS_VALUE &&
+            impl_->format->start_time > 0) {
+            seconds -= impl_->format->start_time / static_cast<double>(AV_TIME_BASE);  // (see subtitleAt)
+        }
+        text->setFrame(impl_->subFrameW.load(), impl_->subFrameH.load());
+        return text->pictureAt(seconds, wait);
+    }
     std::lock_guard<std::mutex> lock(impl_->subMutex);
     const Impl::SubCue* best = nullptr;  // the latest one that is on
     auto look = [&](const Impl::SubCue& c) {

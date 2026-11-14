@@ -216,6 +216,15 @@ if(PIXELVR_ENABLE_MEDIA)
         target_link_libraries(pixelvr_core PUBLIC PkgConfig::PULSE)
         target_compile_definitions(pixelvr_core PUBLIC PIXELVR_HAVE_PULSE=1)
     endif()
+
+    # Text subtitles drawn by libass (every script, .ass / .ssa styling). Optional: without it the
+    # player's own font draws plain lines. SteamOS has libass (its ffmpeg package needs it).
+    target_sources(pixelvr_core PRIVATE src/media/subtitle_text.cpp)
+    pkg_check_modules(LIBASS IMPORTED_TARGET libass)
+    if(LIBASS_FOUND)
+        target_link_libraries(pixelvr_core PUBLIC PkgConfig::LIBASS)
+        target_compile_definitions(pixelvr_core PUBLIC PIXELVR_HAVE_LIBASS=1)
+    endif()
 endif()
 
 # In-VR file browser: text rendering (FreeType) and SMB access (libsmbclient).
