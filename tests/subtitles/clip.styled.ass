@@ -1,0 +1,18 @@
+[Script Info]
+ScriptType: v4.00+
+PlayResX: 1920
+PlayResY: 1080
+ScaledBorderAndShadow: yes
+
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Default,Noto Sans,64,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,3,1,2,40,40,50,1
+Style: Top,Noto Serif,72,&H0000FFFF,&H000000FF,&H00800000,&H80000000,0,-1,0,0,100,100,0,0,1,4,0,8,40,40,60,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+Dialogue: 0,0:00:01.00,0:00:08.00,Top,,0,0,0,,Top aligned, yellow, italic
+Dialogue: 0,0:00:02.00,0:00:08.00,Default,,0,0,0,,Bottom line with {\c&H0000FF&}red{\c} and {\b1}bold{\b0} words
+Dialogue: 0,0:00:09.00,0:00:14.00,Default,,0,0,0,,{\an7}Top left corner{\an7}
+Dialogue: 0,0:00:09.00,0:00:14.00,Default,,0,0,0,,{\pos(1500,540)\frz20}Rotated at the right
+Dialogue: 0,0:00:15.00,0:00:20.00,Default,,0,0,0,,{\k50}Ka{\k50}ra{\k50}o{\k50}ke {\k100}line

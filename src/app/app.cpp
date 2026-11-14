@@ -4243,6 +4243,9 @@ int App::run() {
                 // Picture subtitles (Blu-ray / DVD tracks): the picture that is on right now.
                 std::shared_ptr<const MediaEngine::SubtitlePicture> pic;
                 if (es.open && !es.web && !es.openAbandoned) {
+                    // Text subtitles are laid out inside the visible picture: its shape, 1080 rows high.
+                    screens_[s].engine.setSubtitleFrame(
+                        std::clamp(static_cast<int>(1080.0f * screenEyeAspect(s) + 0.5f), 480, 3840) & ~1, 1080);
                     pic = es.engine.subtitlePictureAt(es.engine.position());
                 }
                 if (pic) {

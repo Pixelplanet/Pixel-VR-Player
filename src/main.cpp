@@ -16,6 +16,7 @@
 #include <chrono>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <thread>
 
 extern "C" {
@@ -58,6 +59,26 @@ int run_xrext() {
 }
 
 #ifdef PIXELVR_HAVE_MEDIA
+// Writes a subtitle picture as a .ppm (laid over mid grey, so white letters and their dark outline both
+// show) for looking at what was drawn. `covered` gets the number of pixels that are not transparent.
+bool dumpSubtitlePicture(const pixelvr::MediaEngine::SubtitlePicture& pic, const std::string& file, size_t& covered) {
+    covered = 0;
+    const size_t n = static_cast<size_t>(pic.w) * pic.h;
+    std::vector<std::uint8_t> rgb(n * 3);
+    for (size_t i = 0; i < n && i * 4 + 3 < pic.rgba.size(); ++i) {
+        const unsigned a = pic.rgba[i * 4 + 3];
+        if (a > 0) ++covered;
+        for (int c = 0; c < 3; ++c) rgb[i * 3 + c] = static_cast<std::uint8_t>((pic.rgba[i * 4 + c] * a + 128u * (255 - a)) / 255);
+    }
+    if (file.empty()) return true;
+    std::FILE* f = std::fopen(file.c_str(), "wb");
+    if (f == nullptr) return false;
+    std::fprintf(f, "P6\n%d %d\n255\n", pic.w, pic.h);
+    const bool ok = std::fwrite(rgb.data(), 1, rgb.size(), f) == rgb.size();
+    std::fclose(f);
+    return ok;
+}
+
 // Headless decode probe: opens the media (including smb:// streams) and samples
 // a few decoded frames, reporting chroma statistics. Runs without OpenXR so the
 // decode/streaming path can be verified on-device without the headset.
@@ -124,6 +145,13 @@ int run_probe(const std::string& path) {
         // PIXELVR_PROBE_SUB_AT=<seconds>: look there instead of at the start (films start without lines).
         const char* atEnv = std::getenv("PIXELVR_PROBE_SUB_AT");
         const double base = atEnv ? std::atof(atEnv) : 0.0;
+        // PIXELVR_PROBE_SUB_FRAME=<width>x<height>: the visible picture text subtitles are laid out in.
+        int frameW = 0, frameH = 0;
+        if (const char* fr = std::getenv("PIXELVR_PROBE_SUB_FRAME"); fr && std::sscanf(fr, "%dx%d", &frameW, &frameH) == 2) {
+            media.setSubtitleFrame(frameW, frameH);
+        }
+        // PIXELVR_PROBE_SUB_DUMP=<folder>: every picture found below is written there as a .ppm.
+        const char* dumpDir = std::getenv("PIXELVR_PROBE_SUB_DUMP");
         media.seek(base);
         // Let it play for a few seconds (frames are taken and dropped), then ask for some moments.
         pixelvr::DrmVideoFrame drm;
@@ -135,13 +163,27 @@ int run_probe(const std::string& path) {
             }
             std::this_thread::sleep_for(std::chrono::milliseconds(25));
         }
-        for (double off : {1.7, 2.5, 3.5, 4.5, 5.5, 6.5}) {
+        // (0.0: what began before the seek target and is still on there)
+        for (double off : {0.0, 1.7, 2.5, 3.5, 4.5, 5.5, 6.5}) {
             const double t = base + off;
             std::string text;
-            media.subtitleAt(t, text);
-            if (const auto pic = media.subtitlePictureAt(t)) {
-                text = "picture " + std::to_string(pic->w) + "x" + std::to_string(pic->h) + " at " + std::to_string(pic->x) +
-                       "," + std::to_string(pic->y) + " on " + std::to_string(pic->canvasW) + "x" + std::to_string(pic->canvasH);
+            media.subtitleAt(t, text, true);
+            if (const auto pic = media.subtitlePictureAt(t, true)) {
+                // A text track drawn by libass gives both: the picture's size and place, and the plain words.
+                std::string what = "picture " + std::to_string(pic->w) + "x" + std::to_string(pic->h) + " at " +
+                                   std::to_string(pic->x) + "," + std::to_string(pic->y) + " on " + std::to_string(pic->canvasW) +
+                                   "x" + std::to_string(pic->canvasH);
+                size_t covered = 0;
+                std::string file;
+                if (dumpDir != nullptr) {
+                    char name[96];
+                    std::snprintf(name, sizeof(name), "/sub-%d-%07d.ppm", st.index, static_cast<int>(t * 1000.0));
+                    file = std::string(dumpDir) + name;
+                }
+                const bool wrote = dumpSubtitlePicture(*pic, file, covered);
+                what += ", " + std::to_string(covered) + " px drawn";
+                if (!file.empty()) what += wrote ? " -> " + file : " (could not write " + file + ")";
+                text = text.empty() ? what : what + "  \"" + text + "\"";
             }
             for (char& c : text) {
                 if (c == '\n') c = '|';
