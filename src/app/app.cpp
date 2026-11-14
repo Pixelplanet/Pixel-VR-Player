@@ -4244,8 +4244,10 @@ int App::run() {
                 std::shared_ptr<const MediaEngine::SubtitlePicture> pic;
                 if (es.open && !es.web && !es.openAbandoned) {
                     // Text subtitles are laid out inside the visible picture: its shape, 1080 rows high.
+                    // (360 / 180: the subtitle floats in view on its own, laid out as for a 16:9 picture.)
+                    const float subAspect = es.projection == 0 ? screenEyeAspect(s) : 16.0f / 9.0f;
                     screens_[s].engine.setSubtitleFrame(
-                        std::clamp(static_cast<int>(1080.0f * screenEyeAspect(s) + 0.5f), 480, 3840) & ~1, 1080);
+                        std::clamp(static_cast<int>(1080.0f * subAspect + 0.5f), 480, 3840) & ~1, 1080);
                     pic = es.engine.subtitlePictureAt(es.engine.position());
                 }
                 if (pic) {
