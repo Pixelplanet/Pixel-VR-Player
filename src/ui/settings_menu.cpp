@@ -1,6 +1,7 @@
 #include "ui/settings_menu.hpp"
 #include "util/sdcard.hpp"
 #include "app/vault_manager.hpp"
+#include "app/subtitle_pick.hpp"
 #include "net/smb_credentials.hpp"
 #include "plugins/plugin_host.hpp"
 #include "plugins/plugin_repo.hpp"
@@ -466,6 +467,10 @@ void SettingsMenu::refresh() {
         rows_.push_back({"Preferred Audio Language",
                          kLangNames[audioLangIdx_ % kLangCount],
                          Action::EnterLangList});
+        // What a file starts with when no subtitle track was picked for it by hand.
+        segmented("Subtitles", {"Off", "Foreign parts only", "Always"}, subtitleMode_ % 3, Action::CycleSubtitleMode);
+        rows_.push_back({"Subtitle Language", kSubtitleLanguages[subLangIdx_ % kSubtitleLanguageCount].name,
+                         Action::EnterSubLangList});
     } else if (section_ == 3) {
         title_ = "Settings > Controls & Input";
         hint(kButtonsStatus);
@@ -993,6 +998,12 @@ void SettingsMenu::refresh() {
                    Action::PickAudioStream, static_cast<int>(i));
         }
         rows_.push_back({"Back to Tracks", "", Action::Back});
+    } else if (subLangList_) {  // section_ == 12, opened from Subtitle Language
+        title_ = "Settings > Tracks > Subtitle Language";
+        for (int i = 0; i < kSubtitleLanguageCount; ++i) {
+            option(kSubtitleLanguages[i].name, i == subLangIdx_, Action::PickSubtitleLanguage, i);
+        }
+        rows_.push_back({"Back to Tracks", "", Action::Back});
     } else {  // section_ == 12: preferred-language list
         title_ = "Settings > Tracks > Preferred Language";
         for (int i = 0; i < kLangCount; ++i) {
@@ -1056,7 +1067,8 @@ SettingsMenu::Action SettingsMenu::activate() {
     switch (act) {
         case Action::EnterVideoList: section_ = 10; selected_ = 0; refresh(); break;
         case Action::EnterAudioList: section_ = 11; selected_ = 0; refresh(); break;
-        case Action::EnterLangList:  section_ = 12; selected_ = 0; refresh(); break;
+        case Action::EnterLangList:  subLangList_ = false; section_ = 12; selected_ = 0; refresh(); break;
+        case Action::EnterSubLangList: subLangList_ = true; section_ = 12; selected_ = 0; refresh(); break;
         case Action::Back:
             section_ = (section_ >= 10) ? 2 : 0;  // list -> Tracks; else -> Display
             selected_ = 0;
@@ -1282,6 +1294,18 @@ SettingsMenu::Action SettingsMenu::activate() {
             break;
         case Action::PickLanguage:
             audioLangIdx_ = rows_[selected_].data;
+            saveConfig();
+            section_ = 2;
+            selected_ = 0;
+            refresh();
+            break;
+        case Action::CycleSubtitleMode:
+            subtitleMode_ = (subtitleMode_ + 1) % 3;
+            saveConfig();
+            refresh();
+            break;
+        case Action::PickSubtitleLanguage:
+            subLangIdx_ = std::clamp(rows_[selected_].data, 0, kSubtitleLanguageCount - 1);
             saveConfig();
             section_ = 2;
             selected_ = 0;
@@ -1540,6 +1564,10 @@ void SettingsMenu::setSelectedAudioStream(int containerIndex) {
 
 std::string SettingsMenu::audioLanguage() const {
     return kLangCodes[audioLangIdx_ % kLangCount];
+}
+
+std::string SettingsMenu::subtitleLanguage() const {
+    return kSubtitleLanguages[subLangIdx_ % kSubtitleLanguageCount].code;
 }
 
 void SettingsMenu::setControlsInfo(std::vector<std::pair<std::string, std::string>> info,
@@ -1917,6 +1945,13 @@ void SettingsMenu::loadConfig() {
                 }
             }
             else if (key == "audio_lang") audioLangIdx_ = std::clamp(std::stoi(val), 0, kLangCount - 1);
+            else if (key == "subtitle_mode") subtitleMode_ = std::clamp(std::stoi(val), 0, 2);
+            else if (key == "subtitle_lang") {  // the language's code ("audio" = same as the audio track)
+                subLangIdx_ = 0;
+                for (int i = 1; i < kSubtitleLanguageCount; ++i) {
+                    if (val == kSubtitleLanguages[i].code) subLangIdx_ = i;
+                }
+            }
             else if (key == "curvature") curvatureIdx_ = std::clamp(std::stoi(val), 0, kCurvatureCount - 1);
             else if (key == "ui_text_scale") uiTextScaleIdx_ = std::clamp(std::stoi(val), 0, kUiTextScaleCount - 1);
             else if (key == "ui_text_color") uiTextColorIdx_ = std::clamp(std::stoi(val), 0, kUiTextColorCount - 1);
@@ -1991,6 +2026,8 @@ void SettingsMenu::saveConfig() const {
                 file << "shortcut=" << (sc.onRail ? 1 : 0) << "|" << (sc.kiosk ? 1 : 0) << "|" << sc.name << "|" << sc.url << "\n";
             }
             file << "audio_lang=" << audioLangIdx_ << "\n";
+            file << "subtitle_mode=" << subtitleMode_ << "\n";
+            file << "subtitle_lang=" << (subLangIdx_ > 0 ? subtitleLanguage() : std::string("audio")) << "\n";
             file << "curvature=" << curvatureIdx_ << "\n";
             file << "ui_text_scale=" << uiTextScaleIdx_ << "\n";
             file << "ui_text_color=" << uiTextColorIdx_ << "\n";

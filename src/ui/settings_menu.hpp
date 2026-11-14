@@ -52,6 +52,9 @@ public:
         PickVideoStream,
         PickAudioStream,
         PickLanguage,
+        CycleSubtitleMode,     // Subtitles: Off / Foreign parts only / Always
+        EnterSubLangList,
+        PickSubtitleLanguage,
         CycleVaultAutoLockHeadset,
         CycleVaultTimeout,
         RecordVaultCombo,
@@ -323,6 +326,10 @@ public:
     void setSelectedAudioStream(int containerIndex);
     void setSelectedVideoStream(int containerIndex);
     std::string audioLanguage() const;  // ISO code of the preferred language, ""
+    // Preferred subtitles for a file nothing was chosen for: 0 = off, 1 = foreign-language parts only
+    // (a "forced" track), 2 = always (a full track); and their language (ISO code, "" = same as the audio).
+    int subtitleMode() const { return subtitleMode_; }
+    std::string subtitleLanguage() const;
 
     void loadConfig();
     void saveConfig() const;
@@ -490,6 +497,9 @@ private:
     int videoSel_ = 0;      // position within videoStreams_
     int audioSel_ = 0;      // position within audioStreams_
     int audioLangIdx_ = 0;  // index into the preferred-language table
+    int subtitleMode_ = 0;  // 0 = Off, 1 = Foreign parts only, 2 = Always
+    int subLangIdx_ = 0;    // index into kSubtitleLanguages (0 = same as audio)
+    bool subLangList_ = false;  // the language list page (12) shows the subtitle languages
 };
 
 } // namespace pixelvr

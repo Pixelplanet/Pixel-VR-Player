@@ -2,6 +2,10 @@
 #include "app/file_ops.hpp"
 #include "app/vault_crypto.hpp"
 #include "app/vault_manager.hpp"
+#include "app/subtitle_pick.hpp"
+#ifdef PIXELVR_HAVE_MEDIA
+#include "app/subtitle_auto.hpp"
+#endif
 #include "util/sdcard.hpp"
 #include "net/remote_fs.hpp"
 #include "net/smb_credentials.hpp"
@@ -859,10 +863,22 @@ void App::finishLoadMedia(int slot) {
     sc.stereo = sc.engine.frameSequential() ? 3 : static_cast<int>(stereo);  // FS3D shows as its own format
     renderer_.setPixelAspect(slot, sc.engine.pixelAspect());  // non-square pixels: the display shape
     // Subtitles: the same file again (a track switch) keeps the choice; a Plex / Jellyfin play takes the
-    // track chosen on the page; anything else starts without.
-    if (!sameFile) sc.subtitleChoice = (isPlex && sc.webSuspended) ? plexPlay.subtitleStream : -1;
+    // track chosen on the page; a file whose track (or "off") was picked by hand before gets that again;
+    // anything else gets what the preferred-subtitles setting picks (nothing while it is Off).
+    if (!sameFile) {
+        const bool byHand = remembered != nullptr && remembered->subtitle != PlaybackMemory::kNoSubtitleChoice;
+        sc.subtitleAuto = !(isPlex && sc.webSuspended) && !byHand;
+        sc.subtitleChoice = (isPlex && sc.webSuspended) ? plexPlay.subtitleStream : (byHand ? remembered->subtitle : -1);
+    }
+    int autoSubtitle = -1;  // the track the setting switched on just now (for the note)
+    if (sc.subtitleAuto) {  // (again after an audio track switch: "same as audio" follows the new language)
+        const int before = sameFile ? sc.subtitleChoice : -1;
+        sc.subtitleChoice = preferredSubtitleTrack(slot);
+        if (sc.subtitleChoice != before) autoSubtitle = sc.subtitleChoice;
+    }
     sc.engine.setSubtitleStream(sc.subtitleChoice);
     sc.subtitleChoice = sc.engine.subtitleStream();  // (-1 when that track is not a usable one)
+    if (autoSubtitle >= 0 && sc.subtitleChoice == autoSubtitle) noteAutoSubtitle(slot, autoSubtitle);
     if (slot == 0 && settings_.screenSizeIdx() == 3) applyScreenSize(false);  // Original Pixels: this video's
     // Letterbox bars: measured in the background (films on network shares too: a few short reads over
     // a second connection; most films people keep on a NAS are letterboxed).
@@ -945,6 +961,41 @@ void App::finishLoadMedia(int slot) {
         webHosts_[slot].plexTimeline("playing", static_cast<int64_t>(plexPlay.offset * 1000.0));
         PIXELVR_LOG_INFO("Plex: playing \"%s\" on screen %d", plexPlay.title.c_str(), slot + 1);
     }
+}
+
+int App::preferredSubtitleTrack(int slot) {
+#ifdef PIXELVR_HAVE_MEDIA
+    ScreenState& sc = screens_[slot];
+    const SubtitleMode mode = static_cast<SubtitleMode>(settings_.subtitleMode());
+    if (mode == SubtitleMode::Off || sc.engine.audioOnly()) return -1;
+    // "Same as audio" is the language of the audio track that plays.
+    return pickSubtitleTrack(subtitleCandidates(sc.engine), mode, settings_.subtitleLanguage(),
+                             playingAudioLanguage(sc.engine));
+#else
+    (void)slot;
+    return -1;
+#endif
+}
+
+void App::noteAutoSubtitle(int slot, int track) {
+#ifdef PIXELVR_HAVE_MEDIA
+    using SI = MediaEngine::StreamInfo;
+    for (const SI& st : screens_[slot].engine.subtitleStreams()) {
+        if (st.index != track) continue;
+        const std::string lang = subtitleTrackLanguage(st);
+        const bool forced = (st.flags & SI::kForced) != 0;
+        // Says why subtitles appear, and where to change it.
+        renderer_.setScreenTitle(slot,
+                                 "Subtitles: " + languageName(lang) + (forced ? ", foreign-language parts only" : "") +
+                                     "  (preferred subtitles, change in Settings or Tracks)",
+                                 6.0f);
+        PIXELVR_LOG_INFO("Subtitles: screen %d track %d picked by the preferred-subtitles setting", slot + 1, track);
+        return;
+    }
+#else
+    (void)slot;
+    (void)track;
+#endif
 }
 
 void App::switchTracks(bool byLanguage) {
@@ -6202,6 +6253,16 @@ int App::run() {
                                             cur().engine.setSubtitleStream(tr.index);
                                             cur().subtitleChoice = cur().engine.subtitleStream();
                                             cur().subtitleLogged = false;
+                                            // Picked by hand: this wins over the preferred-subtitles setting, and
+                                            // is kept for this file (also "off"). Never for vault files or a
+                                            // Plex / Jellyfin play.
+                                            cur().subtitleAuto = false;
+                                            if (!cur().webSuspended && !cur().path.empty() &&
+                                                !VaultManager::isPrivatePath(cur().path)) {
+                                                playbackMemory_.setSubtitle(cur().path, cur().subtitleChoice,
+                                                                            cur().fingerprint);
+                                                playbackMemory_.save();
+                                            }
                                             PIXELVR_LOG_INFO("Subtitles: screen %d %s (track %d)", selectedScreen_ + 1,
                                                              cur().subtitleChoice < 0 ? "off" : "on", cur().subtitleChoice);
                                             // Lines already on screen at this moment come with a tiny seek.
