@@ -93,6 +93,28 @@ int run_probe(const std::string& path) {
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(30));
     }
+    // Subtitle files outside the file (next to a video on a network share): read here at once, the way
+    // the player's worker does after the start. PIXELVR_PROBE_SUB_URL=<http address>: one more, fetched
+    // like a media server's external subtitle (PIXELVR_PROBE_SUB_CODEC: its format, srt when not given).
+    {
+        std::vector<pixelvr::SubtitleSource> extra = pixelvr::subsources::findNextTo(path);
+        if (const char* url = std::getenv("PIXELVR_PROBE_SUB_URL")) {
+            pixelvr::ServerSubtitle s;
+            s.id = 1;
+            s.url = url;
+            const char* codec = std::getenv("PIXELVR_PROBE_SUB_CODEC");
+            s.codec = codec ? codec : "srt";
+            for (auto& f : pixelvr::subsources::fetchFromServer({s}, 1)) extra.push_back(std::move(f));
+        }
+        for (const auto& s : extra) {
+            pixelvr::MediaEngine::StreamInfo info;
+            info.label = s.label;
+            info.language = s.language;
+            info.flags = s.flags;
+            const int index = media.addSubtitleData(info, s.fileName, s.data);
+            PIXELVR_LOG_INFO("probe: subtitle file from outside: %zu bytes -> track %d", s.data ? s.data->size() : 0, index);
+        }
+    }
     // Subtitles: every track, and the first line each usable one shows within the first seconds.
     for (const auto& st : media.subtitleStreams()) {
         PIXELVR_LOG_INFO("probe: subtitle track %d  [%s] %s%s", st.index, st.language.c_str(), st.label.c_str(),

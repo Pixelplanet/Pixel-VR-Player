@@ -1127,8 +1127,37 @@ int runScreen(const ScreenOptions& opt) {
     const std::string kJfStopPageJs =
         "(async()=>{try{const c=window.ApiClient;if(!c)return 0;const s=await c.getSessions({deviceId:c.deviceId()});"
         "for(const x of s)await c.sendPlayStateCommand(x.Id,'Stop');return s.length}catch(e){return -1}})()";
+    // The external subtitle tracks a page script listed (`xs`: a JSON array of {id, key, codec, lang,
+    // title, forced, hi, sel}) as two more fields of the hand-off: "subs" with full addresses
+    // (`pre` + key + `post`; rebuilt field by field, so nothing else from the page gets into the line)
+    // and "xsub", the id of the one selected there (-1 = none).
+    auto subsFields = [](const std::string& xs, const std::string& pre, const std::string& post) {
+        std::string list;
+        int selected = -1, count = 0;
+        pvrjson::Value arr;
+        if (!xs.empty() && pvrjson::parse(xs, arr) && arr.type == pvrjson::Value::Type::Array) {
+            for (const pvrjson::Value& s : arr.array) {
+                const std::string key = s.getString("key");
+                if (key.empty() || key[0] != '/' || count >= 16) continue;
+                auto flag = [&](const char* name) {
+                    const pvrjson::Value* f = s.get(name);
+                    return f != nullptr && f->boolean;
+                };
+                const int id = static_cast<int>(s.getNumber("id", -1));
+                if (flag("sel")) selected = id;
+                list += std::string(count++ ? "," : "") + "{\"id\":" + std::to_string(id) + ",\"url\":" +
+                        pvrjson::quote(pre + key + post) + ",\"codec\":" + pvrjson::quote(s.getString("codec")) +
+                        ",\"lang\":" + pvrjson::quote(s.getString("lang")) + ",\"title\":" +
+                        pvrjson::quote(s.getString("title")) + ",\"forced\":" + (flag("forced") ? "true" : "false") +
+                        ",\"hi\":" + (flag("hi") ? "true" : "false") + "}";
+            }
+        }
+        return ",\"subs\":[" + list + "],\"xsub\":" + std::to_string(selected);
+    };
+    // subIdx: the subtitle stream chosen on the page (Jellyfin's stream index; -1 = off there), or -2 =
+    // not said: then the one the server picks for this user (its subtitle language and mode settings).
     auto jfStart = [&](const std::string& session, const std::string& itemId, const std::string& user,
-                       long long startTicks, int audioIdx, bool next) {
+                       long long startTicks, int audioIdx, bool next, int subIdx = -2) {
         plex.jfItem = itemId;
         plex.jfStarted = false;
         static const char* kProfile =
@@ -1151,6 +1180,15 @@ int runScreen(const ScreenOptions& opt) {
             "const pi=await (await fetch(b+'/Items/'+id+'/PlaybackInfo?UserId='+u+'&IsPlayback=true&AutoOpenLiveStream=true',"
             "{method:'POST',headers:h,body:" + pvrjson::quote(kProfile) + "})).json();"
             "const m=pi.MediaSources[0],v=(m.MediaStreams||[]).find(s=>s.Type==='Video')||{};"
+            "const ms=m.MediaStreams||[],si=" +
+            (subIdx >= -1 ? std::to_string(subIdx) : std::string("(m.DefaultSubtitleStreamIndex??-1)")) +
+            ",ss=ms.find(s=>s.Type==='Subtitle'&&s.Index===si);"
+            // External text subtitles: the server hands each one out as a file (converted to srt when it is
+            // neither ass nor vtt). The token is added to the address outside the page.
+            "const xs=JSON.stringify(ms.filter(s=>s.Type==='Subtitle'&&s.IsExternal&&s.IsTextSubtitleStream).map(s=>{"
+            "const c=(s.Codec||'').toLowerCase(),e=c==='ass'||c==='ssa'?'ass':c==='vtt'||c==='webvtt'?'vtt':'srt';"
+            "return {id:s.Index,key:'/Videos/'+id+'/'+m.Id+'/Subtitles/'+s.Index+'/0/Stream.'+e,codec:e,"
+            "lang:s.Language||'',title:s.Title||'',forced:!!s.IsForced,hi:!!s.IsHearingImpaired,sel:s.Index===si}}));"
             "let sg='';try{const r=await fetch(b+'/MediaSegments/'+id,{headers:h});if(r.ok){const s=await r.json();"
             "sg=(s.Items||[]).filter(x=>x.Type==='Intro'||x.Type==='Outro')"
             ".map(x=>(x.Type==='Intro'?'intro':'credits')+':'+Math.round((x.StartTicks||0)/10000)+'-'+"
@@ -1159,6 +1197,9 @@ int runScreen(const ScreenOptions& opt) {
             "file:(m.Path||'').split(/[\\\\/]/).pop(),"
             "ticks:it.RunTimeTicks||m.RunTimeTicks||0,msid:m.Id,session:pi.PlaySessionId||'',user:u,"
             "series:it.Type==='Episode'?(it.SeriesId||''):'',aud:(m.DefaultAudioStreamIndex??-1),"
+            // The chosen subtitle track when it is inside the file: its place in the container. Jellyfin
+            // numbers external files among the streams, so those that come before it do not count.
+            "sub:ss&&!ss.IsExternal?si-ms.filter(s=>s.IsExternal&&s.Index<si).length:-1,xs:xs,"
             "info:it.Type==='Episode'?[it.SeriesName,((it.ParentIndexNumber!=null?'S'+it.ParentIndexNumber:'')+"
             "(it.IndexNumber!=null?' E'+it.IndexNumber:'')).trim(),it.Name].filter(Boolean).join(' '+String.fromCharCode(183)+' '):'',"
             "container:(m.Container||'').toLowerCase(),vcodec:(v.Codec||'').toLowerCase(),turl:m.TranscodingUrl||'',mk:sg})})()";
@@ -1204,12 +1245,15 @@ int runScreen(const ScreenOptions& opt) {
                           "%.3f,\"duration\":%.3f,\"service\":\"jellyfin\",\"audio\":%d,\"episode\":%s}",
                           static_cast<double>(startTicks) / 1e7, plex.durationMs / 1000.0, audio,
                           plex.jfSeries.empty() ? "false" : "true");
+            // A transcode carries no subtitle tracks: only the server's external files can be shown then.
+            const int sub = plex.jfMethod == "DirectPlay" ? static_cast<int>(info.getNumber("sub", -1)) : -1;
             evalIn(session, kJfStopPageJs);  // the page's own player is not needed: ours plays it
             std::fprintf(stderr, "jellyfin: %s %s/%s audio %d%s\n", plex.jfMethod.c_str(), ct.c_str(), vc.c_str(), audio,
                          plex.jfSeries.empty() ? "" : " (episode)");
             emitLine("plex {\"url\":" + pvrjson::quote(playUrl) + ",\"title\":" + pvrjson::quote(info.getString("title")) +
                      ",\"file\":" + pvrjson::quote(info.getString("file")) + ",\"info\":" + pvrjson::quote(info.getString("info")) +
-                     ",\"markers\":" + pvrjson::quote(info.getString("mk")) + ",\"offset\":" + nums);
+                     ",\"markers\":" + pvrjson::quote(info.getString("mk")) + ",\"sub\":" + std::to_string(sub) +
+                     subsFields(info.getString("xs"), plex.base, "?ApiKey=" + plex.token) + ",\"offset\":" + nums);
         }, true);
     };
     // Plex: the part, title, duration and the audio track chosen in Plex for a metadata item.
@@ -1226,7 +1270,8 @@ int runScreen(const ScreenOptions& opt) {
                  ",\"title\":" + pvrjson::quote(info.getString("title")) + ",\"file\":" + pvrjson::quote(info.getString("file")) +
                  ",\"info\":" +
                  pvrjson::quote(info.getString("info")) + ",\"markers\":" + pvrjson::quote(info.getString("mk")) +
-                 ",\"sub\":" + std::to_string(static_cast<int>(info.getNumber("sub", -1))) + ",\"offset\":" + nums);
+                 ",\"sub\":" + std::to_string(static_cast<int>(info.getNumber("sub", -1))) +
+                 subsFields(info.getString("xs"), plex.base, "?X-Plex-Token=" + plex.token) + ",\"offset\":" + nums);
     };
     // JS returning that info for the metadata object `m` (part `p`).
     const std::string kPlexInfoJs =
@@ -1236,6 +1281,10 @@ int runScreen(const ScreenOptions& opt) {
         "aud:((p.Stream||[]).find(s=>s.streamType===2&&s.selected)||{index:-1}).index,"
         // The embedded subtitle track selected on the page (external ones have no stream index).
         "sub:((p.Stream||[]).find(s=>s.streamType===3&&s.selected&&s.index!=null)||{index:-1}).index,"
+        // External subtitle files (the server's own or downloaded ones): they have a key to fetch them by.
+        "xs:JSON.stringify((p.Stream||[]).filter(s=>s.streamType===3&&s.key).map(s=>({id:+s.id||0,key:String(s.key),"
+        "codec:s.codec||s.format||'',lang:s.languageCode||s.languageTag||'',title:s.title||'',"
+        "forced:!!s.forced,hi:!!s.hearingImpaired,sel:!!s.selected}))),"
         // Intro / credits markers (when the server has analysed the file): "intro:0-88000;credits:..." in ms.
         "mk:(m.Marker||[]).filter(x=>x.type==='intro'||x.type==='credits')"
         ".map(x=>x.type+':'+Math.round(x.startTimeOffset||0)+'-'+Math.round(x.endTimeOffset||0)).join(';'),"
@@ -1735,6 +1784,18 @@ int runScreen(const ScreenOptions& opt) {
                     at != std::string::npos && at + 19 < body.size() && std::isdigit(static_cast<unsigned char>(body[at + 19]))) {
                     audioIdx = std::atoi(body.c_str() + at + 19);
                 }
+                // The subtitle track chosen on the page, the same way (-1 there = off).
+                int subIdx = -2;
+                auto numberAt = [](const std::string& s, size_t at, int& out) {
+                    if (at < s.size() && (std::isdigit(static_cast<unsigned char>(s[at])) ||
+                                          (s[at] == '-' && at + 1 < s.size() && std::isdigit(static_cast<unsigned char>(s[at + 1]))))) {
+                        out = std::max(-1, std::atoi(s.c_str() + at));
+                    }
+                };
+                numberAt(queryParam(url, "SubtitleStreamIndex"), 0, subIdx);
+                if (const size_t at = body.find("\"SubtitleStreamIndex\":"); at != std::string::npos) {
+                    numberAt(body, at + 22, subIdx);
+                }
                 plex.service = "jellyfin";
                 plex.intercepted = true;
                 plex.restoring = false;
@@ -1745,7 +1806,7 @@ int runScreen(const ScreenOptions& opt) {
                 plex.jfAuth = "MediaBrowser Client=\"Pixel VR Player\", Device=\"Steam Frame\", DeviceId=\"pixelvr-" +
                               std::to_string(getpid()) + "\", Version=\"1\", Token=\"" + token + "\"";
                 plex.pauseUntil = Clock::now() + std::chrono::seconds(90);  // as long as the app waits for the server
-                jfStart(session, itemId, user, startTicks, audioIdx, false);
+                jfStart(session, itemId, user, startTicks, audioIdx, false, subIdx);
                 return;
             }
             plex.service = "plex";

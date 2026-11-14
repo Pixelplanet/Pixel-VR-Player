@@ -150,7 +150,7 @@ public:
         std::string language;  // ISO-639 code from metadata, or empty
         bool usable = true;    // subtitles: false when FFmpeg has no decoder for the track's format
         // Subtitles: what the track is for (from the file's flags, else its title).
-        enum : int { kForced = 1, kHearingImpaired = 2, kCommentary = 4, kFromFile = 8 };
+        enum : int { kForced = 1, kHearingImpaired = 2, kCommentary = 4, kFromFile = 8, kFromServer = 16 };
         int flags = 0;
         std::string title;     // the track's own name in the file, or the sidecar's file name
         int entries = -1;      // subtitles: how many lines the track has, when the file says so
@@ -161,6 +161,12 @@ public:
     // files next to a local file (.srt .ass .ssa .vtt .sup .idx; index >= kExternalSubtitleBase).
     static constexpr int kExternalSubtitleBase = 10000;
     std::vector<StreamInfo> subtitleStreams() const;
+    // A subtitle file found somewhere else after open() (a network share, the vault, a media server) and
+    // already read whole: `fileName`'s extension says how to read it (.srt .ass .ssa .vtt .sup; its name
+    // is never logged). `info` gives label, language, flags and title. Returns the track's index in
+    // subtitleStreams() (>= kExternalSubtitleBase), or -1 (a format that cannot be read from memory, or
+    // the list is full). Call it from the thread that reads the track list, after open() has returned.
+    int addSubtitleData(const StreamInfo& info, const std::string& fileName, std::shared_ptr<const std::string> data);
     // -1 = off. Takes effect at once; lines that began before the switch appear after the next seek.
     void setSubtitleStream(int index);
     int subtitleStream() const;

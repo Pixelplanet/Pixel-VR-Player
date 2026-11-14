@@ -7,6 +7,7 @@
 #ifdef PIXELVR_HAVE_MEDIA
 #include "media/media_engine.hpp"
 #include "media/scrub_preview.hpp"
+#include "media/subtitle_sources.hpp"
 #endif
 
 #ifdef PIXELVR_HAVE_FREETYPE
@@ -352,6 +353,13 @@ private:
         std::vector<BrowserHost::PlexPlay::Marker> plexMarkers;  // intro / credits of what plays (Skip pill)
         int subtitleChoice = -1;        // the subtitle track picked for this file (kept across a track reload)
         bool subtitleLogged = false;    // the first shown line of this choice was logged
+#ifdef PIXELVR_HAVE_MEDIA
+        // Subtitle files found for this file outside of it (network share, vault, media server): kept
+        // to be added again when the file is reopened for a track switch. Memory only.
+        std::vector<SubtitleSource> extraSubs;
+#endif
+        uint64_t subLookupSerial = 0;   // which lookup's answer this screen waits for
+        int subWantedServerId = -1;     // the server's external subtitle chosen on the page, until it has arrived
         bool plexAwaitingNext = false;  // ended, waiting for the next episode's hand-off
         bool plexNavManual = false;     // ... asked for with the screen's arrow (keeps playing if there is none)
         std::chrono::steady_clock::time_point plexNextSince{};
@@ -532,6 +540,12 @@ private:
     int stickAxis_ = 0;
     bool panShiftLatched_ = false;       // 360/180: bumper + stick pan lasts until the sticks are centred
     void finishLoadMedia(int slot);
+    // Subtitles from outside the file (media/subtitle_sources.hpp): asked for when a file has opened,
+    // added to the screen's track list when the worker has them.
+    SubtitleFinder subtitleFinder_;
+    void startSubtitleLookup(int slot, const BrowserHost::PlexPlay* play);
+    void pollSubtitleLookups();
+    void addFoundSubtitles(int slot);
     void pollMediaOpens(std::chrono::steady_clock::time_point now);
     void buildMusicQueue(int slot, const std::string& path);  // audio file opened from a folder
     // Empties `slot` for new content, keeping its place in the screen layout.
