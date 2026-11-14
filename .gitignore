@@ -57,6 +57,7 @@ Thumbs.db
 
 # Internal planning, agent handoff and personal dev tools: kept locally, not on GitHub
 /TODO.md
+/TODO-ARCHIVE.md
 /UI_HANDOFF_ROADMAP.md
 /docs/concepts/
 /docs/ui-redesign/
