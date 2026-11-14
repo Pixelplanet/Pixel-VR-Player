@@ -16,7 +16,7 @@ extern "C" {
 
 namespace pixelvr {
 
-struct SubtitleSource {
+struct SubtitleCatchUpSource {
     AVFormatContext* fmt = nullptr;
     std::unique_ptr<VaultAvio> vaultIo;  // (outlives fmt)
     // A file on a share: read straight from its connection (a few seeks and short reads).
@@ -24,7 +24,7 @@ struct SubtitleSource {
     int64_t remotePos = 0;
     AVIOContext* remoteCtx = nullptr;
 
-    ~SubtitleSource() { close(); }
+    ~SubtitleCatchUpSource() { close(); }
 
     void close() {
         if (fmt != nullptr) avformat_close_input(&fmt);
@@ -37,7 +37,7 @@ struct SubtitleSource {
     }
 
     static int remoteRead(void* opaque, uint8_t* buf, int size) {
-        auto* s = static_cast<SubtitleSource*>(opaque);
+        auto* s = static_cast<SubtitleCatchUpSource*>(opaque);
         const int n = s->remote->read(buf, size);
         if (n < 0) return AVERROR(EIO);
         if (n == 0) return AVERROR_EOF;
@@ -46,7 +46,7 @@ struct SubtitleSource {
     }
 
     static int64_t remoteSeek(void* opaque, int64_t offset, int whence) {
-        auto* s = static_cast<SubtitleSource*>(opaque);
+        auto* s = static_cast<SubtitleCatchUpSource*>(opaque);
         const int64_t size = s->remote->size();
         if (whence & AVSEEK_SIZE) return size >= 0 ? size : AVERROR(ENOSYS);
         int64_t p;

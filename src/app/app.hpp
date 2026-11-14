@@ -363,6 +363,7 @@ private:
 #endif
         uint64_t subLookupSerial = 0;   // which lookup's answer this screen waits for
         int subWantedServerId = -1;     // the server's external subtitle chosen on the page, until it has arrived
+        int subWantedIndex = -1;        // a remembered by-hand external track, until the lookup has added it
         bool plexAwaitingNext = false;  // ended, waiting for the next episode's hand-off
         bool plexNavManual = false;     // ... asked for with the screen's arrow (keeps playing if there is none)
         std::chrono::steady_clock::time_point plexNextSince{};

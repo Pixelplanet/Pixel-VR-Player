@@ -5306,11 +5306,19 @@ void VulkanRenderer::updateSphereSubtitle(const XrView* views, uint32_t viewCoun
         const float frameW = sp.twoHalves == 1 ? 0.5f * cw : cw;
         const float frameH = sp.twoHalves == 2 ? 0.5f * ch : ch;
         const float aspect = (sp.canvasH >= 720 && sp.twoHalves == 0) ? std::clamp(cw / ch, 1.0f, 2.4f) : 16.0f / 9.0f;
-        ss.w = kFrameW * pw / frameW;
-        ss.h = (kFrameW / aspect) * ph / frameH;
-        const float k = std::min({1.0f, kMaxW / ss.w, kMaxH / ss.h});  // (keeps its shape)
-        ss.w *= k;
-        ss.h *= k;
+        if (sp.id >= (1ull << 62)) {
+            // Text drawn by libass: one scale for the whole track (square pixels, 1080 rows = the height
+            // of a 16:9 frame), so the letters keep their size from line to line.
+            const float mPerPx = (kFrameW * 9.0f / 16.0f) / ch;
+            ss.w = std::min(pw * mPerPx, kMaxW);
+            ss.h = ph * mPerPx;
+        } else {
+            ss.w = kFrameW * pw / frameW;
+            ss.h = (kFrameW / aspect) * ph / frameH;
+            const float k = std::min({1.0f, kMaxW / ss.w, kMaxH / ss.h});  // (keeps its shape)
+            ss.w *= k;
+            ss.h *= k;
+        }
         ss.picture = true;
     } else {
         // Up to three lines, wrapped at words; done again only when the text changes.
@@ -5413,7 +5421,9 @@ void VulkanRenderer::updateSphereSubtitle(const XrView* views, uint32_t viewCoun
 
     // Centre of the quad: 16 degrees below the direction it follows.
     const float halfHAng = std::atan(0.5f * ss.h / kDist);
-    float target = ss.pitch - 16.0f * kDeg;
+    // Text from libass keeps its bottom edge in place (a second line grows upwards, the first stays).
+    float target = (ss.picture && subPictures_[0].id >= (1ull << 62)) ? ss.pitch - 18.0f * kDeg + halfHAng
+                                                                      : ss.pitch - 16.0f * kDeg;
     // While the transport dock is up and in the same direction, the subtitle stays above it (the
     // dock is drawn in front and would cover it).
     if (controlBarVisible_) {

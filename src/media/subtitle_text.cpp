@@ -142,7 +142,7 @@ struct SubtitleText::Impl {
     bool fontsSet = false;
     int frameW = 0, frameH = 0;    // what the renderer is set to
     int videoW = 0, videoH = 0;
-    bool dirty = false;            // a change that was not published yet (moving lines are not published every frame)
+    std::atomic<bool> dirty{false};  // a change not published yet (moving lines are not published every frame); pictureAt asks again
     size_t shownPixels = 0;        // the size of the published picture
     bool shownSome = false;        // the published state has a picture
     std::chrono::steady_clock::time_point lastPublish{};
@@ -357,6 +357,14 @@ bool SubtitleText::openFile(const std::string& path) {
     return d_->track != nullptr && d_->track->n_events > 0;
 }
 
+bool SubtitleText::openData(const std::string& data) {
+    std::lock_guard<std::mutex> lock(d_->libMutex);
+    if (d_->track != nullptr || data.empty()) return false;
+    std::string copy = data;  // (libass takes a writable buffer)
+    d_->track = ass_read_memory(d_->lib, copy.data(), copy.size(), nullptr);
+    return d_->track != nullptr && d_->track->n_events > 0;
+}
+
 void SubtitleText::openTrack(const std::string& header, bool ownStyle, const std::string& language) {
     {
         std::lock_guard<std::mutex> lock(d_->pendingMutex);
@@ -422,7 +430,7 @@ std::shared_ptr<const MediaEngine::SubtitlePicture> SubtitleText::pictureAt(doub
     std::unique_lock<std::mutex> lock(d_->mutex);
     if (!d_->worker.joinable()) d_->worker = std::thread([impl = d_.get()] { impl->run(); });
     // The same moment again (paused) with nothing new to draw needs no render.
-    if (wait || seconds != d_->wantTime || d_->havePending.load()) {
+    if (wait || seconds != d_->wantTime || d_->havePending.load() || d_->dirty.load()) {
         d_->wantTime = seconds;
         d_->wantAtOnce = wait;
         const uint64_t mine = ++d_->wantSerial;
@@ -440,6 +448,7 @@ SubtitleText::~SubtitleText() = default;
 std::shared_ptr<SubtitleText> SubtitleText::create() { return nullptr; }
 void SubtitleText::addFont(const std::string&, const uint8_t*, size_t) {}
 bool SubtitleText::openFile(const std::string&) { return false; }
+bool SubtitleText::openData(const std::string&) { return false; }
 void SubtitleText::openTrack(const std::string&, bool, const std::string&) {}
 void SubtitleText::addEvent(const std::string&, double, double) {}
 void SubtitleText::setVideoSize(int, int) {}

@@ -193,42 +193,45 @@ std::vector<SubtitleSource> fetchFromServer(const std::vector<ServerSubtitle>& s
 
 SubtitleFinder::~SubtitleFinder() {
     {
-        std::lock_guard<std::mutex> lk(mutex_);
-        stop_ = true;
-        jobs_.clear();
+        std::lock_guard<std::mutex> lk(st_->mutex);
+        st_->stop = true;
+        st_->jobs.clear();
     }
-    cv_.notify_all();
-    if (worker_.joinable()) worker_.join();
+    st_->cv.notify_all();  // not joined: the worker may be blocked on the network; it owns its state
 }
 
 void SubtitleFinder::request(Job job) {
     {
-        std::lock_guard<std::mutex> lk(mutex_);
+        std::lock_guard<std::mutex> lk(st_->mutex);
         // A newer load of the same screen replaces a lookup that has not started yet.
-        jobs_.erase(std::remove_if(jobs_.begin(), jobs_.end(), [&](const Job& j) { return j.slot == job.slot; }), jobs_.end());
-        jobs_.push_back(std::move(job));
-        if (!worker_.joinable()) worker_ = std::thread(&SubtitleFinder::loop, this);
+        st_->jobs.erase(std::remove_if(st_->jobs.begin(), st_->jobs.end(), [&](const Job& j) { return j.slot == job.slot; }),
+                        st_->jobs.end());
+        st_->jobs.push_back(std::move(job));
+        if (!st_->running) {
+            st_->running = true;
+            std::thread(&SubtitleFinder::loop, st_).detach();
+        }
     }
-    cv_.notify_one();
+    st_->cv.notify_one();
 }
 
 bool SubtitleFinder::take(Result& out) {
-    std::lock_guard<std::mutex> lk(mutex_);
-    if (results_.empty()) return false;
-    out = std::move(results_.front());
-    results_.pop_front();
+    std::lock_guard<std::mutex> lk(st_->mutex);
+    if (st_->results.empty()) return false;
+    out = std::move(st_->results.front());
+    st_->results.pop_front();
     return true;
 }
 
-void SubtitleFinder::loop() {
+void SubtitleFinder::loop(std::shared_ptr<State> st) {
     for (;;) {
         Job job;
         {
-            std::unique_lock<std::mutex> lk(mutex_);
-            cv_.wait(lk, [this] { return stop_ || !jobs_.empty(); });
-            if (stop_) return;
-            job = std::move(jobs_.front());
-            jobs_.pop_front();
+            std::unique_lock<std::mutex> lk(st->mutex);
+            st->cv.wait(lk, [&] { return st->stop || !st->jobs.empty(); });
+            if (st->stop) return;
+            job = std::move(st->jobs.front());
+            st->jobs.pop_front();
         }
         Result r;
         r.slot = job.slot;
@@ -236,8 +239,9 @@ void SubtitleFinder::loop() {
         r.found = subsources::findNextTo(job.videoPath);
         std::vector<SubtitleSource> server = subsources::fetchFromServer(job.server, job.wantedServerId);
         for (SubtitleSource& s : server) r.found.push_back(std::move(s));
-        std::lock_guard<std::mutex> lk(mutex_);
-        results_.push_back(std::move(r));
+        std::lock_guard<std::mutex> lk(st->mutex);
+        if (st->stop) return;
+        st->results.push_back(std::move(r));
     }
 }
 

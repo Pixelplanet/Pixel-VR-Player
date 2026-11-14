@@ -683,8 +683,19 @@ public:
         if (len < 0) {  // HEAD refused: ask for one byte
             std::string e;
             int64_t total = -1;
-            if (fetch(0, 1, &total, &e) && total >= 0) len = total;
+            const bool got = fetch(0, 1, &total, &e);
+            if (got && total >= 0) len = total;
             chunk_.clear();
+            if (len < 0 && got) {
+                // Answered, but without a size: a generated file from a server that ignores Range (a media
+                // server's subtitle stream). Taken whole if it is small; reads are then served from chunk_.
+                if (fetch(0, kDavRangeMax + 1, nullptr, &e) && static_cast<int64_t>(chunk_.size()) <= kDavRangeMax) {
+                    len = static_cast<int64_t>(chunk_.size());
+                } else {
+                    chunk_.clear();
+                    if (e.empty()) e = "the server gives no file size";
+                }
+            }
             if (len < 0) {
                 err = e.empty() ? httpError(code, rc, curl_) : e;
                 return false;

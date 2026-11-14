@@ -73,13 +73,17 @@ public:
     bool take(Result& out);
 
 private:
-    void loop();
-    std::mutex mutex_;
-    std::condition_variable cv_;
-    std::deque<Job> jobs_;
-    std::deque<Result> results_;
-    std::thread worker_;
-    bool stop_ = false;
+    // Shared with the worker, which is detached: at exit it may still sit in a network call.
+    struct State {
+        std::mutex mutex;
+        std::condition_variable cv;
+        std::deque<Job> jobs;
+        std::deque<Result> results;
+        bool running = false;
+        bool stop = false;
+    };
+    static void loop(std::shared_ptr<State> st);
+    std::shared_ptr<State> st_ = std::make_shared<State>();
 };
 
 }  // namespace pixelvr

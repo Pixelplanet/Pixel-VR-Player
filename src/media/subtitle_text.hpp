@@ -24,6 +24,8 @@ public:
     void addFont(const std::string& name, const uint8_t* data, size_t size);
     // An .ass / .ssa file: libass reads it itself (styles, embedded fonts). False: not readable.
     bool openFile(const std::string& path);
+    // The same for a file handed over as bytes (network share, vault, server).
+    bool openData(const std::string& data);
     // A track fed line by line. `header` is the script header (FFmpeg's subtitle_header); empty: a plain
     // default. ownStyle: the format has no styling of its own (SubRip, WebVTT ...), so the player's look
     // is used (a sans font found through fontconfig, outline and soft shadow).

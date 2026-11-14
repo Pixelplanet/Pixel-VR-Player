@@ -721,6 +721,7 @@ void App::startSubtitleLookup(int slot, const BrowserHost::PlexPlay* play) {
     sc.extraSubs.clear();
     ++sc.subLookupSerial;  // an answer still on its way for the previous file no longer counts
     sc.subWantedServerId = -1;
+    sc.subWantedIndex = -1;
     SubtitleFinder::Job job;
     job.slot = slot;
     job.serial = sc.subLookupSerial;
@@ -763,6 +764,13 @@ void App::addFoundSubtitles(int slot) {
             sc.subWantedServerId = -1;
             PIXELVR_LOG_INFO("Subtitles: screen %d shows the server's subtitle chosen on the page", slot + 1);
         }
+        // The file picked by hand for this video last time.
+        if (index >= 0 && index == sc.subWantedIndex && sc.subtitleChoice < 0) {
+            sc.engine.setSubtitleStream(index);
+            sc.subtitleChoice = sc.engine.subtitleStream();
+            sc.subtitleLogged = false;
+            sc.subWantedIndex = -1;
+        }
     }
 }
 
@@ -775,7 +783,19 @@ void App::pollSubtitleLookups() {
         sc.extraSubs = std::move(r.found);
         // While the file is being reopened (a track switch) the engine belongs to the open thread:
         // finishLoadMedia adds them then.
-        if (sc.open && !sc.opening && !sc.openAbandoned) addFoundSubtitles(r.slot);
+        if (sc.open && !sc.opening && !sc.openAbandoned) {
+            addFoundSubtitles(r.slot);
+            // The preferred-subtitles setting found nothing inside the file: the found files are candidates too.
+            if (sc.subtitleAuto && sc.subtitleChoice < 0) {
+                const int pick = preferredSubtitleTrack(r.slot);
+                if (pick >= 0) {
+                    sc.engine.setSubtitleStream(pick);
+                    sc.subtitleChoice = sc.engine.subtitleStream();
+                    sc.subtitleLogged = false;
+                    if (sc.subtitleChoice == pick) noteAutoSubtitle(r.slot, pick);
+                }
+            }
+        }
     }
 }
 
@@ -935,17 +955,25 @@ void App::finishLoadMedia(int slot) {
         sc.subtitleAuto = !(isPlex && sc.webSuspended) && !byHand;
         sc.subtitleChoice = (isPlex && sc.webSuspended) ? plexPlay.subtitleStream : (byHand ? remembered->subtitle : -1);
     }
+    // Subtitle files outside the file: looked for in the background; after a reopen, added again
+    // (before the pick below, so they are candidates).
+    if (!sameFile) startSubtitleLookup(slot, (isPlex && sc.webSuspended) ? &plexPlay : nullptr);
+    else addFoundSubtitles(slot);
     int autoSubtitle = -1;  // the track the setting switched on just now (for the note)
     if (sc.subtitleAuto) {  // (again after an audio track switch: "same as audio" follows the new language)
         const int before = sameFile ? sc.subtitleChoice : -1;
         sc.subtitleChoice = preferredSubtitleTrack(slot);
         if (sc.subtitleChoice != before) autoSubtitle = sc.subtitleChoice;
     }
-    // Subtitle files outside the file: looked for in the background; after a reopen, added again.
-    if (!sameFile) startSubtitleLookup(slot, (isPlex && sc.webSuspended) ? &plexPlay : nullptr);
-    else addFoundSubtitles(slot);
+    const int wantedSubtitle = sc.subtitleChoice;
     sc.engine.setSubtitleStream(sc.subtitleChoice);
     sc.subtitleChoice = sc.engine.subtitleStream();  // (-1 when that track is not a usable one)
+    // A remembered file that the background lookup brings is not in the list yet: addFoundSubtitles
+    // switches it on when it arrives.
+    if (!sameFile && !sc.subtitleAuto && !(isPlex && sc.webSuspended) && sc.subtitleChoice < 0 &&
+        wantedSubtitle >= MediaEngine::kExternalSubtitleBase) {
+        sc.subWantedIndex = wantedSubtitle;
+    }
     if (autoSubtitle >= 0 && sc.subtitleChoice == autoSubtitle) noteAutoSubtitle(slot, autoSubtitle);
     if (slot == 0 && settings_.screenSizeIdx() == 3) applyScreenSize(false);  // Original Pixels: this video's
     // Letterbox bars: measured in the background (films on network shares too: a few short reads over
@@ -4245,7 +4273,8 @@ int App::run() {
                 if (es.open && !es.web && !es.openAbandoned) {
                     // Text subtitles are laid out inside the visible picture: its shape, 1080 rows high.
                     // (360 / 180: the subtitle floats in view on its own, laid out as for a 16:9 picture.)
-                    const float subAspect = es.projection == 0 ? screenEyeAspect(s) : 16.0f / 9.0f;
+                    // (0.72 of a 16:9 frame: as wide as the floating subtitle may be, so libass wraps there.)
+                    const float subAspect = es.projection == 0 ? screenEyeAspect(s) : 0.72f * 16.0f / 9.0f;
                     screens_[s].engine.setSubtitleFrame(
                         std::clamp(static_cast<int>(1080.0f * subAspect + 0.5f), 480, 3840) & ~1, 1080);
                     pic = es.engine.subtitlePictureAt(es.engine.position());
@@ -6386,6 +6415,7 @@ int App::run() {
                                                 playbackMemory_.save();
                                             }
                                             cur().subWantedServerId = -1;  // the viewer's own choice stands
+                                            cur().subWantedIndex = -1;
                                             PIXELVR_LOG_INFO("Subtitles: screen %d %s (track %d)", selectedScreen_ + 1,
                                                              cur().subtitleChoice < 0 ? "off" : "on", cur().subtitleChoice);
                                             // Lines already on screen at this moment come with a tiny seek.

@@ -560,10 +560,8 @@ struct MediaEngine::Impl {
                                    std::vector<SubCue>& out);
     template <typename Cues> static void closeOpenCues(Cues& cues, double t) {
         for (SubCue& c : cues) {
-            if (c.open && c.start < t) {
-                c.end = std::min(c.end, t);
-                c.open = false;
-            }
+            // (stays "open": an earlier entry fetched later, after a seek, still shortens it)
+            if (c.open && c.start + 0.001 < t) c.end = std::min(c.end, t);
         }
     }
     mutable std::shared_ptr<const MediaEngine::SubtitlePicture> subPicShown;  // the last one unpacked (subMutex)
@@ -1017,14 +1015,16 @@ void MediaEngine::Impl::addSubtitleEntry(int stream, uint64_t gen, bool has, Sub
     closeOpenCues(subCues, start);  // (an entry without content clears the screen: Blu-ray subtitles end that way)
     if (!has) return;
     for (const SubCue& c : subCues) {  // read again after a seek back, or by both readers
-        if (std::fabs(c.start - cue.start) < 0.01 && c.text == cue.text && c.rle == cue.rle) return;
+        if (std::fabs(c.start - cue.start) < 0.01 && c.text == cue.text && c.rle == cue.rle) {
+            // The same words in another layer / style / position are a line of their own for libass
+            // (a true re-read is sorted out by SubtitleText::addEvent's own filter).
+            if (subText && cue.picId == 0 && !cue.ass.empty()) feedSubtitleText(*subText, cue);
+            return;
+        }
     }
     if (cue.open) {  // fetched after later entries were seen already: the first of them ends it
         for (const double m : subMarks) {
-            if (m > cue.start + 0.001 && m < cue.end) {
-                cue.end = m;
-                cue.open = false;
-            }
+            if (m > cue.start + 0.001 && m < cue.end) cue.end = m;
         }
     }
     if (subText && cue.picId == 0) feedSubtitleText(*subText, cue);
@@ -1158,7 +1158,7 @@ void MediaEngine::Impl::stopSubtitleCatchUp() {
 }
 
 void MediaEngine::Impl::subtitleCatchUpLoop(std::shared_ptr<SubCatchUp> st) {
-    SubtitleSource src;       // opened at the first request, kept for the next seeks
+    SubtitleCatchUpSource src;  // opened at the first request, kept for the next seeks
     int failures = 0;
     std::map<int, bool> indexed;  // per subtitle stream: the file lists where its entries are
     AVPacket* pk = av_packet_alloc();
@@ -1454,6 +1454,8 @@ bool MediaEngine::Impl::readSubtitleFormat(AVFormatContext* fmt, const std::stri
         if (cc == nullptr) break;
         avcodec_parameters_to_context(cc, fmt->streams[si]->codecpar);
         cc->pkt_timebase = fmt->streams[si]->time_base;
+        // No UTF-8 check in FFmpeg: it would drop every entry with a Windows-1252 letter; addEvent converts.
+        cc->sub_charenc_mode = FF_SUB_CHARENC_MODE_IGNORE;
         if (avcodec_open2(cc, dec, nullptr) < 0) break;
         const double tb = av_q2d(fmt->streams[si]->time_base);
         size_t words = 0;  // packed picture data so far
@@ -2929,7 +2931,8 @@ void MediaEngine::setSubtitleStream(int index) {
         // With libass: an .ass / .ssa file on disk is read by libass itself (its styles and fonts), and an
         // .srt file through FFmpeg first, which keeps italics and colours (it wants UTF-8; else the plain reader).
         std::shared_ptr<SubtitleText> drawn = path.empty() ? nullptr : SubtitleText::create();
-        if (data == nullptr && drawn != nullptr && (ext == ".ass" || ext == ".ssa") && drawn->openFile(path)) {
+        if (drawn != nullptr && (ext == ".ass" || ext == ".ssa") &&
+            (data != nullptr ? drawn->openData(*data) : drawn->openFile(path))) {
             text = drawn;
             read = true;
         } else if (drawn != nullptr && ext == ".srt") {
