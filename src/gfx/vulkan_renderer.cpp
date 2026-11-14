@@ -3959,6 +3959,7 @@ void VulkanRenderer::renderLayersBefore(XrContext& xr, const XrView* views, uint
     uiLayerPending_ = false;
     modelsInView_ = controllerModelsInView(views, viewCount);
     layoutButtonLabels(views, viewCount);
+    updateSphereSubtitle(views, viewCount);
     if (!uiLayerLive() || viewCount == 0) {
         return;
     }
@@ -5246,6 +5247,217 @@ void VulkanRenderer::drawScreenOverlay(int slot, float ax, const math::Mat4& ort
     }
 }
 
+void VulkanRenderer::updateSphereSubtitle(const XrView* views, uint32_t viewCount) {
+    using namespace math;
+    SphereSubtitle& ss = sphereSub_;
+    ss.on = false;
+    if (projectionMode_ == ProjectionMode::Flat || views == nullptr || viewCount == 0) return;
+    const SubPicture& sp = subPictures_[0];  // (360 / 180 plays alone, on the main slot)
+    const bool picOn = sp.id != 0 && sp.w > 0 && sp.h > 0 && sp.canvasW > 0 && sp.canvasH > 0 &&
+                       cardThumbs_[kSubPicThumbSlot].ready && thumbPipeline_ != VK_NULL_HANDLE;
+    const std::string& text = screenOverlay_[0].subs;
+    const bool textOn = !picOn && !text.empty() && textReady_ && uiPipeline_ != VK_NULL_HANDLE;
+    if (!picOn && !textOn) return;
+    if (!videoSlots_[0].hasVideo) return;
+    // The hub, a dialog, a menu or the keyboard stands where the subtitle would be.
+    if (browserVisible_ || settingsVisible_ || downloadsVisible_ || actionMenu_.visible || keyboardModal_.visible) return;
+
+    constexpr float kDeg = 0.0174533f;
+    constexpr float kDist = 2.0f;                 // metres from the head
+    constexpr float kFrameW = 2.3f;               // a full-width line of the track's canvas: about 60 degrees
+    const float kMaxW = 2.0f * kDist * std::tan(22.5f * kDeg);  // 45 degrees
+    constexpr float kMaxH = 0.56f;                // about 16 degrees
+    if (picOn) {
+        // The picture's own pixels; of a 3D track's two copies (one per half of the canvas) the
+        // first one only. The second copy is the first one moved by half the canvas, so the first
+        // ends where the picture ends less that half (a few pixels of depth shift either way).
+        const float cw = static_cast<float>(sp.canvasW), ch = static_cast<float>(sp.canvasH);
+        float pw = static_cast<float>(sp.w), ph = static_cast<float>(sp.h);
+        ss.uv[0] = 0.0f;
+        ss.uv[1] = 0.0f;
+        ss.uv[2] = 1.0f;
+        ss.uv[3] = 1.0f;
+        if (sp.twoHalves == 1) {
+            const float tol = std::max(4.0f, cw / 100.0f);
+            const float midIn = 0.5f * cw - static_cast<float>(sp.x);  // the canvas's middle, in picture pixels
+            pw = std::clamp(pw - 0.5f * cw + tol, 1.0f, std::max(midIn, 1.0f));
+            ss.uv[2] = pw / static_cast<float>(sp.w);
+        } else if (sp.twoHalves == 2) {
+            const float tol = std::max(4.0f, ch / 100.0f);
+            const float midIn = 0.5f * ch - static_cast<float>(sp.y);
+            ph = std::clamp(ph - 0.5f * ch + tol, 1.0f, std::max(midIn, 1.0f));
+            ss.uv[3] = ph / static_cast<float>(sp.h);
+        }
+        // The frame the canvas stands for: half of it for a 3D track. A 360 / 180 video's own shape
+        // says nothing about how wide a line should look, so an HD canvas keeps square pixels and
+        // a DVD canvas or a half is taken as a 16:9 frame.
+        const float frameW = sp.twoHalves == 1 ? 0.5f * cw : cw;
+        const float frameH = sp.twoHalves == 2 ? 0.5f * ch : ch;
+        const float aspect = (sp.canvasH >= 720 && sp.twoHalves == 0) ? std::clamp(cw / ch, 1.0f, 2.4f) : 16.0f / 9.0f;
+        ss.w = kFrameW * pw / frameW;
+        ss.h = (kFrameW / aspect) * ph / frameH;
+        const float k = std::min({1.0f, kMaxW / ss.w, kMaxH / ss.h});  // (keeps its shape)
+        ss.w *= k;
+        ss.h *= k;
+        ss.picture = true;
+    } else {
+        // Up to three lines, wrapped at words; done again only when the text changes.
+        constexpr float kTextH = 0.075f, kPitch = 0.100f, kMaxLineW = 1.50f;
+        if (ss.text != text || ss.lines.empty()) {
+            ss.text = text;
+            ss.lines.clear();
+            ss.lineW.clear();
+            const FontAtlas& font = fontAtlasBold_.ok ? fontAtlasBold_ : fontAtlas_;
+            auto widthOf = [&](const std::string& t) {
+                float w = 0.0f;
+                if (font.ok && font.lineHeight > 0.0f) {
+                    for (std::size_t i = 0; i < t.size();) w += font.glyphs[nextGlyphIndexUtf8(t, i)].advance;
+                    w *= kTextH / font.lineHeight;
+                }
+                return w;
+            };
+            std::string cueLine;
+            for (std::size_t i = 0; i <= text.size(); ++i) {
+                if (i < text.size() && text[i] != '\n') {
+                    cueLine += text[i];
+                    continue;
+                }
+                std::string line, word;
+                for (std::size_t k = 0; k <= cueLine.size(); ++k) {
+                    if (k < cueLine.size() && cueLine[k] != ' ') {
+                        word += cueLine[k];
+                        continue;
+                    }
+                    if (word.empty()) continue;
+                    const std::string trial = line.empty() ? word : line + " " + word;
+                    if (!line.empty() && widthOf(trial) > kMaxLineW) {
+                        ss.lines.push_back(line);
+                        line = word;
+                    } else {
+                        line = trial;
+                    }
+                    word.clear();
+                }
+                if (!line.empty()) ss.lines.push_back(line);
+                cueLine.clear();
+            }
+            if (ss.lines.size() > 3) ss.lines.erase(ss.lines.begin(), ss.lines.end() - 3);  // the latest three
+            for (const std::string& l : ss.lines) ss.lineW.push_back(widthOf(l));
+        }
+        if (ss.lines.empty()) return;
+        ss.w = 0.0f;
+        for (float w : ss.lineW) ss.w = std::max(ss.w, w + 0.08f);
+        ss.h = kPitch * static_cast<float>(ss.lines.size());
+        ss.picture = false;
+    }
+
+    // The head: between the eyes, looking along the mean of the two views (they may be canted).
+    const XrView& v0 = views[0];
+    const XrView& v1 = views[viewCount > 1 ? 1 : 0];
+    const Vec3 head{0.5f * (v0.pose.position.x + v1.pose.position.x), 0.5f * (v0.pose.position.y + v1.pose.position.y),
+                    0.5f * (v0.pose.position.z + v1.pose.position.z)};
+    const Vec3 fwd = normalize(
+        rotate(Quat{v0.pose.orientation.x, v0.pose.orientation.y, v0.pose.orientation.z, v0.pose.orientation.w},
+               Vec3{0.0f, 0.0f, -1.0f}) +
+        rotate(Quat{v1.pose.orientation.x, v1.pose.orientation.y, v1.pose.orientation.z, v1.pose.orientation.w},
+               Vec3{0.0f, 0.0f, -1.0f}));
+    // Same convention as screenYaw_: forward = (-sin yaw, 0, -cos yaw); pitch is up.
+    const bool yawKnown = fwd.x * fwd.x + fwd.z * fwd.z > 0.02f;  // (not while looking straight up / down)
+    const float headYaw = yawKnown ? std::atan2(-fwd.x, -fwd.z) : ss.yaw;
+    const float headPitch = std::asin(std::clamp(fwd.y, -1.0f, 1.0f));
+    auto wrap = [](float a) {
+        while (a > 3.14159265f) a -= 6.28318531f;
+        while (a < -3.14159265f) a += 6.28318531f;
+        return a;
+    };
+
+    // Lazy follow: small head movements leave it where it is (it reads like a thing in the room);
+    // past that it catches up softly, and it is never left further behind than stays in view.
+    const auto now = std::chrono::steady_clock::now();
+    float dt = std::chrono::duration<float>(now - ss.lastT).count();
+    const bool fresh = !ss.seeded || dt > 1.0f || dt < 0.0f;  // after a pause it starts where the viewer looks
+    ss.lastT = now;
+    dt = std::clamp(dt, 0.0f, 0.1f);
+    if (fresh) {
+        if (!yawKnown && !ss.seeded) return;  // (no direction to put it in yet)
+        ss.yaw = headYaw;
+        ss.pitch = headPitch;
+    } else {
+        const float rate = std::clamp(3.0f * dt, 0.0f, 1.0f);
+        auto follow = [&](float& v, float target, float dead, float limit, bool angle) {
+            float d = target - v;
+            if (angle) d = wrap(d);
+            const float over = d > dead ? d - dead : (d < -dead ? d + dead : 0.0f);
+            float moved = over * rate;
+            const float left = d - moved;
+            if (left > limit) moved = d - limit;
+            if (left < -limit) moved = d + limit;
+            v += moved;
+            if (angle) v = wrap(v);
+        };
+        follow(ss.yaw, headYaw, 8.0f * kDeg, 24.0f * kDeg, true);
+        follow(ss.pitch, headPitch, 5.0f * kDeg, 15.0f * kDeg, false);
+    }
+
+    // Centre of the quad: 16 degrees below the direction it follows.
+    const float halfHAng = std::atan(0.5f * ss.h / kDist);
+    float target = ss.pitch - 16.0f * kDeg;
+    // While the transport dock is up and in the same direction, the subtitle stays above it (the
+    // dock is drawn in front and would cover it).
+    if (controlBarVisible_) {
+        const PanelPlacement placement = computePanelPlacement(
+            uiDistance_, false, uiFollowMode_, screenPivot_, screenForward_, screenYaw_, recenterPitch_,
+            sphereFollowInit_ ? sphereFollowYaw_ : screenYaw_);
+        const Vec3 top = transformPoint(placement.base, Vec3{0.0f, kBarY + kDockHalfH, 0.0f}) - head;
+        const float flat = std::sqrt(top.x * top.x + top.z * top.z);
+        if (flat > 0.2f) {
+            const float dockYaw = std::atan2(-top.x, -top.z);
+            const float dockHalf = std::atan(kDockHalfW / flat);
+            const float subHalf = std::atan(0.5f * ss.w / kDist);
+            if (std::fabs(wrap(ss.yaw - dockYaw)) < dockHalf + subHalf + 2.0f * kDeg) {
+                target = std::max(target, std::atan2(top.y, flat) + 2.5f * kDeg + halfHAng);
+            }
+        }
+    }
+    target = std::clamp(target, -80.0f * kDeg, 80.0f * kDeg);
+    if (fresh) {
+        ss.elev = target;
+    } else {
+        ss.elev += (target - ss.elev) * std::clamp(10.0f * dt, 0.0f, 1.0f);
+    }
+    ss.seeded = true;
+
+    // The quad faces the head from kDist away in that direction; its x axis stays level.
+    const Mat4 orient = orientFromYawPitch(ss.yaw, ss.elev);
+    const Vec3 dir = transformDir(orient, Vec3{0.0f, 0.0f, -1.0f});
+    ss.model = multiply(translation(head + dir * kDist), orient);
+    ss.on = true;
+}
+
+void VulkanRenderer::drawSphereSubtitlePicture(const math::Mat4& viewProj) {
+    using namespace math;
+    const SphereSubtitle& ss = sphereSub_;
+    const VkPipeline pipe = eyePipeline(thumbPipeline_);
+    const CardThumbnail& tex = cardThumbs_[kSubPicThumbSlot];
+    if (pipe == VK_NULL_HANDLE || !tex.ready || tex.set == VK_NULL_HANDLE) return;
+    const Mat4 mvp = multiply(viewProj, ss.model);
+    vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe);
+    vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, textPipelineLayout_, 0, 1, &tex.set, 0, nullptr);
+    TextPush tp{};
+    std::memcpy(tp.mvp, mvp.m, sizeof(tp.mvp));
+    const float white4[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+    std::memcpy(tp.color, white4, sizeof(tp.color));
+    tp.rect[0] = -0.5f * ss.w;
+    tp.rect[1] = -0.5f * ss.h;
+    tp.rect[2] = ss.w;
+    tp.rect[3] = ss.h;
+    std::memcpy(tp.uv, ss.uv, sizeof(tp.uv));
+    tp.bend[2] = 1.0f;  // plain picture: no rounded corners, no scrims
+    vkCmdPushConstants(commandBuffer_, textPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                       sizeof(TextPush), &tp);
+    vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
+}
+
 void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                                 const XrView& view, const UiLayerPass* layer) {
     const bool layerPass = (layer != nullptr);
@@ -6504,6 +6716,53 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
         }
 
+    }
+
+    // 360 / 180: the subtitle, over the video and under everything else (placed by
+    // updateSphereSubtitle; the same quad for both eyes, so it sits at its own depth).
+    if (drawWorld && sphereSub_.on) {
+        const Mat4 subVp = multiply(proj, viewMat);
+        flushText();  // (text drawn so far stays under it)
+        if (sphereSub_.picture) {
+            drawSphereSubtitlePicture(subVp);
+        } else {
+            // Text lines, each on its own dark strip, like on a flat screen.
+            const Mat4 subMvp = multiply(subVp, sphereSub_.model);
+            const FontAtlas* subFont = fontAtlasBold_.ok ? &fontAtlasBold_ : &fontAtlas_;
+            const std::size_t n = sphereSub_.lines.size();
+            const float pitch = n > 0 ? sphereSub_.h / static_cast<float>(n) : 0.0f;
+            const float textH = 0.75f * pitch;
+            const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+            const float bg[4] = {0.0f, 0.0f, 0.0f, 0.58f};
+            uiBendOverride = 0.0f;  // flat, not on the curved panel
+            bindPipe(uiPipeline_);
+            for (std::size_t i = 0; i < n; ++i) {
+                const float y = 0.5f * sphereSub_.h - pitch * (static_cast<float>(i) + 0.5f);
+                drawUiElement(subMvp, 0.0f, y, 0.5f * sphereSub_.lineW[i] + 0.04f, 0.5f * pitch, UiShape::RoundedBox, bg,
+                              0.30f);
+            }
+            const Mat4* prevVpS = curTextVp;
+            const float prevBendS = curTextBend;
+            const FontAtlas* prevFontS = curFont;
+            const VkDescriptorSet prevSetS = curTextSet;
+            curTextVp = &subMvp;
+            curTextBend = 0.0f;
+            curFont = subFont;
+            curTextSet = fontAtlasBold_.ok ? textSetBold_ : textSet_;
+            if (subFont->ok && subFont->lineHeight > 0.0f) {
+                for (std::size_t i = 0; i < n; ++i) {
+                    const float y = 0.5f * sphereSub_.h - pitch * (static_cast<float>(i) + 0.5f);
+                    drawString(-0.5f * sphereSub_.lineW[i], y - 0.36f * textH, textH / subFont->lineHeight, white,
+                               sphereSub_.lines[i]);
+                }
+            }
+            flushText();  // subMvp goes out of scope
+            curTextVp = prevVpS;
+            curTextBend = prevBendS;
+            curFont = prevFontS;
+            curTextSet = prevSetS;
+            uiBendOverride = -1.0f;
+        }
     }
 
     // =========================================================================
