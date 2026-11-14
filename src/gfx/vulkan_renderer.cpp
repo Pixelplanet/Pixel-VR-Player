@@ -2418,7 +2418,24 @@ void VulkanRenderer::setScreenSubtitlePicture(int slot, uint64_t id, const uint8
     }
     if (sp.id == id) return;
     updateCardThumbnail(kSubPicThumbSlot + slot, "sub#" + std::to_string(id), rgba, w, h);
-    sp = cardThumbs_[kSubPicThumbSlot + slot].ready ? SubPicture{id, canvasW, canvasH, x, y, w, h} : SubPicture{};
+    sp = cardThumbs_[kSubPicThumbSlot + slot].ready ? SubPicture{id, canvasW, canvasH, x, y, w, h, false} : SubPicture{};
+    // Two copies, one per half? The canvas's middle lies well inside the picture and the columns
+    // around it are clear from top to bottom.
+    const int mid = canvasW / 2 - x;
+    const int gap = std::max(2, canvasW / 200);
+    if (sp.id != 0 && mid - gap > w / 8 && mid + gap < w - w / 8) {
+        bool clear = true;
+        for (int yy = 0; yy < h && clear; ++yy) {
+            const uint8_t* row = rgba + (static_cast<size_t>(yy) * w + (mid - gap)) * 4;
+            for (int xx = 0; xx < 2 * gap; ++xx) {
+                if (row[xx * 4 + 3] > 8) {
+                    clear = false;
+                    break;
+                }
+            }
+        }
+        sp.twoHalves = clear;
+    }
 }
 
 void VulkanRenderer::updateCardThumbnail(int slot, const std::string& path,
@@ -4914,7 +4931,7 @@ void VulkanRenderer::recordScreenCopy(int slot, const ScreenLayer& L, uint32_t i
             vkCmdSetViewport(commandBuffer_, 0, 1, &hv);
             const ScreenHitInfo& shb = screenHit_[slot];
             const float dispAspect = (shb.valid && shb.halfH > 0.0f) ? shb.halfW / shb.halfH : hv.width / hv.height;
-            drawScreenOverlay(slot, (16.0f / 9.0f) / dispAspect, ortho, glyphCursor);
+            drawScreenOverlay(slot, (16.0f / 9.0f) / dispAspect, ortho, glyphCursor, e, st == StereoMode::SideBySide);
         }
     }
     vkCmdEndRenderPass(commandBuffer_);
@@ -5016,7 +5033,8 @@ void VulkanRenderer::drawCopyText(const std::string& utf8, float cx, float cy, f
     vkCmdDraw(commandBuffer_, 6, glyphCursor - first, 0, first);
 }
 
-void VulkanRenderer::drawScreenOverlay(int slot, float ax, const math::Mat4& ortho, uint32_t& glyphCursor) {
+void VulkanRenderer::drawScreenOverlay(int slot, float ax, const math::Mat4& ortho, uint32_t& glyphCursor, int eye,
+                                       bool sideBySide) {
     using namespace math;
     static const float kAccents[5][3] = {{0.25f, 0.78f, 1.00f}, {0.18f, 0.85f, 0.52f}, {1.00f, 0.68f, 0.20f},
                                          {0.68f, 0.42f, 1.00f}, {0.96f, 0.28f, 0.36f}};
@@ -5069,6 +5087,17 @@ void VulkanRenderer::drawScreenOverlay(int slot, float ax, const math::Mat4& ort
         const float cw = static_cast<float>(sp.canvasW), ch = static_cast<float>(sp.canvasH);
         float w = 3.2f * static_cast<float>(sp.w) / cw;
         float x = -1.6f + 3.2f * static_cast<float>(sp.x) / cw;
+        float u0 = 0.0f, u1 = 1.0f;
+        if (sideBySide && sp.twoHalves) {
+            // This eye's half of the canvas fills its view: the part of the picture in that half.
+            const float half = 0.5f * cw, h0 = half * static_cast<float>(eye);
+            const float p0 = std::max(static_cast<float>(sp.x), h0);
+            const float p1 = std::min(static_cast<float>(sp.x + sp.w), h0 + half);
+            u0 = (p0 - static_cast<float>(sp.x)) / static_cast<float>(sp.w);
+            u1 = (p1 - static_cast<float>(sp.x)) / static_cast<float>(sp.w);
+            x = -1.6f + 3.2f * (p0 - h0) / half;
+            w = 3.2f * std::max(p1 - p0, 0.0f) / half;
+        }
         float h, yTop;
         if (sp.canvasH >= 720) {
             const float perPx = (3.2f / ax) / cw;  // model height of one canvas pixel
@@ -5098,7 +5127,8 @@ void VulkanRenderer::drawScreenOverlay(int slot, float ax, const math::Mat4& ort
         tp.rect[1] = yTop - h;
         tp.rect[2] = w;
         tp.rect[3] = h;
-        tp.uv[2] = 1.0f;
+        tp.uv[0] = u0;
+        tp.uv[2] = u1;
         tp.uv[3] = 1.0f;
         tp.bend[2] = 1.0f;  // plain picture: no rounded corners, no scrims
         vkCmdPushConstants(commandBuffer_, textPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT,

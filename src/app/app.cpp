@@ -1777,6 +1777,7 @@ void App::openTracksMenu() {
             } else if (st.flags & SI::kForced) {
                 what = "Foreign-language parts only";
                 help = "Lines appear only when someone speaks another language than the film's (\"forced\" subtitles).";
+                if (st.entries >= 0) help += " " + std::to_string(st.entries) + (st.entries == 1 ? " line" : " lines") + " in this film.";
             } else if (st.flags & SI::kHearingImpaired) {
                 what = "Full, with sound descriptions";
                 help = "Everything that is said, plus sounds and who is speaking (for the hard of hearing, \"SDH\").";

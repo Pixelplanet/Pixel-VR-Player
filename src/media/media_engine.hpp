@@ -153,6 +153,7 @@ public:
         enum : int { kForced = 1, kHearingImpaired = 2, kCommentary = 4, kFromFile = 8 };
         int flags = 0;
         std::string title;     // the track's own name in the file, or the sidecar's file name
+        int entries = -1;      // subtitles: how many lines the track has, when the file says so
     };
     std::vector<StreamInfo> videoStreams() const;
     std::vector<StreamInfo> audioStreams() const;

@@ -1858,7 +1858,16 @@ bool MediaEngine::open(const std::string& path) {
                 flags |= StreamInfo::kHearingImpaired;
             }
             if ((s->disposition & AV_DISPOSITION_COMMENT) || named("comment") || named("kommentar")) flags |= StreamInfo::kCommentary;
-            impl_->subtitleStreamList.push_back({static_cast<int>(si), label, lang, text, flags, title});
+            // Matroska files usually say how many lines a track has. Fewer than one a minute is a
+            // track for the foreign-language parts only, even when nothing marks it as "forced".
+            int entries = -1;
+            for (const char* key : {"NUMBER_OF_FRAMES", "NUMBER_OF_FRAMES-eng"}) {
+                if (AVDictionaryEntry* e = av_dict_get(s->metadata, key, nullptr, 0)) entries = std::atoi(e->value);
+                if (entries >= 0) break;
+            }
+            const double minutes = impl_->format->duration > 0 ? impl_->format->duration / (60.0 * AV_TIME_BASE) : 0.0;
+            if (entries >= 0 && minutes > 10.0 && entries < minutes) flags |= StreamInfo::kForced;
+            impl_->subtitleStreamList.push_back({static_cast<int>(si), label, lang, text, flags, title, entries});
         }
     }
     // Subtitle files next to a local, unencrypted video: "Movie.srt", "Movie.en.ass", "Movie.forced.de.sup",
