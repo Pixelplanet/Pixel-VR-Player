@@ -21,6 +21,8 @@
 #include <deque>
 #include <functional>
 #include <mutex>
+#include <sstream>
+#include <unordered_map>
 #include <thread>
 #include <unistd.h>
 
@@ -543,6 +545,12 @@ struct MediaEngine::Impl {
                                 int fallbackW, int fallbackH, SubCue& cue);
     // A new entry of the track at `t` ends what was shown without an end of its own.
     static bool readSubtitleFileAv(const std::string& path, int fallbackW, int fallbackH, std::vector<SubCue>& out);
+    // The same for a file that is already in memory (`fileName`: only its extension is used).
+    static bool readSubtitleDataAv(const std::string& data, const std::string& fileName, int fallbackW, int fallbackH,
+                                   std::vector<SubCue>& out);
+    // Every entry of an opened subtitle file as a cue; closes `fmt`. `path` is only named in a warning.
+    static bool readSubtitleFormat(AVFormatContext* fmt, const std::string& path, int fallbackW, int fallbackH,
+                                   std::vector<SubCue>& out);
     template <typename Cues> static void closeOpenCues(Cues& cues, double t) {
         for (SubCue& c : cues) {
             if (c.open && c.start < t) {
@@ -554,6 +562,9 @@ struct MediaEngine::Impl {
     mutable std::shared_ptr<const MediaEngine::SubtitlePicture> subPicShown;  // the last one unpacked (subMutex)
     std::vector<MediaEngine::StreamInfo> subtitleStreamList;
     std::vector<std::string> subtitleFiles;      // sidecar file paths (index - kExternalSubtitleBase)
+    // Sidecars that were handed over as bytes (addSubtitleData), by their place in subtitleFiles, which
+    // then holds only a name for the extension.
+    std::unordered_map<size_t, std::shared_ptr<const std::string>> subtitleData;
     std::atomic<int> subtitleStream{-1};         // container index, an external index, or -1 = off
     mutable std::mutex subMutex;
     std::deque<SubCue> subCues;                  // embedded: around the playback position
@@ -842,9 +853,7 @@ std::string assEventText(const char* ass) {
 }
 
 // A .srt file: blocks of "n", "hh:mm:ss,mmm --> hh:mm:ss,mmm", text lines, blank line.
-bool readSrtFile(const std::string& path, std::vector<std::pair<std::pair<double, double>, std::string>>& out) {
-    std::ifstream in(path, std::ios::binary);
-    if (!in) return false;
+bool readSrtStream(std::istream& in, std::vector<std::pair<std::pair<double, double>, std::string>>& out) {
     std::string line, text;
     double start = -1.0, end = -1.0;
     auto flush = [&] {
@@ -869,6 +878,50 @@ bool readSrtFile(const std::string& path, std::vector<std::pair<std::pair<double
     }
     flush();
     return !out.empty();
+}
+
+bool readSrtFile(const std::string& path, std::vector<std::pair<std::pair<double, double>, std::string>>& out) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return false;
+    return readSrtStream(in, out);
+}
+
+// A subtitle file held in memory, read by FFmpeg through an AVIOContext.
+struct MemoryInput {
+    const std::string* data = nullptr;
+    size_t pos = 0;
+};
+
+int memoryInputRead(void* opaque, uint8_t* buf, int size) {
+    auto* m = static_cast<MemoryInput*>(opaque);
+    if (m->pos >= m->data->size()) return AVERROR_EOF;
+    const size_t n = std::min(static_cast<size_t>(size), m->data->size() - m->pos);
+    std::memcpy(buf, m->data->data() + m->pos, n);
+    m->pos += n;
+    return static_cast<int>(n);
+}
+
+int64_t memoryInputSeek(void* opaque, int64_t offset, int whence) {
+    auto* m = static_cast<MemoryInput*>(opaque);
+    const int64_t size = static_cast<int64_t>(m->data->size());
+    if (whence & AVSEEK_SIZE) return size;
+    int64_t p;
+    switch (whence & ~AVSEEK_FORCE) {
+        case SEEK_SET: p = offset; break;
+        case SEEK_CUR: p = static_cast<int64_t>(m->pos) + offset; break;
+        case SEEK_END: p = size + offset; break;
+        default: return -1;
+    }
+    if (p < 0) return -1;
+    m->pos = static_cast<size_t>(std::min(p, size));
+    return p;
+}
+
+std::string lowerExtension(const std::string& name) {
+    const size_t dot = name.find_last_of('.');
+    std::string ext = dot == std::string::npos ? std::string() : name.substr(dot);
+    for (char& ch : ext) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
+    return ext;
 }
 
 }  // namespace
@@ -988,6 +1041,37 @@ bool MediaEngine::Impl::readSubtitleFileAv(const std::string& path, int fallback
                                            std::vector<SubCue>& out) {
     AVFormatContext* fmt = nullptr;
     if (avformat_open_input(&fmt, path.c_str(), nullptr, nullptr) < 0) return false;
+    return readSubtitleFormat(fmt, path, fallbackW, fallbackH, out);
+}
+
+bool MediaEngine::Impl::readSubtitleDataAv(const std::string& data, const std::string& fileName, int fallbackW,
+                                           int fallbackH, std::vector<SubCue>& out) {
+    MemoryInput mem{&data, 0};
+    constexpr int kBuf = 1 << 16;
+    auto* buf = static_cast<unsigned char*>(av_malloc(kBuf));
+    AVIOContext* io = buf ? avio_alloc_context(buf, kBuf, 0, &mem, &memoryInputRead, nullptr, &memoryInputSeek) : nullptr;
+    if (io == nullptr) {
+        av_free(buf);
+        return false;
+    }
+    bool ok = false;
+    AVFormatContext* fmt = avformat_alloc_context();
+    if (fmt != nullptr) {
+        fmt->pb = io;
+        fmt->flags |= AVFMT_FLAG_CUSTOM_IO;
+        // FFmpeg gets a made-up name with the real extension (a hint at the format), never the file's own.
+        const std::string hint = "subtitle" + lowerExtension(fileName);
+        if (avformat_open_input(&fmt, hint.c_str(), nullptr, nullptr) >= 0) {  // (frees fmt when it fails)
+            ok = readSubtitleFormat(fmt, std::string(), fallbackW, fallbackH, out);
+        }
+    }
+    av_freep(&io->buffer);
+    avio_context_free(&io);
+    return ok;
+}
+
+bool MediaEngine::Impl::readSubtitleFormat(AVFormatContext* fmt, const std::string& path, int fallbackW, int fallbackH,
+                                           std::vector<SubCue>& out) {
     bool ok = false;
     AVCodecContext* cc = nullptr;
     AVPacket* pk = av_packet_alloc();
@@ -1809,6 +1893,7 @@ bool MediaEngine::open(const std::string& path) {
     impl_->audioStreamList.clear();
     impl_->subtitleStreamList.clear();
     impl_->subtitleFiles.clear();
+    impl_->subtitleData.clear();
     impl_->subtitleStream.store(-1);
     {
         std::lock_guard<std::mutex> lock(impl_->subMutex);
@@ -2318,6 +2403,7 @@ void MediaEngine::close() {
     impl_->teardown();
     if (impl_->subCodec != nullptr) avcodec_free_context(&impl_->subCodec);  // (the decode thread is gone)
     impl_->subCodecStream = -1;
+    impl_->subtitleData.clear();  // (a vault file's subtitles do not stay in memory)
     impl_->audioOnly = false;
     impl_->formatHint = {};
     impl_->chapters.clear();
@@ -2423,6 +2509,23 @@ std::vector<MediaEngine::StreamInfo> MediaEngine::subtitleStreams() const {
 
 int MediaEngine::subtitleStream() const { return impl_ ? impl_->subtitleStream.load() : -1; }
 
+int MediaEngine::addSubtitleData(const StreamInfo& info, const std::string& fileName,
+                                 std::shared_ptr<const std::string> data) {
+    if (!impl_ || !impl_->format || !data || data->empty()) return -1;
+    const std::string ext = lowerExtension(fileName);
+    // (.idx is left out: FFmpeg opens its .sub by file name, which a file in memory does not have.)
+    if (ext != ".srt" && ext != ".ass" && ext != ".ssa" && ext != ".vtt" && ext != ".sup") return -1;
+    if (impl_->subtitleFiles.size() >= 24) return -1;
+    const size_t fi = impl_->subtitleFiles.size();
+    StreamInfo s = info;
+    s.index = kExternalSubtitleBase + static_cast<int>(fi);
+    s.usable = true;
+    impl_->subtitleFiles.push_back("subtitle" + ext);  // setSubtitleStream only looks at the extension
+    impl_->subtitleData[fi] = std::move(data);
+    impl_->subtitleStreamList.push_back(std::move(s));
+    return impl_->subtitleStreamList.back().index;
+}
+
 void MediaEngine::setSubtitleStream(int index) {
     if (!impl_) return;
     bool known = index < 0;
@@ -2436,8 +2539,16 @@ void MediaEngine::setSubtitleStream(int index) {
         std::string ext = std::filesystem::path(path).extension().string();
         for (char& ch : ext) ch = static_cast<char>(std::tolower(static_cast<unsigned char>(ch)));
         bool read = false;
+        // A file handed over as bytes (addSubtitleData) is read from memory by the same two readers.
+        const auto mem = impl_->subtitleData.find(fi);
+        const std::string* data = mem != impl_->subtitleData.end() ? mem->second.get() : nullptr;
         if (ext == ".srt") {
-            read = readSrtFile(path, cues);
+            if (data != nullptr) {
+                std::istringstream in(*data);
+                read = readSrtStream(in, cues);
+            } else {
+                read = readSrtFile(path, cues);
+            }
             for (auto& c : cues) {
                 Impl::SubCue cue;
                 cue.start = c.first.first;
@@ -2445,6 +2556,9 @@ void MediaEngine::setSubtitleStream(int index) {
                 cue.text = std::move(c.second);
                 file.push_back(std::move(cue));
             }
+        } else if (data != nullptr) {
+            read = Impl::readSubtitleDataAv(*data, path, impl_->codec ? impl_->codec->width : 0,
+                                            impl_->codec ? impl_->codec->height : 0, file);
         } else if (!path.empty()) {  // every other format through FFmpeg (text or pictures)
             read = Impl::readSubtitleFileAv(path, impl_->codec ? impl_->codec->width : 0, impl_->codec ? impl_->codec->height : 0,
                                       file);

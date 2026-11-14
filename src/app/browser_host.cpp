@@ -452,6 +452,20 @@ void BrowserHost::handleLine(const std::string& line) {
             if (!v.getString("service").empty()) p.service = v.getString("service");
             p.audioStream = static_cast<int>(v.getNumber("audio", -1));
             p.subtitleStream = static_cast<int>(v.getNumber("sub", -1));
+            p.externalSubSelected = static_cast<int>(v.getNumber("xsub", -1));
+            if (const pvrjson::Value* subs = v.get("subs"); subs && subs->type == pvrjson::Value::Type::Array) {
+                for (const pvrjson::Value& s : subs->array) {
+                    PlexPlay::ExternalSub x;
+                    x.id = static_cast<int>(s.getNumber("id", -1));
+                    x.url = s.getString("url");
+                    x.codec = s.getString("codec");
+                    x.language = s.getString("lang");
+                    x.title = s.getString("title");
+                    if (const pvrjson::Value* f = s.get("forced")) x.forced = f->boolean;
+                    if (const pvrjson::Value* f = s.get("hi")) x.hearingImpaired = f->boolean;
+                    if (!x.url.empty() && p.externalSubs.size() < 16) p.externalSubs.push_back(std::move(x));
+                }
+            }
             if (const pvrjson::Value* ep = v.get("episode")) p.episode = ep->boolean;
             p.episodeInfo = v.getString("info");
             {

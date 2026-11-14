@@ -714,6 +714,71 @@ void App::pollMediaOpens(std::chrono::steady_clock::time_point now) {
     }
 }
 
+// A file has opened on `slot`: look for its subtitle files on the worker. `play`: the Plex / Jellyfin
+// hand-off it came from (the server's external subtitles), else null.
+void App::startSubtitleLookup(int slot, const BrowserHost::PlexPlay* play) {
+    ScreenState& sc = screens_[slot];
+    sc.extraSubs.clear();
+    ++sc.subLookupSerial;  // an answer still on its way for the previous file no longer counts
+    sc.subWantedServerId = -1;
+    SubtitleFinder::Job job;
+    job.slot = slot;
+    job.serial = sc.subLookupSerial;
+    if (play != nullptr) {
+        for (const auto& x : play->externalSubs) {
+            ServerSubtitle s;
+            s.id = x.id;
+            s.url = x.url;
+            s.codec = x.codec;
+            s.language = x.language;
+            s.title = x.title;
+            s.forced = x.forced;
+            s.hearingImpaired = x.hearingImpaired;
+            job.server.push_back(std::move(s));
+        }
+        // Chosen on the page, unless a track inside the file was (that one is on already).
+        if (play->subtitleStream < 0) sc.subWantedServerId = play->externalSubSelected;
+        job.wantedServerId = sc.subWantedServerId;
+    } else if (subsources::needsLookup(sc.path)) {
+        job.videoPath = sc.path;
+    }
+    if (!job.videoPath.empty() || !job.server.empty()) subtitleFinder_.request(std::move(job));
+}
+
+// Puts the screen's found subtitle files into its engine's track list (after every open of the file).
+void App::addFoundSubtitles(int slot) {
+    ScreenState& sc = screens_[slot];
+    for (const SubtitleSource& s : sc.extraSubs) {
+        MediaEngine::StreamInfo info;
+        info.label = s.label;
+        info.language = s.language;
+        info.flags = s.flags;
+        info.title = (s.flags & MediaEngine::StreamInfo::kFromServer) ? s.label : s.fileName;
+        const int index = sc.engine.addSubtitleData(info, s.fileName, s.data);
+        // The server's subtitle that was on in the page, when nothing else has been chosen meanwhile.
+        if (index >= 0 && s.serverId >= 0 && s.serverId == sc.subWantedServerId && sc.subtitleChoice < 0) {
+            sc.engine.setSubtitleStream(index);
+            sc.subtitleChoice = sc.engine.subtitleStream();
+            sc.subtitleLogged = false;
+            sc.subWantedServerId = -1;
+            PIXELVR_LOG_INFO("Subtitles: screen %d shows the server's subtitle chosen on the page", slot + 1);
+        }
+    }
+}
+
+void App::pollSubtitleLookups() {
+    SubtitleFinder::Result r;
+    while (subtitleFinder_.take(r)) {
+        if (r.slot < 0 || r.slot >= VulkanRenderer::kMaxVideoSlots) continue;
+        ScreenState& sc = screens_[r.slot];
+        if (r.serial != sc.subLookupSerial) continue;  // for a file that is no longer on this screen
+        sc.extraSubs = std::move(r.found);
+        // While the file is being reopened (a track switch) the engine belongs to the open thread:
+        // finishLoadMedia adds them then.
+        if (sc.open && !sc.opening && !sc.openAbandoned) addFoundSubtitles(r.slot);
+    }
+}
+
 void App::finishLoadMedia(int slot) {
     ScreenState& sc = screens_[slot];
     const std::string path = sc.path;
@@ -876,6 +941,9 @@ void App::finishLoadMedia(int slot) {
         sc.subtitleChoice = preferredSubtitleTrack(slot);
         if (sc.subtitleChoice != before) autoSubtitle = sc.subtitleChoice;
     }
+    // Subtitle files outside the file: looked for in the background; after a reopen, added again.
+    if (!sameFile) startSubtitleLookup(slot, (isPlex && sc.webSuspended) ? &plexPlay : nullptr);
+    else addFoundSubtitles(slot);
     sc.engine.setSubtitleStream(sc.subtitleChoice);
     sc.subtitleChoice = sc.engine.subtitleStream();  // (-1 when that track is not a usable one)
     if (autoSubtitle >= 0 && sc.subtitleChoice == autoSubtitle) noteAutoSubtitle(slot, autoSubtitle);
@@ -1444,6 +1512,10 @@ void App::closeMedia(int slot) {
     renderer_.setMusicView(slot, {});
     sc.open = false;
     sc.path.clear();
+#ifdef PIXELVR_HAVE_MEDIA
+    sc.extraSubs.clear();  // (a vault file's subtitles do not stay in memory)
+#endif
+    ++sc.subLookupSerial;
     sc.muted = false;  // the next clip on this screen starts audible
     sc.projection = 0;
     sc.stereo = 0;
@@ -1877,7 +1949,10 @@ void App::openTracksMenu() {
                 what = "Full subtitles";
                 help = "Everything that is said in the film.";
             }
-            if (st.flags & SI::kFromFile) {
+            if (st.flags & SI::kFromServer) {
+                what += "  (server)";
+                help += " A subtitle file the media server has for this film.";
+            } else if (st.flags & SI::kFromFile) {
                 what += "  (file)";
                 help += " From the file \"" + st.title + "\" next to the video.";
             } else if (!st.title.empty() && st.usable && st.title.size() <= 28) {
@@ -4095,6 +4170,7 @@ int App::run() {
 
 #ifdef PIXELVR_HAVE_MEDIA
             pollMediaOpens(now);
+            pollSubtitleLookups();
             // Feed every open screen's newest frame into its renderer slot. Held
             // dma-buf frames are released when a decoder is about to seek so it
             // can reclaim its V4L2 capture buffers (otherwise it wedges).
@@ -6304,6 +6380,7 @@ int App::run() {
                                                                             cur().fingerprint);
                                                 playbackMemory_.save();
                                             }
+                                            cur().subWantedServerId = -1;  // the viewer's own choice stands
                                             PIXELVR_LOG_INFO("Subtitles: screen %d %s (track %d)", selectedScreen_ + 1,
                                                              cur().subtitleChoice < 0 ? "off" : "on", cur().subtitleChoice);
                                             // Lines already on screen at this moment come with a tiny seek.
