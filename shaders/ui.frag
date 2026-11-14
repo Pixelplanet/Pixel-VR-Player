@@ -83,7 +83,9 @@ void main() {
     // Shape 40: the same rounded box in flat colours (no top light, no rim
     // light), for strokes that must match each other exactly.
     bool flatBox = (shape == 40);
-    if (shape == 0 || glass || flatBox) {
+    // Shapes 43 / 44 (colour picker): the same rounded box filled with a gradient, see below.
+    bool gradientBox = (shape == 43 || shape == 44);
+    if (shape == 0 || glass || flatBox || gradientBox) {
         // Shape 0: Rounded rectangle (e.g. button body, panel, progress bar)
         float r = clamp(pc.params.y, 0.0, 1.0);
         d = sdRoundedBox(pBox, boxHalf, r);
@@ -352,6 +354,19 @@ void main() {
     }
 
     vec4 fillLin = vec4(pow(max(pc.color.rgb, vec3(0.0)), vec3(2.2)), pc.color.a);
+    if (shape == 43) {
+        // Shape 43: hue strip, every hue at full strength from the top (red) down to the bottom (red again).
+        float hue = 0.5 * (1.0 - vCoord.y);
+        vec3 rgb = clamp(abs(mod(hue * 6.0 + vec3(0.0, 4.0, 2.0), 6.0) - 3.0) - 1.0, 0.0, 1.0);
+        fillLin.rgb = pow(rgb, vec3(2.2));
+    } else if (shape == 44) {
+        // Shape 44: saturation / brightness square of one hue (color.rgb = that hue at full strength):
+        // white on the left to the full hue on the right, black at the bottom.
+        float sat = 0.5 * (vCoord.x + 1.0);
+        float val = 0.5 * (vCoord.y + 1.0);
+        vec3 rgb = mix(vec3(1.0), clamp(pc.color.rgb, 0.0, 1.0), sat) * val;
+        fillLin.rgb = pow(rgb, vec3(2.2));
+    }
     if (glass) {
         // Glass slab: distance inside the edge in metres drives a thin bevel
         // (lit top edge, slightly shadowed bottom edge) so the panel reads as

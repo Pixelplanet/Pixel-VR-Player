@@ -581,6 +581,22 @@ inline UiRect settingsSegment(const SettingsCard& L, int s, int n) {
     return {left + w * (static_cast<float>(s) + 0.5f), L.ctrlY, w * 0.5f - 0.003f, L.ctrlHalfH - 0.005f};
 }
 
+// Colour picker page (in the settings content area, x -0.45 .. 0.85, y -0.40 .. 0.36). Zones 0..4:
+// the suggested colours (a column of pills on the right), 5: the saturation / brightness square,
+// 6: the hue strip next to it, 7 / 8: Reset and Back.
+inline UiRect colorPickerZone(int z) {
+    if (z < 5) return {0.655f, 0.150f - static_cast<float>(z) * 0.076f, 0.195f, 0.032f};
+    switch (z) {
+        case 5: return {-0.090f, -0.020f, 0.360f, 0.360f};
+        case 6: return {0.360f, -0.020f, 0.050f, 0.360f};
+        case 7: return {0.555f, -0.335f, 0.095f, 0.040f};
+        default: return {0.755f, -0.335f, 0.095f, 0.040f};
+    }
+}
+inline UiRect colorPickerCurrent() { return {0.520f, 0.295f, 0.060f, 0.042f}; }  // the colour in use
+constexpr float kColorPickerLabelY = 0.215f;  // "Suggested"
+constexpr float kColorPickerNoteY = -0.232f;  // two lines about too dark colours
+
 // Modals.
 inline UiRect confirmModalButton(int i) { return {i == 0 ? -0.15f : 0.15f, -0.15f, 0.13f, 0.046f}; }
 constexpr float kActionMenuStepY = 0.068f;
@@ -2966,6 +2982,8 @@ void VulkanRenderer::updatePointer() {
     settingsHovered_ = -1;
     settingsRow_ = -1;
     settingsSegmentHovered_ = -1;
+    colorPickerZone_ = -1;
+    colorPickerPtrValid_ = false;
     downloadsHovered_ = -1;
     downloadsBtnHovered_ = -1;
     downloadsJobBtnHovered_ = -1;
@@ -3211,6 +3229,7 @@ void VulkanRenderer::updatePointer() {
         if (hubOpen && inPanel) {
             hitHere(world.x, world.y, world.z);
             const int page = settingsVisible_ ? 2 : (downloadsVisible_ ? 1 : 0);
+            if (settingsVisible_) colorPickerHitTest(hx, hyy);  // (anywhere on the panel: a drag may slide onto the rail)
 
             // Left navigation rail
             if (hx <= kRailRight) {
@@ -4241,7 +4260,7 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
         // Its look also depends on the 3D layout and the accent colour.
         const int badgeKey = badge == 0 ? 0
                                         : badge | (static_cast<int>(st) << 8) |
-                                              (std::clamp(uiAccentColorIdx_, 0, 4) << 12);
+                                              (themeAccentKey() << 12);
         const int overlayKey = screenOverlayKey(slot);
         if (L.drawnSerial != frameSerial_[slot] || L.drawnBadge != badgeKey || L.drawnOverlay != overlayKey) {
             uint32_t idx = 0;
@@ -4579,9 +4598,7 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
         VkRect2D sc = rp.renderArea;
         vkCmdSetScissor(commandBuffer_, 0, 1, &sc);
         vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipelineLayer_);
-        static const float kAccents[5][3] = {{0.25f, 0.78f, 1.00f}, {0.18f, 0.85f, 0.52f}, {1.00f, 0.68f, 0.20f},
-                                             {0.68f, 0.42f, 1.00f}, {0.96f, 0.28f, 0.36f}};
-        const float* ac = kAccents[std::clamp(uiAccentColorIdx_, 0, 4)];
+        const float* ac = themeAccentColor();
         const Mat4 ortho = orthographicVulkan(-1.0f, 1.0f, -1.0f, 1.0f);
         UiPush push{};
         std::memcpy(push.mvp, ortho.m, sizeof(push.mvp));
@@ -4616,9 +4633,7 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
         VkRect2D sc = rp.renderArea;
         vkCmdSetScissor(commandBuffer_, 0, 1, &sc);
         vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipelineLayer_);
-        static const float kAccents[5][3] = {{0.25f, 0.78f, 1.00f}, {0.18f, 0.85f, 0.52f}, {1.00f, 0.68f, 0.20f},
-                                             {0.68f, 0.42f, 1.00f}, {0.96f, 0.28f, 0.36f}};
-        const float* ac = kAccents[std::clamp(uiAccentColorIdx_, 0, 4)];
+        const float* ac = themeAccentColor();
         const Mat4 ortho = orthographicVulkan(-1.0f, 1.0f, -1.0f, 1.0f);
         auto draw = [&](float half, UiShape shape, const float col[4], float spread) {
             UiPush push{};
@@ -4854,9 +4869,7 @@ void VulkanRenderer::recordScreenCopy(int slot, const ScreenLayer& L, uint32_t i
         const int views = (st == StereoMode::Mono) ? 1 : 2;
         const float w = static_cast<float>(L.targets.width);
         const float h = static_cast<float>(L.targets.height);
-        static const float kAccents[5][3] = {{0.25f, 0.78f, 1.00f}, {0.18f, 0.85f, 0.52f}, {1.00f, 0.68f, 0.20f},
-                                             {0.68f, 0.42f, 1.00f}, {0.96f, 0.28f, 0.36f}};
-        const float* ac = kAccents[std::clamp(uiAccentColorIdx_, 0, 4)];
+        const float* ac = themeAccentColor();
         const bool bold = fontAtlasBold_.ok;
         const FontAtlas& font = bold ? fontAtlasBold_ : fontAtlas_;
         const VkDescriptorSet fontSet = bold ? textSetBold_ : textSet_;
@@ -5051,9 +5064,7 @@ void VulkanRenderer::drawCopyText(const std::string& utf8, float cx, float cy, f
 void VulkanRenderer::drawScreenOverlay(int slot, float ax, const math::Mat4& ortho, uint32_t& glyphCursor, int eye,
                                        int stereo) {
     using namespace math;
-    static const float kAccents[5][3] = {{0.25f, 0.78f, 1.00f}, {0.18f, 0.85f, 0.52f}, {1.00f, 0.68f, 0.20f},
-                                         {0.68f, 0.42f, 1.00f}, {0.96f, 0.28f, 0.36f}};
-    const float* ac = kAccents[std::clamp(uiAccentColorIdx_, 0, 4)];
+    const float* ac = themeAccentColor();
     const Mat4 mvp = multiply(ortho, scaling(Vec3{ax, 1.0f, 1.0f}));  // square model units stay square
     auto shape = [&](float cx, float cy, float hw, float hh, UiShape s, const float col[4], float radius, float border,
                      const float bcol[4]) {
@@ -6189,20 +6200,6 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
     // Dynamic UI Typography Scale & Color Themes (configured in Settings > UI & Appearance)
     const float tScale = std::clamp(uiTextScale_, 0.85f, 1.75f);
 
-    static const float kTextPalettes[5][4] = {
-        {0.97f, 0.98f, 1.00f, 1.0f}, // 0: Pure White
-        {0.82f, 0.95f, 1.00f, 1.0f}, // 1: Ice Cyan
-        {1.00f, 0.96f, 0.88f, 1.0f}, // 2: Warm Cream
-        {1.00f, 0.90f, 0.58f, 1.0f}, // 3: Soft Gold
-        {0.78f, 0.98f, 0.86f, 1.0f}, // 4: Mint Green
-    };
-    static const float kAccentPalettes[5][4] = {
-        {0.25f, 0.78f, 1.00f, 1.0f}, // 0: Cyber Cyan
-        {0.18f, 0.85f, 0.52f, 1.0f}, // 1: Emerald Green
-        {1.00f, 0.68f, 0.20f, 1.0f}, // 2: Amber Gold
-        {0.68f, 0.42f, 1.00f, 1.0f}, // 3: Royal Purple
-        {0.96f, 0.28f, 0.36f, 1.0f}, // 4: Crimson Red
-    };
     // Glass palette scaled by the Panel Transparency setting. Large surfaces take
     // the full factor; cards, controls and wells keep more opacity so content
     // on them stays readable over bright video.
@@ -6216,14 +6213,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
     const auto glassCardHoverT = tinted(kGlassCardHover, 0.65f + 0.35f * op);
     const auto glassControlT = tinted(kGlassControl, 0.60f + 0.40f * op);
     const auto glassWellT = tinted(kGlassWell, 0.60f + 0.40f * op);
-    const int tcIdx = std::clamp(uiTextColorIdx_, 0, 4);
-    const int acIdx = std::clamp(uiAccentColorIdx_, 0, 4);
-    const float* themeTextCol = kTextPalettes[tcIdx];
-    const float* themeAccentCol = kAccentPalettes[acIdx];
-    for (int k = 0; k < 3; ++k) {  // (themeHex(): the browser toolbar follows the theme)
-        themeTextRgb_[k] = themeTextCol[k];
-        themeAccentRgb_[k] = themeAccentCol[k];
-    }
+    const float* themeTextCol = themeTextColor();
+    const float* themeAccentCol = themeAccentColor();
     // One scrollbar for every list (file browser, Downloads, music queue): a recessed track with an
     // accent thumb. `first` = index of the first visible item, `visible` of `total` items shown.
     auto drawScrollbar = [&](const Mat4& mvp, float cx, float cy, float halfW, float halfH, int first, int visible,
@@ -7410,7 +7401,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         if (activeMainTab == 1) {
             activeSubTab = downloadsFilter_;
         } else if (activeMainTab == 2) {
-            activeSubTab = (settingsSection_ >= 10 && settingsSection_ <= 12) ? 2 : ((settingsSection_ == 13 || settingsSection_ == 21 || settingsSection_ == 22) ? 1 : (settingsSection_ >= 23 && settingsSection_ < 30) ? 3 : (settingsSection_ == 15 || settingsSection_ == 16 || settingsSection_ == 18 || settingsSection_ == 19) ? 4 : (settingsSection_ == 4 || settingsSection_ == 20) ? 5 : settingsSection_);
+            activeSubTab = (settingsSection_ >= 10 && settingsSection_ <= 12) ? 2 : ((settingsSection_ == 13 || settingsSection_ == 21 || settingsSection_ == 22 || settingsSection_ == 8 || settingsSection_ == 9) ? 1 : (settingsSection_ >= 23 && settingsSection_ < 30) ? 3 : (settingsSection_ == 15 || settingsSection_ == 16 || settingsSection_ == 18 || settingsSection_ == 19) ? 4 : (settingsSection_ == 4 || settingsSection_ == 20) ? 5 : settingsSection_);
         }
         const float subActBg[4] = {0.85f, 0.90f, 1.00f, 0.14f};
         const float slateIconCol[4] = {
@@ -8478,27 +8469,14 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     drawUiElement(vpPanel, knobX, L.ctrlY, knobR, knobR, UiShape::RoundedBox,
                                   (on && en) ? knobOn : switchOffKnob, 1.0f);
                 } else if (row.kind == kColor) {
+                    // A swatch of the colour in use and a chevron: the row opens the colour picker.
                     const bool isAccent = (row.label.find("Accent") != std::string::npos);
-                    const int n = std::min(row.steps, 5);
-                    const float dotR = L.ctrlHalfH * 0.42f;
-                    const float pitch = dotR * 3.0f;
-                    for (int p = 0; p < n; ++p) {
-                        const float dotX = ctrlRight - 0.020f - dotR - static_cast<float>(n - 1 - p) * pitch;
-                        const float* palCol = isAccent ? kAccentPalettes[p] : kTextPalettes[p];
-                        if (p == row.stepIdx) {
-                            const float haloCol[4] = {1.0f, 1.0f, 1.0f, 0.95f};
-                            drawUiElement(vpPanel, dotX, L.ctrlY, dotR * 1.38f, dotR * 1.38f,
-                                          UiShape::RoundedBox, haloCol, 1.0f);
-                            drawUiElement(vpPanel, dotX, L.ctrlY, dotR * 1.16f, dotR * 1.16f,
-                                          UiShape::RoundedBox, glassWellT.data(), 1.0f);
-                        }
-                        if (i == settingsHovered_ && p == settingsSegmentHovered_ && p != row.stepIdx && en) {
-                            const float ring[4] = {1.0f, 1.0f, 1.0f, 0.45f};
-                            drawUiElement(vpPanel, dotX, L.ctrlY, dotR * 1.30f, dotR * 1.30f, UiShape::RoundedBox, ring, 1.0f);
-                        }
-                        drawUiElement(vpPanel, dotX, L.ctrlY, dotR, dotR,
-                                      UiShape::RoundedBox, palCol, 1.0f);
-                    }
+                    const float swHalfW = L.ctrlHalfH * 1.45f;
+                    const float swHalfH = L.ctrlHalfH * 0.62f;
+                    drawUiElement(vpPanel, ctrlRight - 0.052f - swHalfW, L.ctrlY, swHalfW, swHalfH, UiShape::FlatBox,
+                                  isAccent ? themeAccentCol : themeTextCol, 1.0f, 0.10f, kGlassRim);
+                    drawUiElement(vpPanel, ctrlRight - 0.026f, L.ctrlY, 0.010f, 0.010f,
+                                  UiShape::Chevron, en ? themeAccentCol : dimCol);
                 } else if (row.kind == kChoice && row.steps > 1 && row.steps <= 8) {
                     // Stepped slider: one segment per option, filled up to the active one
                     const float segRight = ctrlRight - 0.022f;
@@ -8536,6 +8514,57 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 }
             }
 
+            // Colour picker page: its controls (same rectangles as the laser's hit-test).
+            if (colorPickerTarget_ >= 0) {
+                const bool pkAccent = colorPickerTarget_ == 1;
+                const float* pkCur = pkAccent ? themeAccentCol : themeTextCol;  // the colour in use
+                float pkHue[4] = {1.0f, 0.0f, 0.0f, 1.0f};  // the strip's hue at full strength
+                uicolor::hsvToRgb(colorPickerHsv_[0], 1.0f, 1.0f, pkHue);
+                float pkRaw[4] = {1.0f, 1.0f, 1.0f, 1.0f};  // the colour under the square's marker
+                uicolor::hsvToRgb(colorPickerHsv_[0], colorPickerHsv_[1], colorPickerHsv_[2], pkRaw);
+                const float pkWhite[4] = {1.0f, 1.0f, 1.0f, 0.95f};
+                const float pkDark[4] = {0.0f, 0.0f, 0.0f, 0.55f};
+                auto pkLit = [&](int z) { return colorPickerZone_ == z || colorPickerDrag_ == z; };
+                // Saturation / brightness square and hue strip, each with its marker.
+                const UiRect sq = hub::colorPickerZone(kColorPickerSquare);
+                drawUiElement(vpPanel, sq.cx, sq.cy, sq.hw, sq.hh, UiShape::SatValSquare, pkHue, 0.05f, 0.010f,
+                              pkLit(kColorPickerSquare) ? kGlassRim : kGlassRimFaint);
+                const float mR = colorPickerDrag_ == kColorPickerSquare ? 0.026f : 0.020f;
+                const float mX = sq.cx - sq.hw + 2.0f * sq.hw * colorPickerHsv_[1];
+                const float mY = sq.cy - sq.hh + 2.0f * sq.hh * colorPickerHsv_[2];
+                drawUiElement(vpPanel, mX, mY, mR + 0.004f, mR + 0.004f, UiShape::FlatBox, pkDark, 1.0f);
+                drawUiElement(vpPanel, mX, mY, mR, mR, UiShape::FlatBox, pkRaw, 1.0f, 0.22f, pkWhite);
+                const UiRect hs = hub::colorPickerZone(kColorPickerHue);
+                drawUiElement(vpPanel, hs.cx, hs.cy, hs.hw, hs.hh, UiShape::HueStrip, pkWhite, 0.30f, 0.06f,
+                              pkLit(kColorPickerHue) ? kGlassRim : kGlassRimFaint);
+                const float hH = colorPickerDrag_ == kColorPickerHue ? 0.016f : 0.012f;
+                const float hY = hs.cy + hs.hh - 2.0f * hs.hh * colorPickerHsv_[0];
+                drawUiElement(vpPanel, hs.cx, hY, hs.hw + 0.016f, hH + 0.004f, UiShape::FlatBox, pkDark, 1.0f);
+                drawUiElement(vpPanel, hs.cx, hY, hs.hw + 0.012f, hH, UiShape::FlatBox, pkHue, 1.0f, 0.30f, pkWhite);
+                // The colour in use (its hex value next to it, in the text pass).
+                const UiRect cur = hub::colorPickerCurrent();
+                drawUiElement(vpPanel, cur.cx, cur.cy, cur.hw, cur.hh, UiShape::FlatBox, pkCur, 0.45f, 0.06f, kGlassRim);
+                // Suggested colours: one pill each (dot + name), the one in use with an accent rim.
+                const int pkIn = uicolor::swatchIndex(pkAccent, uicolor::fromFloat(pkCur));
+                for (int z = 0; z < uicolor::kSwatchCount; ++z) {
+                    const UiRect r = hub::colorPickerZone(z);
+                    const bool h = colorPickerZone_ == z && colorPickerDrag_ < 0;
+                    drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox,
+                                  h ? glassCardHoverT.data() : glassControlT.data(), 1.0f, z == pkIn ? 0.10f : 0.06f,
+                                  z == pkIn ? tabActiveBord : (h ? kGlassRim : kGlassRimFaint));
+                    float sw[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+                    uicolor::toFloat(uicolor::swatches(pkAccent)[z].rgb, sw);
+                    drawUiElement(vpPanel, r.cx - r.hw + 0.040f, r.cy, 0.019f, 0.019f, UiShape::FlatBox, sw, 1.0f, 0.10f,
+                                  kGlassRim);
+                }
+                for (int z : {kColorPickerReset, kColorPickerBack}) {
+                    const UiRect r = hub::colorPickerZone(z);
+                    const bool h = colorPickerZone_ == z && colorPickerDrag_ < 0;
+                    drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox, h ? tabHovBg : tabNormBg, 1.0f,
+                                  0.06f, h ? tabHovBord : tabNormBord);
+                }
+            }
+
             const std::vector<std::string> setSegs = splitCrumbs(settingsTitle_);
             const Crumbs setCrumbs = layoutCrumbs(setSegs, -0.45f, 0.84f, scHeader * 0.90f);
             drawCrumbChevrons(setCrumbs, 0.455f);
@@ -8562,7 +8591,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             drawRailText();
             const char* setSubLabels[6] = {"Display & Cinema", "UI & Appearance", "Audio & Tracks",
                                            "Controls & Input", "Plugins", "Vault & Privacy"};
-            const int effSec = (settingsSection_ >= 10 && settingsSection_ <= 12) ? 2 : ((settingsSection_ == 13 || settingsSection_ == 21 || settingsSection_ == 22) ? 1 : (settingsSection_ >= 23 && settingsSection_ < 30) ? 3 : (settingsSection_ == 15 || settingsSection_ == 16 || settingsSection_ == 18 || settingsSection_ == 19) ? 4 : (settingsSection_ == 4 || settingsSection_ == 20) ? 5 : settingsSection_);
+            const int effSec = (settingsSection_ >= 10 && settingsSection_ <= 12) ? 2 : ((settingsSection_ == 13 || settingsSection_ == 21 || settingsSection_ == 22 || settingsSection_ == 8 || settingsSection_ == 9) ? 1 : (settingsSection_ >= 23 && settingsSection_ < 30) ? 3 : (settingsSection_ == 15 || settingsSection_ == 16 || settingsSection_ == 18 || settingsSection_ == 19) ? 4 : (settingsSection_ == 4 || settingsSection_ == 20) ? 5 : settingsSection_);
             const int sCount = vaultUnlocked_ ? 6 : 5;
             for (int sub = 0; sub < sCount; ++sub) {
                 drawFit(-0.84f, hub::subY(setSubY[sub]), 0.30f, scSub * 0.92f,
@@ -8741,10 +8770,45 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     // Value text on the left of the well; controls occupy the right side.
                     float maxW = 0.48f;
                     if (row.kind == kToggle) maxW = 0.36f;
-                    else if (row.kind == kColor) maxW = 0.30f;
+                    else if (row.kind == kColor) maxW = 0.36f;
                     else if (row.kind == kChoice && row.steps > 1 && row.steps <= 8) maxW = 0.28f;
                     drawFit(ctrlLeft + 0.020f, L.ctrlY, maxW, valSc, valueCol, row.value);
                 }
+            }
+
+            // Colour picker page: hex value, swatch names, the note about dark colours, button labels.
+            if (colorPickerTarget_ >= 0) {
+                const bool pkAccent = colorPickerTarget_ == 1;
+                const float* pkCur = pkAccent ? themeAccentCol : themeTextCol;
+                const float pkWarn[4] = {1.0f, 0.72f, 0.36f, 1.0f};
+                // (Large text sizes: a line is shrunk to its room before it would be cut off.)
+                auto pkFit = [&](float x, float y, float maxW, float sc, const float* col, const std::string& s) {
+                    const float w = measureString(sc, s);
+                    drawFit(x, y, maxW, w > maxW ? sc * maxW / w : sc, col, s);
+                };
+                const UiRect cur = hub::colorPickerCurrent();
+                const float colL = cur.cx - cur.hw;                    // the right column's left edge
+                const float colW = 2.0f * hub::colorPickerZone(0).hw;  // ... and its width
+                withHeadingFont([&] {
+                    pkFit(cur.cx + cur.hw + 0.022f, cur.cy, colW - 2.0f * cur.hw - 0.022f, scHeader * 0.90f, themeTextCol,
+                          "#" + uicolor::toHex(uicolor::fromFloat(pkCur)));
+                });
+                pkFit(colL, hub::kColorPickerLabelY, colW, scDetail, slateCol, "Suggested");
+                for (int z = 0; z < uicolor::kSwatchCount; ++z) {
+                    const UiRect r = hub::colorPickerZone(z);
+                    pkFit(r.cx - r.hw + 0.076f, r.cy, 2.0f * r.hw - 0.096f, scSub, themeTextCol,
+                          uicolor::swatches(pkAccent)[z].name);
+                }
+                // In the warning colour while the spot under the marker is too dark to be used as it is.
+                const float* noteCol = colorPickerAdjusted_ ? pkWarn : slateCol;
+                pkFit(colL, hub::kColorPickerNoteY, colW, scDetail, noteCol,
+                      colorPickerAdjusted_ ? "Too dark here: brightened" : "Very dark colors are brightened");
+                pkFit(colL, hub::kColorPickerNoteY - 0.030f, colW, scDetail, noteCol,
+                      pkAccent ? "so highlights stay visible." : "so text stays readable.");
+                const UiRect rr = hub::colorPickerZone(kColorPickerReset);
+                const UiRect rb = hub::colorPickerZone(kColorPickerBack);
+                drawFitCentered(rr.cx, rr.cy, rr.hw * 2.0f - 0.02f, scSub, themeTextCol, "Reset");
+                drawFitCentered(rb.cx, rb.cy, rb.hw * 2.0f - 0.02f, scSub, themeTextCol, "Back");
             }
 
             if (!settingsStatus_.empty()) {
@@ -13453,6 +13517,28 @@ float VulkanRenderer::volumeLevelAtPointer(bool drag) const {
         if (x < x0 - 0.014f) return -1.0f;  // the speaker icon side: mute
     }
     return std::clamp((x - x0) / std::max(x1 - x0, 1e-4f), 0.0f, 1.0f);
+}
+
+// Colour picker page: the control under the laser, and where the laser is on the panel (a dragged
+// square or hue strip follows it, also beside the control).
+void VulkanRenderer::colorPickerHitTest(float hx, float hy) {
+    if (colorPickerTarget_ < 0) return;
+    colorPickerPtr_[0] = hx;
+    colorPickerPtr_[1] = hy;
+    colorPickerPtrValid_ = true;
+    for (int z = 0; z <= kColorPickerBack; ++z) {
+        if (hub::colorPickerZone(z).contains(hx, hy, 0.004f)) colorPickerZone_ = z;
+    }
+}
+
+bool VulkanRenderer::colorPickerPointer(int zone, float& a, float& b) const {
+    if (!colorPickerPtrValid_ || (zone != kColorPickerSquare && zone != kColorPickerHue)) return false;
+    const UiRect r = hub::colorPickerZone(zone);
+    const float u = std::clamp((colorPickerPtr_[0] - (r.cx - r.hw)) / (2.0f * r.hw), 0.0f, 1.0f);
+    const float v = std::clamp((colorPickerPtr_[1] - (r.cy - r.hh)) / (2.0f * r.hh), 0.0f, 1.0f);
+    a = zone == kColorPickerHue ? 1.0f - v : u;  // the strip's hue runs from the top down
+    b = v;
+    return true;
 }
 
 } // namespace pixelvr
