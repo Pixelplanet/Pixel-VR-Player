@@ -634,7 +634,7 @@ constexpr float kColorPickerLabelY = 0.215f;  // "Suggested"
 constexpr float kColorPickerNoteY = -0.232f;  // two lines about too dark colours
 
 // Modals.
-constexpr float kActionMenuStepY = 0.068f;
+constexpr float kActionMenuStepY = 2.0f * tok::kCtlS + tok::kRowGap;  // 6.8 cm: a row plus the shared gap
 constexpr float kTracksHalfW = 0.54f;     // the track list is wider: its rows say what each track is
 constexpr float kTracksRowHalfW = 0.48f;
 inline UiRect actionMenuOption(int i, int count, float halfW = 0.38f) {
@@ -7245,39 +7245,44 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     curTextBend = screenBend[slot];
                     const float lh = fontAtlas_.lineHeight;
                     const float infoW = 2.0f * music::kCoverHalf + 0.10f;
+                    // The shared text scale at twice the size (screen units; near the subtitles' 0.088:
+                    // readable from the couch and on a wall of screens).
+                    constexpr float kMusicK = 2.0f;
+                    const float mTitle = kMusicK * tok::kTextTitle / lh, mLarge = kMusicK * tok::kTextLarge / lh,
+                                mBody = kMusicK * tok::kTextBody / lh, mSecondary = kMusicK * tok::kTextSecondary / lh,
+                                mCaption = kMusicK * tok::kTextCaption / lh;
                     withHeadingFont([&] {
-                        drawFitCentered(hub::musicui::kInfoCx, hub::musicui::kTitleY, infoW, 0.080f / lh, themeTextCol,
+                        drawFitCentered(hub::musicui::kInfoCx, hub::musicui::kTitleY, infoW, mTitle, themeTextCol,
                                         mv.title);
-                        drawFit(hub::musicui::kPanel.cx - hub::musicui::kPanel.hw + 0.06f, hub::musicui::kHeaderY, 0.6f, 0.058f / lh,
+                        drawFit(hub::musicui::kPanel.cx - hub::musicui::kPanel.hw + 0.06f, hub::musicui::kHeaderY, 0.6f, mBody,
                                 themeTextCol, "Queue");
                     });
-                    // (Sizes near the subtitles' 0.088: readable from the couch and on a wall of screens.)
-                    drawFitCentered(hub::musicui::kInfoCx, hub::musicui::kArtistY, infoW, 0.064f / lh, themeTextCol, mv.artist);
-                    drawFitCentered(hub::musicui::kInfoCx, hub::musicui::kAlbumY, infoW, 0.056f / lh, dim, mv.album);
+                    drawFitCentered(hub::musicui::kInfoCx, hub::musicui::kArtistY, infoW, mLarge, themeTextCol, mv.artist);
+                    drawFitCentered(hub::musicui::kInfoCx, hub::musicui::kAlbumY, infoW, mBody, dim, mv.album);
                     {
-                        const float sc = 0.048f / lh;
+                        const float sc = mSecondary;
                         const float w = measureString(sc, mv.queueInfo);
                         drawFit(hub::musicui::kPanel.cx + hub::musicui::kPanel.hw - 0.06f - w, hub::musicui::kHeaderY, 0.9f, sc, dim,
                                 mv.queueInfo);
                     }
                     if (mv.repeat == 2) {  // "1" on the repeat button: repeat this track
                         const UiRect b = hub::musicui::button(4);
-                        drawFitCentered(b.cx + 0.040f, b.cy + 0.040f, 0.05f, 0.032f / lh, accentTextCol, "1");
+                        drawFitCentered(b.cx + 0.040f, b.cy + 0.040f, 0.05f, mCaption, accentTextCol, "1");
                     }
                     for (int i = 0; i < rows; ++i) {
                         const UiRect r = hub::musicui::row(i);
                         const MusicView::Row& row = mv.rows[static_cast<size_t>(i)];
                         const float left = r.cx - r.hw + 0.11f;
                         if (!row.current) {
-                            drawFitCentered(r.cx - r.hw + 0.055f, r.cy, 0.08f, 0.044f / lh, dim,
+                            drawFitCentered(r.cx - r.hw + 0.055f, r.cy, 0.08f, mCaption, dim,
                                             std::to_string(mv.first + i + 1));
                         }
-                        const float durSc = 0.048f / lh;
+                        const float durSc = mSecondary;
                         const float durW = measureString(durSc, row.duration);
                         const float maxW = 2.0f * r.hw - 0.16f - durW - 0.05f;
-                        drawFit(left, r.cy + (row.artist.empty() ? 0.0f : 0.026f), maxW, 0.060f / lh,
+                        drawFit(left, r.cy + (row.artist.empty() ? 0.0f : 0.026f), maxW, mBody,
                                 row.current ? accentTextCol : themeTextCol, row.title);
-                        if (!row.artist.empty()) drawFit(left, r.cy - 0.036f, maxW, 0.044f / lh, dim, row.artist);
+                        if (!row.artist.empty()) drawFit(left, r.cy - 0.036f, maxW, mCaption, dim, row.artist);
                         drawFit(r.cx + r.hw - 0.03f - durW, r.cy, durW + 0.01f, durSc, dim, row.duration);
                     }
                     flushText();
@@ -7742,8 +7747,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         // Floating scrub hover tooltip speech bubble
         if (transportLive_ != 0 && transportDuration_ > 0.0) {
             // "LIVE" readout dot: red at the live edge, grey when behind.
-            const float liveRed[4] = {0.93f, 0.16f, 0.16f, 1.0f};
-            const float liveGrey[4] = {0.62f, 0.66f, 0.72f, 1.0f};
+            // (The signal red of the badges; grey = the disabled text role.)
+            const float* liveRed = tok::kBadgeRed.data();
+            const float* liveGrey = textDisabledCol;
             drawUiElement(vpPanel, trackHalfW + 0.044f, trackY, 0.011f, 0.011f, UiShape::RoundedBox,
                           transportLive_ == 2 ? liveRed : liveGrey, 1.0f);
         }
@@ -9183,7 +9189,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                                 drawUiElement(vpPanel, sx + (on ? 0.0155f : -0.0155f), hc.cy, 0.0115f, 0.0115f, UiShape::RoundedBox,
                                               knob, 1.0f);
                             } else if ((ctl == "pill" || ctl == "button") && !lr.value.empty()) {
-                                const float ts = setCard(r).textSc * 0.90f;
+                                const float ts = setCard(r).textSc;
                                 const float tw = std::min(measureString(ts, lr.value), 0.46f);
                                 const float bw = tw * 0.5f + 0.018f, bh = hc.halfH - 0.008f;
                                 const float bx = hc.cx - hc.halfW + hub::kShortcutUrlX + tw * 0.5f;
@@ -9663,10 +9669,11 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const bool pkAccent = colorPickerTarget_ == 1;
                 const float* pkCur = pkAccent ? themeAccentCol : themeTextCol;
                 const float* pkWarn = tok::kWarning.text.data();
-                // (Large text sizes: a line is shrunk to its room before it would be cut off.)
+                // (Large text sizes: a line is shrunk to its room before it would be cut off, but never
+                // below the Caption step.)
                 auto pkFit = [&](float x, float y, float maxW, float sc, const float* col, const std::string& s) {
                     const float w = measureString(sc, s);
-                    drawFit(x, y, maxW, w > maxW ? sc * maxW / w : sc, col, s);
+                    drawFit(x, y, maxW, w > maxW ? std::max(std::min(sc, scCaption), sc * maxW / w) : sc, col, s);
                 };
                 const UiRect cur = hub::colorPickerCurrent();
                 const float colL = cur.cx - cur.hw;                    // the right column's left edge
