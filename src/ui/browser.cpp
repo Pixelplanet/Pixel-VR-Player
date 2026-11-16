@@ -367,7 +367,7 @@ void Browser::scanSmbInto(const std::string& uri, ScanResult& out) {
             }
         }
         sort_and_append(out.entries, rdirs, rfiles, sortMode_.load());
-        out.status = std::to_string(out.entries.size() - 1) + " items";
+        out.status.clear();  // (the header shows "1-6 of N"; the bottom row the focused name)
         return;
     }
 
@@ -480,7 +480,7 @@ void Browser::scanSmbInto(const std::string& uri, ScanResult& out) {
         return;
     }
     sort_and_append(out.entries, dirs, files, sortMode_.load());
-    out.status = std::to_string(out.entries.size() - 1) + " items";
+    out.status.clear();  // (the header shows "1-6 of N"; the bottom row the focused name)
 #else
     out.status = "SMB support not built";
 #endif
@@ -754,12 +754,8 @@ void Browser::scanBookmarksInto(ScanResult& out) {
     for (const auto& bm : scanBookmarks_) {
         if (!VaultManager::isPrivatePath(bm.path) || VaultManager::instance().isUnlocked()) ++visible;
     }
-    if (visible == 0) {
-        out.status = "No bookmarks yet. Click [+ Bookmark] in any folder to add one.";
-        return;
-    }
-
-    out.status = std::to_string(visible) + (visible == 1 ? " bookmark" : " bookmarks");
+    if (visible == 0) return;  // the content area says what to do (the app's empty state)
+    out.status.clear();
 
     for (const auto& bm : scanBookmarks_) {
         // Bookmarks into the vault stay invisible while it is locked.

@@ -16,6 +16,7 @@
 #endif
 
 #include "ui/settings_menu.hpp"
+#include "ui/laser_focus.hpp"
 #include "app/playback_memory.hpp"
 #include "app/browser_host.hpp"
 #include "app/chromium_installer.hpp"
@@ -131,6 +132,18 @@ private:
     // Menu nav stick auto-repeat: -1/+1 to step (initial press + hold), else 0.
     int navStep(float axisY, std::chrono::steady_clock::time_point now);
     int navStepX(float axisX, std::chrono::steady_clock::time_point now);
+    // Up / down hold: when the current hold began, and whether the last step was its first one
+    // (the file list wraps at its ends only on a fresh press, and pages through after 1.5 s).
+    std::chrono::steady_clock::time_point navHoldStart_{};
+    bool navLastStepFirst_ = false;
+    bool navHeldLong(std::chrono::steady_clock::time_point now) const {
+        return !navArmed_ && now - navHoldStart_ >= std::chrono::milliseconds(1500);
+    }
+    // Laser or buttons: who moves the highlight in lists right now ("last input wins").
+    LaserFocus laserFocus_;
+    uint64_t laserFocusPageKey_ = 0;  // which page / dialog / folder was up last frame (a new one holds the focus)
+    std::string laserFocusLocation_;
+    void updateLaserFocus(const XrInputState& in);
     void performVaultLock();
     // Closes the current clip and returns the renderer to flat/mono so the hub
     // panel stops behaving as if 180/360 content were still playing.
@@ -180,6 +193,20 @@ private:
     void cancelPick(bool backToSettings = true);
     void confirmPick();
     std::string pickReason() const;  // why the open folder can't take it ("" = it can)
+    // Options (Y) while choosing a folder: Move here / New folder / Stop moving, the confirm row first.
+    void openPickMenu();
+    // The file grid, by buttons: A opens / plays the focused entry; the stick / D-pad moves the focus
+    // (rows keep their column, List view pages with left / right, the ends wrap on a fresh press,
+    // a long hold pages through).
+    void activateBrowserFocus();
+    void moveBrowserFocus(int dx, int dy, std::chrono::steady_clock::time_point now);
+    void openNewFolderKeyboard(const XrInputState& in);
+    bool browserScrollDrag_ = false;  // trigger held after grabbing the file list's scrollbar
+    // The controller button an action is bound to right now ("A", "Trigger", "Bumpers"), from the
+    // live SteamVR bindings; the action's own name when it is not bound to a button we can name.
+    std::string buttonName(InputAction a) const;
+    // Footer hint (button + what it does), the empty / loading message and the position readout.
+    void publishBrowserGuide();
     std::vector<std::string> sidecarPatterns() const;
     // Footer notices in the browser (results, warnings): they outlive the folder rescans that follow.
     std::string hubNotice_;

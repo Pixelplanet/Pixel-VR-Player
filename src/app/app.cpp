@@ -1286,10 +1286,15 @@ int App::navStep(float axisY, std::chrono::steady_clock::time_point now) {
         if (navArmed_) {  // first press: step now, then pause before repeating
             navArmed_ = false;
             navNextRepeat_ = now + 350ms;
+            navHoldStart_ = now;
+            navLastStepFirst_ = true;
+            laserFocus_.hold();  // the buttons move the highlight now, not a resting beam
             return dir;
         }
         if (now >= navNextRepeat_) {  // held down: auto-repeat
             navNextRepeat_ = now + 120ms;
+            navLastStepFirst_ = false;
+            laserFocus_.hold();
             return dir;
         }
         return 0;
@@ -1305,16 +1310,42 @@ int App::navStepX(float axisX, std::chrono::steady_clock::time_point now) {
         if (navArmedX_) {
             navArmedX_ = false;
             navNextRepeatX_ = now + 350ms;
+            laserFocus_.hold();
             return dir;
         }
         if (now >= navNextRepeatX_) {
             navNextRepeatX_ = now + 140ms;
+            laserFocus_.hold();
             return dir;
         }
         return 0;
     }
     if (axisX > -0.20f && axisX < 0.20f) navArmedX_ = true;
     return 0;
+}
+
+void App::updateLaserFocus(const XrInputState& in) {
+    float px = 0.0f, py = 0.0f;
+    const bool onPanel = renderer_.pointerOnPanel(px, py);
+    // A page, dialog or folder that has just come up keeps its own preselection (a delete question
+    // starts on Cancel, a folder on the entry it was left on) until the laser really moves.
+    uint64_t key = (actionMenu_.visible ? 1u : 0u) | (static_cast<uint64_t>(actionMenu_.page & 0xFF) << 1) |
+                   (settings_.isOpen() ? 1u << 9 : 0u) | (downloadsWindow_ ? 1u << 10 : 0u) |
+                   (textEntry_.active ? 1u << 11 : 0u);
+    bool newPlace = false;
+#ifdef PIXELVR_HAVE_FREETYPE
+    key |= browser_.isOpen() ? 1u << 12 : 0u;
+    if (browser_.currentLocation() != laserFocusLocation_) {
+        laserFocusLocation_ = browser_.currentLocation();
+        newPlace = true;
+    }
+#endif
+    if (key != laserFocusPageKey_) {
+        laserFocusPageKey_ = key;
+        newPlace = true;
+    }
+    if (newPlace) laserFocus_.hold();
+    laserFocus_.update(onPanel, px, py, in.select);  // a trigger pull is always the laser's
 }
 
 namespace {
@@ -3723,6 +3754,8 @@ void App::openActionMenu() {
     actionMenu_.page = menupage::Main;
     actionMenu_.selectedOption = 0;
     actionMenu_.options.clear();
+    actionMenu_.dividerBefore = -1;
+    actionMenu_.footer.clear();
     pendingActionPath_ = fe ? fe->path : std::string();  // the row the menu is for (the list may change)
     if (FileOps::instance().relocationPending() && browser_.inVault()) {
         actionMenu_.title = "Vault";
@@ -3738,67 +3771,94 @@ void App::openActionMenu() {
         if (fe && !fe->isBack) {
             actionMenu_.options.push_back("Open Bookmark");
             actionMenu_.options.push_back("Remove Bookmark");
+            actionMenu_.footer = buttonName(InputAction::Back) + ": Close";
+        } else {
+            actionMenu_.options.push_back("Cancel");
         }
-        actionMenu_.options.push_back("Cancel");
         return;
     }
 
+    // B / Y close it (and a click beside it): no Cancel row, a dim line says so instead.
+    actionMenu_.footer = buttonName(InputAction::Back) + ": Close";
     const bool hasFocused = (fe != nullptr && !fe->isBack && fe->path != "smb://__add_share__" &&
                              (!fe->path.empty() || fe->isNetwork));
     if (!hasFocused) {
-        actionMenu_.title = "Folder Actions";
+        // The folder itself: what the header buttons do, reachable by buttons.
+        static const char* const kSortNames[3] = {"Name", "Newest", "Largest"};
+        static const char* const kViewNames[3] = {"Large", "Grid", "List"};
+        actionMenu_.title = "Options";
         actionMenu_.subtitle = browser_.currentPath();
+        if (browser_.canCreateFolder() && !(FileOps::instance().relocationPending() && browser_.inVault())) {
+            actionMenu_.options.push_back("New Folder");
+        }
+        actionMenu_.options.push_back(std::string("Sort: ") + kSortNames[settings_.browserSort() % 3]);
+        actionMenu_.options.push_back(std::string("View: ") + kViewNames[settings_.browserViewMode() % 3]);
+        actionMenu_.dividerBefore = static_cast<int>(actionMenu_.options.size());
         if (browser_.isCurrentBookmarked()) {
             actionMenu_.options.push_back("Remove from Bookmarks");
         } else {
             actionMenu_.options.push_back("Add to Bookmarks");
         }
-        actionMenu_.options.push_back("Cancel");
         return;
     }
 
-    actionMenu_.title = fe->isDir ? "Folder Actions" : "File Actions";
+    // The entry's own rows first, starting with the one A would do (Play / Open), the rarer and
+    // destructive ones after, then a line and the folder's bookmark row (it is not about the entry).
+    actionMenu_.title = "Options";
     actionMenu_.subtitle = fe->label;
 
     const bool isSmbRoot = (browser_.currentPath() == "smb://" || browser_.currentPath().empty());
     const bool isSmbEntry = isRemotePath(fe->path);
+    const bool isPluginFile = !fe->isDir && !isSmbEntry && fe->path.size() > 10 &&
+                              fe->path.compare(fe->path.size() - 10, 10, ".pvrplugin") == 0;
 
+    if (isSmbRoot && isSmbEntry) {
+        actionMenu_.options.push_back("Open Share");
+    } else if (fe->isDir || fe->isNetwork) {
+        actionMenu_.options.push_back("Open");
+    } else if (fe->isVideo) {
+        actionMenu_.options.push_back("Play");
+    } else if (isPluginFile) {
+        actionMenu_.options.push_back("Install Plugin");
+    }
     // Network entries download from here (this used to be the X button, which
     // is Recenter now).
-    if (browser_.onNetwork()) {
+    if (browser_.onNetwork() && !fe->isNetwork) {
         actionMenu_.options.push_back(fe->isDir ? "Download Folder" : "Download");
     }
     if (isSmbRoot && isSmbEntry) {
-        actionMenu_.options.push_back("Open Share");
         actionMenu_.options.push_back("Edit Network Share");
         actionMenu_.options.push_back("Delete Network Share");
+        actionMenu_.dividerBefore = static_cast<int>(actionMenu_.options.size());
         if (browser_.isBookmarked(fe->path)) {
             actionMenu_.options.push_back("Remove from Bookmarks");
         } else {
             actionMenu_.options.push_back("Add to Bookmarks");
         }
     } else {
-        const std::string itemPath = (fe && fe->isDir) ? fe->path : browser_.currentPath();
-        if (browser_.isBookmarked(itemPath)) {
-            actionMenu_.options.push_back("Remove from Bookmarks");
-        } else {
-            actionMenu_.options.push_back(fe->isDir ? "Add to Bookmarks" : "Add Folder to Bookmarks");
-        }
         if (!browser_.onNetwork() && browser_.isFileActionTarget(*fe)) {
-            const VaultManager& vm = VaultManager::instance();
-            if (vm.isUnlocked() && vm.available() && !browser_.inVault() && !vaultcrypto::hasExtension(fe->path)) {
-                actionMenu_.options.push_back("Move to Vault");
-            }
             if (fe && !fe->isDir && fe->isVideo && !VaultManager::isPrivatePath(fe->path)) {  // nothing is stored for vault files
                 actionMenu_.options.push_back("Change 3D / VR Format");
             }
             actionMenu_.options.push_back("Move");
             actionMenu_.options.push_back("Copy");
             actionMenu_.options.push_back("Rename");
+            const VaultManager& vm = VaultManager::instance();
+            if (vm.isUnlocked() && vm.available() && !browser_.inVault() && !vaultcrypto::hasExtension(fe->path)) {
+                actionMenu_.options.push_back("Move to Vault");
+            }
             actionMenu_.options.push_back("Delete");
         }
+        if (!fe->isNetwork) {
+            actionMenu_.dividerBefore = static_cast<int>(actionMenu_.options.size());
+            if (fe->isDir) {  // the folder itself
+                actionMenu_.options.push_back(browser_.isBookmarked(fe->path) ? "Remove from Bookmarks" : "Add to Bookmarks");
+            } else {  // a file: the folder it is in, said so
+                actionMenu_.options.push_back(browser_.isCurrentBookmarked() ? "Remove Folder Bookmark" : "Bookmark This Folder");
+            }
+        }
     }
-    actionMenu_.options.push_back("Cancel");
+    if (actionMenu_.options.empty()) actionMenu_.options.push_back("Cancel");
 #endif
 }
 
@@ -3936,11 +3996,18 @@ void App::startVaultMove(bool lockWhenDone) {
 }
 
 void App::cancelPick(bool backToSettings) {
-    const bool wasDownloadDir = pick_.kind == PickState::Kind::DownloadDir;
+    const PickState::Kind was = pick_.kind;
+    const bool wasDownloadDir = was == PickState::Kind::DownloadDir;
     pick_ = {};
+    // Never silently: the footer (or Settings) says that nothing was moved / changed.
+    if (was == PickState::Kind::Move) showNotice("Move cancelled: nothing was moved", false, false, 3.0);
+    else if (was == PickState::Kind::Copy) showNotice("Copy cancelled: nothing was copied", false, false, 3.0);
+    if (wasDownloadDir) settings_.showStatus("The download folder was not changed.");
     if (wasDownloadDir && backToSettings) {
         settings_.open();
         settings_.setSection(1);
+    } else if (wasDownloadDir) {
+        showNotice("The download folder was not changed", false, false, 3.0);
     }
 }
 
@@ -4010,6 +4077,232 @@ void App::confirmPick() {
     pick_ = {};
     xr_.triggerHaptic(0, 0.050f, 0.0f, 0.7f);
     xr_.triggerHaptic(1, 0.050f, 0.0f, 0.7f);
+#endif
+}
+
+void App::openPickMenu() {
+#ifdef PIXELVR_HAVE_FREETYPE
+    if (!picking()) return;
+    const bool dlDir = pick_.kind == PickState::Kind::DownloadDir;
+    const bool copy = pick_.kind == PickState::Kind::Copy;
+    actionMenu_.visible = true;
+    actionMenu_.page = menupage::Main;
+    actionMenu_.options.clear();
+    actionMenu_.dividerBefore = -1;
+    actionMenu_.footer = buttonName(InputAction::Back) + ": Close";
+    actionMenu_.title = dlDir ? "Download Folder" : (copy ? "Copy" : "Move");
+    pendingActionPath_.clear();
+    // The confirm row first and preselected; when this folder can't take it, the reason is the
+    // subtitle (choosing the row anyway shows it as a notice and the pick goes on).
+    const std::string why = pickReason();
+    const std::string here = FileOps::placeName(browser_.currentLocation());
+    actionMenu_.subtitle = !why.empty() ? why
+                         : dlDir ? "Downloads go to " + here
+                         : std::string(copy ? "Copy " : "Move ") + "\"" + pick_.srcLabel + "\" to " + here;
+    actionMenu_.options.push_back(dlDir ? "Use this folder" : (copy ? "Copy here" : "Move here"));
+    if (browser_.canCreateFolder() && !(FileOps::instance().relocationPending() && browser_.inVault())) {
+        actionMenu_.options.push_back("New Folder");
+    }
+    actionMenu_.options.push_back(dlDir ? "Keep the Old Folder" : (copy ? "Stop Copying" : "Stop Moving"));
+    actionMenu_.selectedOption = 0;
+#endif
+}
+
+void App::activateBrowserFocus() {
+#ifdef PIXELVR_HAVE_FREETYPE
+    const Browser::Entry* row = browser_.focused();
+    const int hand = renderer_.pointerHand() == 0 ? 0 : 1;
+    if (picking() && row && !row->isDir && !row->isBack && !row->isNetwork) {
+        // Choosing a target folder: files don't open (and nothing plays meanwhile).
+        xr_.triggerHaptic(hand, 0.015f, 0.0f, 0.3f);
+        return;
+    }
+    std::string playPath;
+    const Browser::Result res = browser_.activate(playPath);
+    if (res != Browser::Result::None) xr_.triggerHaptic(hand, 0.015f, 0.0f, 0.4f);
+    if (picking() && res != Browser::Result::Navigated) {
+        // only folders while choosing
+    } else if (res == Browser::Result::AddSmbShare) {
+        openSmbModal(true);
+    } else if (res == Browser::Result::Play && !playPath.empty()) {
+        playFromBrowser(playPath);
+    } else if (res == Browser::Result::InstallPlugin) {
+        installPlugin(playPath);
+    }
+#endif
+}
+
+void App::moveBrowserFocus(int dx, int dy, std::chrono::steady_clock::time_point now) {
+#ifdef PIXELVR_HAVE_FREETYPE
+    const int n = static_cast<int>(browser_.entries().size());
+    if (n <= 0) return;
+    const VulkanRenderer::BrowserViewMode mode = renderer_.browserViewMode();
+    const bool list = mode == VulkanRenderer::BrowserViewMode::CompactList;
+    const int cols = (mode == VulkanRenderer::BrowserViewMode::MiniCards) ? 4 : (list ? 1 : 3);
+    const int perPage = (mode == VulkanRenderer::BrowserViewMode::MiniCards) ? 12 : (list ? 8 : 6);
+    const int sel = std::clamp(browser_.selected(), 0, n - 1);
+    const int lastRow = (n - 1) / cols;
+    int target = sel;
+    bool wrapped = false;
+    if (dy != 0) {
+        if (navHeldLong(now)) {
+            target = sel + dy * perPage;  // held for 1.5 s: a page per step, same column
+        } else if (navLastStepFirst_ && dy > 0 && sel / cols == lastRow && lastRow > 0) {
+            target = sel % cols;  // down on the last row (a fresh press): the first row
+            wrapped = true;
+        } else if (navLastStepFirst_ && dy < 0 && sel / cols == 0 && lastRow > 0) {
+            target = std::min(n - 1, lastRow * cols + sel % cols);  // up on the first row: the last row
+            wrapped = true;
+        } else {
+            target = sel + dy * cols;
+        }
+    } else if (list) {
+        target = sel + dx * perPage;  // List view: left / right turn a page (up / down step a row)
+    } else {
+        target = sel + dx;
+    }
+    target = std::clamp(target, 0, n - 1);
+    if (target == sel) return;
+    browser_.setSelected(target);
+    renderer_.setBrowserSelected(target);
+    renderer_.scrollBrowser(0);
+    if (wrapped) xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.012f, 0.0f, 0.35f);  // one tick: back at the other end
+#else
+    (void)dx;
+    (void)dy;
+    (void)now;
+#endif
+}
+
+void App::openNewFolderKeyboard(const XrInputState& in) {
+#ifdef PIXELVR_HAVE_FREETYPE
+    if (FileOps::instance().relocationPending() && browser_.inVault()) {
+        showNotice("The vault is being moved: wait until that is done", true);
+        return;
+    }
+    openKeyboard("New Folder", "", false, in, [this](const std::string& text) {
+        std::string name = text;
+        while (!name.empty() && std::isspace(static_cast<unsigned char>(name.front()))) name.erase(name.begin());
+        while (!name.empty() && std::isspace(static_cast<unsigned char>(name.back()))) name.pop_back();
+        if (!name.empty() && browser_.createFolder(name)) xr_.triggerHaptic(1, 0.040f, 0.0f, 0.6f);
+    });
+#else
+    (void)in;
+#endif
+}
+
+std::string App::buttonName(InputAction a) const {
+    // Prefer the laser hand's button (the one the viewer holds), then the other hand's.
+    const int laserHand = renderer_.laserOn(0) ? 0 : 1;
+    const std::size_t idx = static_cast<std::size_t>(a);
+    std::string found[2];
+    if (idx < labelSources_.size()) {
+        for (const std::string& p : labelSources_[idx]) {
+            int hand = 1;
+            std::string component, detail;
+            if (!parseLabelSource(p, hand, component, detail) || hand < 0 || hand > 1) continue;
+            if (!found[hand].empty()) continue;
+            std::string key = labelComponentKey(component);
+            if (key.empty()) continue;
+            if (key.size() == 1) {
+                key[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(key[0])));  // "a" -> "A"
+            } else {
+                key[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(key[0])));  // "trigger" -> "Trigger"
+                if (key == "Dpad") key = "D-pad";
+                if (detail == "up" || detail == "down" || detail == "left" || detail == "right") {
+                    key += " " + detail;
+                }
+            }
+            found[hand] = key;
+        }
+    }
+    if (!found[laserHand].empty()) return found[laserHand];
+    if (!found[1 - laserHand].empty()) return found[1 - laserHand];
+    switch (a) {  // not bound to a button we can name: say what it is
+        case InputAction::PlayOk: return "OK";
+        case InputAction::Back: return "Back";
+        case InputAction::Options: return "Options";
+        default: return XrContext::actionLabel(a);
+    }
+}
+
+void App::publishBrowserGuide() {
+#ifdef PIXELVR_HAVE_FREETYPE
+    const auto& ents = browser_.entries();
+    const bool loading = browser_.isScanning() ||
+                         (ents.size() == 1 && !ents[0].isBack && ents[0].path.empty() && ents[0].label == "Scanning...");
+    // What the buttons do here, named after the buttons they are bound to.
+    std::vector<VulkanRenderer::BrowserHint> hints;
+    const Browser::Entry* fe = browser_.focused();
+    const std::string ok = buttonName(InputAction::PlayOk);
+    const std::string back = buttonName(InputAction::Back);
+    const std::string opts = buttonName(InputAction::Options);
+    // B goes up a folder; at a location's root it closes the hub (or stops choosing a folder).
+    const bool hasUp = !ents.empty() && ents[0].isBack;
+    if (picking()) {
+        const bool dlDir = pick_.kind == PickState::Kind::DownloadDir;
+        hints.push_back({ok, "Open folder"});
+        hints.push_back({back, hasUp || loading ? "Up" : "Stop"});
+        hints.push_back({opts, dlDir ? "Use this folder..." : (pick_.kind == PickState::Kind::Copy ? "Copy here..." : "Move here...")});
+    } else {
+        std::string a = "Open";
+        if (fe && fe->isBack) a = "Up";
+        else if (fe && !fe->isDir && !fe->isNetwork && fe->isVideo) a = browser_.onNetwork() ? "Stream" : "Play";
+        if (!loading && fe) hints.push_back({ok, a});
+        hints.push_back({back, hasUp || loading ? "Up" : "Close"});
+        hints.push_back({opts, browser_.onNetwork() ? "Options (Download)" : "Options"});
+        const std::string prev = buttonName(InputAction::Previous);
+        const std::string next = buttonName(InputAction::Next);
+        if (prev == next && prev != XrContext::actionLabel(InputAction::Previous)) {
+            hints.push_back({prev + "s", "Tab"});  // both bumpers: "Bumpers"
+        }
+    }
+    renderer_.setBrowserHints(std::move(hints));
+
+    // The middle of the content area: still opening, or nothing there (and what to do).
+    int real = 0;  // entries other than Up
+    bool onlyAddShare = true;
+    for (const Browser::Entry& e : ents) {
+        if (e.isBack) continue;
+        ++real;
+        if (e.path != "smb://__add_share__") onlyAddShare = false;
+    }
+    const std::string& loc = browser_.currentLocation();
+    std::string title, line;
+    if (loading) {
+        title = "Opening folder";
+    } else if (real == 0 && !browser_.status().empty() && browser_.status().rfind("Cannot browse", 0) == 0) {
+        title = "Can't open this folder";
+        line = browser_.status();
+    } else if (real == 0 && loc == "bookmarks://") {
+        title = "No bookmarks yet";
+        line = "Open a folder and choose Bookmark in the header (or " + opts + ": Bookmark This Folder)";
+    } else if (real == 0) {
+        title = "This folder is empty";
+        line = back + ": Up" + (browser_.canCreateFolder() ? std::string("   |   + Folder to create one") : std::string());
+    } else if (onlyAddShare && loc == "smb://") {
+        title = "No network shares yet";
+        line = "Choose + Add Network Share to add one (SMB, SFTP or WebDAV)";
+    }
+    renderer_.setBrowserMessage(title, line, loading);
+
+    // Where the visible cards are: "13-18 of 500" (Up does not count).
+    std::string readout;
+    const int backs = (!ents.empty() && ents[0].isBack) ? 1 : 0;
+    const int items = static_cast<int>(ents.size()) - backs;
+    if (!loading && items > 0) {
+        const VulkanRenderer::BrowserViewMode mode = renderer_.browserViewMode();
+        const int perPage = (mode == VulkanRenderer::BrowserViewMode::MiniCards) ? 12
+                          : (mode == VulkanRenderer::BrowserViewMode::CompactList) ? 8 : 6;
+        const int first = renderer_.browserFirst();
+        const int lo = std::max(1, first + 1 - backs);
+        const int hi = std::min(items, first + perPage - backs);
+        if (hi >= lo) {
+            readout = (lo == hi ? std::to_string(lo) : std::to_string(lo) + "-" + std::to_string(hi)) + " of " +
+                      std::to_string(items);
+        }
+    }
+    renderer_.setBrowserReadout(readout);
 #endif
 }
 
@@ -4097,8 +4390,7 @@ void App::updateBrowserFooter(std::chrono::steady_clock::time_point now) {
             bar.confirmLabel = copy ? "Copy here" : "Move here";
         }
         const std::string why = pickReason();
-        bar.canConfirm = why.empty();
-        bar.hint = "Trigger: Open folder  |  B: Up  |  Y: Cancel";
+        bar.canConfirm = why.empty();  // (the footer's key caps say how to confirm: publishBrowserGuide)
         // Don't treat still standing in the starting folder as an error warning in the footer
         // (clicking the disabled "Move here" pill still shows the refusal notice via confirmPick()).
         if (text.empty() && !why.empty() && why != "Opening the folder..." && why != "It is already in this folder") {
@@ -5584,9 +5876,16 @@ int App::run() {
 
                 std::vector<VulkanRenderer::BrowserItem> items;
                 items.reserve(browser_.entries().size());
+                // The Up card says where it leads ("Up to Videos").
+                std::string upName = "Up";
+                {
+                    const std::vector<Browser::Crumb> crumbs = browser_.crumbs();
+                    if (browser_.currentLocation() == "bookmarks://") upName = "Up to Home";
+                    else if (crumbs.size() >= 2) upName = "Up to " + crumbs[crumbs.size() - 2].label;
+                }
                 for (const auto& e : browser_.entries()) {
                     VulkanRenderer::BrowserItem item;
-                    item.name = e.label;
+                    item.name = e.isBack ? upName : e.label;
                     item.detail = e.detail;
                     item.isDir = e.isDir;
                     item.isVideo = e.isVideo;
@@ -5780,6 +6079,7 @@ int App::run() {
                 // Only real status messages go here; the renderer draws the
                 // controls hint itself on the right of the footer.
                 std::string status = browser_.status();
+                if (status == "Scanning...") status.clear();  // the content area says "Opening folder" itself
                 renderer_.setListColumnVisibility(
                     settings_.listShowFormat(),
                     settings_.listShowRes(),
@@ -5792,6 +6092,7 @@ int App::run() {
                 }
                 renderer_.setBrowserItems(true, browser_.title(), items,
                                          browser_.selected(), status);
+                publishBrowserGuide();  // footer key caps, empty / loading message, "13-18 of 500"
                 if (!browser_.isScanning()) {
                     browser_.setFirst(renderer_.browserFirst());
                 }
@@ -6011,6 +6312,7 @@ int App::run() {
             lastSettingsHov = curSettingsHov;
             lastSettingsPagerHov = curSettingsPagerHov;
             lastCtrlBtnHov = curCtrlBtnHov;
+            updateLaserFocus(in);  // laser or buttons: who moves the highlight in the lists below
 
 #ifdef PIXELVR_HAVE_FREETYPE
             // Unified Spatial Hub left navigation rail clicks (shared across Files, Downloads, Settings)
@@ -6182,11 +6484,17 @@ int App::run() {
                         if (dy != 0) {
                             actionMenu_.selectedOption += dy;
                             const int maxOpt = static_cast<int>(actionMenu_.options.size()) - 1;
+                            if (actionMenu_.page == menupage::Main && maxOpt > 0 && navLastStepFirst_) {
+                                // File Options wraps on a fresh press (up from the first row = Delete is
+                                // two steps away); a held stick stops at the ends.
+                                if (actionMenu_.selectedOption < 0) actionMenu_.selectedOption = maxOpt;
+                                if (actionMenu_.selectedOption > maxOpt) actionMenu_.selectedOption = 0;
+                            }
                             if (actionMenu_.selectedOption < 0) actionMenu_.selectedOption = 0;
                             if (actionMenu_.selectedOption > maxOpt) actionMenu_.selectedOption = maxOpt;
                         }
                         const int hov = renderer_.actionMenuBtnHovered();
-                        if (hov >= 0) actionMenu_.selectedOption = hov;
+                        if (hov >= 0 && laserFocus_.laserOwns()) actionMenu_.selectedOption = hov;
                         if (actionMenu_.page == menupage::Tracks) {  // what the selected row is, in a sentence
                             const int selRow = actionMenu_.selectedOption;
                             actionMenu_.subtitle = (selRow >= 0 && selRow < static_cast<int>(trackRows_.size()))
@@ -6194,7 +6502,8 @@ int App::run() {
                         }
 
                         if (in.select || in.togglePlay) {
-                            int chosen = (hov >= 0) ? hov : actionMenu_.selectedOption;
+                            // The trigger answers with the row under the beam, A with the highlighted row.
+                            int chosen = (hov >= 0 && (in.select || laserFocus_.laserOwns())) ? hov : actionMenu_.selectedOption;
                             if (actionMenu_.page == menupage::Arrange && chosen >= 100) {
                                 // Swap arrow between two screens in the preview.
                                 const int sa = (chosen - 100) / 3;
@@ -6213,7 +6522,56 @@ int App::run() {
                             if (chosen >= 0 && chosen < static_cast<int>(actionMenu_.options.size())) {
                                 const std::string opt = actionMenu_.options[chosen];
                                 if (actionMenu_.page == menupage::Main) {
-                                    if (opt == "Download" || opt == "Download Folder") {
+                                    const bool pickMenu = picking();  // Options while choosing a folder (openPickMenu)
+                                    if (opt == "Play" || opt == "Open" || opt == "Install Plugin") {
+                                        // What A does on the card, for the entry the menu was opened for.
+                                        actionMenu_.visible = false;
+                                        if (!fe || fe->path != pendingActionPath_) {
+                                            showNotice("The folder changed meanwhile: choose it again", true);
+                                        } else {
+                                            laserFocus_.hold();
+                                            activateBrowserFocus();
+                                        }
+                                    } else if (pickMenu && (opt == "Move here" || opt == "Copy here" || opt == "Use this folder")) {
+                                        actionMenu_.visible = false;
+                                        confirmPick();  // (refused: the reason as a notice, the pick goes on)
+                                    } else if (pickMenu && (opt == "Stop Moving" || opt == "Stop Copying" ||
+                                                            opt == "Keep the Old Folder")) {
+                                        actionMenu_.visible = false;
+                                        cancelPick();
+                                    } else if (opt == "New Folder") {
+                                        actionMenu_.visible = false;
+                                        openNewFolderKeyboard(in);
+                                    } else if (opt.rfind("Sort: ", 0) == 0) {
+                                        // Steps through the orders; the menu stays open to show the new one.
+                                        static const char* const kSortNames[3] = {"Name", "Newest", "Largest"};
+                                        settings_.setBrowserSort(settings_.browserSort() + 1);
+                                        browser_.setSortMode(settings_.browserSort());
+                                        renderer_.setBrowserFirst(0);
+                                        actionMenu_.options[static_cast<std::size_t>(chosen)] =
+                                            std::string("Sort: ") + kSortNames[settings_.browserSort() % 3];
+                                        actionMenu_.selectedOption = chosen;
+                                        xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.025f, 0.0f, 0.5f);
+                                    } else if (opt.rfind("View: ", 0) == 0) {
+                                        static const char* const kViewNames[3] = {"Large", "Grid", "List"};
+                                        const int mode = (settings_.browserViewMode() + 1) % 3;
+                                        settings_.setBrowserViewMode(mode);
+                                        settings_.saveConfig();
+                                        renderer_.setBrowserViewMode(static_cast<VulkanRenderer::BrowserViewMode>(mode));
+                                        renderer_.scrollBrowser(0);
+                                        actionMenu_.options[static_cast<std::size_t>(chosen)] = std::string("View: ") + kViewNames[mode];
+                                        actionMenu_.selectedOption = chosen;
+                                        xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.025f, 0.0f, 0.5f);
+                                    } else if (opt == "Bookmark This Folder" || opt == "Remove Folder Bookmark") {
+                                        // A file's menu: the folder it is in (never the file's own name as the label).
+                                        const std::string cur = browser_.currentPath();
+                                        if (opt == "Remove Folder Bookmark") browser_.removeBookmark(cur);
+                                        else browser_.addBookmark(cur);
+                                        renderer_.setBrowserBookmarked(browser_.isBookmarked(cur));
+                                        xr_.triggerHaptic(0, 0.050f, 0.0f, 0.7f);
+                                        xr_.triggerHaptic(1, 0.050f, 0.0f, 0.7f);
+                                        actionMenu_.visible = false;
+                                    } else if (opt == "Download" || opt == "Download Folder") {
                                         actionMenu_.visible = false;
                                         downloadFocusedEntry();
                                     } else if (opt == "Open Share" || opt == "Open Bookmark") {
@@ -6522,14 +6880,15 @@ int App::run() {
                             actionMenu_.selectedOption = (actionMenu_.selectedOption == 0) ? 1 : 0;
                         }
                         const int hov = renderer_.actionMenuBtnHovered();
-                        if (hov >= 0) actionMenu_.selectedOption = hov;
+                        // (A beam resting on "Delete" since the dialog opened does not override Cancel.)
+                        if (hov >= 0 && laserFocus_.laserOwns()) actionMenu_.selectedOption = hov;
                         // The laser's click: on a button = that button; on the dialog beside the buttons =
                         // nothing; outside the dialog = Cancel. (A answers with the highlighted button.)
                         if (in.select && hov < 0 && renderer_.actionMenuInside()) in.select = false;
                         const bool clickedOutside = in.select && hov < 0;  // beside the dialog, or into the room
 
                         if (in.select || in.togglePlay) {
-                            int chosen = (hov >= 0) ? hov : (clickedOutside ? 1 : actionMenu_.selectedOption);
+                            int chosen = (hov >= 0 && in.select) ? hov : (clickedOutside ? 1 : actionMenu_.selectedOption);
                             const Browser::Entry* del = browser_.focused();
                             if (confirmYes_) {
                                 std::function<void()> yes = std::move(confirmYes_);
@@ -6591,10 +6950,10 @@ int App::run() {
                             if (actionMenu_.selectedOption > maxOpt) actionMenu_.selectedOption = maxOpt;
                         }
                         const int hov = renderer_.actionMenuBtnHovered();
-                        if (hov >= 0) actionMenu_.selectedOption = hov;
+                        if (hov >= 0 && laserFocus_.laserOwns()) actionMenu_.selectedOption = hov;
 
                         if (in.select || in.togglePlay) {
-                            int chosen = (hov >= 0) ? hov : actionMenu_.selectedOption;
+                            int chosen = (hov >= 0 && (in.select || laserFocus_.laserOwns())) ? hov : actionMenu_.selectedOption;
                             if (chosen >= 0) {
                                 xr_.triggerHaptic(0, 0.025f, 0.0f, 0.5f);
                                 xr_.triggerHaptic(1, 0.025f, 0.0f, 0.5f);
@@ -6723,20 +7082,35 @@ int App::run() {
                 }
             } else if (actionBtnPressed && browser_.isOpen() && !downloadsWindow_ &&
                        !settings_.isOpen()) {
-                if (picking()) cancelPick();
+                // While choosing a folder Y is still Options: its menu confirms (first row), makes a
+                // folder or stops; nothing is thrown away by Y alone.
+                if (picking()) openPickMenu();
                 else openActionMenu();
                 interacted = true;
             } else if (browser_.isOpen() && !browser_.isScanning() && !downloadsWindow_ &&
                        !settings_.isOpen()) {
-                // 2D grid thumbstick navigation: row steps depend on columns per row
-                const int cols = (renderer_.browserViewMode() == VulkanRenderer::BrowserViewMode::MiniCards) ? 4 :
-                                 (renderer_.browserViewMode() == VulkanRenderer::BrowserViewMode::CompactList) ? 1 : 3;
+                // Stick / D-pad: rows keep their column; see moveBrowserFocus.
                 const int dy = navStep(in.thumbstickY, nowT);
                 const int dx = navStepX(in.thumbstickX, nowT);
-                if (dy != 0 || dx != 0) {
-                    const int delta = dy * cols + dx;
-                    browser_.move(delta);
-                    renderer_.scrollBrowser(0);
+                if (dy != 0 || dx != 0) moveBrowserFocus(dx, dy, nowT);
+
+                // The scrollbar: a click or a drag moves the list (and the focus with it, so it stays on screen).
+                if (in.select && renderer_.browserScrollbarHovered() && sbHover < 0) {
+                    browserScrollDrag_ = true;
+                    in.select = false;
+                    in.togglePlay = false;
+                    xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.015f, 0.0f, 0.4f);
+                }
+                if (browserScrollDrag_ && !in.selectHeld) browserScrollDrag_ = false;
+                if (float frac = 0.0f; browserScrollDrag_ && renderer_.browserScrollbarPointer(frac)) {
+                    const int oldFirst = renderer_.browserFirst();
+                    const int newFirst = renderer_.scrollBrowserTo(frac);
+                    if (newFirst != oldFirst) {
+                        const int n = static_cast<int>(browser_.entries().size());
+                        browser_.setSelected(std::clamp(browser_.selected() - oldFirst + newFirst, 0, std::max(0, n - 1)));
+                        browser_.setFirst(newFirst);
+                    }
+                    interacted = true;
                 }
 
                 // Check header pagination & action buttons
@@ -6747,36 +7121,33 @@ int App::run() {
                     xr_.triggerHaptic(1, 0.025f, 0.0f, 0.5f);
                     interacted = true;
                 } else if ((in.togglePlay || in.select) && pbHover >= 0 && sbHover < 0) {
+                    constexpr int kSortSeg = 10, kViewSeg = 13;  // the header's segment ids (renderer hub layout)
                     if (pbHover == 7) {
                         confirmPick();
                     } else if (pbHover == 8) {
                         cancelPick();
                         xr_.triggerHaptic(1, 0.025f, 0.0f, 0.5f);
-                    } else if (pbHover == 2) {
-                        // Cycle View Mode: BigCards (0) -> MiniCards (1) -> CompactList (2)
-                        int curMode = settings_.browserViewMode();
-                        curMode = (curMode + 1) % 3;
-                        settings_.setBrowserViewMode(curMode);
-                        settings_.saveConfig();
-                        renderer_.setBrowserViewMode(static_cast<VulkanRenderer::BrowserViewMode>(curMode));
-                        renderer_.scrollBrowser(0);
+                    } else if (pbHover >= kViewSeg && pbHover < kViewSeg + 3) {
+                        // View mode: Large (0), Grid (1), List (2), picked directly.
+                        const int mode = pbHover - kViewSeg;
+                        if (mode != settings_.browserViewMode()) {
+                            settings_.setBrowserViewMode(mode);
+                            settings_.saveConfig();
+                            renderer_.setBrowserViewMode(static_cast<VulkanRenderer::BrowserViewMode>(mode));
+                            renderer_.scrollBrowser(0);
+                        }
                         xr_.triggerHaptic(1, 0.025f, 0.0f, 0.5f);
-                    } else if (pbHover == 5) {
-                        // Cycle sort order: Name -> Newest -> Largest
-                        settings_.setBrowserSort(settings_.browserSort() + 1);
-                        browser_.setSortMode(settings_.browserSort());
-                        renderer_.setBrowserFirst(0);
-                        renderer_.scrollBrowser(0);
+                    } else if (pbHover >= kSortSeg && pbHover < kSortSeg + 3) {
+                        // Sort order: Name, Newest, Largest, picked directly.
+                        if (pbHover - kSortSeg != settings_.browserSort()) {
+                            settings_.setBrowserSort(pbHover - kSortSeg);
+                            browser_.setSortMode(settings_.browserSort());
+                            renderer_.setBrowserFirst(0);
+                            renderer_.scrollBrowser(0);
+                        }
                         xr_.triggerHaptic(1, 0.025f, 0.0f, 0.5f);
-                    } else if (pbHover == 6 && FileOps::instance().relocationPending() && browser_.inVault()) {
-                        showNotice("The vault is being moved: wait until that is done", true);
                     } else if (pbHover == 6) {
-                        openKeyboard("New Folder", "", false, in, [this](const std::string& text) {
-                            std::string name = text;
-                            while (!name.empty() && std::isspace(static_cast<unsigned char>(name.front()))) name.erase(name.begin());
-                            while (!name.empty() && std::isspace(static_cast<unsigned char>(name.back()))) name.pop_back();
-                            if (!name.empty() && browser_.createFolder(name)) xr_.triggerHaptic(1, 0.040f, 0.0f, 0.6f);
-                        });
+                        openNewFolderKeyboard(in);
                     } else if (pbHover == 3) {
                         const std::string cur = browser_.currentPath();
                         if (cur != "bookmarks://") {
@@ -6792,46 +7163,22 @@ int App::run() {
                         }
                     }
                     interacted = true;
-                } else if (sbHover < 0) {
-                    const bool stickActive = (std::fabs(in.thumbstickY) > 0.25f || std::fabs(in.thumbstickX) > 0.25f);
+                } else if (sbHover < 0 && !browserScrollDrag_) {
+                    // One focus, last input wins: the card under the laser takes it only while the laser
+                    // owns it (it moved, or the trigger was pulled); a stick / D-pad step keeps it.
                     const int hovered = renderer_.browserHovered();
-                    if (!stickActive && hovered >= 0) {
+                    if (hovered >= 0 && laserFocus_.laserOwns()) {
                         renderer_.setBrowserSelected(hovered);
                         browser_.setSelected(hovered);
                     }
-                    // Open the highlighted entry.
-                    const Browser::Entry* pickRow = browser_.focused();
-                    const bool pickBlocks = picking() && pickRow && !pickRow->isDir && !pickRow->isBack && !pickRow->isNetwork;
-                    if ((in.togglePlay || in.select) && pickBlocks && renderer_.pointerButton() < 0 &&
-                        (hovered >= 0 || stickActive)) {
-                        // Choosing a target folder: files don't open (and nothing plays meanwhile).
-                        xr_.triggerHaptic(1, 0.015f, 0.0f, 0.3f);
-                    } else if ((in.togglePlay || in.select) &&
-                        renderer_.pointerButton() < 0 && hovered >= 0) {
-                        std::string playPath;
-                        Browser::Result res = browser_.activate(playPath);
-                        if (picking() && res != Browser::Result::Navigated) {
-                            // only folders while choosing
-                        } else if (res == Browser::Result::AddSmbShare) {
-                            openSmbModal(true);
-                        } else if (res == Browser::Result::Play && !playPath.empty()) {
-                            playFromBrowser(playPath);
-                        } else if (res == Browser::Result::InstallPlugin) {
-                            installPlugin(playPath);
-                        }
-                    } else if ((in.togglePlay || in.select) &&
-                               renderer_.pointerButton() < 0 && stickActive) {
-                        std::string playPath;
-                        Browser::Result res = browser_.activate(playPath);
-                        if (picking() && res != Browser::Result::Navigated) {
-                            // only folders while choosing
-                        } else if (res == Browser::Result::AddSmbShare) {
-                            openSmbModal(true);
-                        } else if (res == Browser::Result::Play && !playPath.empty()) {
-                            playFromBrowser(playPath);
-                        } else if (res == Browser::Result::InstallPlugin) {
-                            installPlugin(playPath);
-                        }
+                    // The trigger opens the card under the beam; A the focused card, wherever the beam is
+                    // (not on a header button, the path or the rail: those took the press above).
+                    const bool byTrigger = in.select && hovered >= 0 && renderer_.pointerButton() < 0;
+                    const bool byA = in.togglePlay && renderer_.pointerButton() < 0;
+                    if (byTrigger || byA) {
+                        if (byA) laserFocus_.hold();  // a folder opened by A keeps the focus it is left with
+                        activateBrowserFocus();
+                        interacted = true;
                     }
                 }
             }
@@ -6864,7 +7211,7 @@ int App::run() {
                     in.select = in.togglePlay = false;
                 }
                 const int hovered = renderer_.settingsHovered();
-                if (hovered >= 0) {
+                if (hovered >= 0 && laserFocus_.laserOwns()) {  // (a resting beam does not undo a D-pad step)
                     renderer_.setSettingsSelected(hovered);
                     settings_.setSelected(hovered);
                 }
