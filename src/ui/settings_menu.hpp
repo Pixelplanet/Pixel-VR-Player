@@ -24,7 +24,7 @@ public:
         EnterDownloadFolder,  // opens the Download Folder page (one option per line, like the track lists)
         PickDownloadPreset,   // a preset on that page (data = index)
         MoveVault,            // Vault location: move the vault to / from the SD card (App, after a 2nd click)
-        // Shortcuts (UI & Appearance > Shortcuts): a list of name + address entries, each
+        // Shortcuts (Files & Web > Shortcuts): a list of name + address entries, each
         // editable; row.data carries the shortcut index.
         OpenShortcut,
         AddShortcut,
@@ -105,6 +105,7 @@ public:
         InstallRepoPlugin,  // from the plugin repository; the app downloads repoEntryToInstall()
         OpenStore,          // the Install plugins page
         OpenStorePlugin,    // one repository plugin's details
+        BackToFilesWeb,     // from Download Folder / List View Columns / Shortcuts
     };
 
     // How a row's value is presented: the renderer draws a stepped slider for
@@ -113,7 +114,8 @@ public:
     // option for small unordered choices (Segmented).
     // Shortcut: a line of the shortcut list (stepIdx = on the rail; steps = 1 while Delete waits
     // for its confirming second press; data = the shortcut index).
-    enum class Kind { Choice, Toggle, Action, Binding, Color, Option, Segmented, Shortcut, PluginLine, Paragraph, Button };
+    // ReadOnly: a line of a table (the Buttons pages): name and value, no control, nothing to press.
+    enum class Kind { Choice, Toggle, Action, Binding, Color, Option, Segmented, Shortcut, PluginLine, Paragraph, Button, ReadOnly };
 
     struct Row {
         std::string label;
@@ -124,7 +126,9 @@ public:
         Kind kind = Kind::Action;
         int steps = 0;        // Choice/Color/Segmented: number of options
         int stepIdx = 0;      // Choice/Color/Segmented: active option; Toggle/Option: 1 = on
-        std::vector<std::string> options;  // Segmented: short label per option
+        std::vector<std::string> options;  // Segmented: short label per option; Choice: each step's name
+        std::string reason;  // a disabled row: why it is off (shown instead of its value)
+        std::string note;    // shown on the status line while the row is selected
     };
 
     SettingsMenu();
@@ -157,6 +161,43 @@ public:
     // For a Segmented row: activates it until option `segment` is chosen (so
     // the app sees the same action as a normal click) and returns that action.
     Action activateSegment(int segment);
+
+    // Settings with the controller's buttons alone (stick / D-pad, A, B). The code is at the end of
+    // settings_menu.cpp.
+    // Files & Web: download folder, list view columns, shortcuts, private browsing.
+    static constexpr int kFilesWebSection = 5;
+    // The section list on the rail: Display, UI, Files & Web, Playback & Tracks, Controls, Plugins,
+    // Vault (only while it is unlocked).
+    int railSectionCount() const;
+    int railPosOf(int section) const;  // the rail entry a page belongs to (a sub-page: its section's)
+    int railPos() const { return railPosOf(section_); }
+    void openRailSection(int pos);     // a click on a rail entry, or A on the marked one
+    // The focus is on the section list (Up from the first row): Up / Down mark a section, A or Right
+    // opens it. -1 while the focus is on the page.
+    bool railFocus() const { return railFocus_; }
+    int railFocusPos() const { return railFocus_ ? railFocusPos_ : -1; }
+    // Up / Down: the rows in reading order (list pages: the lines that can act); up from the first
+    // one onto the section list.
+    void navUpDown(int d);
+    // Left / Right: one step down / up on a slider, pills or a switch (no wrap: `changed` stays false
+    // at an end), the next button of a dialog, a page of a paged list; Left elsewhere moves onto the
+    // section list. Returns the row's action when its value changed (the app applies it like a click).
+    Action navLeftRight(int d, bool& changed);
+    bool pressRail();  // A while the focus is on the section list: opens the marked section
+    // A (or a click on a card outside its slider's steps): like activate(), but a slider steps up and
+    // stops at the top instead of jumping back to the first step.
+    Action press();
+    // The laser moved onto a row (another one than before): the focus leaves the section list.
+    void notePointer(int hovered);
+    // Colour picker with buttons: a focus over its controls (the zones of the renderer's picker:
+    // 0..4 suggested colours, 5 square, 6 hue strip, 7 Reset, 8 Back). A on the square or the strip
+    // grabs its marker: the stick then moves it until A or B lets go.
+    int pickerFocus() const { return colorPickerTarget() >= 0 && !railFocus_ ? pickFocus_ : -1; }
+    int pickerGrab() const { return pickGrab_; }
+    void pickerNav(int dx, int dy);
+    bool pickerPress(int zone);       // true: the page was left (Back)
+    void pickerNudge(float x, float y);  // stick deflection (-1..1) while a marker is grabbed
+    bool pickerRelease();             // lets go of a grabbed marker (saved); false if none was
 
     // Settings values
     int projectionMode() const { return projectionMode_; } // 0=Flat, 1=360, 2=180
@@ -230,7 +271,7 @@ public:
     int shortcutIdx() const { return shortcutIdx_; }  // the one on the edit page
     void setShortcutName(int idx, const std::string& name);
     void setShortcutUrl(int idx, const std::string& url);  // normalised (scheme added, Jellyfin /web trimmed)
-    void openShortcutsPage(const std::string& hint);  // UI & Appearance > Shortcuts
+    void openShortcutsPage(const std::string& hint);  // Files & Web > Shortcuts
     // The shortcut list's line controls (the app routes clicks on them here).
     static constexpr int kMaxShortcuts = 10;  // what the list page has room for
     void shortcutToggle(int idx);
@@ -389,7 +430,7 @@ public:
     const std::string& pluginPackageToInstall() const { return pluginPackageToInstall_; }
     int heatStyle() const { return 1; }  // always the line graph
     // The Plugins page header button ("Install plugins"); "" = none.
-    std::string headerButton() const { return section_ == kPluginsSection && repo_ ? "Install plugins" : std::string(); }
+    std::string headerButton() const { return section_ == kPluginsSection && repo_ ? "Install Plugins" : std::string(); }
     void openPluginStore();               // the header button
     void openPluginUpdate(int pluginIdx);  // the green update icon on a plugin line
     void showStatus(const std::string& s) { status_ = s; }
@@ -429,7 +470,7 @@ private:
     int editingPluginSetting_ = -1;
     bool open_ = false;
     std::string title_ = "Settings > Display & Cinema";
-    std::string status_ = "Point + Trigger: Change Setting  |  B: Close";
+    std::string status_ = "Up / Down: Select  |  Left / Right or A: Change  |  B: Close";  // = kDefaultStatus
     std::vector<Row> rows_;
     int selected_ = 0;
 
@@ -477,6 +518,14 @@ private:
     float pickH_ = 0.0f, pickS_ = 0.0f, pickV_ = 1.0f;  // the picker's markers
     bool pickAdjusted_ = false;
     bool pickDirty_ = false;  // changed by a drag, not saved yet
+    int pickFocus_ = 0;       // the picker control with the button focus
+    int pickGrab_ = -1;       // the square / hue strip the stick moves (-1 none)
+    std::chrono::steady_clock::time_point pickNudgeAt_{};
+    bool railFocus_ = false;  // the focus is on the section list
+    int railFocusPos_ = 0;
+    int lastPointerRow_ = -1;
+    void enterRail();
+    void fixListSelection();  // list pages: the selection on a line that can act
     void pickerLoad();        // markers from the current colour (on opening the page)
     void pickerApply();       // the colour from the markers
     int uiDistanceIdx_ = 1;    // 0=Near (1.5m), 1=Comfort (1.9m), 2=Mid (2.3m), 3=Far (2.8m)
@@ -516,7 +565,7 @@ private:
     int screenSizeIdx_ = 0;
     int glowReachIdx_ = 3;     // 0=Close, 1=Short, 2=Medium, 3=Wide (default, the look before the setting)
 
-    int section_ = 0;   // 0=Display, 1=UI, 2=Audio, 3=Controls, 4=Vault; 8, 9, 10..12, 21, 22, 23..=sub-pages; 15/16=plugins
+    int section_ = 0;   // 0=Display, 1=UI, 2=Playback & Tracks, 3=Controls, 4=Vault, 5=Files & Web; 8, 9, 10..12, 13, 17, 21, 22, 23..=sub-pages; 15/16=plugins
     std::vector<std::pair<int, std::string>> videoStreams_;  // (index, label)
     std::vector<std::pair<int, std::string>> audioStreams_;
     int videoSel_ = 0;      // position within videoStreams_

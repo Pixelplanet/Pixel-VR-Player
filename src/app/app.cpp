@@ -1853,6 +1853,62 @@ void App::updateColorPicker(XrInputState& in) {
     }
 }
 
+// Settings with the controller's buttons alone. Up / Down: the rows in reading order and, up from
+// the first one, the section list on the rail; Left / Right: the selected value one step down / up
+// (or a page, or onto the section list); A on the section list opens the marked section. The colour
+// picker has its own focus: A on a suggested colour picks it, A on the square / strip lets the stick
+// move its marker until A or B lets go.
+bool App::settingsButtons(XrInputState& in, std::chrono::steady_clock::time_point nowT, SettingsMenu::Action& act) {
+    act = SettingsMenu::Action::None;
+    const int pH = renderer_.pointerHand();
+    const int hand = (pH >= 0 && pH <= 1) ? pH : 1;
+    auto tick = [&] {  // a step of the focus or the value: the laser's hover tick
+        if (settings_.hoverHapticsEnabled()) xr_.triggerHaptic(hand, 0.008f, 0.0f, settings_.hoverHapticsStrength());
+    };
+    if (settings_.colorPickerTarget() >= 0 && !settings_.railFocus()) {
+        if (settings_.pickerGrab() >= 0) {
+            settings_.pickerNudge(in.thumbstickX, in.thumbstickY);
+            if (in.togglePlay) {
+                settings_.pickerRelease();
+                xr_.triggerHaptic(hand, 0.02f, 0.0f, 0.4f);
+                in.togglePlay = false;
+            }
+            return false;
+        }
+        const int dy = navStep(in.thumbstickY, nowT);
+        const int dx = navStepX(in.thumbstickX, nowT);
+        if (dx != 0 || dy != 0) {
+            settings_.pickerNav(dx, dy);
+            tick();
+        }
+        // A: the control under the laser, else the one with the focus (the header path takes its own).
+        if (in.togglePlay && colorDragZone_ < 0 && renderer_.settingsCrumbHovered() < 0) {
+            const int z = renderer_.colorPickerZone() >= 0 ? renderer_.colorPickerZone() : settings_.pickerFocus();
+            if (z >= 0) {
+                settings_.pickerPress(z);
+                xr_.triggerHaptic(hand, 0.02f, 0.0f, 0.4f);
+            }
+            in.togglePlay = false;
+        }
+        return false;
+    }
+    if (const int d = navStep(in.thumbstickY, nowT)) {
+        settings_.navUpDown(d);
+        tick();
+    }
+    bool changed = false;
+    if (const int dx = navStepX(in.thumbstickX, nowT)) {
+        act = settings_.navLeftRight(dx, changed);
+        tick();
+    }
+    if (in.togglePlay && settings_.railFocus()) {
+        settings_.pressRail();
+        xr_.triggerHaptic(hand, 0.02f, 0.0f, 0.4f);
+        in.togglePlay = false;
+    }
+    return changed;
+}
+
 void App::dismissHud(const XrInputState& in, std::chrono::steady_clock::time_point nowT) {
     hudDismissed_ = true;
     hudDismissTime_ = nowT;
@@ -4005,7 +4061,7 @@ void App::cancelPick(bool backToSettings) {
     if (wasDownloadDir) settings_.showStatus("The download folder was not changed.");
     if (wasDownloadDir && backToSettings) {
         settings_.open();
-        settings_.setSection(1);
+        settings_.setSection(SettingsMenu::kFilesWebSection);  // where the Download Folder row is
     } else if (wasDownloadDir) {
         showNotice("The download folder was not changed", false, false, 3.0);
     }
@@ -4063,7 +4119,7 @@ void App::confirmPick() {
         showNotice("Downloads go to " + FileOps::placeName(loc) + " now");
         pick_ = {};
         settings_.open();
-        settings_.setSection(1);
+        settings_.setSection(SettingsMenu::kFilesWebSection);  // where the Download Folder row is
         xr_.triggerHaptic(1, 0.040f, 0.0f, 0.7f);
         return;
     }
@@ -6153,12 +6209,16 @@ int App::run() {
                     v.stepIdx = r.stepIdx;
                     v.enabled = r.enabled;
                     v.options = r.options;
+                    if (!r.enabled) v.reason = r.reason;
                     sRows.push_back(std::move(v));
                 }
                 renderer_.setSettingsSection(settings_.section());
                 renderer_.setSettingsCompact(settings_.compactPage());
+                // Where the button focus is: on the page's selected row, or on the section list.
+                renderer_.setSettingsFocus(settings_.railPos(), settings_.railFocusPos(), settings_.pickerFocus());
                 renderer_.setColorPicker(settings_.colorPickerTarget(), settings_.pickerHue(), settings_.pickerSat(),
-                                         settings_.pickerVal(), settings_.pickerAdjusted(), colorDragZone_);
+                                         settings_.pickerVal(), settings_.pickerAdjusted(),
+                                         colorDragZone_ >= 0 ? colorDragZone_ : settings_.pickerGrab());
                 renderer_.setSettingsHeaderButton(settings_.headerButton());
                 renderer_.setSettingsCrumbTargets(settings_.crumbTargets());
                 renderer_.setSettings(true, settings_.title(), sRows,
@@ -6368,16 +6428,11 @@ int App::run() {
                     if (picking()) cancelPick(false);
                     downloadsWindow_ = false;
                     settings_.open();
-                } else if (sbHover >= 3 && sbHover <= 8) {
-                    const int sub = sbHover - 3;
+                } else if ((sbHover >= 3 && sbHover <= 8) || sbHover == VulkanRenderer::kSettingsRail7HoverId) {
+                    // (Settings has seven entries with the vault unlocked: the 7th has its own id.)
+                    const int sub = sbHover == VulkanRenderer::kSettingsRail7HoverId ? 6 : sbHover - 3;
                     if (settings_.isOpen()) {
-                        if (sub <= 3) {
-                            settings_.setSection(sub);
-                        } else if (sub == 4) {
-                            settings_.openPluginsPage();
-                        } else if (sub == 5 && VaultManager::instance().isUnlocked()) {
-                            settings_.setSection(4);
-                        }
+                        settings_.openRailSection(sub);  // Display, UI, Files & Web, Playback & Tracks, ...
                     } else if (downloadsWindow_) {
                         if (sub <= 2) renderer_.setDownloadsFilter(sub);
                     } else if (browser_.isOpen()) {
@@ -7190,13 +7245,9 @@ int App::run() {
 
             if (settings_.isOpen() && !actionMenu_.visible) updateColorPicker(in);  // (also with the laser on the rail: a drag goes on)
             if (settings_.isOpen() && sbHover < 0 && !actionMenu_.visible) {  // (a dialog over it takes the input)
-                if (const int d = navStep(in.thumbstickY, nowT)) {
-                    settings_.move(d * (settings_.compactPage() ? 1 : 2));  // list pages have one column
-                }
-                if (const int dx = navStepX(in.thumbstickX, nowT)) {
-                    // The Buttons pages are read-only: left / right turns the page.
-                    if (!settings_.turnButtonsPage(dx, true)) settings_.move(dx);
-                }
+                // Stick / D-pad: rows, values, the section list (the Buttons pages: left / right turns the page).
+                SettingsMenu::Action stepAct = SettingsMenu::Action::None;
+                const bool stepped = settingsButtons(in, nowT, stepAct);
                 // Header pager (< n / m >) on the Buttons pages.
                 if (const int pg = renderer_.settingsPagerHovered(); pg >= 0 && (in.select || in.togglePlay)) {
                     if (settings_.turnButtonsPage(pg == 0 ? -1 : 1, true)) {
@@ -7211,6 +7262,7 @@ int App::run() {
                     in.select = in.togglePlay = false;
                 }
                 const int hovered = renderer_.settingsHovered();
+                settings_.notePointer(hovered);
                 if (hovered >= 0 && laserFocus_.laserOwns()) {  // (a resting beam does not undo a D-pad step)
                     renderer_.setSettingsSelected(hovered);
                     settings_.setSelected(hovered);
@@ -7268,14 +7320,31 @@ int App::run() {
                     in.select = in.togglePlay = false;
                 }
                 // Trigger activates the selection made by the laser or the stick;
-                // Play / OK activates the selected row, pointed at or not.
-                // (List pages show no stick selection: there only the row under the laser acts, so a
-                // stray stick flick + Play can never start "Move vault" or "Install".)
+                // Play / OK activates the selected row, pointed at or not; Left / Right changed a value
+                // (stepped): applied the same way.
                 const bool listPage = settings_.compactPage();
-                if (((in.select && (hovered >= 0 || std::fabs(in.thumbstickY) > 0.25f)) || in.togglePlay) &&
-                    (!listPage || hovered >= 0)) {
-                    const int seg = (hovered >= 0) ? renderer_.settingsSegmentHovered() : -1;
-                    auto act = (seg >= 0) ? settings_.activateSegment(seg) : settings_.activate();
+                // List pages draw the button selection too: A acts on it. A shortcut or plugin line opens
+                // its page, like a click on its name. (A dialog page starts on its Back button, so a
+                // quick second press never starts "Move vault" or "Install".)
+                bool listA = false;
+                if (listPage && in.togglePlay && hovered < 0 && !settings_.railFocus()) {
+                    const int s = settings_.selected();
+                    const bool pluginLine = s >= 0 && s < static_cast<int>(setRows.size()) &&
+                                            setRows[static_cast<size_t>(s)].kind == SettingsMenu::Kind::PluginLine;
+                    if (shortcutRowAt(s) || pluginLine) {
+                        const int idx = setRows[static_cast<size_t>(s)].data;
+                        if (pluginLine) settings_.pluginEdit(idx);
+                        else settings_.shortcutEdit(idx);
+                        xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.02f, 0.0f, 0.4f);
+                        in.togglePlay = false;
+                    } else {
+                        listA = true;
+                    }
+                }
+                if (stepped || (((in.select && (hovered >= 0 || std::fabs(in.thumbstickY) > 0.25f)) || in.togglePlay) &&
+                                (!listPage || hovered >= 0 || listA))) {
+                    const int seg = (!stepped && hovered >= 0) ? renderer_.settingsSegmentHovered() : -1;
+                    auto act = stepped ? stepAct : (seg >= 0) ? settings_.activateSegment(seg) : settings_.press();
                         if (act == SettingsMenu::Action::PickDownloadFolder) {
                             startDownloadDirPick();
                         } else if (act == SettingsMenu::Action::StartVaultMoveLock) {
