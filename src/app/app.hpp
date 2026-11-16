@@ -100,8 +100,9 @@ private:
     // Folder download waiting for its answer in the shared confirm dialog (action menu page 2).
     bool confirmFolderDl_ = false;
     // The shared two-button dialog with any question: `onYes` runs when the first button is chosen.
+    // Asked from another dialog, its Cancel (and B) goes back to that dialog.
     void askConfirm(const std::string& title, const std::string& text, const std::string& yesLabel,
-                    std::function<void()> onYes);
+                    std::function<void()> onYes, const std::string& noLabel = "Cancel");
     std::function<void()> confirmYes_;
     void askShortcutDelete(int idx);  // Settings > Shortcuts: asks, then deletes
     void askPluginDelete(int idx);    // Settings > Plugins: asks, then removes the plugin
@@ -241,6 +242,10 @@ private:
         bool reveal = false;  // password shown in clear ("Show" on the keyboard)
         bool shift = false;
         bool symbols = false;
+        bool capsLock = false;            // Shift pressed twice: stays on until pressed again
+        std::string enterLabel = "Done";  // the key that finishes: "Done", "Rename", "Next", "Enter" (web)
+        int peekStart = -1;               // password: the character just typed, shown in clear
+        int peekLen = 0;
     } textEntry_;
     void commitKeyboard();
     void cancelKeyboard();
@@ -262,6 +267,46 @@ private:
                       const XrInputState& in,
                       std::function<void(const std::string&)> onDone,
                       std::function<void()> onCancel = nullptr);
+
+    // --- Dialogs with buttons alone: one step back, the share form, the keyboard's key focus ---
+    // A dialog page opened from another one (Format / Delete from File Actions, a question from the
+    // share form): B, Cancel, the X and a click beside it go back to that page.
+    struct MenuParent {
+        VulkanRenderer::ActionMenuData data;
+        int childPage = -1;      // the page it was left for
+        std::string actionPath;  // pendingActionPath_ of that page
+    };
+    std::vector<MenuParent> menuStack_;
+    void pushMenuParent(int childPage);   // before actionMenu_ turns into childPage
+    bool restoreMenuParent(int childPage);  // back to the page childPage was opened from; false = none
+    bool menuBack();      // B / Y / the X / a click outside: one step back (a root page closes)
+    void cancelConfirm(); // the two-button question's Cancel, wherever it was asked
+    // Share form: Cancel / B / X; with anything changed it asks first ("Discard Changes?").
+    void closeShareEditor(bool ask);
+    bool smbModalChanged() const;
+    SmbModalState smbModalOpened_{};  // the form as it opened
+    void openSmbField(int id, bool chain);  // the keyboard for field `id`; chain: Enter goes on to the next
+    int smbChainNext(int id) const;         // the next field of the chain after `id`, -1 = none
+    bool smbChain_ = false;                 // the open keyboard's Enter means "Next"
+    float smbNavX_ = 0.0f;                  // share form: the column the stick keeps while going up / down
+    void navigateShareEditor(int dx, int dy, bool fresh);
+    void navigatePicker(int dx, int dy, bool fresh);
+    void navigateArrange(int dx, int dy);
+    void stepListSelection(int dy, bool fresh);  // list pages: wraps on a fresh press, stops while held
+    int pickerLastTile_ = -1;   // "Play on which screen?": the tile Up returns to from Cancel
+    int arrangeColumnSel_ = 0;  // Arrange: the preset / toggle Left returns to
+    bool navLastFresh_ = false; // the last navStep / navStepX step was a fresh press (not the repeat)
+    // In-app keyboard with buttons: the stick / D-pad move a key focus, A types it, X deletes,
+    // Y finishes. The laser takes the focus over once it moves onto another key.
+    int kbFocus_ = -1;
+    bool kbNavOwns_ = false;
+    int kbNavHoverKey_ = -1;    // the key under the laser when the stick last moved the focus
+    bool kbRevealSession_ = false;  // "Show" on a password stays chosen for this session (not web fields)
+    std::chrono::steady_clock::time_point kbPeekUntil_{};
+    static int keyboardKeyWithCode(int code);
+    // Notices as a pill on the panel, whatever page shows (fades in and out).
+    std::chrono::steady_clock::time_point hubNoticeSince_{};
+    void updateNoticeToast(std::chrono::steady_clock::time_point now);
 
 #ifdef PIXELVR_HAVE_FREETYPE
     Browser browser_;

@@ -1286,10 +1286,12 @@ int App::navStep(float axisY, std::chrono::steady_clock::time_point now) {
         if (navArmed_) {  // first press: step now, then pause before repeating
             navArmed_ = false;
             navNextRepeat_ = now + 350ms;
+            navLastFresh_ = true;
             return dir;
         }
         if (now >= navNextRepeat_) {  // held down: auto-repeat
             navNextRepeat_ = now + 120ms;
+            navLastFresh_ = false;
             return dir;
         }
         return 0;
@@ -1305,10 +1307,12 @@ int App::navStepX(float axisX, std::chrono::steady_clock::time_point now) {
         if (navArmedX_) {
             navArmedX_ = false;
             navNextRepeatX_ = now + 350ms;
+            navLastFresh_ = true;
             return dir;
         }
         if (now >= navNextRepeatX_) {
             navNextRepeatX_ = now + 140ms;
+            navLastFresh_ = false;
             return dir;
         }
         return 0;
@@ -2001,7 +2005,7 @@ void App::openTracksMenu() {
                               on ? std::string("Video track: this one is playing.")
                                  : std::string("Video track. The video reloads at the same position.")});
     }
-    actionMenu_.options.push_back("Cancel");
+    actionMenu_.options.push_back("Close");
     actionMenu_.optionKinds.push_back(0);
     xr_.triggerHaptic(0, 0.020f, 0.0f, 0.4f);
     xr_.triggerHaptic(1, 0.020f, 0.0f, 0.4f);
@@ -2030,8 +2034,12 @@ void App::openFormatMenu() {
     formatMenuPath_.clear();  // from the dock: the playing screen
     actionMenu_.visible = true;
     actionMenu_.page = menupage::Format;
-    actionMenu_.title = "Playback Format";
-    actionMenu_.subtitle = "Select 3D / VR Projection";
+    // One name for this menu wherever it opens from; the subtitle names the file.
+    actionMenu_.title = "3D / VR Format";
+    actionMenu_.subtitle = (cur().web || cur().path.empty() || cur().path.find("://") != std::string::npos ||
+                            VaultManager::isPrivatePath(cur().path))
+                               ? std::string()
+                               : std::filesystem::path(cur().path).filename().string();
     actionMenu_.options.clear();
     // "short|full": the menu shows the short name and, beside it, what it stands for.
     actionMenu_.options.push_back("2D|Flat, standard video");
@@ -2045,7 +2053,7 @@ void App::openFormatMenu() {
         actionMenu_.options.push_back("VR360 3D|360° top-bottom 3D");
         actionMenu_.options.push_back("VR360 SBS|360° side-by-side 3D");
     }
-    actionMenu_.options.push_back("Cancel");
+    actionMenu_.options.push_back("Close");
     actionMenu_.selectedOption = 0;
     xr_.triggerHaptic(0, 0.020f, 0.0f, 0.4f);
     xr_.triggerHaptic(1, 0.020f, 0.0f, 0.4f);
@@ -2160,14 +2168,15 @@ void App::updateButtonLabels(std::chrono::steady_clock::time_point nowT, bool la
     st.context = textEntry_.active ? ButtonLabelState::Context::Keyboard
                                    : (menus ? ButtonLabelState::Context::Menus : ButtonLabelState::Context::Watching);
     st.dialog = actionMenu_.visible || smbModal_.active;
-    // Only the two-button delete confirm takes left / right; the other dialogs
-    // step up / down only.
-    st.dialogLeftRight = actionMenu_.visible && actionMenu_.page == menupage::Confirm;
+    // Left / Right in the dialogs whose choices sit side by side; the plain lists step up / down only.
+    st.dialogLeftRight = actionMenu_.visible &&
+                         (actionMenu_.page == menupage::Confirm || actionMenu_.page == menupage::ScreenPicker ||
+                          actionMenu_.page == menupage::Arrange || actionMenu_.page == menupage::ShareEditor);
 #ifdef PIXELVR_HAVE_FREETYPE
     // Options opens File Actions on the Files tab and closes an open action
     // menu; it does nothing in Settings, Downloads or the download confirm.
     st.optionsWork = !settings_.isOpen() && !downloadsWindow_ &&
-                     (actionMenu_.visible || browser_.isOpen());
+                     (actionMenu_.visible ? actionMenu_.page != menupage::ShareEditor : browser_.isOpen());
     st.recenterWorks = browser_.isOpen() || downloadsWindow_ || settings_.isOpen();
     // Downloads (laser only) reads neither stick nor D-pad.
     st.noStick = downloadsWindow_ && !settings_.isOpen() && !actionMenu_.visible;
@@ -2187,7 +2196,9 @@ void App::updateButtonLabels(std::chrono::steady_clock::time_point nowT, bool la
 }
 
 void App::openSmbModal(bool isNew, const std::string& smbPath) {
-    actionMenu_.subtitle.clear();  // no stale error from a previous edit
+    actionMenu_.subtitle.clear();
+    actionMenu_.error.clear();  // no stale error from a previous edit
+    actionMenu_.errorField = -1;
     smbDeleteArmedUntil_ = {};
     confirmEditorDelete_ = false;
 #ifdef PIXELVR_HAVE_FREETYPE
@@ -2256,7 +2267,11 @@ void App::openSmbModal(bool isNew, const std::string& smbPath) {
 
     actionMenu_.visible = true;
     actionMenu_.page = menupage::ShareEditor;
-    actionMenu_.selectedOption = 0;
+    // A new share starts at its type (top of the form), an existing one at the server.
+    actionMenu_.selectedOption = isNew ? 10 : 0;
+    smbNavX_ = 0.0f;
+    smbChain_ = false;
+    smbModalOpened_ = smbModal_;  // to tell later whether anything was changed
     updateSmbModalMenu();
 #endif
 }
@@ -2265,9 +2280,7 @@ void App::updateSmbModalMenu() {
     smbDeleteArmedUntil_ = {};  // any other change in the editor disarms "press Delete again"
 #ifdef PIXELVR_HAVE_FREETYPE
     actionMenu_.title = smbModal_.isNew ? "Add Network Share" : "Edit Network Share";
-    if (actionMenu_.subtitle.rfind("Error", 0) != 0 || !smbModal_.host.empty()) {
-        actionMenu_.subtitle = "Point at a field and pull the trigger to type  \xB7  B: back";
-    }
+    actionMenu_.subtitle = "A: Edit field  \xB7  B: Close  \xB7  Stick or laser: choose a field";
     actionMenu_.options.clear();
     actionMenu_.editingRow = -1;
     actionMenu_.cursorPos = 0;
@@ -2323,12 +2336,16 @@ void App::saveSmbModal() {
         smbModal_.host.pop_back();
     }
     if (smbModal_.host.empty()) {
-        actionMenu_.subtitle = "Error: Server IP or Hostname is required!";
+        actionMenu_.error = "Enter a server address first";
+        actionMenu_.errorField = 0;
+        actionMenu_.selectedOption = 0;  // A types it right away
         return;
     }
     const int port = smbModal_.protocol == "smb" ? 0 : std::atoi(smbModal_.port.c_str());
     if (port < 0 || port > 65535) {
-        actionMenu_.subtitle = "Error: the port must be between 1 and 65535";
+        actionMenu_.error = "The port must be between 1 and 65535";
+        actionMenu_.errorField = 5;
+        actionMenu_.selectedOption = 5;
         return;
     }
     if (!smbModal_.isNew && (smbModal_.host != smbModal_.origHost || smbModal_.share != smbModal_.origShare ||
@@ -2406,11 +2423,20 @@ void App::openKeyboard(const std::string& prompt,
     textEntry_.text = initialText;
     textEntry_.cursor = initialText.size();
     textEntry_.password = isPassword;
+    // "Show" chosen on a password of the player's own forms stays on for this session.
+    textEntry_.reveal = isPassword && kbRevealSession_;
+    // Buttons alone: the focus starts on the key that finishes for a filled-in text, else on "g".
+    kbFocus_ = VulkanRenderer::keyboardKeyStart(!initialText.empty());
+    kbNavOwns_ = false;
+    kbNavHoverKey_ = -1;
+    smbChain_ = false;
 }
 
 void App::openWebKeyboard(int slot, const BrowserHost::FocusEvent* field, const XrInputState& in) {
     openKeyboard("Typing on the page", field ? field->value : std::string(), field && field->password, in, nullptr);
     if (field) textEntry_.cursor = utf16ToByteOffset(field->value, field->cursor);
+    textEntry_.reveal = false;          // a page's password is never shown by a remembered choice
+    textEntry_.enterLabel = "Enter";    // sent to the page; the keyboard stays open
     kbWebSlot_ = slot;
 }
 
@@ -2434,7 +2460,7 @@ void App::commitKeyboard() {
     kbOnDone_ = nullptr;
     kbOnCancel_ = nullptr;
     if (cb) cb(text);
-    if (smbModal_.active) {
+    if (smbModal_.active && !textEntry_.active) {  // (the share form may have opened its next field)
         smbModal_.editingField = SmbModalState::Field::None;
         updateSmbModalMenu();
     }
@@ -2480,6 +2506,7 @@ void App::pressKeyboardKey(int key) {
     std::size_t& c = textEntry_.cursor;
     if (c > t.size()) c = t.size();
     const int code = VulkanRenderer::keyboardKeyCode(key);
+    textEntry_.peekStart = -1;  // any key ends the look at the last password character
     if (kbWebSlot_ >= 0) {
         // Typing into a page: every key goes to it at once; our field mirrors
         // it (corrected by the page's own value right after).
@@ -2500,8 +2527,14 @@ void App::pressKeyboardKey(int key) {
             const std::string ch = VulkanRenderer::keyboardKeyText(key, textEntry_.shift, textEntry_.symbols);
             if (!ch.empty() && t.size() < kMaxChars) {
                 t.insert(c, ch);
+                if (textEntry_.password) {
+                    // The character just typed shows in clear for a second (a laser slip is seen at once).
+                    textEntry_.peekStart = static_cast<int>(c);
+                    textEntry_.peekLen = static_cast<int>(ch.size());
+                    kbPeekUntil_ = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+                }
                 c += ch.size();
-                if (!textEntry_.symbols) textEntry_.shift = false;  // one-shot shift
+                if (!textEntry_.symbols && !textEntry_.capsLock) textEntry_.shift = false;  // one-shot shift
             }
             break;
         }
@@ -2513,12 +2546,29 @@ void App::pressKeyboardKey(int key) {
             c = p;
             break;
         }
-        case 2: textEntry_.shift = !textEntry_.shift; break;
+        case 2:  // Shift: once = the next letter, twice = caps lock, a third time = off
+            if (!textEntry_.shift) {
+                textEntry_.shift = true;
+                textEntry_.capsLock = false;
+            } else if (!textEntry_.capsLock) {
+                textEntry_.capsLock = true;
+            } else {
+                textEntry_.shift = false;
+                textEntry_.capsLock = false;
+            }
+            break;
         case 3: textEntry_.symbols = !textEntry_.symbols; break;
         case 5: moveTextCursor(-1); break;
         case 6: moveTextCursor(1); break;
-        case 7: commitKeyboard(); break;
-        case 8: cancelKeyboard(); break;
+        case 7: commitKeyboard(); break;  // in the share form's chain: on to the next field
+        case 8:
+            smbChain_ = false;
+            cancelKeyboard();
+            break;
+        case 9:  // "Done" pill: finish here, back to the share form
+            smbChain_ = false;
+            commitKeyboard();
+            break;
         default: break;
     }
 }
@@ -3373,7 +3423,9 @@ void App::computeArrangement(const Arrangement& a,
 }
 
 void App::askConfirm(const std::string& title, const std::string& text, const std::string& yesLabel,
-                     std::function<void()> onYes) {
+                     std::function<void()> onYes, const std::string& noLabel) {
+    if (actionMenu_.visible) pushMenuParent(menupage::Confirm);  // Cancel / B go back to that dialog
+    else menuStack_.clear();
     confirmYes_ = std::move(onYes);
     confirmFolderDl_ = false;
     confirmShareDelete_ = false;
@@ -3384,7 +3436,7 @@ void App::askConfirm(const std::string& title, const std::string& text, const st
     actionMenu_.subtitle = text;
     actionMenu_.options.clear();
     actionMenu_.options.push_back(yesLabel);
-    actionMenu_.options.push_back("Cancel");
+    actionMenu_.options.push_back(noLabel);
     actionMenu_.selectedOption = 1;  // a stray press cancels
 }
 
@@ -3392,7 +3444,7 @@ void App::askPluginDelete(int idx) {
     const auto& plist = plugins_.plugins();
     if (idx < 0 || idx >= static_cast<int>(plist.size())) return;
     const std::string id = plist[static_cast<size_t>(idx)].id;
-    askConfirm("Delete Plugin?", "Delete the plugin \"" + plist[static_cast<size_t>(idx)].name + "\" from the player?",
+    askConfirm("Delete Plugin?", "\"" + plist[static_cast<size_t>(idx)].name + "\" is removed from the player.",
                "Yes, Delete", [this, id] {
                    const auto& now = plugins_.plugins();  // (the list may have changed meanwhile)
                    for (size_t k = 0; k < now.size(); ++k) {
@@ -3410,10 +3462,419 @@ void App::askShortcutDelete(int idx) {
     const auto& list = settings_.shortcuts();
     if (idx < 0 || idx >= static_cast<int>(list.size())) return;
     const std::string name = list[static_cast<size_t>(idx)].name;
-    askConfirm("Delete Shortcut?", "Delete the shortcut \"" + name + "\"?", "Yes, Delete", [this, idx, name] {
+    askConfirm("Delete Shortcut?", "\"" + name + "\" will be removed from the hub.", "Yes, Delete", [this, idx, name] {
         const auto& now = settings_.shortcuts();  // still the same one?
         if (idx < static_cast<int>(now.size()) && now[static_cast<size_t>(idx)].name == name) settings_.shortcutDelete(idx);
     });
+}
+
+// ---------------------------------------------------------------------------
+// Dialogs with buttons alone: one step back, the share form, the panel toast.
+// ---------------------------------------------------------------------------
+void App::pushMenuParent(int childPage) {
+    if (!actionMenu_.visible) return;
+    if (menuStack_.size() >= 4) menuStack_.erase(menuStack_.begin());  // (never this deep)
+    menuStack_.push_back({actionMenu_, childPage, pendingActionPath_});
+}
+
+bool App::restoreMenuParent(int childPage) {
+    if (menuStack_.empty() || menuStack_.back().childPage != childPage) return false;
+    MenuParent parent = std::move(menuStack_.back());
+    menuStack_.pop_back();
+    actionMenu_ = std::move(parent.data);  // with the row that was highlighted
+    actionMenu_.visible = true;
+    pendingActionPath_ = parent.actionPath;
+#ifdef PIXELVR_HAVE_FREETYPE
+    if (actionMenu_.page == menupage::ShareEditor) updateSmbModalMenu();  // its fields as they are now
+#endif
+    return true;
+}
+
+bool App::menuBack() {
+    if (!actionMenu_.visible) return false;
+    if (actionMenu_.page == menupage::ShareEditor) {
+        closeShareEditor(true);
+        return true;
+    }
+    if (actionMenu_.page == menupage::Confirm) {
+        cancelConfirm();
+        return true;
+    }
+    if (actionMenu_.page == menupage::Chromium) {
+        // As its last row: a running install goes on in the background.
+        if (chromiumInstaller_.state() != ChromiumInstaller::State::Running) {
+            chromiumInstaller_.reset();
+            installWebSlot_ = -1;
+        }
+        actionMenu_.visible = false;
+        return true;
+    }
+    if (!restoreMenuParent(actionMenu_.page)) actionMenu_.visible = false;  // a root page closes
+    return true;
+}
+
+void App::cancelConfirm() {
+    confirmYes_ = nullptr;
+    confirmFolderDl_ = false;
+    confirmShareDelete_ = false;
+    if (confirmEditorDelete_) {
+        // Back to the share form as it was.
+        confirmEditorDelete_ = false;
+        actionMenu_.page = menupage::ShareEditor;
+        actionMenu_.subtitle.clear();
+        updateSmbModalMenu();
+        actionMenu_.selectedOption = 9;
+        return;
+    }
+    if (!restoreMenuParent(menupage::Confirm)) actionMenu_.visible = false;
+}
+
+bool App::smbModalChanged() const {
+    const SmbModalState& a = smbModal_;
+    const SmbModalState& b = smbModalOpened_;
+    return a.protocol != b.protocol || a.port != b.port || a.host != b.host || a.share != b.share ||
+           a.anon != b.anon || a.user != b.user || a.pass != b.pass || a.workgroup != b.workgroup ||
+           a.label != b.label;
+}
+
+void App::closeShareEditor(bool ask) {
+    if (ask && smbModal_.active && smbModalChanged()) {
+        // Never throw away typed fields (a password among them) without a question. Keep Editing is
+        // the default answer.
+        askConfirm("Discard Changes?", "What was typed into this form is lost.", "Discard",
+                   [this] { closeShareEditor(false); }, "Keep Editing");
+        return;
+    }
+    smbModal_.active = false;
+    smbModal_.editingField = SmbModalState::Field::None;
+    smbChain_ = false;
+    if (textEntry_.active) cancelKeyboard();
+    if (!restoreMenuParent(menupage::ShareEditor)) actionMenu_.visible = false;  // back to File Actions, if from there
+}
+
+namespace {
+// The share form's text fields in the order Enter walks them: server, share / folder, username,
+// password (not for guest access), nickname. Workgroup / port keep their defaults mostly.
+std::vector<int> smbChainOrder(bool anon) {
+    std::vector<int> order = {0, 1};
+    if (!anon) {
+        order.push_back(3);
+        order.push_back(4);
+    }
+    order.push_back(6);
+    return order;
+}
+}  // namespace
+
+int App::smbChainNext(int id) const {
+    const std::vector<int> order = smbChainOrder(smbModal_.anon);
+    const auto it = std::find(order.begin(), order.end(), id);
+    if (it == order.end() || it + 1 == order.end()) return -1;
+    return *(it + 1);
+}
+
+void App::openSmbField(int id, bool chain) {
+#ifdef PIXELVR_HAVE_FREETYPE
+    using F = SmbModalState::Field;
+    const bool smb = smbModal_.protocol == "smb";
+    F field = F::None;
+    std::string label;  // the field's label on the form, with a note what empty means
+    std::string value;
+    bool isPass = false;
+    switch (id) {
+        case 0: field = F::Host; label = "Server / host"; value = smbModal_.host; break;
+        case 1:
+            field = F::Share;
+            label = smb ? "Share (empty = all shares)" : "Folder (empty = start folder)";
+            value = smbModal_.share;
+            break;
+        case 3: field = F::User; label = "Username"; value = smbModal_.user; break;
+        case 4: field = F::Pass; label = "Password"; value = smbModal_.pass; isPass = true; break;
+        case 5:
+            if (smb) {
+                field = F::Workgroup;
+                label = "Workgroup / domain";
+                value = smbModal_.workgroup;
+            } else {
+                field = F::Port;
+                label = "Port (empty = default)";
+                value = smbModal_.port;
+            }
+            break;
+        case 6: field = F::Label; label = "Nickname"; value = smbModal_.label; break;
+        default: return;
+    }
+    const std::vector<int> order = smbChainOrder(smbModal_.anon);
+    const auto at = std::find(order.begin(), order.end(), id);
+    const bool inChain = chain && at != order.end();
+    std::string prompt = label;
+    if (inChain) {
+        prompt += "  (" + std::to_string(at - order.begin() + 1) + " of " + std::to_string(order.size()) + ")";
+    }
+    smbModal_.editingField = field;
+    actionMenu_.selectedOption = id;
+    openKeyboard(
+        prompt, value, isPass, XrInputState{},
+        [this, field, id](const std::string& text) {
+            if (!smbModal_.active) return;
+            if (field == SmbModalState::Field::Host) {
+                std::string h = text;
+                if (const std::size_t sch = h.find("://"); sch != std::string::npos) h = h.substr(sch + 3);
+                while (!h.empty() && (std::isspace(static_cast<unsigned char>(h.front())) || h.front() == '/' || h.front() == '\\')) h.erase(h.begin());
+                while (!h.empty() && (std::isspace(static_cast<unsigned char>(h.back())) || h.back() == '/' || h.back() == '\\')) h.pop_back();
+                if (smbModal_.protocol != "smb") {  // "host:port"
+                    const std::size_t colon = h.rfind(':');
+                    if (colon != std::string::npos && h.find(':') == colon && colon + 1 < h.size() &&
+                        h.find_first_not_of("0123456789", colon + 1) == std::string::npos) {
+                        smbModal_.port = h.substr(colon + 1);
+                        h = h.substr(0, colon);
+                    }
+                }
+                smbModal_.host = h;
+            } else if (field == SmbModalState::Field::Port) {
+                std::string d;
+                for (char c : text) {
+                    if (c >= '0' && c <= '9') d += c;
+                }
+                smbModal_.port = d;
+            } else if (field == SmbModalState::Field::Share) {
+                std::string s = text;
+                while (!s.empty() && (s.front() == '/' || s.front() == '\\')) s.erase(s.begin());
+                while (!s.empty() && (s.back() == '/' || s.back() == '\\')) s.pop_back();
+                smbModal_.share = s;
+            } else if (field == SmbModalState::Field::User) {
+                smbModal_.user = text;
+            } else if (field == SmbModalState::Field::Pass) {
+                smbModal_.pass = text;
+            } else if (field == SmbModalState::Field::Workgroup) {
+                smbModal_.workgroup = text.empty() ? "WORKGROUP" : text;
+            } else if (field == SmbModalState::Field::Label) {
+                smbModal_.label = text;
+            }
+            smbModal_.editingField = SmbModalState::Field::None;
+            if (actionMenu_.errorField == id) {  // fixed: the complaint goes
+                actionMenu_.error.clear();
+                actionMenu_.errorField = -1;
+            }
+            updateSmbModalMenu();
+            if (smbChain_) {  // Enter = Next: straight on to the next field
+                smbChain_ = false;
+                const int next = smbChainNext(id);
+                if (next >= 0) openSmbField(next, true);
+            }
+        },
+        [this]() {
+            smbChain_ = false;
+            if (smbModal_.active) {
+                smbModal_.editingField = SmbModalState::Field::None;
+                updateSmbModalMenu();
+            }
+        });
+    smbChain_ = inChain && smbChainNext(id) >= 0;
+    textEntry_.enterLabel = smbChain_ ? "Next" : "Done";
+#else
+    (void)id;
+    (void)chain;
+#endif
+}
+
+void App::navigateShareEditor(int dx, int dy, bool fresh) {
+#ifdef PIXELVR_HAVE_FREETYPE
+    // The form as drawn, row by row (option ids and their column, see the renderer's
+    // hub::smbFieldWell / smbButton): Type, Server, Share | Nickname, Sign in, Username | Password,
+    // Workgroup or Port, then the footer Delete | Save | Cancel. Fields that are off are skipped.
+    struct Item {
+        int id;
+        float x;
+    };
+    std::vector<std::vector<Item>> rows = {{{10, 0.0f}}, {{0, 0.0f}}, {{1, -0.28f}, {6, 0.28f}}, {{2, 0.0f}}};
+    if (!smbModal_.anon) rows.push_back({{3, -0.28f}, {4, 0.28f}});
+    rows.push_back({{5, -0.28f}});
+    std::vector<Item> footer;
+    if (!smbModal_.isNew) footer.push_back({9, -0.455f});
+    footer.push_back({7, 0.255f});
+    footer.push_back({8, 0.465f});
+    rows.push_back(footer);
+    int r = -1, c = -1;
+    for (std::size_t i = 0; i < rows.size() && r < 0; ++i) {
+        for (std::size_t k = 0; k < rows[i].size(); ++k) {
+            if (rows[i][k].id == actionMenu_.selectedOption) {
+                r = static_cast<int>(i);
+                c = static_cast<int>(k);
+            }
+        }
+    }
+    const int hand = renderer_.pointerHand() == 0 ? 0 : 1;
+    if (r < 0) {  // nothing (or a field that is off) highlighted: start at the server
+        actionMenu_.selectedOption = 0;
+        return;
+    }
+    if (dx != 0) {
+        const int id = rows[static_cast<std::size_t>(r)][static_cast<std::size_t>(c)].id;
+        if (id == 10) {  // Type: Left / Right pick the protocol
+            static const char* const kProtocols[4] = {"smb", "sftp", "dav", "davs"};
+            int cur = 0;
+            for (int k = 0; k < 4; ++k) {
+                if (smbModal_.protocol == kProtocols[k]) cur = k;
+            }
+            const int next = std::clamp(cur + dx, 0, 3);
+            if (next != cur) {
+                smbModal_.protocol = kProtocols[next];
+                smbModal_.port.clear();
+                updateSmbModalMenu();
+                xr_.triggerHaptic(hand, 0.010f, 0.0f, 0.35f);
+            }
+        } else if (id == 2) {  // Sign in: Left = guest, Right = username & password
+            const bool anon = dx < 0;
+            if (anon != smbModal_.anon) {
+                smbModal_.anon = anon;
+                updateSmbModalMenu();
+                xr_.triggerHaptic(hand, 0.010f, 0.0f, 0.35f);
+            }
+        } else {
+            const std::vector<Item>& row = rows[static_cast<std::size_t>(r)];
+            const int nc = std::clamp(c + dx, 0, static_cast<int>(row.size()) - 1);
+            actionMenu_.selectedOption = row[static_cast<std::size_t>(nc)].id;
+            smbNavX_ = row[static_cast<std::size_t>(nc)].x;
+        }
+        return;
+    }
+    if (dy != 0) {
+        const int n = static_cast<int>(rows.size());
+        int nr = r + dy;
+        if (nr < 0) nr = fresh ? n - 1 : 0;  // round to the other end on a fresh press only
+        if (nr >= n) nr = fresh ? 0 : n - 1;
+        if (nr == r) return;
+        const std::vector<Item>& row = rows[static_cast<std::size_t>(nr)];
+        std::size_t best = 0;
+        float bestD = 1e9f;
+        for (std::size_t k = 0; k < row.size(); ++k) {  // the column kept while going up / down
+            const float d = std::fabs(row[k].x - smbNavX_);
+            if (d < bestD) {
+                bestD = d;
+                best = k;
+            }
+        }
+        actionMenu_.selectedOption = row[best].id;
+        if (row.size() > 1) smbNavX_ = row[best].x;
+    }
+#else
+    (void)dx;
+    (void)dy;
+    (void)fresh;
+#endif
+}
+
+void App::stepListSelection(int dy, bool fresh) {
+    const int maxOpt = static_cast<int>(actionMenu_.options.size()) - 1;
+    if (maxOpt < 0) return;
+    int sel = actionMenu_.selectedOption + dy;
+    // Past the end: round to the other end on a fresh press; a held stick stops there.
+    if (sel < 0) sel = fresh ? maxOpt : 0;
+    if (sel > maxOpt) sel = fresh ? 0 : maxOpt;
+    actionMenu_.selectedOption = sel;
+}
+
+void App::navigatePicker(int dx, int dy, bool fresh) {
+    // "Play on which screen?": the tiles left to right as drawn, Cancel (option 3) below them.
+    constexpr int kCancel = VulkanRenderer::kMaxVideoSlots;
+    const std::vector<int> tiles = renderer_.pickerChoicesLeftToRight();
+    int& sel = actionMenu_.selectedOption;
+    if (sel == kCancel) {
+        if (dy < 0 && !tiles.empty()) {  // Up: back to the tile it came from
+            sel = (std::find(tiles.begin(), tiles.end(), pickerLastTile_) != tiles.end()) ? pickerLastTile_
+                                                                                         : tiles.back();
+        }
+        return;
+    }
+    if (dy > 0) {
+        pickerLastTile_ = sel;
+        sel = kCancel;
+        return;
+    }
+    if (dx != 0 && !tiles.empty()) {
+        const int n = static_cast<int>(tiles.size());
+        const auto it = std::find(tiles.begin(), tiles.end(), sel);
+        int pos = (it == tiles.end()) ? (dx > 0 ? -1 : n) : static_cast<int>(it - tiles.begin());
+        pos += dx;
+        if (pos < 0) pos = fresh ? n - 1 : 0;
+        if (pos >= n) pos = fresh ? 0 : n - 1;
+        sel = tiles[static_cast<std::size_t>(pos)];
+    }
+}
+
+void App::navigateArrange(int dx, int dy) {
+    // Arrange Screens: the left column (layouts, then Snap edges and Style), the swap arrows in the
+    // preview, then Apply and Cancel at the bottom right. Up / Down walk the column, Left / Right go
+    // across; A on an arrow swaps those two screens.
+    const int presets = std::max(0, static_cast<int>(actionMenu_.options.size()) - 4);
+    const int colLast = presets + 1;  // Style
+    const int apply = presets + 2;
+    const int cancel = presets + 3;
+    std::vector<int> arrows;
+    for (int k = 0; k < renderer_.arrangeSwapCount(); ++k) arrows.push_back(renderer_.arrangeSwapId(k));
+    int& sel = actionMenu_.selectedOption;
+    const auto arrowAt = std::find(arrows.begin(), arrows.end(), sel);
+    if (sel >= 100 && arrowAt == arrows.end()) {  // an arrow that is gone (the layout changed)
+        sel = arrows.empty() ? apply : arrows.front();
+        return;
+    }
+    if (sel < 0) {
+        sel = 0;
+        return;
+    }
+    if (sel <= colLast) {
+        if (dy != 0) {
+            const int m = colLast + 1;
+            sel = ((sel + dy) % m + m) % m;
+        }
+        if (dx > 0) {
+            arrangeColumnSel_ = sel;
+            sel = arrows.empty() ? apply : arrows.front();
+        }
+        return;
+    }
+    if (arrowAt != arrows.end()) {
+        const int k = static_cast<int>(arrowAt - arrows.begin()) + (dx != 0 ? dx : dy);
+        if (k < 0) {
+            sel = dx < 0 ? std::min(arrangeColumnSel_, colLast) : arrows.front();
+        } else if (k >= static_cast<int>(arrows.size())) {
+            sel = apply;
+        } else {
+            sel = arrows[static_cast<std::size_t>(k)];
+        }
+        return;
+    }
+    if (dx > 0 && sel == apply) {
+        sel = cancel;
+    } else if (dx < 0 && sel == cancel) {
+        sel = apply;
+    } else if (dx < 0 || dy < 0) {
+        sel = arrows.empty() ? std::min(arrangeColumnSel_, colLast) : arrows.back();
+    }
+}
+
+int App::keyboardKeyWithCode(int code) {
+    for (int k = 0;; ++k) {
+        const int c = VulkanRenderer::keyboardKeyCode(k);
+        if (c < 0) return -1;
+        if (c == code) return k;
+    }
+}
+
+void App::updateNoticeToast(std::chrono::steady_clock::time_point now) {
+    if (!hubNotice_.empty() &&
+        (now >= hubNoticeUntil_ || (hubNoticePrivate_ && !VaultManager::instance().isUnlocked()))) {
+        hubNotice_.clear();
+    }
+    if (hubNotice_.empty()) {
+        renderer_.setPanelToast(std::string(), false, 0.0f);
+        return;
+    }
+    // A short fade in and out.
+    const float shown = std::chrono::duration<float>(now - hubNoticeSince_).count();
+    const float left = std::chrono::duration<float>(hubNoticeUntil_ - now).count();
+    renderer_.setPanelToast(hubNotice_, hubNoticeWarn_, std::clamp(std::min(shown, left) / 0.2f, 0.0f, 1.0f));
 }
 
 void App::applyScreenSize(bool resetDistance) {
@@ -3790,7 +4251,7 @@ void App::openActionMenu() {
                 actionMenu_.options.push_back("Move to Vault");
             }
             if (fe && !fe->isDir && fe->isVideo && !VaultManager::isPrivatePath(fe->path)) {  // nothing is stored for vault files
-                actionMenu_.options.push_back("Change 3D / VR Format");
+                actionMenu_.options.push_back("3D / VR Format");  // the same name as the menu it opens
             }
             actionMenu_.options.push_back("Move");
             actionMenu_.options.push_back("Copy");
@@ -3814,6 +4275,10 @@ bool pathIsUnder(const std::string& p, const std::string& dir) {
 }  // namespace
 
 void App::showNotice(const std::string& text, bool warn, bool priv, double seconds) {
+    if (text != hubNotice_) {  // a new message (the same one again keeps its toast as it is)
+        hubNoticeSince_ = std::chrono::steady_clock::now();
+        if (warn) xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.030f, 0.0f, 0.5f);
+    }
     hubNotice_ = text;
     hubNoticeWarn_ = warn;
     hubNoticePrivate_ = priv;
@@ -4072,10 +4537,9 @@ void App::updateBrowserFooter(std::chrono::steady_clock::time_point now) {
     if (!hubNotice_.empty()) {
         if (now >= hubNoticeUntil_ || (hubNoticePrivate_ && !VaultManager::instance().isUnlocked())) {
             hubNotice_.clear();
-        } else {
-            text = hubNotice_;
-            warn = hubNoticeWarn_;
         }
+        // (A notice is shown as the panel's toast, see updateNoticeToast; the footer keeps the
+        // standing status.)
     }
     if (picking()) {
         bar.active = true;
@@ -4425,33 +4889,60 @@ int App::run() {
             if (comboGate || recordingCombo) in.clearButtons();
 
             // In-app keyboard (text entry). It owns all controller input while open:
-            // trigger / Play / OK press the key under the laser, stick left/right
-            // moves the cursor, Back / Main Menu cancel.
+            // the trigger presses the key under the laser; the stick / D-pad move a key focus
+            // that A types; X deletes, Y finishes; the arrow keys and pointing into the text move
+            // the cursor; Back / Main Menu cancel.
             const bool kbOpen = textEntry_.active;
             if (kbOpen) {
                 if (in.back || in.mainMenu) {
+                    smbChain_ = false;
                     cancelKeyboard();
                 } else {
                     using namespace std::chrono_literals;
                     const int hand = renderer_.pointerHand() == 0 ? 0 : 1;
-                    // Thumbstick left/right: step, then accelerate while held.
-                    const int stickDir = (in.thumbstickX > 0.45f) ? 1 : (in.thumbstickX < -0.45f ? -1 : 0);
-                    if (stickDir == 0) {
-                        kbRepeat_.stickDir = 0;
-                    } else if (stickDir != kbRepeat_.stickDir) {
-                        kbRepeat_.stickDir = stickDir;
-                        kbRepeat_.start = nowT;
-                        kbRepeat_.next = nowT + 380ms;
-                        moveTextCursor(stickDir);
-                    } else if (nowT >= kbRepeat_.next) {
-                        kbRepeat_.next = nowT + repeatInterval(nowT - kbRepeat_.start);
-                        moveTextCursor(stickDir);
+                    {
+                        // Stick and D-pad: the key focus, key by key (a first step, then repeat while held).
+                        float sx = in.thumbstickX;
+                        float sy = in.thumbstickY;
+                        if (in.dpadUpHeld) sy = 1.0f;
+                        else if (in.dpadDownHeld) sy = -1.0f;
+                        if (in.dpadRightHeld) sx = 1.0f;
+                        else if (in.dpadLeftHeld) sx = -1.0f;
+                        const int fdy = navStep(sy, nowT);
+                        const int fdx = navStepX(sx, nowT);
+                        if (fdx != 0 || fdy != 0) {
+                            kbFocus_ = VulkanRenderer::keyboardKeyNeighbour(kbFocus_, fdx, fdy);
+                            kbNavOwns_ = true;
+                            kbNavHoverKey_ = renderer_.keyboardKeyHovered();
+                            xr_.triggerHaptic(hand, 0.006f, 0.0f, 0.25f);
+                        }
                     }
 
                     const int key = renderer_.keyboardKeyHovered();
-                    const bool pressed = in.select || in.togglePlay;
+                    // The laser takes the focus over once it is on another key than when the stick moved
+                    // it (a beam resting on the sheet does not undo the stick's steps).
+                    if (key >= 0 && (!kbNavOwns_ || key != kbNavHoverKey_)) {
+                        kbNavOwns_ = false;
+                        const int kc = VulkanRenderer::keyboardKeyCode(key);
+                        if (kc != 8 && kc != 9) kbFocus_ = key;  // (not the prompt-line pills)
+                    }
+                    if (in.togglePlay && kbFocus_ >= 0) {
+                        // A types the key with the focus rim, wherever the laser is.
+                        xr_.triggerHaptic(hand, 0.015f, 0.0f, 0.45f);
+                        pressKeyboardKey(kbFocus_);
+                    } else if (in.recenter) {
+                        xr_.triggerHaptic(hand, 0.015f, 0.0f, 0.45f);
+                        pressKeyboardKey(keyboardKeyWithCode(1));  // X: delete the character before the cursor
+                    } else if (in.options) {
+                        xr_.triggerHaptic(hand, 0.015f, 0.0f, 0.45f);
+                        smbChain_ = false;  // Y: done (in the share form: back to the form, not the next field)
+                        pressKeyboardKey(keyboardKeyWithCode(7));
+                    }
+
+                    const bool pressed = in.select && textEntry_.active;
                     if (pressed && textEntry_.password && renderer_.keyboardRevealHovered()) {
                         textEntry_.reveal = !textEntry_.reveal;
+                        if (kbWebSlot_ < 0) kbRevealSession_ = textEntry_.reveal;  // kept for the session
                         xr_.triggerHaptic(hand, 0.015f, 0.0f, 0.45f);
                     } else if (pressed && key >= 0) {
                         xr_.triggerHaptic(hand, 0.015f, 0.0f, 0.45f);
@@ -4510,6 +5001,9 @@ int App::run() {
                                        static_cast<int>(textEntry_.cursor));
             renderer_.setKeyboardModes(textEntry_.shift, textEntry_.symbols);
             renderer_.setKeyboardReveal(textEntry_.password, textEntry_.password && textEntry_.reveal);
+            if (textEntry_.peekStart >= 0 && nowT >= kbPeekUntil_) textEntry_.peekStart = -1;
+            renderer_.setKeyboardExtras(textEntry_.active ? kbFocus_ : -1, textEntry_.enterLabel, textEntry_.capsLock,
+                                        textEntry_.active && smbChain_, textEntry_.peekStart, textEntry_.peekLen);
 
             // Multi-screen grab: while the trigger is held on an unlocked screen it
             // follows the laser (grab point stays under it) and turns to face the
@@ -5136,6 +5630,7 @@ int App::run() {
 #ifdef PIXELVR_HAVE_FREETYPE
             drainFileOps();
             updateBrowserFooter(nowT);
+            updateNoticeToast(nowT);
             {
                 // Vault on the SD card: pulled while unlocked -> lock the whole vault (user decision);
                 // put back while its placeholder is shown -> show the vault.
@@ -5374,17 +5869,19 @@ int App::run() {
             // a web page under the laser took theirs already.)
             if (in.back) {
                 in.back = false;
+                const int backHand = renderer_.pointerHand() == 0 ? 0 : 1;
                 if (actionMenu_.visible) {
-                    actionMenu_.visible = false;
-                    smbModal_.active = false;
-                    smbModal_.editingField = SmbModalState::Field::None;
-                    if (textEntry_.active) cancelKeyboard();
+                    // A page opened from another one goes back to it; the share form asks before what
+                    // was typed is thrown away; a question answers "Cancel".
+                    menuBack();
+                    xr_.triggerHaptic(backHand, 0.025f, 0.0f, 0.5f);
                 } else if (downloadsWindow_) {
-                    downloadsWindow_ = false;
+                    closeHub();  // the tab's top level: B closes the hub (not back to the folder below)
+                    xr_.triggerHaptic(backHand, 0.025f, 0.0f, 0.5f);
                 } else if (settings_.isOpen()) {
-                    // Up one level on a sub-page; from a top-level page B leaves Settings.
-                    if (settings_.navigateBack()) xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.025f, 0.0f, 0.5f);
-                    else settings_.close();
+                    // Up one level on a sub-page; from a top-level page B closes the hub.
+                    if (!settings_.navigateBack()) closeHub();
+                    xr_.triggerHaptic(backHand, 0.025f, 0.0f, 0.5f);
                 } else if (browser_.isOpen()) {
                     // A folder still loading shows a lone "Scanning..." row (no Up
                     // entry): it is not the root, so ignore Back until it lands.
@@ -5405,6 +5902,7 @@ int App::run() {
                         cancelPick();
                     } else {  // the root of a location: close the hub
                         closeHub();
+                        xr_.triggerHaptic(backHand, 0.025f, 0.0f, 0.5f);
                     }
                 } else if (cur().opening) {
 #ifdef PIXELVR_HAVE_MEDIA
@@ -5546,7 +6044,6 @@ int App::run() {
             }
             renderer_.setActiveDownloadCount(activeDlCount);
             const bool dlWin = downloadsWindow_ && !settings_.isOpen();
-            renderer_.setDownloadsModal(false);
             renderer_.setDownloads(
                 dlWin, "Downloads", drows,
                 browser_.downloadActive()
@@ -6164,6 +6661,7 @@ int App::run() {
             }
 
             // File Action Submenu or Files view interaction inside Unified Spatial Hub
+            if (!actionMenu_.visible && !menuStack_.empty()) menuStack_.clear();  // (closed: no way back)
             if (actionMenu_.visible) {
                 // (A question asked with askConfirm() belongs to whatever page asked it, Settings included.)
                 if (!confirmYes_ &&
@@ -6174,16 +6672,24 @@ int App::run() {
                 } else {
                     const Browser::Entry* fe = browser_.focused();
 
-                    // Button Y (or configured move button) toggles/cancels
+                    // Y (Options): the same one step back as B. Not in the share form (what was typed
+                    // would be gone at a touch).
                     if (actionBtnPressed) {
-                        actionMenu_.visible = false;
+                        if (actionMenu_.page != menupage::ShareEditor) {
+                            menuBack();
+                            xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.025f, 0.0f, 0.5f);
+                        }
                     } else if (actionMenu_.page == menupage::Main || actionMenu_.page == menupage::MoveTo || actionMenu_.page >= menupage::Format) {
                         const int dy = navStep(in.thumbstickY, nowT);
-                        if (dy != 0) {
-                            actionMenu_.selectedOption += dy;
-                            const int maxOpt = static_cast<int>(actionMenu_.options.size()) - 1;
-                            if (actionMenu_.selectedOption < 0) actionMenu_.selectedOption = 0;
-                            if (actionMenu_.selectedOption > maxOpt) actionMenu_.selectedOption = maxOpt;
+                        const bool freshY = navLastFresh_;
+                        if (actionMenu_.page == menupage::ScreenPicker || actionMenu_.page == menupage::Arrange) {
+                            // Choices side by side: Left / Right go across them.
+                            const int dx = navStepX(in.thumbstickX, nowT);
+                            const bool fresh = dx != 0 ? navLastFresh_ : freshY;
+                            if (actionMenu_.page == menupage::ScreenPicker) navigatePicker(dx, dy, fresh);
+                            else navigateArrange(dx, dy);
+                        } else if (dy != 0) {
+                            stepListSelection(dy, freshY);
                         }
                         const int hov = renderer_.actionMenuBtnHovered();
                         if (hov >= 0) actionMenu_.selectedOption = hov;
@@ -6191,6 +6697,17 @@ int App::run() {
                             const int selRow = actionMenu_.selectedOption;
                             actionMenu_.subtitle = (selRow >= 0 && selRow < static_cast<int>(trackRows_.size()))
                                                        ? trackRows_[static_cast<std::size_t>(selRow)].help : std::string();
+                        }
+                        // The laser's click: on a row = that row; on the dialog beside the rows = nothing;
+                        // on its X or beside the dialog = one step back. A answers with the highlighted row.
+                        if (in.select && hov < 0) {
+                            in.select = false;
+                            if (renderer_.actionMenuCloseHovered() || !renderer_.actionMenuInside()) {
+                                menuBack();
+                                xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.025f, 0.0f, 0.5f);
+                                in.togglePlay = false;
+                                interacted = true;
+                            }
                         }
 
                         if (in.select || in.togglePlay) {
@@ -6207,7 +6724,7 @@ int App::run() {
                                     refreshArrangeMenu();
                                     xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.020f, 0.0f, 0.45f);
                                 }
-                                actionMenu_.selectedOption = -1;
+                                actionMenu_.selectedOption = chosen;  // (stays on the arrow: A again swaps back)
                                 chosen = -1;
                             }
                             if (chosen >= 0 && chosen < static_cast<int>(actionMenu_.options.size())) {
@@ -6224,16 +6741,18 @@ int App::run() {
                                         }
                                     } else if (opt == "Edit Network Share") {
                                         if (fe) {
+                                            pushMenuParent(menupage::ShareEditor);  // B / Cancel come back here
                                             openSmbModal(false, fe->path);
                                         }
                                     } else if (opt == "Delete Network Share") {
                                         // A saved share and its login: never on a single click.
                                         if (fe && fe->path == pendingActionPath_) {
+                                            pushMenuParent(menupage::Confirm);  // Cancel comes back to this menu
                                             confirmShareDelete_ = true;
                                             confirmEditorDelete_ = false;
                                             actionMenu_.page = menupage::Confirm;
                                             actionMenu_.title = "Delete Network Share?";
-                                            actionMenu_.subtitle = "Remove the saved share \"" + fe->label + "\" and its login?";
+                                            actionMenu_.subtitle = "Deletes the saved share \"" + fe->label + "\" and its login.";
                                             actionMenu_.options.clear();
                                             actionMenu_.options.push_back("Yes, Delete");
                                             actionMenu_.options.push_back("Cancel");
@@ -6283,10 +6802,11 @@ int App::run() {
                                                 }
                                             }
                                         }
-                                    } else if (opt == "Change 3D / VR Format") {
+                                    } else if (opt == "3D / VR Format" || opt == "Change 3D / VR Format") {
+                                        pushMenuParent(menupage::Format);  // B / Close come back to this menu
                                         formatMenuPath_ = pendingActionPath_;  // this file, not the playing one
                                         actionMenu_.page = menupage::Format;
-                                        actionMenu_.title = "3D & VR Format";
+                                        actionMenu_.title = "3D / VR Format";
                                         actionMenu_.subtitle = fe ? fe->label : "";
                                         actionMenu_.options.clear();
                                         actionMenu_.options.push_back("2D|Flat, standard video");
@@ -6298,7 +6818,7 @@ int App::run() {
                                         actionMenu_.options.push_back("VR360|360° 2D (mono)");
                                         actionMenu_.options.push_back("VR360 3D|360° top-bottom 3D");
                                         actionMenu_.options.push_back("VR360 SBS|360° side-by-side 3D");
-                                        actionMenu_.options.push_back("Cancel");
+                                        actionMenu_.options.push_back("Close");
                                         actionMenu_.selectedOption = 0;
                                     } else if (opt == "Move" || opt == "Copy") {
                                         actionMenu_.visible = false;
@@ -6341,15 +6861,18 @@ int App::run() {
                                                         }
                                                     }
                                                 });
+                                            textEntry_.enterLabel = "Rename";  // the key says what it does
                                         }
                                     } else if (opt == "Delete") {
+                                        pushMenuParent(menupage::Confirm);  // Cancel comes back to this menu
                                         confirmShareDelete_ = false;
                                         confirmEditorDelete_ = false;
                                         pendingActionPath_ = fe ? fe->path : std::string();
                                         actionMenu_.page = menupage::Confirm;
                                         actionMenu_.title = (fe && fe->isDir) ? "Delete Folder?" : "Delete File?";
-                                        actionMenu_.subtitle = "Permanently delete \"" + (fe ? fe->label : "") + "\"" +
-                                                               ((fe && fe->isDir) ? " and all contents?" : "?");
+                                        actionMenu_.subtitle = "\"" + (fe ? fe->label : "") + "\"" +
+                                                               ((fe && fe->isDir) ? " and everything in it are deleted permanently."
+                                                                                  : " is deleted permanently.");
                                         actionMenu_.options.clear();
                                         actionMenu_.options.push_back("Yes, Delete");
                                         actionMenu_.options.push_back("Cancel");
@@ -6453,7 +6976,7 @@ int App::run() {
                                         chooseFormat(1, 1);
                                     }
 #ifdef PIXELVR_HAVE_MEDIA
-                                    if (opt != "Cancel" && !formatStoredOnly_ && (cur().open || cur().opening) &&
+                                    if (opt != "Close" && opt != "Cancel" && !formatStoredOnly_ && (cur().open || cur().opening) &&
                                         !VaultManager::isPrivatePath(cur().path)) {
                                         playbackMemory_.setFormat(cur().path, cur().projection, cur().stereo,
                                                                   cur().fingerprint);
@@ -6462,9 +6985,13 @@ int App::run() {
                                         cur().formatPending = false;
                                     }
 #endif
-                                    xr_.triggerHaptic(0, 0.040f, 0.0f, 0.6f);
-                                    xr_.triggerHaptic(1, 0.040f, 0.0f, 0.6f);
-                                    actionMenu_.visible = false;
+                                    if (opt == "Close") {
+                                        menuBack();  // nothing chosen: one step back, as B
+                                    } else {
+                                        xr_.triggerHaptic(0, 0.040f, 0.0f, 0.6f);
+                                        xr_.triggerHaptic(1, 0.040f, 0.0f, 0.6f);
+                                        actionMenu_.visible = false;
+                                    }
                                 } else if (actionMenu_.page == menupage::Arrange) {
                                     // 0..P-1 = presets, then Snap, Style, Apply, Cancel.
                                     const int presetCount = static_cast<int>(arrangePresets_.size());
@@ -6524,17 +7051,26 @@ int App::run() {
                         const int hov = renderer_.actionMenuBtnHovered();
                         if (hov >= 0) actionMenu_.selectedOption = hov;
                         // The laser's click: on a button = that button; on the dialog beside the buttons =
-                        // nothing; outside the dialog = Cancel. (A answers with the highlighted button.)
-                        if (in.select && hov < 0 && renderer_.actionMenuInside()) in.select = false;
-                        const bool clickedOutside = in.select && hov < 0;  // beside the dialog, or into the room
+                        // nothing; on its X or outside the dialog = Cancel. (A answers with the highlighted button.)
+                        if (in.select && hov < 0 && renderer_.actionMenuInside() && !renderer_.actionMenuCloseHovered()) {
+                            in.select = false;
+                        }
+                        const bool clickedOutside = in.select && hov < 0;  // the X, beside the dialog, or into the room
 
                         if (in.select || in.togglePlay) {
                             int chosen = (hov >= 0) ? hov : (clickedOutside ? 1 : actionMenu_.selectedOption);
                             const Browser::Entry* del = browser_.focused();
-                            if (confirmYes_) {
+                            if (chosen != 0) {
+                                // Cancel (also B): back to the dialog the question was asked from, if any.
+                                cancelConfirm();
+                                in.select = in.togglePlay = false;  // the page under the dialog must not get this press
+                            } else if (confirmYes_) {
                                 std::function<void()> yes = std::move(confirmYes_);
                                 confirmYes_ = nullptr;
                                 actionMenu_.visible = false;
+                                if (!menuStack_.empty() && menuStack_.back().childPage == menupage::Confirm) {
+                                    menuStack_.pop_back();  // answered: not back to where it was asked
+                                }
                                 if (chosen == 0) {
                                     yes();
                                     xr_.triggerHaptic(1, 0.050f, 0.0f, 0.7f);
@@ -6581,17 +7117,17 @@ int App::run() {
                             interacted = true;
                         }
                     } else if (actionMenu_.page == menupage::ShareEditor) {
-                        // SMB Share Editor Modal
+                        // Network share form. The stick / D-pad walk it as it is drawn: Up / Down from row
+                        // to row, Left / Right inside a row (on Type and Sign in they change the choice).
                         const int dy = navStep(in.thumbstickY, nowT);
-                        const int maxOpt = static_cast<int>(actionMenu_.options.size()) - 1;
-                        if (dy != 0) {
-                            actionMenu_.selectedOption += dy;
-                            if (smbModal_.isNew && actionMenu_.selectedOption == 9) actionMenu_.selectedOption += dy;
-                            if (actionMenu_.selectedOption < 0) actionMenu_.selectedOption = 0;
-                            if (actionMenu_.selectedOption > maxOpt) actionMenu_.selectedOption = maxOpt;
-                        }
+                        const bool freshY = navLastFresh_;
+                        const int dx = navStepX(in.thumbstickX, nowT);
+                        if (dx != 0 || dy != 0) navigateShareEditor(dx, dy, freshY);
                         const int hov = renderer_.actionMenuBtnHovered();
                         if (hov >= 0) actionMenu_.selectedOption = hov;
+                        // A click that misses every field does nothing, also beside the form (it holds what
+                        // was typed); A edits the highlighted field.
+                        if (in.select && hov < 0) in.select = false;
 
                         if (in.select || in.togglePlay) {
                             int chosen = (hov >= 0) ? hov : actionMenu_.selectedOption;
@@ -6599,105 +7135,31 @@ int App::run() {
                                 xr_.triggerHaptic(0, 0.025f, 0.0f, 0.5f);
                                 xr_.triggerHaptic(1, 0.025f, 0.0f, 0.5f);
 
-                                auto openKeyboardForField = [&](SmbModalState::Field field, const std::string& desc, const std::string& currentVal, bool isPass) {
-                                    smbModal_.editingField = field;
-                                    openKeyboard(
-                                        desc,
-                                        currentVal,
-                                        isPass,
-                                        in,
-                                        [this, field](const std::string& text) {
-                                            if (!smbModal_.active) return;
-                                            if (field == SmbModalState::Field::Host) {
-                                                std::string h = text;
-                                                if (const std::size_t sch = h.find("://"); sch != std::string::npos) h = h.substr(sch + 3);
-                                                while (!h.empty() && (std::isspace(static_cast<unsigned char>(h.front())) || h.front() == '/' || h.front() == '\\')) h.erase(h.begin());
-                                                while (!h.empty() && (std::isspace(static_cast<unsigned char>(h.back())) || h.back() == '/' || h.back() == '\\')) h.pop_back();
-                                                if (smbModal_.protocol != "smb") {  // "host:port"
-                                                    const std::size_t colon = h.rfind(':');
-                                                    if (colon != std::string::npos && h.find(':') == colon && colon + 1 < h.size() &&
-                                                        h.find_first_not_of("0123456789", colon + 1) == std::string::npos) {
-                                                        smbModal_.port = h.substr(colon + 1);
-                                                        h = h.substr(0, colon);
-                                                    }
-                                                }
-                                                smbModal_.host = h;
-                                            } else if (field == SmbModalState::Field::Port) {
-                                                std::string d;
-                                                for (char c : text) {
-                                                    if (c >= '0' && c <= '9') d += c;
-                                                }
-                                                smbModal_.port = d;
-                                            } else if (field == SmbModalState::Field::Share) {
-                                                std::string s = text;
-                                                while (!s.empty() && (s.front() == '/' || s.front() == '\\')) s.erase(s.begin());
-                                                while (!s.empty() && (s.back() == '/' || s.back() == '\\')) s.pop_back();
-                                                smbModal_.share = s;
-                                            } else if (field == SmbModalState::Field::User) {
-                                                smbModal_.user = text;
-                                            } else if (field == SmbModalState::Field::Pass) {
-                                                smbModal_.pass = text;
-                                            } else if (field == SmbModalState::Field::Workgroup) {
-                                                smbModal_.workgroup = text.empty() ? "WORKGROUP" : text;
-                                            } else if (field == SmbModalState::Field::Label) {
-                                                smbModal_.label = text;
-                                            }
-                                            smbModal_.editingField = SmbModalState::Field::None;
-                                            updateSmbModalMenu();
-                                        },
-                                        [this]() {
-                                            if (smbModal_.active) {
-                                                smbModal_.editingField = SmbModalState::Field::None;
-                                                updateSmbModalMenu();
-                                            }
-                                        });
-                                };
-
-                                if (chosen == 0) {
-                                    openKeyboardForField(SmbModalState::Field::Host, "Server IP / Hostname", smbModal_.host, false);
-                                } else if (chosen == 1) {
-                                    openKeyboardForField(SmbModalState::Field::Share,
-                                                         smbModal_.protocol == "smb" ? "SMB Share Name (empty for all)"
-                                                                                     : "Start folder (empty for the root)",
-                                                         smbModal_.share, false);
+                                if (chosen == 0 || chosen == 1 || chosen == 5 || chosen == 6 ||
+                                    ((chosen == 3 || chosen == 4) && !smbModal_.anon)) {
+                                    // Its keyboard; Enter goes on to the next field (server, share,
+                                    // username, password, nickname).
+                                    openSmbField(chosen, true);
                                 } else if (chosen == 2) {
                                     // Pointing at a segment picks it; stick + A toggles.
                                     const int seg = renderer_.actionMenuKeyHovered();
                                     smbModal_.anon = (seg >= 0) ? (seg == 0) : !smbModal_.anon;
                                     updateSmbModalMenu();
-                                } else if ((chosen == 3 || chosen == 4) && smbModal_.anon) {
-                                    // Guest access needs no credentials.
-                                } else if (chosen == 3) {
-                                    openKeyboardForField(SmbModalState::Field::User, "Username", smbModal_.user, false);
-                                } else if (chosen == 4) {
-                                    openKeyboardForField(SmbModalState::Field::Pass, "Password", smbModal_.pass, true);
-                                } else if (chosen == 5) {
-                                    if (smbModal_.protocol == "smb") {
-                                        openKeyboardForField(SmbModalState::Field::Workgroup, "SMB Workgroup / Domain", smbModal_.workgroup, false);
-                                    } else {
-                                        openKeyboardForField(SmbModalState::Field::Port, "Port (empty for the default)", smbModal_.port, false);
-                                    }
-                                } else if (chosen == 6) {
-                                    openKeyboardForField(SmbModalState::Field::Label, "Nickname", smbModal_.label, false);
                                 } else if (chosen == 7) {
                                     // Save SMB Share
                                     saveSmbModal();
                                 } else if (chosen == 8) {
-                                    // Cancel (footer button or header X)
-                                    actionMenu_.visible = false;
-                                    smbModal_.active = false;
-                                    smbModal_.editingField = SmbModalState::Field::None;
-                                    if (textEntry_.active) cancelKeyboard();
+                                    // Cancel (footer button or header X): asks first when something was changed
+                                    closeShareEditor(true);
                                 } else if (chosen == 9 && !smbModal_.isNew) {
-                                    // Asks once more: the second press within 4 s deletes.
                                     // The same question as "Delete Network Share" in the file menu;
                                     // Cancel comes back to the editor as it was.
                                     confirmEditorDelete_ = true;
                                     confirmShareDelete_ = false;
                                     actionMenu_.page = menupage::Confirm;
                                     actionMenu_.title = "Delete Network Share?";
-                                    actionMenu_.subtitle = "Remove the saved share \"" + smbModal_.host +
-                                                           (smbModal_.share.empty() ? "" : "/" + smbModal_.share) + "\" and its login?";
+                                    actionMenu_.subtitle = "Deletes the saved share \"" + smbModal_.host +
+                                                           (smbModal_.share.empty() ? "" : "/" + smbModal_.share) + "\" and its login.";
                                     actionMenu_.options.clear();
                                     actionMenu_.options.push_back("Yes, Delete");
                                     actionMenu_.options.push_back("Cancel");

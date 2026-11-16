@@ -498,7 +498,29 @@ public:
         bool revealed = false;      // password currently shown in clear
         bool shift = false;    // in-app keyboard: next letter upper-case
         bool symbols = false;  // in-app keyboard: symbols page
+        bool capsLock = false;      // Shift pressed twice: upper-case until pressed again
+        int focusKey = -1;          // key moved to with the stick / D-pad (A types it), -1 = none shown
+        std::string enterLabel = "Done";  // what the key that finishes the entry does
+        bool finishPill = false;    // "Done" pill on the prompt line (while Enter means "Next")
+        int peekStart = -1;         // password: the character just typed, shown in clear (byte range)
+        int peekLen = 0;
     };
+    // Key focus, commit key, caps lock, "Done" pill and password peek of the in-app keyboard.
+    void setKeyboardExtras(int focusKey, const std::string& enterLabel, bool capsLock, bool finishPill,
+                           int peekStart, int peekLen) {
+        keyboardModal_.focusKey = focusKey;
+        keyboardModal_.enterLabel = enterLabel;
+        keyboardModal_.capsLock = capsLock;
+        keyboardModal_.finishPill = finishPill;
+        keyboardModal_.peekStart = peekStart;
+        keyboardModal_.peekLen = peekLen;
+    }
+    // Key focus moves (stick / D-pad): the key next to `index` in direction (dx, dy), wrapping at
+    // the row ends; up / down go to the nearest key of the row above / below. The prompt-line
+    // pills are left out (B cancels).
+    static int keyboardKeyNeighbour(int index, int dx, int dy);
+    // Where the key focus starts: the key that finishes the entry for a pre-filled text, else "g".
+    static int keyboardKeyStart(bool prefilled);
     void setKeyboardModes(bool shift, bool symbols) {
         keyboardModal_.shift = shift;
         keyboardModal_.symbols = symbols;
@@ -566,8 +588,6 @@ public:
         downloadsButtons_ = buttons;  // content-sized buttons along the bottom
         downloadJobs_ = jobs;
     }
-    // Draws a stronger modal backdrop behind the panel (for confirmations).
-    void setDownloadsModal(bool modal) { downloadsModal_ = modal; }
     // The downloads-window list row / button under the pointer, or -1.
     int downloadsHovered() const { return downloadsHovered_; }
     int downloadsButtonHovered() const { return downloadsBtnHovered_; }
@@ -587,12 +607,30 @@ public:
         int selectedOption = -1;
         int editingRow = -1;
         int cursorPos = 0;
+        std::string error;    // share editor: why Save did not work (footer line), "" = none
+        int errorField = -1;  // the field it is about (red rim), -1 = none
     };
     void setActionMenu(const ActionMenuData& data) { actionMenu_ = data; }
     const ActionMenuData& actionMenu() const { return actionMenu_; }
     int actionMenuBtnHovered() const { return actionMenuBtnHovered_; }
-    // The laser is on the confirm dialog's panel (a click there, off its buttons, does nothing).
+    // The laser is on the dialog's panel (a click there, off its rows / buttons, does nothing).
     bool actionMenuInside() const { return actionMenuInside_; }
+    // The laser is on the dialog's close X (top-right corner; the share editor reports its own as 8).
+    bool actionMenuCloseHovered() const { return actionMenuCloseHovered_; }
+    // "Play on which screen?": the slots shown as choices, left to right as drawn.
+    std::vector<int> pickerChoicesLeftToRight() const;
+    // Arrange Screens: the swap arrows drawn in the preview (hover ids, kSwapIdBase + a * 3 + b).
+    int arrangeSwapCount() const { return arrangeArrowCount_; }
+    int arrangeSwapId(int k) const {
+        return (k >= 0 && k < arrangeArrowCount_) ? 100 + arrangeArrows_[k].slotA * 3 + arrangeArrows_[k].slotB : -1;
+    }
+    // A short message on the panel (results, refusals), whatever page shows: a pill near the
+    // bottom edge. `alpha` fades it in and out; empty text = none.
+    void setPanelToast(const std::string& text, bool warn, float alpha) {
+        panelToast_ = text;
+        panelToastWarn_ = warn;
+        panelToastAlpha_ = alpha;
+    }
     int actionMenuKeyHovered() const { return actionMenuKeyHovered_; }
     void setBrowserNetwork(bool onNet) { browserOnNetwork_ = onNet; }
 
@@ -1258,7 +1296,6 @@ private:
     bool downloadsActive_ = false;
     bool downloadsAllDone_ = false;
     bool downloadsFailed_ = false;
-    bool downloadsModal_ = false;
     std::vector<std::string> downloadsButtons_;
     std::vector<DownloadItem> downloadJobs_;
     int downloadsBtnHovered_ = -1;
@@ -1276,6 +1313,10 @@ private:
     ActionMenuData actionMenu_{};
     int actionMenuBtnHovered_ = -1;
     bool actionMenuInside_ = false;
+    bool actionMenuCloseHovered_ = false;
+    std::string panelToast_;
+    bool panelToastWarn_ = false;
+    float panelToastAlpha_ = 0.0f;
     int actionMenuKeyHovered_ = -1;
     int keyboardKeyHovered_ = -1;
     bool keyboardFieldHovered_ = false;
@@ -1421,7 +1462,7 @@ private:
     // Closing animation (layer only): the panel the app just closed keeps being
     // drawn from its last visible flags while it scales and fades out.
     struct PanelFlags {
-        bool browser = false, settings = false, downloads = false, downloadsModal = false;
+        bool browser = false, settings = false, downloads = false;
         bool actionMenu = false, keyboard = false, controlBar = false;
     };
     PanelFlags shownFlags_{};   // last frame's
