@@ -5,6 +5,7 @@
 //
 //   ui_color_test
 
+#include "gfx/ui_tokens.hpp"
 #include "ui/settings_menu.hpp"
 #include "ui/ui_colors.hpp"
 
@@ -15,6 +16,7 @@
 #include <fstream>
 #include <sstream>
 #include <string>
+#include <vector>
 
 using namespace pixelvr;
 
@@ -112,6 +114,68 @@ int main() {
         uicolor::toFloat(uicolor::usable(false, 0x0000FF), f);
         uicolor::rgbToHsv(f, hb, s, v);
         check(std::fabs(h - hb) < 0.01f, "a brightened blue is still blue");
+    }
+
+    // --- design tokens: text roles, labels on accent fills, meaning colours ---
+    {
+        // Every text role keeps its contrast on the lightest surface text sits on, for the
+        // swatches and for the darkest text colours the guard allows.
+        bool roles = true, order = true;
+        std::vector<uint32_t> texts;
+        for (const auto& sw : uicolor::kTextSwatches) texts.push_back(sw.rgb);
+        for (uint32_t rgb : {0x000000u, 0x0000FFu, 0x400000u, 0x606060u}) texts.push_back(uicolor::usable(false, rgb));
+        const float* surf = uitok::kTextGuardSurface.data();
+        for (uint32_t rgb : texts) {
+            float t[3];
+            uicolor::toFloat(rgb, t);
+            const auto sec = uitok::textSecondary(t), dis = uitok::textDisabled(t);
+            const float cp = uitok::contrast(t, surf), cs = uitok::contrast(sec.data(), surf),
+                        cd = uitok::contrast(dis.data(), surf);
+            std::printf("      text %06X: primary %.1f:1, secondary %.1f:1, disabled %.1f:1\n", rgb, cp, cs, cd);
+            roles = roles && cs >= std::min(cp, uitok::kSecondaryContrast) - 0.05f &&
+                    cd >= std::min(cp, uitok::kDisabledContrast) - 0.05f;
+            order = order && cp >= cs - 0.01f && cs >= cd - 0.01f;
+        }
+        check(roles, "secondary and disabled text keep their contrast guard");
+        check(order, "primary >= secondary >= disabled");
+
+        // A label on an accent fill is readable for any accent (stock and picked, guarded), at rest
+        // and under the laser, with one label colour for both.
+        bool labels = true;
+        std::vector<uint32_t> accents;
+        for (const auto& sw : uicolor::kAccentSwatches) accents.push_back(sw.rgb);
+        for (uint32_t rgb : {0xFFFF00u, 0x00FFAAu, 0x1A237Eu, 0x4B0082u, 0x000000u, 0x808080u, 0xFFFFFFu})
+            accents.push_back(uicolor::usable(true, rgb));
+        for (uint32_t rgb : accents) {
+            float a[3];
+            uicolor::toFloat(rgb, a);
+            const auto lab = uitok::labelOnAccent(a);
+            for (float k : {uitok::kPrimaryRest, 1.0f}) {
+                const float fill[3] = {a[0] * k, a[1] * k, a[2] * k};
+                const float c = uitok::contrast(lab.data(), fill);
+                std::printf("      accent %06X x%.2f: label %s %.1f:1\n", rgb, k, lab[0] > 0.5f ? "light" : "dark", c);
+                labels = labels && c >= 3.5f;
+            }
+        }
+        check(labels, "the primary button's label has at least 3.5:1 (bold text) on every accent");
+
+        // Accent text is never darker than the text guard.
+        float deep[3];
+        uicolor::toFloat(uicolor::usable(true, 0x1A237E), deep);
+        check(uicolor::luminance(uitok::accentText(deep).data()) >= uicolor::kMinTextLuminance - 0.01f,
+              "a dark accent is brightened for text");
+
+        // Collisions: Crimson looks like Delete, Emerald like Done, Amber like a warning; Cyan / Purple like none.
+        auto coll = [](uint32_t rgb, const uitok::Semantic& s) {
+            float a[3];
+            uicolor::toFloat(rgb, a);
+            return uitok::collides(a, s);
+        };
+        check(coll(0xF5475C, uitok::kDanger) && coll(0x2ED985, uitok::kSuccess) && coll(0xFFAD33, uitok::kWarning),
+              "red / green / amber accents are recognised as close to the meaning colours");
+        check(!coll(0x40C7FF, uitok::kDanger) && !coll(0x40C7FF, uitok::kSuccess) && !coll(0x40C7FF, uitok::kWarning) &&
+                  !coll(0xAD6BFF, uitok::kDanger) && !coll(0x808080, uitok::kDanger),
+              "cyan, purple and grey accents collide with none");
     }
 
     // --- Settings: a file from before the picker ---

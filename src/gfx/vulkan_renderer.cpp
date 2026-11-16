@@ -3,6 +3,7 @@
 #include "media/cover_art.hpp"
 
 #include "gfx/gltf_mesh.hpp"
+#include "gfx/ui_tokens.hpp"
 #include "media/media_engine.hpp"
 #include "net/remote_fs.hpp"
 #include "xr/xr_context.hpp"
@@ -243,22 +244,23 @@ constexpr float kPanelTop = 0.56f;    // Total height 1.12m (-0.56 to +0.56)
 constexpr float kRailRight = -0.49f;  // Left nav rail spans [-0.90, -0.49] (0.41m)
 constexpr float kContentCx = 0.205f;  // Content area center ((-0.49 + 0.90) / 2)
 // Downloads-window action buttons (content-sized, along the bottom edge).
-constexpr float kDlBtnH = 0.072f;
+constexpr float kDlBtnH = 2.0f * uitok::kCtlM;  // the dialog footer height
 constexpr float kDlBtnGap = 0.035f;
 constexpr float kDlBtnPadX = 0.048f;
 
-// Shared glass palette (sRGB). Surfaces are neutral slate glass with faint
-// light rims; the theme accent is reserved for focus, selection and progress.
-constexpr float kGlassPanel[4]      = {0.078f, 0.092f, 0.115f, 0.93f};
-constexpr float kGlassRail[4]       = {0.050f, 0.060f, 0.078f, 0.60f};
-constexpr float kGlassCard[4]       = {0.112f, 0.130f, 0.160f, 0.90f};
-constexpr float kGlassCardHover[4]  = {0.150f, 0.175f, 0.220f, 0.97f};
-constexpr float kGlassControl[4]    = {0.135f, 0.155f, 0.195f, 0.92f};
-constexpr float kGlassWell[4]       = {0.035f, 0.042f, 0.058f, 0.92f};
-constexpr float kGlassVeil[4]       = {0.85f, 0.90f, 1.00f, 0.09f};   // neutral selection
-constexpr float kGlassRim[4]        = {0.70f, 0.78f, 0.90f, 0.34f};
-constexpr float kGlassRimFaint[4]   = {0.70f, 0.78f, 0.90f, 0.13f};
-constexpr float kGlassDivider[4]    = {0.70f, 0.78f, 0.90f, 0.12f};
+// Shared glass palette (sRGB), from the design tokens (gfx/ui_tokens.hpp): neutral slate glass
+// with faint light rims; the theme accent is reserved for focus, selection and progress.
+namespace tok = uitok;
+constexpr const float* kGlassPanel = tok::kGlassPanel.data();
+constexpr const float* kGlassRail = tok::kGlassRail.data();
+constexpr const float* kGlassCard = tok::kGlassCard.data();
+constexpr const float* kGlassCardHover = tok::kGlassCardHover.data();
+constexpr const float* kGlassControl = tok::kGlassControl.data();
+constexpr const float* kGlassWell = tok::kGlassWell.data();
+constexpr const float* kGlassVeil = tok::kGlassVeil.data();
+constexpr const float* kGlassRim = tok::kGlassRim.data();
+constexpr const float* kGlassRimFaint = tok::kGlassRimFaint.data();
+constexpr const float* kGlassDivider = tok::kGlassDivider.data();
 
 // Media control dock (panel-local metres, floating below the video).
 struct CtrlButtonRect {
@@ -294,14 +296,14 @@ inline CtrlButtonRect get_ctrl_button_rect(int b) {
         case Btn::HideHud:      return { 0.26f, kBarY - 0.045f, 0.046f, 0.046f};
 
         // Left flank pills: HUB, RECENTER, VOLUME (rows match the right flank)
-        case Btn::Files:        return {-0.62f, kBarY + 0.040f, 0.185f, 0.036f};
+        case Btn::Files:        return {-0.62f, kBarY + 0.040f, 0.185f, tok::kCtlM};
         case Btn::Recenter:     return {-0.62f, kBarY - 0.044f, 0.0f, 0.0f};  // removed (X recenters); the place is kept free
-        case Btn::Volume:       return {-0.62f, kBarY - 0.128f, 0.185f, 0.036f};
+        case Btn::Volume:       return {-0.62f, kBarY - 0.128f, 0.185f, tok::kCtlM};
 
         // Right flank pills: Projection/Format, Audio, Screen
-        case Btn::FormatToggle: return { 0.62f, kBarY + 0.040f, 0.210f, 0.036f};
-        case Btn::AudioToggle:  return { 0.62f, kBarY - 0.044f, 0.210f, 0.036f};
-        case Btn::ScreenToggle: return { 0.62f, kBarY - 0.128f, 0.210f, 0.036f};
+        case Btn::FormatToggle: return { 0.62f, kBarY + 0.040f, 0.210f, tok::kCtlM};
+        case Btn::AudioToggle:  return { 0.62f, kBarY - 0.044f, 0.210f, tok::kCtlM};
+        case Btn::ScreenToggle: return { 0.62f, kBarY - 0.128f, 0.210f, tok::kCtlM};
 
         // Multi-screen row (below the main controls, only while shown)
         // The row (screen pill + five buttons) is centred under Play.
@@ -407,7 +409,9 @@ constexpr float kHeaderY = 0.455f;
 // the path's hit band and the buttons keeps a shaky laser off the wrong row.
 constexpr float kBrowserPathY = 0.480f;
 constexpr float kBrowserBtnY = 0.414f;
-constexpr float kBrowserBtnHH = 0.026f;  // (bottom edge stays above the divider at 0.385)
+// The header buttons are as tall as every toolbar button and dialog row (tok::kCtlS); the bottom
+// edge stays just above the divider at 0.385, the path row keeps its own slimmer hit band.
+constexpr float kBrowserBtnHH = tok::kCtlS;
 constexpr int kSortSegBase = 10;
 constexpr int kViewSegBase = 13;
 constexpr float kBrowserDividerY = 0.385f;  // under the button row
@@ -417,21 +421,22 @@ constexpr float kListCaptionY = 0.371f;
 constexpr float kListDividerY = 0.3525f;
 constexpr float kPickDarkText[4] = {0.03f, 0.05f, 0.09f, 1.0f};  // on the accent-filled confirm pill
 // Close button of the hub: top right corner, above the header rows of every tab.
-inline UiRect closeButton() { return {0.853f, 0.522f, 0.027f, 0.027f}; }
+inline UiRect closeButton() { return {0.853f, 0.522f, tok::kCtlS, tok::kCtlS}; }
 // pick: the Move / Copy bar's layout (Cancel at the left end, next to its text, far from the
 // confirm pill at the right end; New folder between them).
+// (The sort segments are 11.2 cm wide so "Largest" fits at the Secondary text size.)
 inline UiRect headerButton(int id, bool pick = false) {
     if (id >= kSortSegBase && id < kSortSegBase + 3) {
-        return {-0.410f + 0.100f * static_cast<float>(id - kSortSegBase), kBrowserBtnY, 0.050f, kBrowserBtnHH};
+        return {-0.404f + 0.112f * static_cast<float>(id - kSortSegBase), kBrowserBtnY, 0.056f, kBrowserBtnHH};
     }
     if (id >= kViewSegBase && id < kViewSegBase + 3) {
-        return {-0.095f + 0.090f * static_cast<float>(id - kViewSegBase), kBrowserBtnY, 0.045f, kBrowserBtnHH};
+        return {-0.059f + 0.090f * static_cast<float>(id - kViewSegBase), kBrowserBtnY, 0.045f, kBrowserBtnHH};
     }
     switch (id) {
-        case 5: return {-0.310f, kBrowserBtnY, 0.150f, kBrowserBtnHH};  // outline of the sort segments
-        case 2: return {-0.005f, kBrowserBtnY, 0.135f, kBrowserBtnHH};  // outline of the view segments
-        case 3: return {0.250f, kBrowserBtnY, 0.100f, kBrowserBtnHH};
-        case 6: return {pick ? 0.490f : 0.465f, kBrowserBtnY, 0.095f, kBrowserBtnHH};
+        case 5: return {-0.292f, kBrowserBtnY, 0.168f, kBrowserBtnHH};  // outline of the sort segments
+        case 2: return {0.031f, kBrowserBtnY, 0.135f, kBrowserBtnHH};   // outline of the view segments
+        case 3: return {0.286f, kBrowserBtnY, 0.100f, kBrowserBtnHH};
+        case 6: return {pick ? 0.490f : 0.501f, kBrowserBtnY, 0.095f, kBrowserBtnHH};
         case 7: return {0.735f, kBrowserBtnY, 0.120f, kBrowserBtnHH};   // pick mode: Move / Copy here
         case 8: return {-0.395f, kBrowserBtnY, 0.065f, kBrowserBtnHH};  // pick mode: Cancel
         default: return {0.0f, -10.0f, 0.0f, 0.0f};  // removed buttons (pager, Up)
@@ -444,11 +449,11 @@ constexpr float kBrowserScrollHalfH = 0.400f;
 inline UiRect browserScrollHit() { return {kBrowserScrollCx, kBrowserScrollCy, 0.024f, kBrowserScrollHalfH + 0.010f}; }
 // Settings header button ("+ Install plugins"): in the pager's place, or left of it when both show.
 inline UiRect settingsHeaderButton(bool withPager) {
-    return {withPager ? 0.34f : 0.64f, kHeaderY, 0.13f, 0.028f};
+    return {withPager ? 0.34f : 0.64f, kHeaderY, 0.13f, tok::kCtlS};
 }
 // Settings header pager (keeps the classic single-row header spots).
 inline UiRect settingsPagerButton(int id) {
-    return {id == 0 ? 0.52f : 0.74f, kHeaderY, 0.035f, 0.028f};
+    return {id == 0 ? 0.52f : 0.74f, kHeaderY, 0.035f, tok::kCtlS};
 }
 
 struct CardLayout {
@@ -621,12 +626,13 @@ inline UiRect settingsSegment(const SettingsCard& L, int s, int n) {
 // the suggested colours (a column of pills on the right), 5: the saturation / brightness square,
 // 6: the hue strip next to it, 7 / 8: Reset and Back.
 inline UiRect colorPickerZone(int z) {
-    if (z < 5) return {0.655f, 0.150f - static_cast<float>(z) * 0.076f, 0.195f, 0.032f};
+    // (Swatch pills and Reset / Back: the list-pill height, tok::kCtlM, 0.8 cm apart.)
+    if (z < 5) return {0.655f, 0.150f - static_cast<float>(z) * (2.0f * tok::kCtlM + 0.008f), 0.195f, tok::kCtlM};
     switch (z) {
         case 5: return {-0.090f, -0.020f, 0.360f, 0.360f};
         case 6: return {0.360f, -0.020f, 0.050f, 0.360f};
-        case 7: return {0.555f, -0.335f, 0.095f, 0.040f};
-        default: return {0.755f, -0.335f, 0.095f, 0.040f};
+        case 7: return {0.555f, -0.335f, 0.095f, tok::kCtlM};
+        default: return {0.755f, -0.335f, 0.095f, tok::kCtlM};
     }
 }
 inline UiRect colorPickerCurrent() { return {0.520f, 0.295f, 0.060f, 0.042f}; }  // the colour in use
@@ -640,17 +646,18 @@ constexpr float kTracksRowHalfW = 0.48f;
 inline UiRect actionMenuOption(int i, int count, float halfW = 0.38f) {
     const float span = static_cast<float>(std::max(0, count - 1)) * kActionMenuStepY;
     const float startY = -0.040f + 0.5f * span;
-    return {0.0f, startY - static_cast<float>(i) * kActionMenuStepY, halfW, 0.028f};
+    return {0.0f, startY - static_cast<float>(i) * kActionMenuStepY, halfW, tok::kCtlS};
 }
 // The two answers of the confirm dialog: far enough apart (0.12) that a shaky laser does not
 // drift from one onto the other.
-inline UiRect deleteConfirmButton(int i) { return {i == 0 ? -0.19f : 0.19f, -0.12f, 0.13f, 0.046f}; }
+inline UiRect deleteConfirmButton(int i) { return {i == 0 ? -0.19f : 0.19f, -0.12f, 0.13f, tok::kCtlXL}; }
 constexpr float kConfirmHalfW = 0.44f;
 constexpr float kConfirmHalfH = 0.24f;
 // Half size of an action-menu page's glass panel (as drawn): list pages grow with their rows.
 inline void actionMenuHalfSize(int page, int optCount, float& hw, float& hh);
 // Close button (X) in the top-right corner of a dialog: a fixed place to dismiss it with the laser.
-inline UiRect menuCloseButton(float halfW, float halfH) { return {halfW - 0.050f, halfH - 0.048f, 0.026f, 0.026f}; }
+// (The same size as the hub's close button.)
+inline UiRect menuCloseButton(float halfW, float halfH) { return {halfW - 0.050f, halfH - 0.048f, tok::kCtlS, tok::kCtlS}; }
 // Network share editor form (action menu page 4). Option ids: 0 host, 1 share
 // (folder for SFTP / WebDAV), 2 authentication, 3 username, 4 password,
 // 5 workgroup (SMB) or port, 6 nickname, 7 save, 8 cancel, 9 delete (existing
@@ -698,10 +705,10 @@ inline UiRect smbTypeSegment(int seg) {
 // left, Cancel to its right, the destructive one alone on the other side.
 inline UiRect smbButton(int id) {
     switch (id) {
-        case 7: return {0.255f, -0.404f, 0.105f, 0.034f};
-        case 8: return {0.465f, -0.404f, 0.085f, 0.034f};
-        case 9: return {-0.455f, -0.404f, 0.090f, 0.034f};
-        default: return {0.545f, 0.399f, 0.026f, 0.026f};
+        case 7: return {0.255f, -0.404f, 0.105f, tok::kCtlM};
+        case 8: return {0.465f, -0.404f, 0.085f, tok::kCtlM};
+        case 9: return {-0.455f, -0.404f, 0.090f, tok::kCtlM};
+        default: return menuCloseButton(kSmbHalfW, kSmbHalfH);  // the close X every dialog has
     }
 }
 // In-app keyboard (text entry for SMB fields, rename): a glass sheet over the
@@ -720,7 +727,7 @@ constexpr float kKbFieldY = 0.095f;      // input field centre
 constexpr float kKbFieldHalfW = 0.62f;
 constexpr float kKbFieldHalfH = 0.046f;
 // "Show" / "Hide" pill at the right end of a password field.
-constexpr UiRect kKbRevealBtn{kKbFieldHalfW - 0.095f, kKbFieldY, 0.080f, 0.036f};
+constexpr UiRect kKbRevealBtn{kKbFieldHalfW - 0.095f, kKbFieldY, 0.080f, tok::kCtlM};
 constexpr float kKbSheetY = -0.272f;     // key sheet centre
 constexpr float kKbSheetHalfW = 0.68f;
 constexpr float kKbSheetHalfH = 0.250f;
@@ -742,7 +749,7 @@ inline std::vector<KbKey> buildKeyboard(int layout) {
     // Laid out like the SteamOS / PC keyboard: number row with Backspace,
     // Enter at the end of the home row, Shift on both sides.
     const float kPitch = 0.097f;
-    const float keyHalfH = 0.040f;
+    const float keyHalfH = tok::kCtlL;
     const float gap = 0.009f;
     const float rowY[5] = {-0.080f, -0.174f, -0.268f, -0.362f, -0.456f};
     // One key per character: letters, the same row with Shift, and symbols.
@@ -820,12 +827,12 @@ inline std::vector<KbKey> buildKeyboard(int layout) {
     }
     // Cancel button at the right end of the prompt line.
     KbKey cancel;
-    cancel.r = {kKbFieldHalfW - 0.085f, kKbFieldY + 0.088f, 0.085f, 0.036f};
+    cancel.r = {kKbFieldHalfW - 0.085f, kKbFieldY + 0.088f, 0.085f, tok::kCtlM};
     cancel.code = kKbCancel;
     out.push_back(cancel);
     // "Done" pill left of it (share form only, while Enter goes on to the next field).
     KbKey finish;
-    finish.r = {kKbFieldHalfW - 0.085f * 3.0f - 0.016f, kKbFieldY + 0.088f, 0.085f, 0.036f};
+    finish.r = {kKbFieldHalfW - 0.085f * 3.0f - 0.016f, kKbFieldY + 0.088f, 0.085f, tok::kCtlM};
     finish.code = kKbFinish;
     out.push_back(finish);
     return out;
@@ -858,7 +865,7 @@ inline UiRect button(int i) {
 constexpr float kPickHalfW = 0.68f;
 constexpr float kPickHalfH = 0.31f;
 inline UiRect pickerTile(int i) { return {-0.42f + 0.42f * static_cast<float>(i), 0.005f, 0.18f, 0.18f * 9.0f / 16.0f}; }
-inline UiRect pickerCancel() { return {0.0f, -0.235f, 0.095f, 0.032f}; }
+inline UiRect pickerCancel() { return {0.0f, -0.235f, 0.105f, tok::kCtlM}; }
 // Picker while a layout is in use: arranged-screens preview + "Add" card.
 inline UiRect pickerPreview(bool withAddCard) {
     return withAddCard ? UiRect{-0.12f, 0.0f, 0.50f, 0.165f} : UiRect{0.0f, 0.0f, 0.62f, 0.165f};
@@ -871,13 +878,13 @@ constexpr int kArrangeButtons = 4;
 constexpr int kSwapIdBase = 100;  // hover id of a swap arrow: base + slotA * 3 + slotB
 constexpr float kArrHalfW = 0.80f;
 constexpr float kArrHalfH = 0.37f;
-inline UiRect arrangeOption(int i) { return {-0.555f, 0.165f - 0.074f * static_cast<float>(i), 0.195f, 0.030f}; }
+inline UiRect arrangeOption(int i) { return {-0.555f, 0.165f - 0.074f * static_cast<float>(i), 0.195f, tok::kCtlS}; }
 inline UiRect arrangeButton(int k) {
     switch (k) {
-        case 0: return {-0.555f, -0.200f, 0.195f, 0.030f};
-        case 1: return {-0.555f, -0.274f, 0.195f, 0.030f};
-        case 2: return {0.425f, -0.285f, 0.105f, 0.032f};
-        default: return {0.640f, -0.285f, 0.090f, 0.032f};
+        case 0: return {-0.555f, -0.200f, 0.195f, tok::kCtlS};
+        case 1: return {-0.555f, -0.274f, 0.195f, tok::kCtlS};
+        case 2: return {0.425f, -0.285f, 0.105f, tok::kCtlM};  // the dialog footer size
+        default: return {0.640f, -0.285f, 0.090f, tok::kCtlM};
     }
 }
 inline UiRect arrangePreview() { return {0.210f, 0.012f, 0.520f, 0.212f}; }
@@ -5590,10 +5597,10 @@ void VulkanRenderer::drawScreenTitlePill(int slot, float ax, float alpha, const 
     const float pillHw = (0.5f * boxW + 0.07f) / ax;
     const float pillHh = 0.068f + 0.5f * pitch * static_cast<float>(count - 1);
     const float pillCy = 0.70f - 0.5f * pitch * static_cast<float>(count - 1);
-    const float bg[4] = {0.03f, 0.04f, 0.06f, 0.74f * alpha};
-    // A problem gets an amber rim, a plain title the faint white one.
-    const float rim[4] = {so.warn ? 1.0f : 1.0f, so.warn ? 0.72f : 1.0f, so.warn ? 0.25f : 1.0f,
-                          (so.warn ? 0.80f : 0.16f) * alpha};
+    const float bg[4] = {uitok::kBadgeBg[0], uitok::kBadgeBg[1], uitok::kBadgeBg[2], 0.74f * alpha};
+    // A problem gets the warning rim (the fixed amber of every warning), a plain title the faint white one.
+    const float rim[4] = {so.warn ? uitok::kWarning.rim[0] : 1.0f, so.warn ? uitok::kWarning.rim[1] : 1.0f,
+                          so.warn ? uitok::kWarning.rim[2] : 1.0f, (so.warn ? 0.80f : 0.16f) * alpha};
     {
         const Mat4 mvp = multiply(ortho, scaling(Vec3{ax, 1.0f, 1.0f}));
         UiPush up{};
@@ -5780,7 +5787,9 @@ void VulkanRenderer::drawScreenOverlay(int slot, float ax, const math::Mat4& ort
     if (!screenOverlay_[slot].skip.empty()) {
         const bool hov = screenSkipSlot_ == slot;
         const float cx = 1.085f, cy = -0.36f;  // drawn units (the screen is 3.2 x 1.8), above the subtitles; hit-test: updatePointer
-        const float bg[4] = {hov ? ac[0] * 0.55f : 0.03f, hov ? ac[1] * 0.55f : 0.04f, hov ? ac[2] * 0.55f : 0.06f, hov ? 0.94f : 0.78f};
+        // Pointed at only: under the laser the shared focus look (lighter fill, accent rim), no accent fill.
+        const float* bgC = hov ? uitok::kGlassCardHover.data() : uitok::kBadgeBg.data();
+        const float bg[4] = {bgC[0], bgC[1], bgC[2], hov ? 0.94f : 0.78f};
         const float rim[4] = {hov ? ac[0] : 1.0f, hov ? ac[1] : 1.0f, hov ? ac[2] : 1.0f, hov ? 1.0f : 0.45f};
         shape(cx / ax, cy, 0.440f / ax, 0.100f, UiShape::RoundedBox, bg, 1.0f, hov ? 0.07f : 0.05f, rim);
         const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
@@ -5801,7 +5810,8 @@ void VulkanRenderer::drawScreenOverlay(int slot, float ax, const math::Mat4& ort
             const bool hov = screenNavHover_ == side;
             const float x = (side == 0 ? -1.0f : 1.0f) * (1.6f - 0.19f * ax) / ax;
             const float r = hov ? 0.125f : 0.11f;
-            const float bg[4] = {0.03f, 0.04f, 0.06f, hov ? 0.86f : 0.62f};
+            const float* bgC = hov ? uitok::kGlassCardHover.data() : uitok::kBadgeBg.data();
+            const float bg[4] = {bgC[0], bgC[1], bgC[2], hov ? 0.86f : 0.62f};
             const float rim[4] = {hov ? ac[0] : 1.0f, hov ? ac[1] : 1.0f, hov ? ac[2] : 1.0f, hov ? 1.0f : 0.30f};
             shape(x, 0.0f, r, r, UiShape::RoundedBox, bg, 1.0f, hov ? 0.07f : 0.04f, rim);
             const float icon[4] = {1.0f, 1.0f, 1.0f, hov ? 1.0f : 0.85f};
@@ -6794,6 +6804,84 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
     const auto glassWellT = tinted(kGlassWell, 0.60f + 0.40f * op);
     const float* themeTextCol = themeTextColor();
     const float* themeAccentCol = themeAccentColor();
+
+    // ---- Shared look (gfx/ui_tokens.hpp): every screen below draws with these ----
+    // Text sizes: the five steps of the scale, as glyph scales at the Text Size setting.
+    const float lineH = fontAtlas_.lineHeight > 0.0f ? fontAtlas_.lineHeight : 1.0f;
+    const float scTitle = tok::kTextTitle * tScale / lineH;
+    const float scLarge = tok::kTextLarge * tScale / lineH;
+    const float scBody = tok::kTextBody * tScale / lineH;
+    const float scSecondary = tok::kTextSecondary * tScale / lineH;
+    const float scCaption = tok::kTextCaption * tScale / lineH;
+    // Text roles from the picked text colour, each with its own contrast guard.
+    const auto textSecondaryC = tok::textSecondary(themeTextCol);
+    const auto textDisabledC = tok::textDisabled(themeTextCol);
+    const float* textSecondaryCol = textSecondaryC.data();
+    const float* textDisabledCol = textDisabledC.data();
+    // The accent where it colours text or thin icons (a dark accent is brightened for those).
+    const auto accentTextC = tok::accentText(themeAccentCol);
+    const float* accentTextCol = accentTextC.data();
+    const float accentRimCol[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 1.0f};
+    // A picked accent close to a meaning colour: that meaning's elements add a strong rim / their mark.
+    const bool accentLikeDanger = tok::collides(themeAccentCol, tok::kDanger);
+    const bool accentLikeSuccess = tok::collides(themeAccentCol, tok::kSuccess);
+    const bool accentLikeWarning = tok::collides(themeAccentCol, tok::kWarning);
+    // Radius / border in metres -> the shader's units (fractions of the shorter half-extent).
+    auto relM = [](float metres, float hw, float hh) {
+        return metres / std::max(1e-4f, std::min(std::fabs(hw), std::fabs(hh)));
+    };
+    // A rounded box with its corner radius and border in metres.
+    auto drawBox = [&](const Mat4& vp, float cx, float cy, float hw, float hh, const float* fill, float radiusM,
+                       float borderM = 0.0f, const float* rim = nullptr) {
+        drawUiElement(vp, cx, cy, hw, hh, UiShape::RoundedBox, fill, std::min(1.0f, relM(radiusM, hw, hh)),
+                      rim ? relM(borderM, hw, hh) : 0.0f, rim);
+    };
+    // Any interactive element in one of its states (tok::look): glow first, then the box.
+    auto drawControl = [&](const Mat4& vp, const UiRect& r, tok::State st, float radiusM = tok::kRadiusPill,
+                           const float* rest = nullptr, const float* hoverFill = nullptr) {
+        const tok::Rgba restC = rest ? tok::Rgba{rest[0], rest[1], rest[2], rest[3]}
+                                     : tok::Rgba{glassControlT[0], glassControlT[1], glassControlT[2], glassControlT[3]};
+        const tok::Rgba hovC = hoverFill ? tok::Rgba{hoverFill[0], hoverFill[1], hoverFill[2], hoverFill[3]}
+                                         : tok::Rgba{glassCardHoverT[0], glassCardHoverT[1], glassCardHoverT[2],
+                                                     glassCardHoverT[3]};
+        const tok::Look l = tok::look(st, restC, hovC, themeAccentCol);
+        if (l.glow) {
+            drawGlow(vp, r.cx, r.cy, r.hw, r.hh, tok::kGlowSpread, l.glowCol.data(),
+                     std::min(1.0f, relM(radiusM, r.hw, r.hh)));
+        }
+        drawBox(vp, r.cx, r.cy, r.hw, r.hh, l.fill.data(), radiusM, l.border, l.rim.data());
+    };
+    // The primary button (the "do it" of a dialog, Move here, Done): accent fill, a light rim, a
+    // glow under the laser or the focus. Returns the label colour, dark or light by contrast.
+    auto drawPrimary = [&](const Mat4& vp, const UiRect& r, bool hover, bool focus, bool enabled = true,
+                           float radiusM = tok::kRadiusPill) -> tok::Rgba {
+        const float k = (hover || focus) && enabled ? 1.0f : tok::kPrimaryRest;
+        const float fill[4] = {themeAccentCol[0] * k, themeAccentCol[1] * k, themeAccentCol[2] * k,
+                               enabled ? 0.98f : 0.40f};
+        tok::Rgba label = tok::labelOnAccent(themeAccentCol);
+        if ((hover || focus) && enabled) {
+            const float glow[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], focus ? 0.45f : 0.30f};
+            drawGlow(vp, r.cx, r.cy, r.hw, r.hh, tok::kGlowSpread, glow, std::min(1.0f, relM(radiusM, r.hw, r.hh)));
+        }
+        // Focus on an accent fill: the rim takes the label colour (an accent rim would vanish).
+        const float rim[4] = {focus ? label[0] : 1.0f, focus ? label[1] : 1.0f, focus ? label[2] : 1.0f,
+                              focus ? 0.95f : 0.35f};
+        drawBox(vp, r.cx, r.cy, r.hw, r.hh, fill, radiusM, focus ? tok::kBorderStrong : tok::kBorderRest, rim);
+        if (!enabled) label[3] = 0.6f;
+        return label;
+    };
+    // A button / row whose colour means something (Delete): its fixed palette, never the accent.
+    // When the accent looks like it, the rim goes strong and light so it does not rely on colour.
+    auto drawSemantic = [&](const Mat4& vp, const UiRect& r, const tok::Semantic& s, bool hover, bool focus,
+                            bool accentLike, float radiusM = tok::kRadiusPill) {
+        if (focus) {
+            const float glow[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], tok::kGlowAlpha};
+            drawGlow(vp, r.cx, r.cy, r.hw, r.hh, tok::kGlowSpread, glow, std::min(1.0f, relM(radiusM, r.hw, r.hh)));
+        }
+        const float* rim = (focus || accentLike) ? tok::kLabelLight.data() : s.rim.data();
+        drawBox(vp, r.cx, r.cy, r.hw, r.hh, (hover || focus) ? s.hover.data() : s.fill.data(), radiusM,
+                (focus || accentLike) ? tok::kBorderStrong : tok::kBorderRest, rim);
+    };
     // One scrollbar for every list (file browser, Downloads, music queue): a recessed track with an
     // accent thumb. `first` = index of the first visible item, `visible` of `total` items shown.
     auto drawScrollbar = [&](const Mat4& mvp, float cx, float cy, float halfW, float halfH, int first, int visible,
@@ -7097,12 +7185,14 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     const int hov = musicHover(hovSlot);
                     const bool hovHere = hovSlot == slot;
                     const float panelBg[4] = {0.025f, 0.03f, 0.05f, 0.62f};
-                    const float rowCur[4] = {themeAccentCol[0] * 0.35f, themeAccentCol[1] * 0.35f,
-                                             themeAccentCol[2] * 0.42f, 0.85f};
-                    const float rowHov[4] = {1.0f, 1.0f, 1.0f, 0.08f};
-                    const float btnHov[4] = {1.0f, 1.0f, 1.0f, 0.22f};
-                    const float dim[4] = {themeTextCol[0] * 0.72f, themeTextCol[1] * 0.76f, themeTextCol[2] * 0.84f, 0.9f};
-                    const float off[4] = {themeTextCol[0], themeTextCol[1], themeTextCol[2], 0.38f};
+                    // The shared states: the track playing = selected (accent tint), the row under the
+                    // laser = lighter fill; the buttons as on the dock (focus look under the laser).
+                    const auto rowCurC = tok::accentTint(themeAccentCol, false);
+                    const float* rowCur = rowCurC.data();
+                    const float* rowHov = kGlassVeil;
+                    const float* btnHov = kGlassCardHover;
+                    const float* dim = textSecondaryCol;
+                    const float* off = textDisabledCol;
                     drawUiElement(mvpUi, hub::musicui::kPanel.cx, hub::musicui::kPanel.cy, hub::musicui::kPanel.hw, hub::musicui::kPanel.hh,
                                   UiShape::RoundedBox, panelBg, 0.05f, 0.004f, kGlassRimFaint);
                     const int rows = std::min<int>(kMusicRows, static_cast<int>(mv.rows.size()));
@@ -7115,7 +7205,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         }
                         if (mv.rows[static_cast<size_t>(i)].current) {
                             drawUiElement(mvpUi, r.cx - r.hw + 0.055f, r.cy, 0.022f, 0.022f,
-                                          mv.paused ? UiShape::Pause : UiShape::Play, themeAccentCol);
+                                          mv.paused ? UiShape::Pause : UiShape::Play, accentTextCol);
                         }
                     }
                     // Scroll position when the queue is longer than the list.
@@ -7132,19 +7222,19 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         // One family with the dock: Play filled with the accent and a dark icon, the
                         // others glass with a faint rim.
                         if (i == 2) {
-                            const float heroBg[4] = {themeAccentCol[0] * 0.80f, themeAccentCol[1] * 0.80f,
-                                                     themeAccentCol[2] * 0.88f, 0.98f};
+                            const float heroBg[4] = {themeAccentCol[0] * tok::kPrimaryRest, themeAccentCol[1] * tok::kPrimaryRest,
+                                                     themeAccentCol[2] * tok::kPrimaryRest, 0.98f};
                             const float heroRim[4] = {1.0f, 1.0f, 1.0f, 0.35f};
                             drawUiElement(mvpUi, b.cx, b.cy, b.hw, b.hh, UiShape::RoundedBox, h ? themeAccentCol : heroBg,
                                           1.0f, 0.03f, heroRim);
                         } else {
                             drawUiElement(mvpUi, b.cx, b.cy, b.hw, b.hh, UiShape::RoundedBox, h ? btnHov : kGlassControl,
-                                          1.0f, 0.03f, kGlassRimFaint);
+                                          1.0f, h ? 0.045f : 0.03f, h ? accentRimCol : kGlassRimFaint);
                         }
                         const bool lit = (i == 0 && mv.shuffle) || (i == 4 && mv.repeat != 0);
-                        const float darkIcon[4] = {0.04f, 0.07f, 0.12f, 0.98f};
-                        const float* col = (i == 0 || i == 4) ? (lit ? themeAccentCol : off)
-                                         : (i == 2)           ? darkIcon
+                        const auto heroIcon = tok::labelOnAccent(themeAccentCol);  // readable on any accent
+                        const float* col = (i == 0 || i == 4) ? (lit ? accentTextCol : off)
+                                         : (i == 2)           ? heroIcon.data()
                                                               : themeTextCol;
                         const float k = (i == 2) ? 0.42f : 0.48f;
                         UiShape icon = UiShape::Shuffle;
@@ -7178,7 +7268,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     }
                     if (mv.repeat == 2) {  // "1" on the repeat button: repeat this track
                         const UiRect b = hub::musicui::button(4);
-                        drawFitCentered(b.cx + 0.040f, b.cy + 0.040f, 0.05f, 0.032f / lh, themeAccentCol, "1");
+                        drawFitCentered(b.cx + 0.040f, b.cy + 0.040f, 0.05f, 0.032f / lh, accentTextCol, "1");
                     }
                     for (int i = 0; i < rows; ++i) {
                         const UiRect r = hub::musicui::row(i);
@@ -7192,7 +7282,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         const float durW = measureString(durSc, row.duration);
                         const float maxW = 2.0f * r.hw - 0.16f - durW - 0.05f;
                         drawFit(left, r.cy + (row.artist.empty() ? 0.0f : 0.026f), maxW, 0.060f / lh,
-                                row.current ? themeAccentCol : themeTextCol, row.title);
+                                row.current ? accentTextCol : themeTextCol, row.title);
                         if (!row.artist.empty()) drawFit(left, r.cy - 0.036f, maxW, 0.044f / lh, dim, row.artist);
                         drawFit(r.cx + r.hw - 0.03f - durW, r.cy, durW + 0.01f, durSc, dim, row.duration);
                     }
@@ -7355,34 +7445,37 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         const float dockCy = kBarY - 0.5f * rowExtra;
         const float dockHh = kDockHalfH + 0.5f * rowExtra;
         drawGlow(vpPanel, 0.0f, dockCy - 0.01f, kDockHalfW, dockHh, 0.06f, dockShadow, 0.14f, true);
-        drawGlass(0.0f, dockCy, kDockHalfW, dockHh, glassPanelT.data(), 0.16f, 0.010f, kGlassRim);
+        // Corners and rim in metres: the same whether or not the multi-screen row makes the dock taller.
+        drawGlass(0.0f, dockCy, kDockHalfW, dockHh, glassPanelT.data(), relM(tok::kRadiusL, kDockHalfW, dockHh),
+                  relM(tok::kBorderStrong, kDockHalfW, dockHh), kGlassRim);
         if (screenControlsVisible_) {
-            // Divider above the multi-screen row + "SCREEN n" label pill
+            // Divider above the multi-screen row + "SCREEN n" label pill (which screen is selected:
+            // the selected look, an accent tint)
             drawUiElement(vpPanel, 0.0f, kBarY - 0.188f, kDockHalfW - 0.06f, 0.0012f,
                           UiShape::RoundedBox, kGlassDivider, 1.0f);
-            const float labelBg[4] = {themeAccentCol[0] * 0.22f, themeAccentCol[1] * 0.22f,
-                                      themeAccentCol[2] * 0.28f, 0.92f};
-            drawUiElement(vpPanel, kScreenPillCx, kBarY - 0.250f, 0.125f, 0.038f,
-                          UiShape::RoundedBox, labelBg, 1.0f, 0.08f, themeAccentCol);
+            const auto labelBg = tok::accentTint(themeAccentCol, false);
+            const float labelRim[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.70f};
+            drawBox(vpPanel, kScreenPillCx, kBarY - 0.250f, 0.125f, tok::kCtlM, labelBg.data(), tok::kRadiusPill,
+                    tok::kBorderRest, labelRim);
         }
 
         // Top scrubber groove
-        drawUiElement(vpPanel, 0.0f, kBarY + 0.150f, kDockHalfW - 0.045f, 0.048f,
-                      UiShape::RoundedBox, glassWellT.data(), 0.55f, 0.012f, kGlassRimFaint);
+        drawBox(vpPanel, 0.0f, kBarY + 0.150f, kDockHalfW - 0.045f, 0.048f, glassWellT.data(), tok::kRadiusPill,
+                tok::kBorderRest, kGlassRimFaint);
 
         // Center transport recessed island: centered at 0.0f, symmetrically
         // enclosing [Stop] (-0.26), [Seek -10] (-0.13), (Play/Pause) (0.00),
         // [Seek +10] (+0.13), and [Hide UI] (+0.26).
-        drawUiElement(vpPanel, 0.0f, kBarY - 0.045f, 0.34f, 0.098f,
-                      UiShape::RoundedBox, glassWellT.data(), 1.0f, 0.012f, kGlassRimFaint);
+        drawBox(vpPanel, 0.0f, kBarY - 0.045f, 0.34f, 0.098f, glassWellT.data(), tok::kRadiusPill, tok::kBorderRest,
+                kGlassRimFaint);
 
-        const float btnBgHover[4] = {
-            themeAccentCol[0] * 0.38f, themeAccentCol[1] * 0.38f,
-            themeAccentCol[2] * 0.46f, 0.96f};
+        // The dock is pointed at only: the button under the laser is what a click acts on, so it
+        // takes the focus look (lighter fill, accent rim at the strong width, glow), eased in.
+        const float* btnBgHover = glassCardHoverT.data();
         const float btnBorderHover[4] = {
             themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 1.0f};
         const float hoverGlow[4] = {
-            themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.22f};
+            themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], tok::kGlowAlpha};
 
         for (int b = 0; b < kBtnCount; ++b) {
             const auto cb = static_cast<CtrlButton>(b);
@@ -7403,12 +7496,14 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
             const float* bg = bgMix;
             const float* border = borderMix;
+            const float borderM = tok::kBorderRest + (tok::kBorderStrong - tok::kBorderRest) * ha;
 
             if (cb == CtrlButton::PlayPause) {
                 // Hero glowing circular Play/Pause button
+                // The primary button of the dock: the accent fill and label colour of every primary.
                 const float heroBgNormal[4] = {
-                    themeAccentCol[0] * 0.80f, themeAccentCol[1] * 0.80f,
-                    themeAccentCol[2] * 0.88f, 0.98f};
+                    themeAccentCol[0] * tok::kPrimaryRest, themeAccentCol[1] * tok::kPrimaryRest,
+                    themeAccentCol[2] * tok::kPrimaryRest, 0.98f};
                 const float heroBgHover[4] = {
                     themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 1.0f};
                 // Waiting for data (a stalled stream): the glow pulses until frames come again.
@@ -7423,29 +7518,26 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 drawGlow(vpPanel, r.cx, r.cy, r.hw, r.hh,
                          transportStalled_ ? 0.016f + 0.020f * stallPulse : (hovered ? 0.022f : 0.016f), heroGlow);
                 const float heroRim[4] = {1.0f, 1.0f, 1.0f, 0.35f};
-                drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh,
-                              UiShape::RoundedBox, hovered ? heroBgHover : heroBgNormal,
-                              1.0f, 0.03f, heroRim);
+                drawBox(vpPanel, r.cx, r.cy, r.hw, r.hh, hovered ? heroBgHover : heroBgNormal, tok::kRadiusPill,
+                        tok::kBorderRest, heroRim);
                 const UiShape iconShape = transportPaused_ ? UiShape::Play : UiShape::Pause;
-                const float darkIcon[4] = {0.04f, 0.07f, 0.12f, 0.98f};
+                const auto heroIcon = tok::labelOnAccent(themeAccentCol);  // dark or light: readable on any accent
                 drawUiElement(vpPanel, r.cx, r.cy, r.hw * 0.40f, r.hh * 0.40f,
-                              iconShape, darkIcon);
+                              iconShape, heroIcon.data());
             } else if (cb == CtrlButton::FormatToggle || cb == CtrlButton::AudioToggle || cb == CtrlButton::ScreenToggle) {
                 const bool enabled = (cb == CtrlButton::FormatToggle) ? hudFormatEnabled_ :
                                      (cb == CtrlButton::AudioToggle)  ? hudAudioEnabled_ : true;
                 const float disabledBg[4] = {0.05f, 0.06f, 0.09f, 0.45f};
                 if (hovered && enabled) {
-                    drawGlow(vpPanel, r.cx, r.cy, r.hw, r.hh, 0.014f, hoverGlow);
+                    drawGlow(vpPanel, r.cx, r.cy, r.hw, r.hh, tok::kGlowSpread, hoverGlow);
                 }
-                drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh,
-                              UiShape::RoundedBox, enabled ? bg : disabledBg,
-                              1.0f, 0.03f, enabled ? border : kGlassRimFaint);
+                drawBox(vpPanel, r.cx, r.cy, r.hw, r.hh, enabled ? bg : disabledBg, tok::kRadiusPill,
+                        enabled ? borderM : tok::kBorderRest, enabled ? border : kGlassRimFaint);
             } else if (cb == CtrlButton::Files || cb == CtrlButton::Recenter || cb == CtrlButton::Volume) {
                 if (hovered) {
-                    drawGlow(vpPanel, r.cx, r.cy, r.hw, r.hh, 0.014f, hoverGlow);
+                    drawGlow(vpPanel, r.cx, r.cy, r.hw, r.hh, tok::kGlowSpread, hoverGlow);
                 }
-                drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh,
-                              UiShape::RoundedBox, bg, 1.0f, 0.03f, border);
+                drawBox(vpPanel, r.cx, r.cy, r.hw, r.hh, bg, tok::kRadiusPill, borderM, border);
                 UiShape iconShape = (cb == CtrlButton::Recenter) ? UiShape::Recenter : UiShape::Files;
                 if (cb == CtrlButton::Volume) {
                     iconShape = volumeMuted_ ? UiShape::SpeakerMuted : UiShape::Speaker;
@@ -7468,20 +7560,18 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         drawUiElement(vpPanel, xk, r.cy, 0.011f, 0.011f, UiShape::RoundedBox, knob, 1.0f);
                     }
                 }
-                drawUiElement(vpPanel, r.cx - r.hw + 0.034f, r.cy, 0.017f, 0.017f,
-                              iconShape, themeAccentCol);
+                drawUiElement(vpPanel, r.cx - r.hw + 0.034f, r.cy, tok::kIconM, tok::kIconM,
+                              iconShape, accentTextCol);
                 if (cb == CtrlButton::Files && activeDownloadCount_ > 0) {
-                    const float badgeRed[4] = {0.92f, 0.24f, 0.28f, 0.98f};
                     drawUiElement(vpPanel, r.cx + r.hw - 0.028f, r.cy, 0.018f, 0.018f,
-                                  UiShape::RoundedBox, badgeRed, 1.0f);
+                                  UiShape::RoundedBox, tok::kBadgeRed.data(), 1.0f);
                 }
             } else {
                 // Stop, Seek -10s, Seek +10s circular buttons
                 if (hovered) {
-                    drawGlow(vpPanel, r.cx, r.cy, r.hw, r.hh, 0.014f, hoverGlow);
+                    drawGlow(vpPanel, r.cx, r.cy, r.hw, r.hh, tok::kGlowSpread, hoverGlow);
                 }
-                drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh,
-                              UiShape::RoundedBox, bg, 1.0f, 0.035f, border);
+                drawBox(vpPanel, r.cx, r.cy, r.hw, r.hh, bg, tok::kRadiusPill, borderM, border);
                 UiShape iconShape = UiShape::RoundedBox;
                 if (cb == CtrlButton::SeekBack) iconShape = UiShape::SeekBack;
                 else if (cb == CtrlButton::SeekFwd) iconShape = UiShape::SeekFwd;
@@ -7493,14 +7583,14 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 else if (cb == CtrlButton::ScreenNumbers) iconShape = UiShape::ScreenNumber;
                 else if (cb == CtrlButton::ScreenLayout) iconShape = UiShape::Layout;
                 else if (cb == CtrlButton::ScreenClose) iconShape = UiShape::Close;
-                const float iconK = is_screen_row_button(b) ? 0.64f : 0.42f;
+                // One icon size on every round button of both rows (it grows with the button's hover).
+                const float iconK = tok::kIconL / get_ctrl_button_rect(b).hh;
                 // The seek buttons carry their step ("10") under the icon: the icon moves up a little.
                 if (cb == CtrlButton::SeekBack || cb == CtrlButton::SeekFwd) r.cy += 0.009f;
-                const float framesOffCol[4] = {themeTextCol[0], themeTextCol[1], themeTextCol[2], 0.38f};
-                const float* iconCol = (cb == CtrlButton::ScreenAudioFollow && audioFollow_) ? themeAccentCol
-                                     : (cb == CtrlButton::ScreenAudioFollow) ? framesOffCol
-                                     : (cb == CtrlButton::ScreenLock && screensUnlocked_) ? themeAccentCol
-                                     : (cb == CtrlButton::ScreenNumbers && !screenNumbersOn_) ? framesOffCol
+                const float* iconCol = (cb == CtrlButton::ScreenAudioFollow && audioFollow_) ? accentTextCol
+                                     : (cb == CtrlButton::ScreenAudioFollow) ? textDisabledCol
+                                     : (cb == CtrlButton::ScreenLock && screensUnlocked_) ? accentTextCol
+                                     : (cb == CtrlButton::ScreenNumbers && !screenNumbersOn_) ? textDisabledCol
                                                                                             : themeTextCol;
                 drawUiElement(vpPanel, r.cx, r.cy, r.hw * iconK, r.hh * iconK, iconShape, iconCol);
             }
@@ -7512,8 +7602,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         const float trackY = kBarY + 0.150f;  // centred in the groove, same as the hit test
         // One colour with or without chapters (a brightened track turned dense chapters into a
         // barcode); no ruler ticks (they meant neither minutes nor chapters).
-        const float trackBg[4] = {0.16f, 0.19f, 0.25f, 0.95f};
-        const float thumbCol[4] = {0.95f, 0.97f, 1.0f, 1.0f};
+        const float* trackBg = tok::kTrack.data();
+        const float* thumbCol = tok::kKnob.data();
 
         drawUiElement(vpPanel, 0.0f, trackY, trackHalfW, trackHalfH,
                       UiShape::RoundedBox, trackBg, 1.0f);
@@ -7641,20 +7731,19 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
         }
         // The scrub bubble grows a second line for the hovered chapter's title.
-        const float tipSc = (0.029f * tScale) / fontAtlas_.lineHeight * 1.05f;
+        const float tipSc = scBody;
         std::string hoverChapter;
         if (chaptersOn && pointerOnTimeline_) {
             if (const Chapter* c = chapterAt(pointerScrub_ * transportDuration_)) hoverChapter = c->title;
         }
         const float bubbleHw = hoverChapter.empty()
                                    ? 0.086f
-                                   : std::clamp(0.5f * measureString(tipSc * 0.9f, hoverChapter) + 0.024f, 0.086f, 0.26f);
+                                   : std::clamp(0.5f * measureString(scSecondary, hoverChapter) + 0.024f, 0.086f, 0.26f);
         const float bubbleHh = hoverChapter.empty() ? 0.028f : 0.046f;
         const float bubbleY = trackY + 0.034f + bubbleHh;
 
         const float thumbX = -trackHalfW + 2.0f * trackHalfW * p;
-        drawUiElement(vpPanel, thumbX, trackY, 0.011f, 0.024f,
-                      UiShape::RoundedBox, thumbCol, 1.0f, 0.18f, kGlassRim);
+        drawBox(vpPanel, thumbX, trackY, 0.011f, 0.024f, thumbCol, tok::kRadiusPill, tok::kBorderRest, kGlassRim);
 
         // Floating scrub hover tooltip speech bubble
         if (transportLive_ != 0 && transportDuration_ > 0.0) {
@@ -7671,8 +7760,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             drawUiElement(vpPanel, rawScrubX, trackY + 0.032f, 0.0035f, 0.010f,
                           UiShape::RoundedBox, kGlassRim, 1.0f);
             // Main bubble capsule
-            drawUiElement(vpPanel, bubbleX, bubbleY, bubbleHw, bubbleHh,
-                          UiShape::RoundedBox, glassControlT.data(), 0.028f / bubbleHh, 0.06f, kGlassRim);
+            drawBox(vpPanel, bubbleX, bubbleY, bubbleHw, bubbleHh, glassControlT.data(), tok::kRadiusL, tok::kBorderRest,
+                    kGlassRim);
 
             // Keyframe preview above the bubble (mockup #4), once decoded
             const CardThumbnail& scrub = cardThumbs_[kScrubThumbSlot];
@@ -7681,9 +7770,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const float pvHalfH = pvHalfW * 9.0f / 16.0f;
                 const float pvX = std::clamp(rawScrubX, -trackHalfW + pvHalfW, trackHalfW - pvHalfW);
                 const float pvY = bubbleY + bubbleHh + 0.012f + pvHalfH;
-                drawUiElement(vpPanel, pvX, pvY, pvHalfW + 0.006f, pvHalfH + 0.006f,
-                              UiShape::RoundedBox, glassControlT.data(), 0.024f / (pvHalfH + 0.006f),
-                              0.004f / (pvHalfH + 0.006f), kGlassRim);
+                drawBox(vpPanel, pvX, pvY, pvHalfW + 0.006f, pvHalfH + 0.006f, glassControlT.data(), tok::kRadiusM,
+                        tok::kBorderStrong, kGlassRim);
                 bindPipe(thumbPipeline_);
                 vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                         textPipelineLayout_, 0, 1, &scrub.set, 0, nullptr);
@@ -7719,8 +7807,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                        : (cbT == CtrlButton::ScreenNumbers) ? (screenNumbersOn_ ? "Hide screen numbers" : "Show screen numbers")
                        : (cbT == CtrlButton::ScreenLayout) ? "Arrange" : "Close screen";
             if (textReady_) {
-                const float tipSc = (0.029f * tScale) / fontAtlas_.lineHeight * 0.90f;
-                rowTipHw = std::max(rowTipHw, 0.5f * measureString(tipSc, rowTipText) + 0.022f);
+                rowTipHw = std::max(rowTipHw, 0.5f * measureString(scSecondary, rowTipText) + 0.022f);
             }
         }
         // Every other button (and the time readout) says what a click does: round buttons right above
@@ -7735,8 +7822,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const CtrlButtonRect rT = timeTip ? CtrlButtonRect{0.70f, kBarY + 0.150f, 0.115f, 0.040f}
                                                   : get_ctrl_button_rect(pointerButton_);
                 if (textReady_) {
-                    const float tipScD = (0.029f * tScale) / fontAtlas_.lineHeight * 0.90f;
-                    dockTipHw = std::max(0.052f, 0.5f * measureString(tipScD, dockTip) + 0.022f);
+                    dockTipHw = std::max(0.052f, 0.5f * measureString(scSecondary, dockTip) + 0.022f);
                 }
                 const bool above = timeTip || rT.hw > rT.hh * 1.5f;
                 const bool hintUp = dockHintAlpha_ > 0.005f && !dockHintText_.empty();
@@ -7745,18 +7831,19 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
             // The time readout is clickable: it lights up like a button under the laser.
             if (pointerOnTimeToggle_ && transportDuration_ > 0.0) {
-                drawUiElement(vpPanel, 0.70f, kBarY + 0.150f, 0.115f, 0.036f, UiShape::RoundedBox, btnBgHover, 1.0f,
-                              0.03f, btnBorderHover);
+                drawGlow(vpPanel, 0.70f, kBarY + 0.150f, 0.115f, tok::kCtlM, tok::kGlowSpread, hoverGlow);
+                drawBox(vpPanel, 0.70f, kBarY + 0.150f, 0.115f, tok::kCtlM, btnBgHover, tok::kRadiusPill,
+                        tok::kBorderStrong, btnBorderHover);
             }
         }
         if (rowTip) {
             const CtrlButtonRect rT = get_ctrl_button_rect(pointerButton_);
             const float tipCx = std::clamp(rT.cx, -kDockHalfW + rowTipHw + 0.01f, kDockHalfW - rowTipHw - 0.01f);
-            drawUiElement(vpPanel, tipCx, rT.cy + 0.080f, rowTipHw, 0.026f,
-                          UiShape::RoundedBox, glassControlT.data(), 1.0f, 0.06f, kGlassRim);
+            drawBox(vpPanel, tipCx, rT.cy + 0.080f, rowTipHw, 0.026f, glassControlT.data(), tok::kRadiusPill,
+                    tok::kBorderRest, kGlassRim);
         } else if (!dockTip.empty()) {
-            drawUiElement(vpPanel, dockTipX, dockTipY, dockTipHw, 0.024f, UiShape::RoundedBox, glassControlT.data(), 1.0f,
-                          0.06f, kGlassRim);
+            drawBox(vpPanel, dockTipX, dockTipY, dockTipHw, 0.026f, glassControlT.data(), tok::kRadiusPill,
+                    tok::kBorderRest, kGlassRim);
         }
 
         // Return hint: a glass pill 1.4 cm above the dock's top edge (centre
@@ -7769,7 +7856,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         if (dockHintAlpha_ > 0.005f && hintHw > 0.0f) {
             const auto hintBg = tinted(glassControlT.data(), dockHintAlpha_);
             const float hintRim[4] = {kGlassRim[0], kGlassRim[1], kGlassRim[2], kGlassRim[3] * dockHintAlpha_};
-            drawUiElement(vpPanel, 0.0f, hintY, hintHw, hintHh, UiShape::RoundedBox, hintBg.data(), 1.0f, 0.06f, hintRim);
+            drawBox(vpPanel, 0.0f, hintY, hintHw, hintHh, hintBg.data(), tok::kRadiusPill, tok::kBorderRest, hintRim);
         }
         // Plugin gauge: label on the left, a bar on the right (one row higher while the hint shows).
         const float gaugeHw = 0.21f;
@@ -7777,10 +7864,10 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         if (pluginGaugeAlpha_ > 0.005f) {
             const auto gBg = tinted(glassControlT.data(), pluginGaugeAlpha_);
             const float gRim[4] = {kGlassRim[0], kGlassRim[1], kGlassRim[2], kGlassRim[3] * pluginGaugeAlpha_};
-            drawUiElement(vpPanel, 0.0f, gaugeY, gaugeHw, hintHh, UiShape::RoundedBox, gBg.data(), 1.0f, 0.06f, gRim);
+            drawBox(vpPanel, 0.0f, gaugeY, gaugeHw, hintHh, gBg.data(), tok::kRadiusPill, tok::kBorderRest, gRim);
             const float barL = -gaugeHw + 0.125f;
             const float barR = gaugeHw - 0.024f;
-            const float barTrack[4] = {0.16f, 0.19f, 0.25f, 0.95f * pluginGaugeAlpha_};
+            const float barTrack[4] = {tok::kTrack[0], tok::kTrack[1], tok::kTrack[2], tok::kTrack[3] * pluginGaugeAlpha_};
             drawUiElement(vpPanel, 0.5f * (barL + barR), gaugeY, 0.5f * (barR - barL), 0.007f, UiShape::RoundedBox,
                           barTrack, 1.0f);
             const float v = std::clamp(pluginGaugeValue_, 0.0f, 1.0f);
@@ -7795,9 +7882,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             bindPipe(textPipeline_);
             vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                     textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
-            const float timeSc = (0.038f * tScale) / fontAtlas_.lineHeight;
-            const float pillSc = (0.029f * tScale) / fontAtlas_.lineHeight;
-            const float pillDisabledCol[4] = {0.42f, 0.48f, 0.58f, 0.60f};
+            const float timeSc = scTitle;
+            const float pillSc = scBody;
+            const float* pillDisabledCol = textDisabledCol;
 
             if (transportDuration_ > 0.0) {
                 const std::string leftStr = format_time(transportElapsed_);
@@ -7814,9 +7901,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         ? "-" + format_time(transportDuration_ - transportElapsed_)
                         : format_time(transportDuration_);
                     // Plain text colour: the accent stays for the played bar and LIVE.
-                    const float rightCol[4] = {themeTextCol[0], themeTextCol[1], themeTextCol[2],
-                                               pointerOnTimeToggle_ ? 1.0f : 0.80f};
-                    drawFit(trackHalfW + 0.026f, trackY, 0.25f, timeSc, rightCol, rightStr);
+                    drawFit(trackHalfW + 0.026f, trackY, 0.25f, timeSc,
+                            pointerOnTimeToggle_ ? themeTextCol : textSecondaryCol, rightStr);
                 }
 
                 if (pointerOnTimeline_) {
@@ -7832,8 +7918,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         drawFitCentered(bubbleX, bubbleY, 0.16f, tipSc, themeTextCol, tipStr);
                     } else {
                         drawFitCentered(bubbleX, bubbleY + 0.016f, 0.16f, tipSc, themeTextCol, tipStr);
-                        drawFitCentered(bubbleX, bubbleY - 0.018f, 2.0f * bubbleHw - 0.03f, tipSc * 0.9f,
-                                        themeAccentCol, hoverChapter);
+                        drawFitCentered(bubbleX, bubbleY - 0.018f, 2.0f * bubbleHw - 0.03f, scSecondary,
+                                        accentTextCol, hoverChapter);
                     }
                 }
                 // (No always-on chapter line above the track: it sat on the groove's rim and mostly
@@ -7846,7 +7932,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
             if (pluginGaugeAlpha_ > 0.005f && !pluginGaugeLabel_.empty()) {
                 const float gCol[4] = {themeTextCol[0], themeTextCol[1], themeTextCol[2], pluginGaugeAlpha_};
-                drawFitCentered(-gaugeHw + 0.064f, gaugeY, 0.10f, tipSc * 0.9f, gCol, pluginGaugeLabel_);
+                drawFitCentered(-gaugeHw + 0.064f, gaugeY, 0.10f, scSecondary, gCol, pluginGaugeLabel_);
             }
 
             // Left flank pills: HUB and RECENTER
@@ -7871,23 +7957,23 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 char lbl[32];
                 std::snprintf(lbl, sizeof(lbl), "Screen %d", screenControlsNumber_);
                 withHeadingFont([&] {
-                    drawFitCentered(kScreenPillCx, kBarY - 0.250f, 0.23f, pillSc * 1.05f, themeTextCol, lbl);
+                    drawFitCentered(kScreenPillCx, kBarY - 0.250f, 0.23f, pillSc, themeTextCol, lbl);
                 });
             }
             // Tooltip text for button hover
             if (rowTip) {
                 const CtrlButtonRect rT = get_ctrl_button_rect(pointerButton_);
                 const float tipCx = std::clamp(rT.cx, -kDockHalfW + rowTipHw + 0.01f, kDockHalfW - rowTipHw - 0.01f);
-                drawFitCentered(tipCx, rT.cy + 0.080f, 2.0f * rowTipHw - 0.02f, pillSc * 0.90f, themeTextCol,
+                drawFitCentered(tipCx, rT.cy + 0.080f, 2.0f * rowTipHw - 0.02f, scSecondary, themeTextCol,
                                 rowTipText);
             } else if (!dockTip.empty()) {
-                drawFitCentered(dockTipX, dockTipY, 2.0f * dockTipHw - 0.02f, pillSc * 0.90f, themeTextCol, dockTip);
+                drawFitCentered(dockTipX, dockTipY, 2.0f * dockTipHw - 0.02f, scSecondary, themeTextCol, dockTip);
             }
             // The seek buttons' step, under their icon.
             withHeadingFont([&] {
                 for (const CtrlButton sb : {CtrlButton::SeekBack, CtrlButton::SeekFwd}) {
                     const CtrlButtonRect rk = get_ctrl_button_rect(static_cast<int>(sb));
-                    drawFitCentered(rk.cx, rk.cy - 0.026f, 0.05f, pillSc * 0.72f, themeTextCol, "10");
+                    drawFitCentered(rk.cx, rk.cy - 0.026f, 0.05f, scCaption, themeTextCol, "10");
                 }
             });
         }
@@ -7902,22 +7988,23 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
 
         // Depth shadow + faint accent edge light behind the glass panel
         const float panelShadow[4] = {0.0f, 0.0f, 0.0f, 0.60f};
-        drawGlow(vpPanel, 0.0f, -0.015f, kPanelW, kPanelTop, 0.08f, panelShadow, 0.09f, true);
+        const float panelR = relM(tok::kRadiusL, kPanelW, kPanelTop);
+        drawGlow(vpPanel, 0.0f, -0.015f, kPanelW, kPanelTop, 0.08f, panelShadow, panelR, true);
         const float edgeLight[4] = {
             themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.045f};
-        drawGlow(vpPanel, 0.0f, 0.0f, kPanelW, kPanelTop, 0.022f, edgeLight, 0.09f, true);
-        drawGlass(0.0f, 0.0f, kPanelW, kPanelTop, glassPanelT.data(), 0.09f, 0.006f, kGlassRim);
+        drawGlow(vpPanel, 0.0f, 0.0f, kPanelW, kPanelTop, 0.022f, edgeLight, panelR, true);
+        drawGlass(0.0f, 0.0f, kPanelW, kPanelTop, glassPanelT.data(), panelR, relM(tok::kBorderStrong, kPanelW, kPanelTop),
+                  kGlassRim);
 
         // Left navigation rail background & vertical separator
-        drawUiElement(vpPanel, -0.695f, 0.0f, 0.190f, kPanelTop - 0.02f,
-                      UiShape::RoundedBox, glassRailT.data(), 0.075f);
+        drawBox(vpPanel, -0.695f, 0.0f, 0.190f, kPanelTop - 0.02f, glassRailT.data(), tok::kRadiusL);
         {
+            // The close X: the same button (size, colours) as every dialog's.
             const UiRect cb = hub::closeButton();
-            const float cbBg[4] = {0.20f, 0.23f, 0.29f, hubCloseHovered_ ? 0.95f : 0.55f};
-            const float cbRim[4] = {1.0f, 1.0f, 1.0f, hubCloseHovered_ ? 0.80f : 0.22f};
-            const float cbIcon[4] = {0.92f, 0.94f, 0.98f, hubCloseHovered_ ? 1.0f : 0.70f};
-            drawUiElement(vpPanel, cb.cx, cb.cy, cb.hw, cb.hh, UiShape::RoundedBox, cbBg, 1.0f, 0.08f, cbRim);
-            drawUiElement(vpPanel, cb.cx, cb.cy, cb.hw * 0.42f, cb.hh * 0.42f, UiShape::Close, cbIcon);
+            tok::State st;
+            st.hover = hubCloseHovered_;
+            drawControl(vpPanel, cb, st);
+            drawUiElement(vpPanel, cb.cx, cb.cy, tok::kIconS, tok::kIconS, UiShape::Close, themeTextCol);
         }
         drawUiElement(vpPanel, kRailRight, 0.0f, 0.0012f, kPanelTop - 0.04f,
                       UiShape::RoundedBox, kGlassDivider, 1.0f);
@@ -7927,7 +8014,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                       UiShape::RoundedBox, kGlassDivider, 1.0f);
 
         // Brand emblem in top-left of rail
-        drawUiElement(vpPanel, -0.835f, 0.455f, 0.024f, 0.024f, UiShape::Headset, themeAccentCol);
+        drawUiElement(vpPanel, -0.835f, 0.455f, 0.024f, 0.024f, UiShape::Headset, accentTextCol);
 
         // Active primary section: 0=Files, 1=Downloads, 2=Settings
         const int activeMainTab = settingsVisible_ ? 2 : (downloadsVisible_ ? 1 : 0);
@@ -7942,13 +8029,12 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
         }
 
-        const float tabActiveBg[4] = {
-            themeAccentCol[0] * 0.30f, themeAccentCol[1] * 0.30f,
-            themeAccentCol[2] * 0.38f, 0.96f};
+        // The open tab is "selected": accent tint and a softer accent rim (tok::look).
+        const auto tabActiveBgC = tok::accentTint(themeAccentCol, false);
+        const float* tabActiveBg = tabActiveBgC.data();
         const float tabActiveBord[4] = {
             themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 1.0f};
-        const float tabActiveGlow[4] = {
-            themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.18f};
+        const float tabSelBord[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.70f};
         const float* tabHovBg = glassCardHoverT.data();
         const float* tabHovBord = kGlassRim;
         const float* tabNormBg = glassControlT.data();
@@ -7958,39 +8044,35 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             const bool act = (s == activeMainTab);
             const bool hov = (browserSidebarHovered_ == hub::mainTabHoverId(s));
             const float tabHh = hub::mainTabHalfH();
+            const float ha = (s < 16) ? railHoverAnim_[s] : (hov ? 1.0f : 0.0f);
             if (act) {
-                drawGlow(vpPanel, -0.695f, mainTabY[s], 0.172f, tabHh, 0.014f,
-                         tabActiveGlow, 0.55f);
-                drawUiElement(vpPanel, -0.695f, mainTabY[s], 0.172f, tabHh,
-                              UiShape::RoundedBox, tabActiveBg, 0.55f, 0.07f, tabActiveBord);
+                const auto selFill = tok::accentTint(themeAccentCol, ha > 0.5f);
+                drawBox(vpPanel, -0.695f, mainTabY[s], 0.172f, tabHh, selFill.data(), tok::kRadiusM, tok::kBorderRest,
+                        tabSelBord);
             } else {
-                // Eased hover: veil -> card colour, rim brightens
-                const float ha = (s < 16) ? railHoverAnim_[s] : (hov ? 1.0f : 0.0f);
+                // Eased hover: veil -> the lighter hover fill, rim brightens
                 float bgMix[4], rimMix[4];
                 for (int k = 0; k < 4; ++k) {
                     bgMix[k] = kGlassVeil[k] + (tabHovBg[k] - kGlassVeil[k]) * ha;
                     rimMix[k] = kGlassRimFaint[k] + (tabHovBord[k] - kGlassRimFaint[k]) * ha;
                 }
-                drawUiElement(vpPanel, -0.695f, mainTabY[s], 0.172f, tabHh,
-                              UiShape::RoundedBox, bgMix, 0.55f, 0.04f + 0.01f * ha, rimMix);
+                drawBox(vpPanel, -0.695f, mainTabY[s], 0.172f, tabHh, bgMix, tok::kRadiusM, tok::kBorderRest, rimMix);
             }
-            drawUiElement(vpPanel, -0.825f, mainTabY[s], 0.017f, 0.017f, mainIcons[s],
-                          act ? themeAccentCol : themeTextCol);
+            drawUiElement(vpPanel, -0.825f, mainTabY[s], tok::kIconM, tok::kIconM, mainIcons[s],
+                          act ? accentTextCol : themeTextCol);
 
             // Red notification badge on Downloads tab when downloads are active
             if (s == 1 && activeDownloadCount_ > 0) {
-                const float redBadge[4] = {0.92f, 0.24f, 0.28f, 0.98f};
                 drawUiElement(vpPanel, -0.555f, mainTabY[s], 0.018f, 0.018f,
-                              UiShape::RoundedBox, redBadge, 1.0f);
+                              UiShape::RoundedBox, tok::kBadgeRed.data(), 1.0f);
             }
             if (s >= hub::kFixedTabCount) {
                 const int sc = s - hub::kFixedTabCount;
                 if (sc < static_cast<int>(railShortcuts_.size()) && !railShortcuts_[sc].kiosk) {
                     const UiRect ib = hub::mainTabIncogBtn(s);
-                    const bool ibHov = (browserSidebarHovered_ == hub::kShortcutIncogHoverBase + sc);
-                    drawUiElement(vpPanel, ib.cx, ib.cy, ib.hw, ib.hh,
-                                  UiShape::RoundedBox, ibHov ? tabActiveBg : tabNormBg,
-                                  0.55f, ibHov ? 0.08f : 0.05f, ibHov ? tabActiveBord : tabNormBord);
+                    tok::State st;
+                    st.hover = (browserSidebarHovered_ == hub::kShortcutIncogHoverBase + sc);
+                    drawControl(vpPanel, ib, st, tok::kRadiusS);
                 }
             }
         }
@@ -8011,58 +8093,47 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         } else if (activeMainTab == 2) {
             activeSubTab = settingsRailPos_;  // (the settings menu knows which entry a sub-page belongs to)
         }
-        const float subActBg[4] = {0.85f, 0.90f, 1.00f, 0.14f};
-        const float slateIconCol[4] = {
-            themeTextCol[0] * 0.62f, themeTextCol[1] * 0.68f,
-            themeTextCol[2] * 0.78f, 0.90f};
+        const float* slateIconCol = textSecondaryCol;
         for (int sub = 0; sub < subCount; ++sub) {
             const float sy = hub::subY(isSet ? setSubY[sub] : (isDl ? dlSubY[sub] : fileSubY[sub]));
             const float sH = hub::subHalfH(isSet ? 0.030f : 0.032f);
             const bool hov = (browserSidebarHovered_ == hub::subHoverId(activeMainTab, sub));
             const bool subAct = (sub == activeSubTab);
             // Settings: the section marked with the buttons (Up from a page's first row), in the accent.
+            // The shared states: the section in use = selected, the laser = hover, the section the
+            // buttons are on (Up from a page's first row) = focus. Clear while none applies.
             const bool btnFocus = isSet && sub == settingsRailFocus_;
-            if (btnFocus) {
-                const float focGlow[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.22f};
-                drawGlow(vpPanel, -0.695f, sy, 0.172f, sH, 0.012f, focGlow, 0.45f);
-                drawUiElement(vpPanel, -0.695f, sy, 0.172f, sH, UiShape::RoundedBox, subAct ? subActBg : kGlassVeil,
-                              0.45f, 0.08f, tabActiveBord);
-            } else if (subAct || hov) {
-                // Neutral veil for the current sub-section (accent stays on the main tab)
-                drawUiElement(vpPanel, -0.695f, sy, 0.172f, sH,
-                              UiShape::RoundedBox, subAct ? subActBg : kGlassVeil,
-                              0.45f, hov ? 0.05f : 0.0f, hov ? kGlassRim : nullptr);
-            }
-            if (subAct || hov) {
-                if (subAct) {
-                    drawUiElement(vpPanel, -0.861f, sy, 0.0035f, sH * 0.55f,
-                                  UiShape::RoundedBox, themeAccentCol, 1.0f);
-                }
+            if (btnFocus || subAct || hov) {
+                tok::State st;
+                st.hover = hov;
+                st.focus = btnFocus;
+                st.selected = subAct;
+                drawControl(vpPanel, {-0.695f, sy, 0.172f, sH}, st, tok::kRadiusM, kGlassVeil);
             }
             if (activeMainTab == 0) {
                 const UiShape qIcons[6] = {UiShape::Home, UiShape::CurvedDisplay, UiShape::List, UiShape::Download, UiShape::Star, UiShape::Lock};
-                drawUiElement(vpPanel, -0.825f, sy, 0.015f, 0.015f, qIcons[sub],
-                              subAct ? themeAccentCol : slateIconCol);
+                drawUiElement(vpPanel, -0.825f, sy, tok::kIconM, tok::kIconM, qIcons[sub],
+                              subAct ? accentTextCol : slateIconCol);
             }
         }
 
         if (vaultUnlocked_) {
-            const bool lockHov = (browserSidebarHovered_ == 9);
-            const float ly = hub::lockVaultButton(activeMainTab).cy;
-            const float lockBg[4] = {0.42f, 0.08f, 0.11f, lockHov ? 0.92f : 0.55f};
-            const float lockBord[4] = {0.95f, 0.35f, 0.40f, lockHov ? 0.95f : 0.45f};
-            drawUiElement(vpPanel, -0.695f, ly, 0.172f, 0.030f,
-                          UiShape::RoundedBox, lockBg, 0.55f, 0.05f, lockBord);
+            // Locking is safe: a plain glass pill with the vault's gold lock and words (not a red one).
+            const UiRect lr = hub::lockVaultButton(activeMainTab);
+            tok::State st;
+            st.hover = (browserSidebarHovered_ == 9);
+            drawControl(vpPanel, {-0.695f, lr.cy, 0.172f, lr.hh}, st, tok::kRadiusM);
+            drawUiElement(vpPanel, -0.825f, lr.cy, tok::kIconM, tok::kIconM, UiShape::Lock, tok::kVault.text.data());
         }
 
         // Button focus outside the page's own selection (setHubNavFocus): a glow and a full accent
         // rim around what A acts on. Not while a dialog is up (it has the buttons then).
+        // (The shared focus look: accent glow and the strong accent rim, over the element's own state.)
         auto drawNavFocus = [&](const UiRect& r) {
-            const float glow[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.30f};
-            const float fill[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.10f};
-            drawGlow(vpPanel, r.cx, r.cy, r.hw, r.hh, 0.016f, glow, 0.55f);
-            drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox, fill, 0.55f,
-                          0.0035f / std::max(0.001f, std::min(r.hw, r.hh)), tabActiveBord);
+            const float glow[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], tok::kGlowAlpha};
+            const float fill[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.06f};
+            drawGlow(vpPanel, r.cx, r.cy, r.hw, r.hh, tok::kGlowSpread, glow, std::min(1.0f, relM(tok::kRadiusM, r.hw, r.hh)));
+            drawBox(vpPanel, r.cx, r.cy, r.hw, r.hh, fill, tok::kRadiusM, tok::kBorderStrong, tabActiveBord);
         };
         const bool navFocusShown = !actionMenu_.visible && !keyboardModal_.visible;
         if (navFocusShown && hubNavZone_ == kNavRail) {
@@ -8072,33 +8143,31 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
 
         // Standardized, generously readable font scales across the entire Unified Spatial Hub
         // Base sizes boosted ~35% and multiplied by user-configurable uiTextScale_!
-        const float scHeader = (0.038f * tScale) / fontAtlas_.lineHeight;
-        const float scStd    = (0.030f * tScale) / fontAtlas_.lineHeight;
-        const float scSub    = (0.026f * tScale) / fontAtlas_.lineHeight;
-        const float scDetail = (0.022f * tScale) / fontAtlas_.lineHeight;
-        const float scBadge  = (0.020f * tScale) / fontAtlas_.lineHeight;
+        // The shared text scale (gfx/ui_tokens.hpp): no local sizes, nothing below Caption.
+        const float scHeader = scTitle;
+        const float scStd    = scBody;
+        const float scSub    = scSecondary;
+        const float scDetail = scCaption;
+        const float scBadge  = scCaption;
 
-        const float slateCol[4] = {
-            themeTextCol[0] * 0.78f, themeTextCol[1] * 0.84f,
-            themeTextCol[2] * 0.94f, 0.95f};
-        const float dimCol[4] = {
-            themeTextCol[0] * 0.62f, themeTextCol[1] * 0.70f,
-            themeTextCol[2] * 0.82f, 0.90f};
-        const float emeraldCol[4] = {0.22f, 0.88f, 0.54f, 1.0f};
+        // Text roles: secondary for what is meant to be read (captions, details, labels), disabled
+        // only for what is off.
+        const float* slateCol = textSecondaryCol;
+        const float* dimCol = textDisabledCol;
+        const float* emeraldCol = tok::kSuccess.text.data();
 
         // Shared rail text (brand + primary tabs); call with the text pipeline bound.
         auto drawRailText = [&]() {
-            const float brandSc = scHeader * 1.05f;
+            const float brandSc = scHeader;
             withHeadingFont([&] {
                 drawFit(-0.795f, 0.455f, 0.20f, brandSc, themeTextCol, "PIXEL");
             });
             float pixelW = 0.0f;
             withHeadingFont([&] { pixelW = measureString(brandSc, "PIXEL "); });
-            drawFit(-0.795f + pixelW, 0.455f, 0.10f, brandSc, themeAccentCol, "VR");
+            drawFit(-0.795f + pixelW, 0.455f, 0.10f, brandSc, accentTextCol, "VR");
             if (vaultUnlocked_) {
-                const float lockTextCol[4] = {1.0f, 0.50f, 0.50f, 1.0f};
                 const UiRect lockR = hub::lockVaultButton(activeMainTab);
-                drawFitCentered(lockR.cx, lockR.cy, 0.28f, scSub, lockTextCol, "Lock Vault");
+                drawFitCentered(lockR.cx + 0.012f, lockR.cy, 0.26f, scSub, tok::kVault.text.data(), "Lock Vault");
             }
             // Compressed pitch (more than 5 tabs): slightly smaller labels.
             const float tabSc = (mainTabCount > 5) ? scSub : scStd;
@@ -8118,8 +8187,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     const int sc = s - hub::kFixedTabCount;
                     const UiRect ib = hub::mainTabIncogBtn(s);
                     const bool ibHov = (browserSidebarHovered_ == hub::kShortcutIncogHoverBase + sc);
-                    drawFitCentered(ib.cx, ib.cy, ib.hw * 1.85f, scBadge * 0.90f,
-                                    ibHov ? themeAccentCol : slateCol, "Incog");
+                    // (Caption, the smallest step: the pill is sized for it.)
+                    drawFitCentered(ib.cx, ib.cy, ib.hw * 1.9f, scBadge, ibHov ? themeTextCol : slateCol, "Incog");
                 }
             }
         };
@@ -8178,7 +8247,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         };
         auto drawCrumbChevrons = [&](const Crumbs& c, float cy) {
             for (float chx : c.chevronX) {
-                drawUiElement(vpPanel, chx, cy, 0.0085f, 0.0085f, UiShape::Chevron, dimCol);
+                drawUiElement(vpPanel, chx, cy, 0.0085f, 0.0085f, UiShape::Chevron, slateCol);
             }
         };
         auto drawCrumbText = [&](const Crumbs& c, float cy, float sc, float maxRight) {
@@ -8238,50 +8307,44 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             auto getCardLayout = [&](int slot) { return hub::browserCard(browserViewMode_, slot); };
 
             // Header buttons (shared layout with the pointer hit-test)
+            tok::Rgba pickOkLabel = tok::kLabelDark;  // Move / Copy here's label colour (UI pass -> text pass)
+            // Header buttons: the shared states (selected = the choice in use, hover = the laser).
             auto headerBtn = [&](int id, bool active) {
                 const UiRect r = hub::headerButton(id, browserPick_.active);
-                const bool hov = (browserPageBtnHovered_ == id);
-                if (active) {
-                    drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh,
-                                  UiShape::RoundedBox, tabActiveBg, 1.0f, 0.07f, tabActiveBord);
-                } else {
-                    drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh,
-                                  UiShape::RoundedBox, hov ? tabHovBg : tabNormBg,
-                                  1.0f, 0.06f, hov ? tabHovBord : tabNormBord);
-                }
+                tok::State st;
+                st.hover = (browserPageBtnHovered_ == id);
+                st.selected = active;
+                drawControl(vpPanel, r, st);
                 return r;
             };
             auto headerIconX = [](const UiRect& r) { return r.cx - r.hw + 0.026f; };
             if (browserPick_.active) {
                 // Move / Copy target: a prominent accent-tinted bar behind the row, confirm and cancel pills.
-                const float barCol[4] = {themeAccentCol[0] * 0.28f, themeAccentCol[1] * 0.28f, themeAccentCol[2] * 0.34f, 0.96f};
+                const auto barCol = tok::accentTint(themeAccentCol, false);
                 const float barGlow[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.18f};
-                drawGlow(vpPanel, 0.195f, hub::kBrowserBtnY, 0.665f, hub::kBrowserBtnHH + 0.005f, 0.012f, barGlow);
-                drawUiElement(vpPanel, 0.195f, hub::kBrowserBtnY, 0.665f, hub::kBrowserBtnHH + 0.005f, UiShape::RoundedBox,
-                              barCol, 1.0f, 0.08f, tabActiveBord);
+                drawGlow(vpPanel, 0.195f, hub::kBrowserBtnY, 0.665f, hub::kBrowserBtnHH + 0.003f, 0.012f, barGlow);
+                drawBox(vpPanel, 0.195f, hub::kBrowserBtnY, 0.665f, hub::kBrowserBtnHH + 0.003f, barCol.data(),
+                        tok::kRadiusPill, tok::kBorderRest, tabActiveBord);
                 if (browserCanCreateFolder_) {
                     const UiRect r = headerBtn(6, false);
-                    drawUiElement(vpPanel, headerIconX(r), r.cy, 0.012f, 0.012f, UiShape::Files, slateIconCol);
+                    drawUiElement(vpPanel, headerIconX(r), r.cy, tok::kIconS, tok::kIconS, UiShape::Files, slateIconCol);
                 }
+                const UiRect r7 = hub::headerButton(7);
                 if (browserPick_.canConfirm) {
-                    const UiRect r = hub::headerButton(7);
-                    const bool hov7 = browserPageBtnHovered_ == 7;
-                    const float fill[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 1.0f};
-                    const float rim[4] = {1.0f, 1.0f, 1.0f, hov7 ? 0.95f : 0.55f};
-                    if (hov7) drawGlow(vpPanel, r.cx, r.cy, r.hw, r.hh, 0.012f, fill);
-                    drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox, fill, 1.0f, hov7 ? 0.12f : 0.08f, rim);
-                    drawUiElement(vpPanel, headerIconX(r), r.cy, 0.012f, 0.012f, UiShape::Checkmark, hub::kPickDarkText);
+                    // Move / Copy here: the one primary-button style.
+                    pickOkLabel = drawPrimary(vpPanel, r7, browserPageBtnHovered_ == 7, false);
                 } else {
-                    const UiRect r = hub::headerButton(7);
-                    const bool hov7 = browserPageBtnHovered_ == 7;
-                    drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox,
-                                  hov7 ? tabHovBg : glassControlT.data(), 1.0f, 0.06f,
-                                  hov7 ? tabHovBord : tabNormBord);
-                    drawUiElement(vpPanel, headerIconX(r), r.cy, 0.012f, 0.012f, UiShape::Checkmark, dimCol);
+                    tok::State st;
+                    st.hover = browserPageBtnHovered_ == 7;
+                    st.disabled = true;
+                    drawControl(vpPanel, r7, st);
+                    pickOkLabel = {textDisabledCol[0], textDisabledCol[1], textDisabledCol[2], textDisabledCol[3]};
                 }
+                drawUiElement(vpPanel, headerIconX(r7), r7.cy, tok::kIconS, tok::kIconS, UiShape::Checkmark,
+                              pickOkLabel.data());
                 {
                     const UiRect r = headerBtn(8, false);
-                    drawUiElement(vpPanel, headerIconX(r), r.cy, 0.010f, 0.010f, UiShape::Close, slateIconCol);
+                    drawUiElement(vpPanel, headerIconX(r), r.cy, tok::kIconS, tok::kIconS, UiShape::Close, slateIconCol);
                 }
             } else {
             {
@@ -8290,32 +8353,28 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const int viewIdx = static_cast<int>(browserViewMode_) % 3;
                 for (int outline : {5, 2}) {
                     const UiRect r = hub::headerButton(outline);
-                    drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox, tabNormBg, 1.0f, 0.06f, tabNormBord);
+                    drawControl(vpPanel, r, tok::State{});
                 }
                 for (int s = 0; s < 3; ++s) {
                     for (int base : {hub::kSortSegBase, hub::kViewSegBase}) {
                         const int id = base + s;
-                        const bool on = s == (base == hub::kSortSegBase ? sortIdx : viewIdx);
-                        const bool hov = browserPageBtnHovered_ == id;
+                        tok::State st;
+                        st.selected = s == (base == hub::kSortSegBase ? sortIdx : viewIdx);
+                        st.hover = browserPageBtnHovered_ == id;
+                        if (!st.selected && !st.hover) continue;
                         const UiRect r = hub::headerButton(id);
-                        if (on) {
-                            drawUiElement(vpPanel, r.cx, r.cy, r.hw - 0.003f, r.hh - 0.004f, UiShape::RoundedBox,
-                                          tabActiveBg, 1.0f, 0.07f, tabActiveBord);
-                        } else if (hov) {
-                            drawUiElement(vpPanel, r.cx, r.cy, r.hw - 0.003f, r.hh - 0.004f, UiShape::RoundedBox,
-                                          tabHovBg, 1.0f, 0.06f, tabHovBord);
-                        }
+                        drawControl(vpPanel, {r.cx, r.cy, r.hw - 0.003f, r.hh - 0.004f}, st);
                     }
                 }
             }
             {
                 const UiRect r = headerBtn(3, browserBookmarked_);  // bookmark
-                drawUiElement(vpPanel, headerIconX(r), r.cy, 0.014f, 0.014f, UiShape::Star,
-                              browserBookmarked_ ? themeAccentCol : slateIconCol);
+                drawUiElement(vpPanel, headerIconX(r), r.cy, tok::kIconS, tok::kIconS, UiShape::Star,
+                              browserBookmarked_ ? accentTextCol : slateIconCol);
             }
             if (browserCanCreateFolder_) {
                 const UiRect r = headerBtn(6, false);  // new folder
-                drawUiElement(vpPanel, headerIconX(r), r.cy, 0.012f, 0.012f, UiShape::Files, slateIconCol);
+                drawUiElement(vpPanel, headerIconX(r), r.cy, tok::kIconS, tok::kIconS, UiShape::Files, slateIconCol);
             }
             }  // not picking
             // The button focus on a header button or a path part (last frame's path layout).
@@ -8329,12 +8388,6 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 }
             }
 
-            const float* normCardBg = glassCardT.data();
-            const float* normCardBorder = kGlassRimFaint;
-            const float* hovCardBg = glassCardHoverT.data();
-            const float selCardBg[4] = {0.13f, 0.155f, 0.195f, 0.95f};
-            const float glowCol[4] = {
-                themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.26f};
             const float* thumbBg = glassWellT.data();
             const float* thumbBorder = kGlassRimFaint;
 
@@ -8371,28 +8424,15 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const bool selected = (entryIdx == browserSelected_);
                 const Mat4 vpCard = cardHoverVp(i, lay);
 
-                // Corner radii in metres, converted to the shader's relative units
-                const float cardR = 0.016f / std::min(lay.cardHalfW, lay.cardHalfH);
-                const float thumbR = 0.018f / std::min(lay.thumbHalfW, lay.thumbHalfH);
-                const float cardBw = 0.0015f / std::min(lay.cardHalfW, lay.cardHalfH);
                 // One focus: only the focused card has the accent rim and glow (A / Y act on it). A card
                 // under the laser while the buttons own the focus gets the plain hover fill.
-                if (selected) {
-                    drawGlow(vpCard, lay.cx, lay.cy, lay.cardHalfW, lay.cardHalfH, 0.018f,
-                             glowCol, cardR * 0.6f);
-                    drawUiElement(vpCard, lay.cx, lay.cy, lay.cardHalfW, lay.cardHalfH,
-                                  UiShape::RoundedBox, hovered ? hovCardBg : selCardBg, cardR, cardBw * 1.6f, tabActiveBord);
-                } else if (hovered) {
-                    drawUiElement(vpCard, lay.cx, lay.cy, lay.cardHalfW, lay.cardHalfH,
-                                  UiShape::RoundedBox, hovCardBg, cardR, cardBw, kGlassRim);
-                } else {
-                    drawUiElement(vpCard, lay.cx, lay.cy, lay.cardHalfW, lay.cardHalfH,
-                                  UiShape::RoundedBox, normCardBg, cardR, cardBw, normCardBorder);
-                }
+                tok::State st;
+                st.hover = hovered;
+                st.focus = selected;
+                drawControl(vpCard, {lay.cx, lay.cy, lay.cardHalfW, lay.cardHalfH}, st, tok::kRadiusM, glassCardT.data());
 
                 // Thumbnail box
-                drawUiElement(vpCard, lay.thumbCx, lay.thumbCy, lay.thumbHalfW, lay.thumbHalfH,
-                              UiShape::RoundedBox, thumbBg, thumbR, 0.0f);
+                drawBox(vpCard, lay.thumbCx, lay.thumbCy, lay.thumbHalfW, lay.thumbHalfH, thumbBg, tok::kRadiusM);
 
                 // Folder tab visual cue for directory cards
                 if (item.isDir && !item.isBack) {
@@ -8456,11 +8496,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
 
             // Draw overlaid format badge and duration pill
             bindPipe(uiPipeline_);
-            const float badgeBg[4] = {0.03f, 0.04f, 0.06f, 0.78f};
+            const float* badgeBg = tok::kBadgeBg.data();
             const float badgeRim[4] = {1.0f, 1.0f, 1.0f, 0.14f};
-            const float listBadgeBg[4] = {
-                themeAccentCol[0] * 0.22f, themeAccentCol[1] * 0.22f,
-                themeAccentCol[2] * 0.28f, 0.90f};
             for (int i = 0; i < perPage; ++i) {
                 const int entryIdx = first + i;
                 if (entryIdx >= total) break;
@@ -8470,23 +8507,23 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 if (item.isBack) continue;  // the Up card has no badge
                 // (Badges carry what tells similar files apart: sized for 2.2 cm text.)
                 if (browserViewMode_ == BrowserViewMode::BigCards) {
-                    drawUiElement(vpCard, lay.cx - lay.thumbHalfW + 0.066f, lay.thumbCy + lay.thumbHalfH - 0.026f,
-                                  0.060f, 0.020f, UiShape::RoundedBox, badgeBg, 1.0f, 0.06f, badgeRim);
+                    drawBox(vpCard, lay.cx - lay.thumbHalfW + 0.066f, lay.thumbCy + lay.thumbHalfH - 0.026f,
+                            0.060f, 0.020f, badgeBg, tok::kRadiusPill, tok::kBorderRest, badgeRim);
                     if (!item.durationTag.empty()) {
-                        drawUiElement(vpCard, lay.cx + lay.thumbHalfW - 0.054f, lay.thumbCy - lay.thumbHalfH + 0.026f,
-                                      0.048f, 0.020f, UiShape::RoundedBox, badgeBg, 1.0f, 0.06f, badgeRim);
+                        drawBox(vpCard, lay.cx + lay.thumbHalfW - 0.054f, lay.thumbCy - lay.thumbHalfH + 0.026f,
+                                0.048f, 0.020f, badgeBg, tok::kRadiusPill, tok::kBorderRest, badgeRim);
                     }
                 } else if (browserViewMode_ == BrowserViewMode::MiniCards) {
-                    drawUiElement(vpCard, lay.cx - lay.thumbHalfW + 0.052f, lay.thumbCy + lay.thumbHalfH - 0.021f,
-                                  0.048f, 0.017f, UiShape::RoundedBox, badgeBg, 1.0f, 0.07f, badgeRim);
+                    drawBox(vpCard, lay.cx - lay.thumbHalfW + 0.052f, lay.thumbCy + lay.thumbHalfH - 0.021f,
+                            0.048f, 0.017f, badgeBg, tok::kRadiusPill, tok::kBorderRest, badgeRim);
                     if (!item.durationTag.empty()) {
-                        drawUiElement(vpCard, lay.cx + lay.thumbHalfW - 0.044f, lay.thumbCy - lay.thumbHalfH + 0.021f,
-                                      0.040f, 0.017f, UiShape::RoundedBox, badgeBg, 1.0f, 0.07f, badgeRim);
+                        drawBox(vpCard, lay.cx + lay.thumbHalfW - 0.044f, lay.thumbCy - lay.thumbHalfH + 0.021f,
+                                0.040f, 0.017f, badgeBg, tok::kRadiusPill, tok::kBorderRest, badgeRim);
                     }
                 } else { // CompactList
-                    if (listShowFormat_) {  // the accent only as the rim: the text on it stays in the text colour
-                        drawUiElement(vpCard, listCols.fmtCx, lay.cy,
-                                      0.060f, 0.017f, UiShape::RoundedBox, listBadgeBg, 1.0f, 0.07f, tabActiveBord);
+                    if (listShowFormat_) {  // a neutral chip: the accent is kept for focus, selection, progress
+                        drawBox(vpCard, listCols.fmtCx, lay.cy, 0.060f, 0.017f, glassControlT.data(), tok::kRadiusPill,
+                                tok::kBorderRest, kGlassRim);
                     }
                 }
             }
@@ -8530,15 +8567,15 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             if (hintsHidden) hintLeft = 0.855f;
             if (!hintsHidden) {
                 for (const HintSlot& hs : hintSlots) {
-                    drawUiElement(vpPanel, hs.keyX + hs.keyW * 0.5f, -0.490f, hs.keyW * 0.5f, 0.016f, UiShape::RoundedBox,
-                                  glassControlT.data(), 1.0f, 0.10f, kGlassRim);
+                    drawBox(vpPanel, hs.keyX + hs.keyW * 0.5f, -0.490f, hs.keyW * 0.5f, 0.016f, glassControlT.data(),
+                            tok::kRadiusPill, tok::kBorderRest, kGlassRim);
                 }
             }
 
             // Breadcrumb trail (chevrons drawn now, segment text in the text pass)
             const float breadX = -0.460f;  // the path has the whole top row
             const float breadRight = 0.855f;
-            const float breadSc = scHeader * 0.90f;
+            const float breadSc = scLarge;
             const std::vector<std::string> crumbSegs = !browserCrumbs_.empty() ? browserCrumbs_
                 : splitCrumbs(formatBreadcrumbs(browserTitle_.empty() ? "Local Storage" : browserTitle_));
             const Crumbs crumbs = layoutCrumbs(crumbSegs, breadX, breadRight - breadX, breadSc);
@@ -8564,7 +8601,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
 
             drawRailText();
             // Places, named like the folder path names them ("Home"); "Download folder", not a second "Downloads".
-            drawFit(-0.855f, hub::railDividerY() - 0.015f, 0.34f, scDetail, dimCol, "PLACES");
+            drawFit(-0.855f, hub::railDividerY() - 0.015f, 0.34f, scDetail, slateCol, "PLACES");
             const char* qLabels[6] = {"Home", "Videos", "Network", "Download folder", "Bookmarks", "Vault"};
             const int qCount = vaultUnlocked_ ? 6 : 5;
             for (int sub = 0; sub < qCount; ++sub) {
@@ -8580,7 +8617,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     c.index - (static_cast<int>(crumbSegs.size()) - static_cast<int>(crumbs.parts.size())));
                 if (vi < crumbs.parts.size()) {
                     drawFit(crumbs.partX[vi], hub::kBrowserPathY, breadRight - crumbs.partX[vi], breadSc,
-                            themeAccentCol, crumbs.parts[vi]);
+                            accentTextCol, crumbs.parts[vi]);
                 }
             }
 
@@ -8595,12 +8632,14 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 });
                 if (browserCanCreateFolder_) {
                     const UiRect nfR = hub::headerButton(6, true);
-                    drawFitCentered(nfR.cx + 0.014f, nfR.cy, nfR.hw * 2.0f - 0.05f, scSub * 0.90f, themeTextCol, "+ Folder");
+                    drawFitCentered(nfR.cx + 0.014f, nfR.cy, nfR.hw * 2.0f - 0.05f, scSub, themeTextCol, "+ Folder");
                 }
                 const UiRect okR = hub::headerButton(7, true);
-                drawFitCentered(okR.cx + 0.014f, okR.cy, okR.hw * 2.0f - 0.05f, scSub * 0.90f,
-                                browserPick_.canConfirm ? hub::kPickDarkText : dimCol, browserPick_.confirmLabel);
-                drawFitCentered(noR.cx + 0.012f, noR.cy, noR.hw * 2.0f - 0.04f, scSub * 0.90f, themeTextCol, "Cancel");
+                withHeadingFont([&] {
+                    drawFitCentered(okR.cx + 0.014f, okR.cy, okR.hw * 2.0f - 0.05f, scSub, pickOkLabel.data(),
+                                    browserPick_.confirmLabel);
+                });
+                drawFitCentered(noR.cx + 0.012f, noR.cy, noR.hw * 2.0f - 0.04f, scSub, themeTextCol, "Cancel");
             } else {
             {
                 // The segment labels: the one in use in the text colour on the accent, the others dimmer.
@@ -8610,42 +8649,43 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const int viewIdx = static_cast<int>(browserViewMode_) % 3;
                 for (int s = 0; s < 3; ++s) {
                     const UiRect sr = hub::headerButton(hub::kSortSegBase + s);
-                    drawFitCentered(sr.cx, sr.cy, sr.hw * 2.0f - 0.008f, scSub * 0.90f,
+                    drawFitCentered(sr.cx, sr.cy, sr.hw * 2.0f - 0.008f, scSub,
                                     s == sortIdx ? themeTextCol : slateCol, kSortNames[s]);
                     const UiRect vr = hub::headerButton(hub::kViewSegBase + s);
-                    drawFitCentered(vr.cx, vr.cy, vr.hw * 2.0f - 0.008f, scSub * 0.90f,
+                    drawFitCentered(vr.cx, vr.cy, vr.hw * 2.0f - 0.008f, scSub,
                                     s == viewIdx ? themeTextCol : slateCol, kViewNames[s]);
                 }
             }
             const char* qpLabel = browserBookmarked_ ? "Bookmarked" : "Bookmark";
             const UiRect bmR = hub::headerButton(3);
-            drawFitCentered(bmR.cx + 0.014f, bmR.cy, bmR.hw * 2.0f - 0.05f, scSub * 0.90f,
-                            browserBookmarked_ ? themeAccentCol : themeTextCol, qpLabel);
+            drawFitCentered(bmR.cx + 0.014f, bmR.cy, bmR.hw * 2.0f - 0.05f, scSub,
+                            browserBookmarked_ ? accentTextCol : themeTextCol, qpLabel);
             if (browserCanCreateFolder_) {
                 const UiRect nfR = hub::headerButton(6);
-                drawFitCentered(nfR.cx + 0.014f, nfR.cy, nfR.hw * 2.0f - 0.05f, scSub * 0.90f,
+                drawFitCentered(nfR.cx + 0.014f, nfR.cy, nfR.hw * 2.0f - 0.05f, scSub,
                                 themeTextCol, "+ Folder");
             }
             // Where the visible cards are in the folder ("13-18 of 500"), at the right end of the row.
             if (!browserReadout_.empty()) {
-                const float rw = measureString(scSub * 0.90f, browserReadout_);
-                drawFit(0.855f - rw, hub::kBrowserBtnY, rw + 0.01f, scSub * 0.90f, slateCol, browserReadout_);
+                const float rw = measureString(scSub, browserReadout_);
+                drawFit(0.855f - rw, hub::kBrowserBtnY, rw + 0.01f, scSub, slateCol, browserReadout_);
             }
             }  // not picking
 
             if (browserViewMode_ == BrowserViewMode::CompactList) {
-                drawFit(-0.315f, hub::kListCaptionY, listCols.nameMaxW, scDetail, dimCol, "Name");
+                // Column captions are meant to be read: the secondary text role.
+                drawFit(-0.315f, hub::kListCaptionY, listCols.nameMaxW, scDetail, slateCol, "Name");
                 if (listShowFormat_) {
-                    drawFitCentered(listCols.fmtCx, hub::kListCaptionY, 0.14f, scDetail, dimCol, "Format");
+                    drawFitCentered(listCols.fmtCx, hub::kListCaptionY, 0.14f, scDetail, slateCol, "Format");
                 }
                 if (listShowRes_) {
-                    drawFitCentered(listCols.resCx, hub::kListCaptionY, 0.19f, scDetail, dimCol, "Resolution");
+                    drawFitCentered(listCols.resCx, hub::kListCaptionY, 0.19f, scDetail, slateCol, "Resolution");
                 }
                 if (listShowSize_) {
-                    drawFitCentered(listCols.sizeCx, hub::kListCaptionY, 0.13f, scDetail, dimCol, "Size");
+                    drawFitCentered(listCols.sizeCx, hub::kListCaptionY, 0.13f, scDetail, slateCol, "Size");
                 }
                 if (listShowDuration_) {
-                    drawFitCentered(listCols.durCx, hub::kListCaptionY, 0.15f, scDetail, dimCol, "Duration");
+                    drawFitCentered(listCols.durCx, hub::kListCaptionY, 0.15f, scDetail, slateCol, "Duration");
                 }
             }
 
@@ -8723,8 +8763,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         const std::size_t dot = gridName.rfind('.');
                         if (dot != std::string::npos && dot > 0 && gridName.size() - dot <= 6) gridName.resize(dot);
                     }
-                    drawFit(textLeft, bottom + 0.053f, maxTextW, scSub * 0.88f, themeTextCol,
-                            truncateMiddle(scSub * 0.88f, maxTextW, gridName));
+                    drawFit(textLeft, bottom + 0.053f, maxTextW, scSub, themeTextCol,
+                            truncateMiddle(scSub, maxTextW, gridName));
                     drawFit(textLeft, bottom + 0.021f, maxTextW, scDetail, slateCol, gridDetail(cardDet));
                     drawFitCentered(lay.cx - lay.thumbHalfW + 0.052f, lay.thumbCy + lay.thumbHalfH - 0.021f,
                                     0.092f, scDetail, themeTextCol, bTag);
@@ -8734,22 +8774,22 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     }
                 } else { // CompactList
                     const float textLeft = -0.315f;
-                    drawFit(textLeft, lay.cy, listCols.nameMaxW, scSub * 0.95f, themeTextCol,
-                            truncateMiddle(scSub * 0.95f, listCols.nameMaxW, item.name));
+                    drawFit(textLeft, lay.cy, listCols.nameMaxW, scSub, themeTextCol,
+                            truncateMiddle(scSub, listCols.nameMaxW, item.name));
                     if (listShowFormat_) {
                         drawFitCentered(listCols.fmtCx, lay.cy, 0.115f, scDetail, themeTextCol, bTag);
                     }
                     if (listShowRes_) {
                         const std::string resStr = item.resolutionTag.empty() ? (item.isDir || item.isBack ? "" : "--") : item.resolutionTag;
-                        drawFitCentered(listCols.resCx, lay.cy, 0.19f, scDetail * 0.95f, slateCol, resStr);
+                        drawFitCentered(listCols.resCx, lay.cy, 0.19f, scDetail, slateCol, resStr);
                     }
                     if (listShowSize_) {
                         const std::string sizeStr = item.sizeTag.empty() ? (item.isDir || item.isBack ? "" : "--") : item.sizeTag;
-                        drawFitCentered(listCols.sizeCx, lay.cy, 0.13f, scDetail * 0.95f, slateCol, sizeStr);
+                        drawFitCentered(listCols.sizeCx, lay.cy, 0.13f, scDetail, slateCol, sizeStr);
                     }
                     if (listShowDuration_) {
                         const std::string durStr = item.durationTag.empty() ? (item.isDir || item.isBack ? "" : "--") : item.durationTag;
-                        drawFitCentered(listCols.durCx, lay.cy, 0.15f, scDetail * 0.95f, slateCol, durStr);
+                        drawFitCentered(listCols.durCx, lay.cy, 0.15f, scDetail, slateCol, durStr);
                     }
                 }
                 curTextVp = &vpPanel;
@@ -8758,12 +8798,12 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             // Bottom status bar: a notice (progress, results, warnings) wins over the browser's status.
             // Otherwise the focused entry's full name (cut in the middle only when even this row is too
             // short), so files that look alike on their cards can be told apart.
-            static const float kWarnCol[4] = {1.0f, 0.72f, 0.36f, 1.0f};
+            const float* kWarnCol = tok::kWarning.text.data();
             const float statusW = hintLeft - 0.02f - (-0.45f);
             if (!browserNotice_.empty()) {
-                drawFit(-0.45f, -0.490f, statusW, scDetail, browserNoticeWarn_ ? kWarnCol : themeAccentCol, browserNotice_);
+                drawFit(-0.45f, -0.490f, statusW, scDetail, browserNoticeWarn_ ? kWarnCol : accentTextCol, browserNotice_);
             } else if (!browserStatus_.empty()) {
-                drawFit(-0.45f, -0.490f, statusW, scDetail, themeAccentCol, browserStatus_);
+                drawFit(-0.45f, -0.490f, statusW, scDetail, accentTextCol, browserStatus_);
             } else if (!browserLoading_ && browserSelected_ >= 0 && browserSelected_ < total) {
                 const std::string& nm = browserItems_[static_cast<std::size_t>(browserSelected_)].name;
                 drawFit(-0.45f, -0.490f, statusW, scSub, themeTextCol, truncateMiddle(scSub, statusW, nm));
@@ -8792,7 +8832,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const float titleX = kContentCx - 0.5f * measureString(scStd, browserLoading_ ? browserMsgTitle_ + "..." : browserMsgTitle_);
                 withHeadingFont([&] { drawFit(titleX, msgY, 1.20f, scStd, slateCol, title); });
                 if (!browserMsgLine_.empty()) {
-                    drawFitCentered(kContentCx, msgY - 0.050f, 1.20f, scSub, dimCol, browserMsgLine_);
+                    drawFitCentered(kContentCx, msgY - 0.050f, 1.20f, scSub, slateCol, browserMsgLine_);
                 }
             }
         }
