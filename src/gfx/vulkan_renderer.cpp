@@ -5155,7 +5155,10 @@ void VulkanRenderer::drawScreenTitlePill(int slot, float ax, float alpha, const 
         g.pop_back();
         ++dots;
     }
-    const float dotSlot = dots > 0 ? 3.0f * font.glyphs[static_cast<unsigned char>('.')].advance * k : 0.0f;
+    // ("Loading" / "Buffering" keep the slot also while they show no dot at all.)
+    const bool animated = so.title.rfind("Loading ", 0) == 0 || so.title.rfind("Buffering", 0) == 0;
+    const float dotSlot =
+        (dots > 0 || animated) ? 3.0f * font.glyphs[static_cast<unsigned char>('.')].advance * k : 0.0f;
     auto widthOf = [&](const std::vector<unsigned char>& v) {
         float w = 0.0f;
         for (unsigned char c : v) w += font.glyphs[c].advance * k;
