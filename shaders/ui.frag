@@ -34,6 +34,10 @@ float sdTriangle(vec2 p, vec2 p0, vec2 p1, vec2 p2) {
     return -sqrt(d.x) * sign(d.y);
 }
 
+// Stroke half-width of every outline icon (rings, arcs, crosses, chevrons, ticks), in units of the
+// icon's half-size: one line weight for all icons drawn at the same size.
+const float kStroke = 0.08;
+
 // SDF line segment
 float sdSegment(vec2 p, vec2 a, vec2 b) {
     vec2 pa = p - a, ba = b - a;
@@ -130,7 +134,7 @@ void main() {
     } else if (shape == 7) {
         // Shape 7: Recenter / Target icon
         float r = length(p);
-        float ring = abs(r - 0.52) - 0.06;
+        float ring = abs(r - 0.52) - kStroke;
         float dotCenter = r - 0.16;
         float tickH = sdRoundedBox(vec2(abs(p.x) - 0.62, p.y), vec2(0.10, 0.03), 0.01);
         float tickV = sdRoundedBox(vec2(p.x, abs(p.y) - 0.62), vec2(0.03, 0.10), 0.01);
@@ -143,13 +147,13 @@ void main() {
         d = min(outerRing, centerDot);
     } else if (shape == 9) {
         // Shape 9: Close / X icon
-        float s1 = sdSegment(p, vec2(-0.45, -0.45), vec2(0.45, 0.45)) - 0.10;
-        float s2 = sdSegment(p, vec2(-0.45, 0.45), vec2(0.45, -0.45)) - 0.10;
+        float s1 = sdSegment(p, vec2(-0.45, -0.45), vec2(0.45, 0.45)) - kStroke;
+        float s2 = sdSegment(p, vec2(-0.45, 0.45), vec2(0.45, -0.45)) - kStroke;
         d = min(s1, s2);
     } else if (shape == 10) {
         // Shape 10: Checkmark (✓)
-        float s1 = sdSegment(p, vec2(-0.45, -0.05), vec2(-0.12, -0.45)) - 0.09;
-        float s2 = sdSegment(p, vec2(-0.12, -0.45), vec2(0.48, 0.45)) - 0.09;
+        float s1 = sdSegment(p, vec2(-0.45, -0.05), vec2(-0.12, -0.45)) - kStroke;
+        float s2 = sdSegment(p, vec2(-0.12, -0.45), vec2(0.48, 0.45)) - kStroke;
         d = min(s1, s2);
     } else if (shape == 11) {
         // Shape 11: Stop icon (filled rounded square)
@@ -181,8 +185,8 @@ void main() {
         float cone = sdTriangle(p, vec2(-0.20, 0.18), vec2(0.16, 0.45), vec2(-0.20, -0.18)) - 0.02;
         float cone2 = sdTriangle(p, vec2(-0.20, -0.18), vec2(0.16, -0.45), vec2(0.16, 0.45)) - 0.02;
         float rArc = length(p - vec2(-0.05, 0.0));
-        float arc1 = max(abs(rArc - 0.46) - 0.06, -p.x + 0.10);
-        float arc2 = max(abs(rArc - 0.68) - 0.06, -p.x + 0.22);
+        float arc1 = max(abs(rArc - 0.46) - kStroke, -p.x + 0.10);
+        float arc2 = max(abs(rArc - 0.68) - kStroke, -p.x + 0.22);
         d = min(min(box, min(cone, cone2)), min(arc1, arc2));
     } else if (shape == 16) {
         // Shape 16: VR Headset / Display goggles
@@ -200,8 +204,8 @@ void main() {
         d = max(arcDisp, max(cutX, cutY));
     } else if (shape == 18) {
         // Shape 18: Chevron (>) for breadcrumbs & pagination
-        float c1 = sdSegment(p, vec2(-0.22, 0.40), vec2(0.24, 0.0)) - 0.08;
-        float c2 = sdSegment(p, vec2(0.24, 0.0), vec2(-0.22, -0.40)) - 0.08;
+        float c1 = sdSegment(p, vec2(-0.22, 0.40), vec2(0.24, 0.0)) - kStroke;
+        float c2 = sdSegment(p, vec2(0.24, 0.0), vec2(-0.22, -0.40)) - kStroke;
         d = min(c1, c2);
     } else if (shape == 19) {
         // Shape 19: Home / Library icon
@@ -272,7 +276,7 @@ void main() {
         d = min(top, bottom);
     } else if (shape == 30) {
         // Shape 30: Screen number (a screen outline with a "1" inside)
-        float outline = abs(sdRoundedBox(p - vec2(0.0, 0.0), vec2(0.70, 0.50), 0.10)) - 0.06;
+        float outline = abs(sdRoundedBox(p - vec2(0.0, 0.0), vec2(0.70, 0.50), 0.10)) - kStroke;
         float stem = sdRoundedBox(p - vec2(0.03, 0.0), vec2(0.06, 0.28), 0.03);
         float flag = sdRoundedBox(p - vec2(-0.08, 0.20), vec2(0.11, 0.05), 0.03);
         float foot = sdRoundedBox(p - vec2(0.03, -0.27), vec2(0.16, 0.045), 0.03);
@@ -286,7 +290,7 @@ void main() {
         d = min(bar, min(lt, rt));
     } else if (shape == 33) {
         // Shape 33: Globe (outline, a meridian ellipse, equator and two parallels)
-        float rim = abs(length(p) - 0.62) - 0.07;
+        float rim = abs(length(p) - 0.62) - kStroke;
         float meridian = abs(length(p / vec2(0.42, 1.0)) - 0.62) * 0.42 - 0.05;
         float equator = max(abs(p.y) - 0.05, length(p) - 0.62);
         float parallels = max(abs(abs(p.y) - 0.31) - 0.045, length(p) - 0.62);
@@ -295,16 +299,16 @@ void main() {
         // Shape 34: Backspace (key outline pointing left, with a cross)
         float body = min(sdRoundedBox(p - vec2(0.20, 0.0), vec2(0.52, 0.46), 0.08),
                          sdTriangle(p, vec2(-0.84, 0.0), vec2(-0.28, 0.46), vec2(-0.28, -0.46)));
-        float outline = abs(body) - 0.07;
+        float outline = abs(body) - kStroke;
         vec2 q = p - vec2(0.24, 0.0);
         float cross = min(sdSegment(q, vec2(-0.19, -0.19), vec2(0.19, 0.19)),
-                          sdSegment(q, vec2(-0.19, 0.19), vec2(0.19, -0.19))) - 0.07;
+                          sdSegment(q, vec2(-0.19, 0.19), vec2(0.19, -0.19))) - kStroke;
         d = min(outline, cross);
     } else if (shape == 35) {
         // Shape 35: Shuffle (two crossing arrows pointing right)
-        float a = sdSegment(p, vec2(-0.62, -0.38), vec2(0.30, 0.38)) - 0.075;
-        float b = sdSegment(p, vec2(-0.62, 0.38), vec2(-0.20, 0.03)) - 0.075;
-        float c = sdSegment(p, vec2(0.02, -0.15), vec2(0.30, -0.38)) - 0.075;
+        float a = sdSegment(p, vec2(-0.62, -0.38), vec2(0.30, 0.38)) - kStroke;
+        float b = sdSegment(p, vec2(-0.62, 0.38), vec2(-0.20, 0.03)) - kStroke;
+        float c = sdSegment(p, vec2(0.02, -0.15), vec2(0.30, -0.38)) - kStroke;
         float h1 = sdTriangle(p, vec2(0.66, 0.38), vec2(0.30, 0.62), vec2(0.30, 0.14)) - 0.02;
         float h2 = sdTriangle(p, vec2(0.66, -0.38), vec2(0.30, -0.14), vec2(0.30, -0.62)) - 0.02;
         d = min(min(a, min(b, c)), min(h1, h2));
@@ -316,7 +320,7 @@ void main() {
         d = min(tri, bar);
     } else if (shape == 38) {
         // Shape 38: Repeat (rounded loop with an arrow head)
-        float loop = abs(sdRoundedBox(p, vec2(0.56, 0.34), 0.30)) - 0.075;
+        float loop = abs(sdRoundedBox(p, vec2(0.56, 0.34), 0.30)) - kStroke;
         float gap = sdRoundedBox(p - vec2(0.12, 0.34), vec2(0.14, 0.12), 0.0);
         float head = sdTriangle(p, vec2(0.10, 0.62), vec2(0.40, 0.34), vec2(0.10, 0.06)) - 0.02;
         d = min(max(loop, -gap), head);
@@ -330,8 +334,8 @@ void main() {
         d = min(min(box, cone), min(shaft, head));
     } else if (shape == 41) {
         // Shape 41: Hide the controls (a chevron pointing down onto a bar: the panel folds away)
-        float c1 = sdSegment(p, vec2(-0.36, 0.30), vec2(0.0, -0.02)) - 0.075;
-        float c2 = sdSegment(p, vec2(0.0, -0.02), vec2(0.36, 0.30)) - 0.075;
+        float c1 = sdSegment(p, vec2(-0.36, 0.30), vec2(0.0, -0.02)) - kStroke;
+        float c2 = sdSegment(p, vec2(0.0, -0.02), vec2(0.36, 0.30)) - kStroke;
         float bar = sdRoundedBox(p - vec2(0.0, -0.36), vec2(0.42, 0.065), 0.05);
         d = min(min(c1, c2), bar);
     } else if (shape == 42) {

@@ -9053,10 +9053,16 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     drawUiElement(vpPanel, r.cx, r.cy, pb == 0 ? -0.011f : 0.011f, 0.011f, UiShape::Chevron,
                                   h ? accentTextCol : themeTextCol);
                 }
-            } else {
-                // Version pill in top-right header
+            } else if (settingsHeaderButton_.empty()) {
+                // Version pill in top-right header (the header button takes its place when shown)
                 drawBox(vpPanel, 0.64f, 0.455f, 0.22f, tok::kCtlS, kGlassVeil, tok::kRadiusPill, tok::kBorderRest,
                         kGlassRimFaint);
+            }
+            if (!settingsHeaderButton_.empty()) {
+                // "+ Install plugins": a header button like the file browser's (it had only its words).
+                tok::State st;
+                st.hover = settingsHeaderHovered_;
+                drawControl(vpPanel, hub::settingsHeaderButton(pager), st);
             }
 
             // Switches and sliders: the shared track / knob colours, "on" in the accent.
@@ -9454,7 +9460,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
             if (!settingsHeaderButton_.empty()) {
                 drawFitCentered(hub::settingsHeaderButton(pager).cx, 0.455f, 0.24f, scSub,
-                                settingsHeaderHovered_ ? accentTextCol : themeTextCol, "+  " + settingsHeaderButton_);
+                                themeTextCol, "+  " + settingsHeaderButton_);
             } else if (pager) {
                 // (the pager alone)
             } else {
@@ -9736,9 +9742,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
     // =========================================================================
     if (drawPanelUi && actionMenu_.visible && textReady_ && uiPipeline_ != VK_NULL_HANDLE) {
         bindPipe(uiPipeline_);
-        const float backdrop[4] = {0.0f, 0.0f, 0.0f, 0.82f};
-        drawUiElement(vpPanel, 0.0f, 0.0f, kPanelW, kPanelTop,
-                      UiShape::RoundedBox, backdrop, 0.09f);
+        // One backdrop for every overlay (dialogs and the keyboard), shaped like the hub panel.
+        drawBox(vpPanel, 0.0f, 0.0f, kPanelW, kPanelTop, tok::kScrim.data(), tok::kRadiusL);
 
         const int menuOptCount = static_cast<int>(actionMenu_.options.size());
         const float menuStepY = hub::kActionMenuStepY;
@@ -9753,42 +9758,26 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                            : (actionMenu_.page == menupage::ScreenPicker) ? hub::kPickHalfH
                            : (actionMenu_.page == menupage::Arrange) ? hub::kArrHalfH
                            : ((actionMenu_.page == menupage::Confirm) ? 0.24f : menuDynHalfH);
-        const float modalBg[4] = {0.032f, 0.045f, 0.075f, 0.98f * (0.55f + 0.45f * op)};
-        // Danger red palette for delete
-        const float redBg[4] = {0.58f, 0.12f, 0.18f, 0.95f};
-        const float redBgHov[4] = {0.78f, 0.18f, 0.24f, 1.0f};
-        const float redBorder[4] = {0.95f, 0.35f, 0.42f, 0.95f};
+        // The dialog surface: the hub's own panel glass (no second, bluer palette).
+        const auto modalBg = tok::modalSurface(op);
+        // Danger red for delete: the one fixed red (gfx/ui_tokens.hpp), never the accent.
+        const float* redBorder = tok::kDanger.rim.data();
         // A question whose answer deletes something: the only dialog with a red frame, so red on
         // screen means "something will be deleted" in any accent colour. Others: the plain glass rim.
         const bool destructiveQuestion = actionMenu_.page == menupage::Confirm && !actionMenu_.options.empty() &&
                                          (actionMenu_.options[0].find("Delete") != std::string::npos ||
                                           actionMenu_.options[0].find("Remove") != std::string::npos);
-        drawGlass(0.0f, 0.0f, mHalfW, mHalfH, modalBg, 0.10f, 0.010f, destructiveQuestion ? redBorder : kGlassRim);
+        // Corners and rim in metres: every dialog, small or large, has the same frame.
+        drawGlass(0.0f, 0.0f, mHalfW, mHalfH, modalBg.data(), relM(tok::kRadiusL, mHalfW, mHalfH),
+                  relM(tok::kBorderStrong, mHalfW, mHalfH), destructiveQuestion ? redBorder : kGlassRim);
 
-        // Slate button palette
-        const float slateBg[4] = {0.10f, 0.14f, 0.22f, 0.92f};
-        const float slateBgHov[4] = {0.20f, 0.28f, 0.42f, 1.0f};
-        const float slateBorder[4] = {0.30f, 0.42f, 0.62f, 0.85f};
-
-        // Vault gold/cyan palette
-        const float goldBg[4] = {0.28f, 0.22f, 0.08f, 0.95f};
-        const float goldBgHov[4] = {0.45f, 0.36f, 0.12f, 1.0f};
-        const float goldBorder[4] = {0.95f, 0.82f, 0.35f, 0.95f};
-
-        // Standard option pills and text colors
-        const float tabNormBg[4] = {0.06f, 0.09f, 0.15f, 0.90f};
-        const float tabHovBg[4] = {
-            themeAccentCol[0] * 0.35f, themeAccentCol[1] * 0.35f,
-            themeAccentCol[2] * 0.45f, 0.95f};
-        const float tabNormBord[4] = {0.18f, 0.28f, 0.44f, 0.65f};
         const float tabActiveBord[4] = {
             themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 1.0f};
-        const float slateCol[4] = {0.60f, 0.70f, 0.84f, 1.0f};
-        const float dimCol[4] = {
-            themeTextCol[0] * 0.62f, themeTextCol[1] * 0.70f, themeTextCol[2] * 0.82f, 0.90f};
-        // What A presses right now (row, button, field): a halo in the accent and a rim in the text colour.
-        const float menuFocusGlow[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.30f};
-        const float menuFocusRim[4] = {themeTextCol[0], themeTextCol[1], themeTextCol[2], 0.95f};
+        // Text roles from the theme (the menu no longer has its own fixed blue-grey).
+        const float* slateCol = textSecondaryCol;
+        const float* dimCol = textDisabledCol;
+        // What A presses right now (row, button, field): the shared focus look (accent glow + rim).
+        const float menuFocusGlow[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], tok::kGlowAlpha};
 
         auto tileVp = [&](const UiRect& r) {
             // Place a flat tile on the (possibly curved) panel: bend its centre
@@ -10018,7 +10007,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         if (actionMenu_.page == menupage::Main || actionMenu_.page == menupage::MoveTo || actionMenu_.page == menupage::Format || actionMenu_.page == menupage::Tracks || actionMenu_.page == menupage::Chromium ||
             actionMenu_.page == menupage::VrQuestion) {
             const float btnHalfW = actionMenu_.page == menupage::Tracks ? hub::kTracksRowHalfW : 0.38f;
-            const float btnHalfH = 0.028f;
+            const float btnHalfH = tok::kCtlS;
             for (int i = 0; i < menuOptCount; ++i) {
                 const float cy = hub::actionMenuOption(i, menuOptCount).cy;
                 // One highlight: the selected row (the laser moves it while it owns the focus); a row
@@ -10029,39 +10018,42 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const bool isDelete = (optStr.find("Delete") != std::string::npos);
                 const bool isVault = (optStr.find("Vault") != std::string::npos);
 
-                const float* bg = hov ? (isDelete ? redBgHov : (isVault ? goldBgHov : tabHovBg))
-                                      : (isDelete ? redBg : (isVault ? goldBg : (ptrOnly ? tabHovBg : tabNormBg)));
-                const float* bord = hov ? (isDelete ? redBorder : (isVault ? goldBorder : tabActiveBord))
-                                        : (isDelete ? redBorder : (isVault ? goldBorder : tabNormBord));
-                // The row A answers with: a halo and a light rim, the same mark as on the confirm dialog.
+                // The row A answers with = focus (accent glow + rim, lighter fill); the row under a
+                // resting beam = hover (lighter fill). No accent fill: it would look like "selected".
+                // Delete keeps the danger red, the vault row its gold.
                 const bool focused = actionMenu_.selectedOption == i;
-                if (focused) drawGlow(vpPanel, 0.0f, cy, btnHalfW, btnHalfH, 0.014f, menuFocusGlow);
-                drawUiElement(vpPanel, 0.0f, cy, btnHalfW, btnHalfH,
-                              UiShape::RoundedBox, bg, 1.0f, focused ? 0.09f : 0.06f, focused ? menuFocusRim : bord);
+                const UiRect rowR{0.0f, cy, btnHalfW, btnHalfH};
+                if (isDelete || isVault) {
+                    drawSemantic(vpPanel, rowR, isDelete ? tok::kDanger : tok::kVault, hov || ptrOnly, focused,
+                                 isDelete && accentLikeDanger);
+                } else {
+                    tok::State st;
+                    st.hover = ptrOnly;
+                    st.focus = focused;
+                    drawControl(vpPanel, rowR, st);
+                }
                 if (actionMenu_.page == menupage::Main && i == actionMenu_.dividerBefore && i > 0) {
                     // A thin line between the entry's own rows and the folder's (bookmark) row.
                     drawUiElement(vpPanel, 0.0f, cy + 0.5f * hub::kActionMenuStepY, btnHalfW - 0.04f, 0.0012f,
                                   UiShape::RoundedBox, kGlassDivider, 1.0f);
                 }
                 // Track rows: what kind of track it is, readable without the text. Audio = speaker in the
-                // accent colour, subtitles = a caption box in amber, video = a screen in grey; the one in
-                // use has a tick at the right.
+                // accent colour, subtitles = a caption box and video = a screen, both in a neutral grey
+                // (never amber: an amber accent made audio and subtitles look the same); the one in use
+                // has a tick at the right.
                 const int kindRaw = (actionMenu_.page == menupage::Tracks && static_cast<std::size_t>(i) < actionMenu_.optionKinds.size())
                                         ? actionMenu_.optionKinds[static_cast<std::size_t>(i)] : 0;
                 const int kind = kindRaw & 15;
                 if (kind != 0) {
-                    const float amber[4] = {1.0f, 0.72f, 0.30f, 1.0f};
-                    const float grey[4] = {0.72f, 0.78f, 0.88f, 1.0f};
-                    const float accent[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 1.0f};
-                    const float dim[4] = {0.42f, 0.46f, 0.54f, 1.0f};
-                    const float* kc = kind == 1 ? accent : (kind == 2 ? amber : (kind == 4 ? dim : grey));
+                    const float* grey = tok::kNeutralIcon.data();
+                    const float* kc = kind == 1 ? accentTextCol : (kind == 4 ? textDisabledCol : grey);
                     const float tile[4] = {kc[0] * 0.22f, kc[1] * 0.22f, kc[2] * 0.22f, 0.95f};
                     const float ix = -btnHalfW + 0.034f;
-                    drawUiElement(vpPanel, ix, cy, 0.026f, btnHalfH - 0.004f, UiShape::RoundedBox, tile, 0.45f, 0.06f, kc);
+                    drawBox(vpPanel, ix, cy, 0.026f, btnHalfH - 0.004f, tile, tok::kRadiusS, tok::kBorderRest, kc);
                     if (kind == 1) {
-                        drawUiElement(vpPanel, ix, cy, 0.015f, 0.015f, UiShape::Speaker, kc);
+                        drawUiElement(vpPanel, ix, cy, tok::kIconS, tok::kIconS, UiShape::Speaker, kc);
                     } else if (kind == 3) {
-                        drawUiElement(vpPanel, ix, cy, 0.016f, 0.016f, UiShape::CurvedDisplay, kc);
+                        drawUiElement(vpPanel, ix, cy, tok::kIconS, tok::kIconS, UiShape::CurvedDisplay, kc);
                     } else {  // a caption box: a frame with two text bars
                         const float clear[4] = {0.0f, 0.0f, 0.0f, 0.0f};
                         drawUiElement(vpPanel, ix, cy, 0.0165f, 0.0120f, UiShape::RoundedBox, clear, 0.30f, 0.16f, kc);
@@ -10069,7 +10061,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         drawUiElement(vpPanel, ix + 0.0010f, cy - 0.0036f, 0.0095f, 0.0017f, UiShape::RoundedBox, kc, 1.0f);
                     }
                     if (kindRaw & 16) {
-                        drawUiElement(vpPanel, btnHalfW - 0.034f, cy, 0.013f, 0.013f, UiShape::Checkmark, kc);
+                        drawUiElement(vpPanel, btnHalfW - 0.034f, cy, tok::kIconS, tok::kIconS, UiShape::Checkmark,
+                                      accentTextCol);
                     }
                 }
             }
@@ -10078,31 +10071,28 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             // a halo, so it is plain which one A presses; the laser's hover only brightens the fill.
             const UiRect yesR = hub::deleteConfirmButton(0);
             const UiRect noR = hub::deleteConfirmButton(1);
-            const bool delHov = (actionMenuBtnHovered_ == 0) || (actionMenu_.selectedOption == 0);
-            const bool canHov = (actionMenuBtnHovered_ == 1) || (actionMenu_.selectedOption == 1);
-            // Red only for a destructive answer ("Yes, Delete"); anything else ("Download") in the accent colour.
+            // Red only for a destructive answer ("Yes, Delete"): the danger button. Anything else
+            // ("Download") is the shared primary button. Cancel is the plain glass button of every dialog.
             const bool destructive = destructiveQuestion;
-            const float okBg[4] = {themeAccentCol[0] * (delHov ? 0.95f : 0.72f), themeAccentCol[1] * (delHov ? 0.95f : 0.72f),
-                                   themeAccentCol[2] * (delHov ? 0.95f : 0.72f), 0.95f};
-            const float okBorder[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 1.0f};
             const bool yesFocus = actionMenu_.selectedOption == 0;
             const bool noFocus = actionMenu_.selectedOption == 1;
-            if (yesFocus) drawGlow(vpPanel, yesR.cx, yesR.cy, yesR.hw, yesR.hh, 0.016f, menuFocusGlow);
-            if (noFocus) drawGlow(vpPanel, noR.cx, noR.cy, noR.hw, noR.hh, 0.016f, menuFocusGlow);
-            drawUiElement(vpPanel, yesR.cx, yesR.cy, yesR.hw, yesR.hh, UiShape::RoundedBox,
-                          destructive ? (delHov ? redBgHov : redBg) : okBg, 1.0f, yesFocus ? 0.10f : 0.05f,
-                          yesFocus ? menuFocusRim : (destructive ? redBorder : okBorder));
-            drawUiElement(vpPanel, noR.cx, noR.cy, noR.hw, noR.hh,
-                          UiShape::RoundedBox, canHov ? slateBgHov : slateBg, 1.0f, noFocus ? 0.10f : 0.05f,
-                          noFocus ? menuFocusRim : slateBorder);
+            if (destructive) {
+                drawSemantic(vpPanel, yesR, tok::kDanger, actionMenuBtnHovered_ == 0, yesFocus, accentLikeDanger);
+            } else {
+                drawPrimary(vpPanel, yesR, actionMenuBtnHovered_ == 0, yesFocus);
+            }
+            tok::State noSt;
+            noSt.hover = actionMenuBtnHovered_ == 1;
+            noSt.focus = noFocus;
+            drawControl(vpPanel, noR, noSt);
         } else if (actionMenu_.page == menupage::ScreenPicker && pickerSpatial_) {
             // "Play on which screen?" while a layout is in use: the screens as
             // they are arranged (point at one to replace it) plus an "Add" card.
-            const float tileGlow[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.30f};
-            const float plusCol[4] = {themeTextCol[0], themeTextCol[1], themeTextCol[2], 0.85f};
+            const float* tileGlow = menuFocusGlow;
+            const float* plusCol = textSecondaryCol;
             const UiRect box = hub::pickerPreview(pickerAddCardShown());
-            drawUiElement(vpPanel, box.cx, box.cy, box.hw, box.hh, UiShape::RoundedBox, glassWellT.data(), 0.08f,
-                          0.05f, kGlassRimFaint);
+            drawBox(vpPanel, box.cx, box.cy, box.hw, box.hh, glassWellT.data(), tok::kRadiusM, tok::kBorderRest,
+                    kGlassRimFaint);
             auto pickHov = [&](int slot) {
                 return actionMenuBtnHovered_ == slot || actionMenu_.selectedOption == slot;
             };
@@ -10111,7 +10101,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 if (!t.valid || !pickHov(slot)) continue;
                 const float* tr = arrangeTileRect_[slot];
                 drawGlow(vpPanel, 0.5f * (tr[0] + tr[1]), 0.5f * (tr[2] + tr[3]), 0.5f * (tr[1] - tr[0]),
-                         0.5f * (tr[3] - tr[2]), 0.014f, tileGlow, 0.10f);
+                         0.5f * (tr[3] - tr[2]), tok::kGlowSpread, tileGlow, 0.10f);
             }
             const Mat4 boxVp = tileVp(box);
             const float noFill[4] = {0.0f, 0.0f, 0.0f, 0.0f};
@@ -10144,14 +10134,14 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                                   plusCol, 1.0f);
                 }
             }
-            const float badgeBg[4] = {0.03f, 0.04f, 0.06f, 0.82f};
+            const float* badgeBg = tok::kBadgeBg.data();
             for (int slot = 0; slot < kMaxVideoSlots; ++slot) {
                 const ArrangeTile& t = arrTiles[slot];
                 if (!t.valid) continue;
                 const bool ghost = slot < menuOptCount && actionMenu_.options[static_cast<std::size_t>(slot)] == "Add";
-                drawUiElement(vpPanel, t.badgeX + 0.026f, t.badgeY - 0.026f, 0.019f, 0.019f, UiShape::RoundedBox,
-                              ghost ? glassControlT.data() : badgeBg, 1.0f, 0.10f,
-                              ghost ? kGlassRimFaint : themeAccentCol);
+                drawBox(vpPanel, t.badgeX + 0.026f, t.badgeY - 0.026f, 0.019f, 0.019f,
+                        ghost ? glassControlT.data() : badgeBg, tok::kRadiusPill, tok::kBorderRest,
+                        ghost ? kGlassRimFaint : kGlassRim);
             }
             // "Add" card only for an empty slot without a tile of its own (a
             // layout is in use, so where it goes depends on the re-layout).
@@ -10164,37 +10154,33 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
             if (freeSlot >= 0) {
                 const UiRect r = hub::pickerAddCard();
-                const bool hov = pickHov(freeSlot);
-                if (hov) drawGlow(vpPanel, r.cx, r.cy, r.hw, r.hh, 0.016f, tileGlow, 0.15f);
-                drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox, glassWellT.data(), 0.14f,
-                              hov ? 0.10f : 0.05f, hov ? tabActiveBord : kGlassRimFaint);
+                tok::State st;
+                st.focus = pickHov(freeSlot);
+                drawControl(vpPanel, r, st, tok::kRadiusM, glassWellT.data(), glassWellT.data());
                 drawUiElement(vpPanel, r.cx, r.cy + 0.012f, 0.030f, 0.006f, UiShape::RoundedBox, plusCol, 1.0f);
                 drawUiElement(vpPanel, r.cx, r.cy + 0.012f, 0.006f, 0.030f, UiShape::RoundedBox, plusCol, 1.0f);
             }
-            const UiRect cr = hub::pickerCancel();
-            const bool cHov = (actionMenuBtnHovered_ == 3) || (actionMenu_.selectedOption == 3);
-            if (actionMenu_.selectedOption == 3) drawGlow(vpPanel, cr.cx, cr.cy, cr.hw, cr.hh, 0.014f, menuFocusGlow);
-            drawUiElement(vpPanel, cr.cx, cr.cy, cr.hw, cr.hh, UiShape::RoundedBox,
-                          cHov ? glassCardHoverT.data() : glassControlT.data(), 1.0f,
-                          actionMenu_.selectedOption == 3 ? 0.09f : 0.06f,
-                          actionMenu_.selectedOption == 3 ? menuFocusRim : (cHov ? kGlassRim : kGlassRimFaint));
+            {
+                tok::State st;
+                st.hover = actionMenuBtnHovered_ == 3;
+                st.focus = actionMenu_.selectedOption == 3;
+                drawControl(vpPanel, hub::pickerCancel(), st);
+            }
         } else if (actionMenu_.page == menupage::ScreenPicker) {
             // "Play on which screen?" picker: live preview tiles in the order the
             // screens sit around the viewer; empty slots show a "+".
             int order[kMaxVideoSlots];
             screenOrderLeftToRight(order);
-            const float tileGlow[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.30f};
-            const float plusCol[4] = {themeTextCol[0], themeTextCol[1], themeTextCol[2], 0.85f};
+            const float* plusCol = textSecondaryCol;
             for (int i = 0; i < kMaxVideoSlots; ++i) {
                 const int slot = order[i];
                 const UiRect r = hub::pickerTile(i);
                 const bool occupied = slot < static_cast<int>(actionMenu_.options.size()) &&
                                       actionMenu_.options[static_cast<std::size_t>(slot)] == "Replace";
-                const bool hov = (actionMenuBtnHovered_ == slot) || (actionMenu_.selectedOption == slot);
-                if (hov) drawGlow(vpPanel, r.cx, r.cy, r.hw, r.hh, 0.016f, tileGlow, 0.15f);
-                drawUiElement(vpPanel, r.cx, r.cy, r.hw + 0.008f, r.hh + 0.008f, UiShape::RoundedBox,
-                              glassWellT.data(), 0.14f, hov ? 0.10f : 0.05f,
-                              hov ? tabActiveBord : kGlassRimFaint);
+                tok::State st;
+                st.focus = (actionMenuBtnHovered_ == slot) || (actionMenu_.selectedOption == slot);
+                drawControl(vpPanel, {r.cx, r.cy, r.hw + 0.008f, r.hh + 0.008f}, st, tok::kRadiusM, glassWellT.data(),
+                            glassWellT.data());
                 if (occupied && (videoSlots_[slot].hasVideo || webSlots_[slot])) {
                     drawLivePreview(slot, multiply(tileVp(r), scaling(Vec3{r.hw / 1.6f, r.hh / 0.9f, 1.0f})),
                                     0.0f);
@@ -10204,54 +10190,41 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     drawUiElement(vpPanel, r.cx, r.cy, 0.006f, 0.034f, UiShape::RoundedBox, plusCol, 1.0f);
                 }
                 // Screen number badge in the top-left corner
-                const float badgeBg[4] = {0.03f, 0.04f, 0.06f, 0.82f};
-                drawUiElement(vpPanel, r.cx - r.hw + 0.030f, r.cy + r.hh - 0.030f, 0.022f, 0.022f,
-                              UiShape::RoundedBox, occupied ? badgeBg : glassControlT.data(), 1.0f, 0.10f,
-                              occupied ? themeAccentCol : kGlassRimFaint);
+                drawBox(vpPanel, r.cx - r.hw + 0.030f, r.cy + r.hh - 0.030f, 0.022f, 0.022f,
+                        occupied ? tok::kBadgeBg.data() : glassControlT.data(), tok::kRadiusPill, tok::kBorderRest,
+                        occupied ? kGlassRim : kGlassRimFaint);
             }
-            const UiRect cr = hub::pickerCancel();
-            const bool cHov = (actionMenuBtnHovered_ == 3) || (actionMenu_.selectedOption == 3);
-            if (actionMenu_.selectedOption == 3) drawGlow(vpPanel, cr.cx, cr.cy, cr.hw, cr.hh, 0.014f, menuFocusGlow);
-            drawUiElement(vpPanel, cr.cx, cr.cy, cr.hw, cr.hh, UiShape::RoundedBox,
-                          cHov ? glassCardHoverT.data() : glassControlT.data(), 1.0f,
-                          actionMenu_.selectedOption == 3 ? 0.09f : 0.06f,
-                          actionMenu_.selectedOption == 3 ? menuFocusRim : (cHov ? kGlassRim : kGlassRimFaint));
+            {
+                tok::State st;
+                st.hover = actionMenuBtnHovered_ == 3;
+                st.focus = actionMenu_.selectedOption == 3;
+                drawControl(vpPanel, hub::pickerCancel(), st);
+            }
         } else if (actionMenu_.page == menupage::Arrange) {
             // Arrange screens: presets (left), live preview (right), toggles + Apply.
             const int presetCount = std::max(0, menuOptCount - hub::kArrangeButtons);
-            const float activeBg[4] = {themeAccentCol[0] * 0.24f, themeAccentCol[1] * 0.24f,
-                                       themeAccentCol[2] * 0.30f, 0.96f};
-            const float hovGlow[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.25f};
             for (int i = 0; i < presetCount + hub::kArrangeButtons; ++i) {
                 const bool isPreset = i < presetCount;
                 const int id = i - presetCount;
                 const UiRect r = isPreset ? hub::arrangeOption(i) : hub::arrangeButton(id);
-                const bool hov = (actionMenuBtnHovered_ == i) || (actionMenu_.selectedOption == i);
-                if (id == 2) {  // Apply (primary)
-                    const float applyBg[4] = {
-                        themeAccentCol[0] * (hov ? 1.0f : 0.85f), themeAccentCol[1] * (hov ? 1.0f : 0.85f),
-                        themeAccentCol[2] * (hov ? 1.0f : 0.90f), 0.98f};
-                    const float applyRim[4] = {1.0f, 1.0f, 1.0f, 0.35f};
-                    if (hov) drawGlow(vpPanel, r.cx, r.cy, r.hw, r.hh, 0.014f, hovGlow);
-                    drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox, applyBg, 1.0f, 0.06f,
-                                  applyRim);
+                const bool focused = actionMenu_.selectedOption == i;
+                if (id == 2) {  // Apply: the shared primary button
+                    drawPrimary(vpPanel, r, actionMenuBtnHovered_ == i, focused);
                     continue;
                 }
-                const bool on = isPreset ? (i == arrangePreset_) : (id == 0 && arrangeSnap_);
-                const bool focused = actionMenu_.selectedOption == i;
-                if (focused) drawGlow(vpPanel, r.cx, r.cy, r.hw, r.hh, 0.014f, menuFocusGlow);
-                drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox,
-                              on ? activeBg : (hov ? glassCardHoverT.data() : glassControlT.data()), 1.0f,
-                              focused ? 0.09f : (on ? 0.08f : 0.06f),
-                              focused ? menuFocusRim : (on ? tabActiveBord : (hov ? kGlassRim : kGlassRimFaint)));
+                tok::State st;
+                st.hover = actionMenuBtnHovered_ == i;
+                st.focus = focused;
+                st.selected = isPreset ? (i == arrangePreset_) : (id == 0 && arrangeSnap_);
+                drawControl(vpPanel, r, st);
             }
             const UiRect o0 = hub::arrangeOption(0);
             drawUiElement(vpPanel, o0.cx, -0.140f, o0.hw, 0.0012f, UiShape::RoundedBox, kGlassDivider, 1.0f);
 
             // Preview well: the live screens where the layout would put them.
             const UiRect box = hub::arrangePreview();
-            drawUiElement(vpPanel, box.cx, box.cy, box.hw, box.hh, UiShape::RoundedBox, glassWellT.data(), 0.08f,
-                          0.05f, kGlassRimFaint);
+            drawBox(vpPanel, box.cx, box.cy, box.hw, box.hh, glassWellT.data(), tok::kRadiusM, tok::kBorderRest,
+                    kGlassRimFaint);
             const Mat4 boxVp = tileVp(box);
             const float noFill[4] = {0.0f, 0.0f, 0.0f, 0.0f};
             for (int oi = 0; oi < kMaxVideoSlots; ++oi) {
@@ -10269,43 +10242,36 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                               slot == selectedScreen_ ? themeAccentCol : kGlassRim);
                 uiBendOverride = -1.0f;
             }
-            const float badgeBg[4] = {0.03f, 0.04f, 0.06f, 0.82f};
             for (int slot = 0; slot < kMaxVideoSlots; ++slot) {
                 const ArrangeTile& t = arrTiles[slot];
                 if (!t.valid) continue;
-                drawUiElement(vpPanel, t.badgeX + 0.026f, t.badgeY - 0.026f, 0.019f, 0.019f, UiShape::RoundedBox,
-                              badgeBg, 1.0f, 0.10f, themeAccentCol);
+                // (The selected screen's number chip has the selected rim, the others the plain one.)
+                drawBox(vpPanel, t.badgeX + 0.026f, t.badgeY - 0.026f, 0.019f, 0.019f, tok::kBadgeBg.data(),
+                        tok::kRadiusPill, tok::kBorderRest, slot == selectedScreen_ ? tabActiveBord : kGlassRim);
             }
             // Swap arrows: round glass buttons on the seams.
             for (int k = 0; k < arrangeArrowCount_; ++k) {
                 const SwapArrow& sa = arrangeArrows_[k];
                 const bool hov = actionMenuBtnHovered_ == hub::kSwapIdBase + sa.slotA * 3 + sa.slotB ||
                                  actionMenu_.selectedOption == hub::kSwapIdBase + sa.slotA * 3 + sa.slotB;
-                const float arrowBg[4] = {0.03f, 0.04f, 0.07f, 0.90f};
-                if (hov) drawGlow(vpPanel, sa.x, sa.y, 0.026f, 0.026f, 0.012f, hovGlow, 1.0f);
-                drawUiElement(vpPanel, sa.x, sa.y, 0.026f, 0.026f, UiShape::RoundedBox, hov ? activeBg : arrowBg,
-                              1.0f, 0.10f, hov ? tabActiveBord : kGlassRim);
-                drawUiElement(vpPanel, sa.x, sa.y, 0.017f, 0.017f, sa.vertical ? UiShape::SwapV : UiShape::SwapH,
-                              hov ? themeTextCol : themeAccentCol);
+                tok::State st;
+                st.focus = hov;
+                drawControl(vpPanel, {sa.x, sa.y, 0.026f, 0.026f}, st, tok::kRadiusPill, tok::kBadgeBg.data());
+                drawUiElement(vpPanel, sa.x, sa.y, tok::kIconM, tok::kIconM, sa.vertical ? UiShape::SwapV : UiShape::SwapH,
+                              hov ? themeTextCol : accentTextCol);
             }
         } else if (actionMenu_.page == menupage::ShareEditor) {
             // SMB share editor: two-column glass form (layout in hub::smbFieldWell)
             const int optCount = static_cast<int>(actionMenu_.options.size());
             const bool anon = optCount > 2 && actionMenu_.options[2] == "guest";
-            const float hovGlow[4] = {
-                themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.25f};
-            const float activeSegBg[4] = {
-                themeAccentCol[0] * 0.24f, themeAccentCol[1] * 0.24f,
-                themeAccentCol[2] * 0.30f, 0.96f};
+            const float* hovGlow = menuFocusGlow;
             // Header: close button + divider
             {
                 const UiRect cr = hub::smbButton(10);
-                const bool hov = (actionMenuBtnHovered_ == 8);  // close X and Cancel share id 8
-                drawUiElement(vpPanel, cr.cx, cr.cy, cr.hw, cr.hh, UiShape::RoundedBox,
-                              hov ? glassCardHoverT.data() : glassControlT.data(), 1.0f, 0.08f,
-                              hov ? kGlassRim : kGlassRimFaint);
-                drawUiElement(vpPanel, cr.cx, cr.cy, cr.hw * 0.42f, cr.hh * 0.42f, UiShape::Close,
-                              themeTextCol);
+                tok::State st;
+                st.hover = (actionMenuBtnHovered_ == 8);  // close X and Cancel share id 8
+                drawControl(vpPanel, cr, st);
+                drawUiElement(vpPanel, cr.cx, cr.cy, tok::kIconS, tok::kIconS, UiShape::Close, themeTextCol);
                 drawUiElement(vpPanel, 0.0f, hub::kSmbHeaderDivY, hub::kSmbHalfW - 0.04f, 0.0012f,
                               UiShape::RoundedBox, kGlassDivider, 1.0f);
                 drawUiElement(vpPanel, 0.0f, hub::kSmbFooterDivY, hub::kSmbHalfW - 0.04f, 0.0012f,
@@ -10319,26 +10285,23 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const bool disabled = anon && (i == 3 || i == 4);
                 const bool focused = !editing && !disabled && actionMenu_.selectedOption == i;
                 const bool faulty = actionMenu_.errorField == i && !editing;
+                // A field: focus / editing = accent rim at the strong width + glow, the laser = brighter
+                // rim, a field Save complained about = the danger rim.
                 if (editing || focused) {
-                    drawGlow(vpPanel, w.cx, w.cy, w.hw, w.hh, 0.014f, hovGlow);
+                    drawGlow(vpPanel, w.cx, w.cy, w.hw, w.hh, tok::kGlowSpread, hovGlow);
                 }
-                drawUiElement(vpPanel, w.cx, w.cy, w.hw, w.hh, UiShape::RoundedBox,
-                              disabled ? glassRailT.data() : glassWellT.data(), 1.0f,
-                              (editing || focused || faulty) ? 0.10f : 0.07f,
-                              (editing || focused) ? tabActiveBord
-                              : faulty             ? redBorder
-                                                   : ((hov && !disabled) ? kGlassRim : kGlassRimFaint));
+                drawBox(vpPanel, w.cx, w.cy, w.hw, w.hh, disabled ? glassRailT.data() : glassWellT.data(),
+                        tok::kRadiusPill, (editing || focused || faulty) ? tok::kBorderStrong : tok::kBorderRest,
+                        (editing || focused) ? tabActiveBord
+                        : faulty             ? redBorder
+                                             : ((hov && !disabled) ? kGlassRim : kGlassRimFaint));
                 if (i == 2) {
                     for (int seg = 0; seg < 2; ++seg) {
                         const UiRect r = hub::smbAuthSegment(seg);
-                        const bool active = (seg == 0) == anon;
-                        if (active) {
-                            drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox,
-                                          activeSegBg, 1.0f, 0.10f, tabActiveBord);
-                        } else if (hov && actionMenuKeyHovered_ == seg) {
-                            drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox,
-                                          kGlassVeil, 1.0f, 0.08f, kGlassRim);
-                        }
+                        tok::State st;
+                        st.selected = (seg == 0) == anon;
+                        st.hover = hov && actionMenuKeyHovered_ == seg;
+                        if (st.selected || st.hover) drawControl(vpPanel, r, st, tok::kRadiusPill, kGlassVeil, kGlassVeil);
                     }
                 }
                 if (i == 10) {
@@ -10349,49 +10312,39 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                                                   : 0;
                     for (int seg = 0; seg < 4; ++seg) {
                         const UiRect r = hub::smbTypeSegment(seg);
-                        if (seg == sel) {
-                            drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox,
-                                          activeSegBg, 1.0f, 0.10f, tabActiveBord);
-                        } else if (hov && actionMenuKeyHovered_ == seg) {
-                            drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox,
-                                          kGlassVeil, 1.0f, 0.08f, kGlassRim);
-                        }
+                        tok::State st;
+                        st.selected = seg == sel;
+                        st.hover = hov && actionMenuKeyHovered_ == seg;
+                        if (st.selected || st.hover) drawControl(vpPanel, r, st, tok::kRadiusPill, kGlassVeil, kGlassVeil);
                     }
                 }
                 if (editing) {
-                    const float valSc = ((0.030f * tScale) / fontAtlas_.lineHeight) * 0.92f;
+                    const float valSc = scBody;
                     const TextFieldLayout lay = layoutTextField(
                         w.cx - w.hw + 0.022f, w.cx + w.hw - 0.022f, valSc,
                         actionMenu_.options[static_cast<std::size_t>(i)], actionMenu_.cursorPos,
                         false, false);
-                    const float caretCol[4] = {1.0f, 1.0f, 1.0f, 0.98f};
                     drawUiElement(vpPanel, lay.cursorX + 0.002f, w.cy, 0.0022f, w.hh * 0.55f,
-                                  UiShape::RoundedBox, caretCol, 1.0f);
+                                  UiShape::RoundedBox, tok::kKnob.data(), 1.0f);
                 }
             }
             // Footer buttons: Save (primary), Cancel, Delete (existing shares)
             for (int id : {7, 8, 9}) {
                 if (id == 9 && (optCount < 10 || actionMenu_.options[9].empty())) continue;
+                // Save = the shared primary button, Cancel = the plain glass one, Delete = the one danger
+                // red (solid, as everywhere else: no near-transparent variant).
                 const UiRect r = hub::smbButton(id);
-                const bool hov = (actionMenuBtnHovered_ == id) || (actionMenu_.selectedOption == id);
+                const bool laser = actionMenuBtnHovered_ == id;
                 const bool focused = actionMenu_.selectedOption == id;
-                if (focused && id != 7) drawGlow(vpPanel, r.cx, r.cy, r.hw, r.hh, 0.014f, menuFocusGlow);
                 if (id == 7) {
-                    const float saveBg[4] = {
-                        themeAccentCol[0] * (hov ? 1.0f : 0.85f), themeAccentCol[1] * (hov ? 1.0f : 0.85f),
-                        themeAccentCol[2] * (hov ? 1.0f : 0.90f), 0.98f};
-                    if (hov) drawGlow(vpPanel, r.cx, r.cy, r.hw, r.hh, 0.014f, hovGlow);
-                    const float saveRim[4] = {1.0f, 1.0f, 1.0f, 0.35f};
-                    drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox,
-                                  saveBg, 1.0f, focused ? 0.09f : 0.06f, focused ? menuFocusRim : saveRim);
+                    drawPrimary(vpPanel, r, laser, focused);
                 } else if (id == 8) {
-                    drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox,
-                                  hov ? glassCardHoverT.data() : glassControlT.data(), 1.0f, focused ? 0.09f : 0.06f,
-                                  focused ? menuFocusRim : (hov ? kGlassRim : kGlassRimFaint));
+                    tok::State st;
+                    st.hover = laser;
+                    st.focus = focused;
+                    drawControl(vpPanel, r, st);
                 } else {
-                    const float delBg[4] = {0.45f, 0.08f, 0.12f, hov ? 0.85f : 0.30f};
-                    drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox,
-                                  delBg, 1.0f, focused ? 0.09f : 0.06f, focused ? menuFocusRim : redBorder);
+                    drawSemantic(vpPanel, r, tok::kDanger, laser, focused, accentLikeDanger);
                 }
             }
         }
@@ -10399,22 +10352,25 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         if (actionMenu_.page != menupage::ShareEditor) {
             // Close X in the top-right corner: a fixed place to dismiss the dialog with the laser (as B).
             const UiRect cr = hub::menuCloseButton(mHalfW, mHalfH);
-            const bool hov = actionMenuCloseHovered_;
-            drawUiElement(vpPanel, cr.cx, cr.cy, cr.hw, cr.hh, UiShape::RoundedBox,
-                          hov ? glassCardHoverT.data() : glassControlT.data(), 1.0f, 0.08f,
-                          hov ? kGlassRim : kGlassRimFaint);
-            drawUiElement(vpPanel, cr.cx, cr.cy, cr.hw * 0.42f, cr.hh * 0.42f, UiShape::Close, themeTextCol);
+            tok::State st;
+            st.hover = actionMenuCloseHovered_;
+            drawControl(vpPanel, cr, st);
+            drawUiElement(vpPanel, cr.cx, cr.cy, tok::kIconS, tok::kIconS, UiShape::Close, themeTextCol);
         }
 
         // Text pass for Action Menu
         bindPipe(textPipeline_);
         vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
                                 textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
-        const float sc = (0.032f * tScale) / fontAtlas_.lineHeight;
+        // Dialog text on the shared scale: titles Title, rows / buttons / questions Body, subtitles and
+        // hints Secondary, captions Caption.
+        const float sc = scBody;
+        const float scDlgTitle = scTitle;
+        const float scDlgSub = scSecondary;
 
         if (actionMenu_.page != menupage::ShareEditor && actionMenu_.page != menupage::ScreenPicker && actionMenu_.page != menupage::Arrange) {  // own header
             withHeadingFont([&] {
-                drawFitCentered(0.0f, mHalfH - 0.050f, (mHalfW - 0.11f) * 2.0f, sc * 1.15f, themeTextCol, actionMenu_.title);
+                drawFitCentered(0.0f, mHalfH - 0.050f, (mHalfW - 0.11f) * 2.0f, scDlgTitle, themeTextCol, actionMenu_.title);
             });
         }
         if (!actionMenu_.subtitle.empty() && actionMenu_.page != menupage::Confirm && actionMenu_.page != menupage::ShareEditor &&
@@ -10424,7 +10380,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             const std::string& sub = actionMenu_.subtitle;
             const float maxW = mHalfW * 1.8f;
             size_t cut = std::string::npos;
-            if (measureString(sc * 0.85f, sub) > maxW) {
+            if (measureString(scDlgSub, sub) > maxW) {
                 for (size_t i = 0; i < sub.size(); ++i) {
                     if (sub[i] != ' ') continue;
                     const auto dist = [&](size_t p) { return p > sub.size() / 2 ? p - sub.size() / 2 : sub.size() / 2 - p; };
@@ -10432,17 +10388,17 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 }
             }
             if (cut == std::string::npos) {
-                drawFitCentered(0.0f, mHalfH - 0.095f, maxW, sc * 0.85f, slateCol, sub);
+                drawFitCentered(0.0f, mHalfH - 0.095f, maxW, scDlgSub, slateCol, sub);
             } else {
-                drawFitCentered(0.0f, mHalfH - 0.095f, maxW, sc * 0.85f, slateCol, sub.substr(0, cut));
-                drawFitCentered(0.0f, mHalfH - 0.127f, maxW, sc * 0.85f, slateCol, sub.substr(cut + 1));
+                drawFitCentered(0.0f, mHalfH - 0.095f, maxW, scDlgSub, slateCol, sub.substr(0, cut));
+                drawFitCentered(0.0f, mHalfH - 0.127f, maxW, scDlgSub, slateCol, sub.substr(cut + 1));
             }
         }
 
         if (actionMenu_.page == menupage::Main || actionMenu_.page == menupage::MoveTo || actionMenu_.page == menupage::Format || actionMenu_.page == menupage::Tracks || actionMenu_.page == menupage::Chromium ||
             actionMenu_.page == menupage::VrQuestion) {
             if (actionMenu_.page == menupage::Main && !actionMenu_.footer.empty()) {  // "B: Close" under the rows
-                drawFitCentered(0.0f, -mHalfH + 0.034f, mHalfW * 1.8f, sc * 0.75f, dimCol, actionMenu_.footer);
+                drawFitCentered(0.0f, -mHalfH + 0.034f, mHalfW * 1.8f, scCaption, slateCol, actionMenu_.footer);
             }
             for (int i = 0; i < menuOptCount; ++i) {
                 const float cy = hub::actionMenuOption(i, menuOptCount).cy;
@@ -10457,13 +10413,16 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     const float* col = (kindRaw & 15) == 4 ? dimCol : ((hov || inUse) ? themeTextCol : slateCol);
                     const float rowL = -hub::kTracksRowHalfW;
                     withHeadingFont([&] { drawFit(rowL + 0.075f, cy, 0.12f, sc, col, o.substr(0, bar)); });
-                    drawFit(rowL + 0.205f, cy, 2.0f * hub::kTracksRowHalfW - 0.205f - 0.075f, sc * 0.92f, col, o.substr(bar + 1));
+                    drawFit(rowL + 0.205f, cy, 2.0f * hub::kTracksRowHalfW - 0.205f - 0.075f, scSecondary, col, o.substr(bar + 1));
                 } else if (bar != std::string::npos) {
                     // "short|full": the short name in bold on the left, what it stands for beside it.
                     withHeadingFont([&] { drawFit(-0.335f, cy, 0.20f, sc, hov ? themeTextCol : slateCol, o.substr(0, bar)); });
-                    drawFit(-0.115f, cy, 0.44f, sc * 0.92f, hov ? themeTextCol : slateCol, o.substr(bar + 1));
+                    drawFit(-0.115f, cy, 0.44f, scSecondary, hov ? themeTextCol : slateCol, o.substr(bar + 1));
                 } else {
-                    drawFitCentered(0.0f, cy, 0.38f * 1.85f, sc, hov ? themeTextCol : slateCol, o);
+                    // Delete / vault rows: the label colour of their fill.
+                    const bool semRow = o.find("Delete") != std::string::npos || o.find("Vault") != std::string::npos;
+                    drawFitCentered(0.0f, cy, 0.38f * 1.85f, sc,
+                                    semRow ? tok::kLabelLight.data() : (hov ? themeTextCol : slateCol), o);
                 }
             }
         } else if (actionMenu_.page == menupage::Confirm) {
@@ -10501,26 +10460,28 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const std::string noText = actionMenu_.options.size() > 1 ? actionMenu_.options[1] : std::string("Cancel");
                 const UiRect yesR = hub::deleteConfirmButton(0);
                 const UiRect noR = hub::deleteConfirmButton(1);
-                drawFitCentered(yesR.cx, yesR.cy, yesR.hw * 1.8f, sc, themeTextCol, yesText);
+                // The answer's label: light on the danger red, dark or light by contrast on the accent.
+                const tok::Rgba yesCol = destructiveQuestion ? tok::kLabelLight : tok::labelOnAccent(themeAccentCol);
+                withHeadingFont([&] { drawFitCentered(yesR.cx, yesR.cy, yesR.hw * 1.8f, sc, yesCol.data(), yesText); });
                 drawFitCentered(noR.cx, noR.cy, noR.hw * 1.8f, sc, themeTextCol, noText);
-                const float hintSc = (0.026f * tScale) / fontAtlas_.lineHeight;
+                const float hintSc = scSecondary;
                 const std::string aText = actionMenu_.selectedOption == 0 ? yesText : noText;
                 drawFitCentered(0.0f, -0.200f, (mHalfW - 0.06f) * 2.0f, hintSc, slateCol,
                                 "A: " + aText + "     B: " + noText);
             }
         } else if (actionMenu_.page == menupage::ScreenPicker && pickerSpatial_) {
             withHeadingFont([&] {
-                drawFitCentered(0.0f, hub::kPickHalfH - 0.050f, (hub::kPickHalfW - 0.11f) * 2.0f, sc * 1.15f,
+                drawFitCentered(0.0f, hub::kPickHalfH - 0.050f, (hub::kPickHalfW - 0.11f) * 2.0f, scDlgTitle,
                                 themeTextCol, actionMenu_.title);
             });
-            drawFitCentered(0.0f, hub::kPickHalfH - 0.095f, hub::kPickHalfW * 1.8f, sc * 0.85f, slateCol,
+            drawFitCentered(0.0f, hub::kPickHalfH - 0.095f, hub::kPickHalfW * 1.8f, scDlgSub, slateCol,
                             actionMenu_.subtitle);
-            const float scCap = ((0.024f * tScale) / fontAtlas_.lineHeight);
+            const float scCap = scSecondary;
             for (int slot = 0; slot < kMaxVideoSlots; ++slot) {
                 const ArrangeTile& t = arrTiles[slot];
                 if (!t.valid) continue;
                 withHeadingFont([&] {
-                    drawFitCentered(t.badgeX + 0.026f, t.badgeY - 0.026f, 0.034f, scCap * 0.95f, themeTextCol,
+                    drawFitCentered(t.badgeX + 0.026f, t.badgeY - 0.026f, 0.034f, scCaption, themeTextCol,
                                     std::to_string(slot + 1));
                 });
             }
@@ -10543,21 +10504,21 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
             if (anyFree) {
                 const UiRect r = hub::pickerAddCard();
-                drawFitCentered(r.cx, r.cy - 0.060f, r.hw * 2.0f - 0.02f, scCap * 0.90f,
+                drawFitCentered(r.cx, r.cy - 0.060f, r.hw * 2.0f - 0.02f, scCaption,
                                 hovAdd ? themeTextCol : slateCol, "Add a screen");
             }
             const UiRect cr = hub::pickerCancel();
-            drawFitCentered(cr.cx, cr.cy, cr.hw * 2.0f - 0.02f, scCap * 1.05f, themeTextCol, "Cancel");
+            drawFitCentered(cr.cx, cr.cy, cr.hw * 2.0f - 0.02f, sc, themeTextCol, "Cancel");
         } else if (actionMenu_.page == menupage::ScreenPicker) {
             int order[kMaxVideoSlots];
             screenOrderLeftToRight(order);
             withHeadingFont([&] {
-                drawFitCentered(0.0f, hub::kPickHalfH - 0.050f, (hub::kPickHalfW - 0.11f) * 2.0f, sc * 1.15f,
+                drawFitCentered(0.0f, hub::kPickHalfH - 0.050f, (hub::kPickHalfW - 0.11f) * 2.0f, scDlgTitle,
                                 themeTextCol, actionMenu_.title);
             });
-            drawFitCentered(0.0f, hub::kPickHalfH - 0.095f, hub::kPickHalfW * 1.8f, sc * 0.85f, slateCol,
+            drawFitCentered(0.0f, hub::kPickHalfH - 0.095f, hub::kPickHalfW * 1.8f, scDlgSub, slateCol,
                             actionMenu_.subtitle);
-            const float scCap = ((0.024f * tScale) / fontAtlas_.lineHeight);
+            const float scCap = scSecondary;
             for (int i = 0; i < kMaxVideoSlots; ++i) {
                 const int slot = order[i];
                 const UiRect r = hub::pickerTile(i);
@@ -10573,42 +10534,48 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                                 occupied ? ("Replace screen " + std::to_string(slot + 1)) : std::string("Add a screen"));
             }
             const UiRect cr = hub::pickerCancel();
-            drawFitCentered(cr.cx, cr.cy, cr.hw * 2.0f - 0.02f, scCap * 1.05f, themeTextCol, "Cancel");
+            drawFitCentered(cr.cx, cr.cy, cr.hw * 2.0f - 0.02f, sc, themeTextCol, "Cancel");
         } else if (actionMenu_.page == menupage::Arrange) {
             const int presetCount = std::max(0, menuOptCount - hub::kArrangeButtons);
             withHeadingFont([&] {
-                drawFitCentered(0.0f, hub::kArrHalfH - 0.050f, (hub::kArrHalfW - 0.11f) * 2.0f, sc * 1.15f,
+                drawFitCentered(0.0f, hub::kArrHalfH - 0.050f, (hub::kArrHalfW - 0.11f) * 2.0f, scDlgTitle,
                                 themeTextCol, actionMenu_.title);
             });
-            drawFitCentered(0.0f, hub::kArrHalfH - 0.095f, hub::kArrHalfW * 1.8f, sc * 0.85f, slateCol,
+            drawFitCentered(0.0f, hub::kArrHalfH - 0.095f, hub::kArrHalfW * 1.8f, scDlgSub, slateCol,
                             actionMenu_.subtitle);
-            const float scBtn = ((0.024f * tScale) / fontAtlas_.lineHeight);
+            const float scBtn = scSecondary;
             for (int i = 0; i < presetCount + hub::kArrangeButtons && i < menuOptCount; ++i) {
                 const bool isPreset = i < presetCount;
                 const int id = i - presetCount;
                 const UiRect r = isPreset ? hub::arrangeOption(i) : hub::arrangeButton(id);
                 const bool hov = (actionMenuBtnHovered_ == i) || (actionMenu_.selectedOption == i);
                 const bool on = isPreset ? (i == arrangePreset_) : (id == 0 && arrangeSnap_);
-                drawFitCentered(r.cx, r.cy, r.hw * 2.0f - 0.03f, scBtn * (isPreset ? 1.05f : 1.0f),
-                                (hov || on || id == 2) ? themeTextCol : slateCol,
+                if (id == 2) {  // Apply: the primary button's label
+                    withHeadingFont([&] {
+                        drawFitCentered(r.cx, r.cy, r.hw * 2.0f - 0.03f, sc, tok::labelOnAccent(themeAccentCol).data(),
+                                        actionMenu_.options[static_cast<std::size_t>(i)]);
+                    });
+                    continue;
+                }
+                drawFitCentered(r.cx, r.cy, r.hw * 2.0f - 0.03f, id == 3 ? sc : scBtn,
+                                (hov || on) ? themeTextCol : slateCol,
                                 actionMenu_.options[static_cast<std::size_t>(i)]);
             }
             for (int slot = 0; slot < kMaxVideoSlots; ++slot) {
                 const ArrangeTile& t = arrTiles[slot];
                 if (!t.valid) continue;
                 withHeadingFont([&] {
-                    drawFitCentered(t.badgeX + 0.026f, t.badgeY - 0.026f, 0.034f, scBtn * 0.95f, themeTextCol,
+                    drawFitCentered(t.badgeX + 0.026f, t.badgeY - 0.026f, 0.034f, scCaption, themeTextCol,
                                     std::to_string(slot + 1));
                 });
             }
         } else if (actionMenu_.page == menupage::ShareEditor) {
             const int optCount = static_cast<int>(actionMenu_.options.size());
             const bool anon = optCount > 2 && actionMenu_.options[2] == "guest";
-            const float labelSc = ((0.026f * tScale) / fontAtlas_.lineHeight);  // readable at 2 m
-            const float valSc = ((0.030f * tScale) / fontAtlas_.lineHeight) * 0.92f;
-            const float dimText[4] = {themeTextCol[0] * 0.55f, themeTextCol[1] * 0.60f,
-                                      themeTextCol[2] * 0.70f, 0.75f};
-            const float errCol[4] = {1.0f, 0.45f, 0.45f, 1.0f};
+            const float labelSc = scSecondary;  // readable at 2 m
+            const float valSc = scBody;
+            const float* dimText = textDisabledCol;  // placeholders
+            const float* errCol = tok::kDanger.text.data();
             const std::string kind = optCount > 10 ? actionMenu_.options[10] : std::string("SMB");
             const bool smbKind = kind == "SMB";
             const std::string defPort = kind == "SFTP" ? "22" : (kind == "WebDAV" ? "80" : "443");
@@ -10620,12 +10587,13 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                                                   "", "Username", "Password",
                                                   smbKind ? "WORKGROUP" : defPort + " (default)",
                                                   "Optional display name", "", "", "", ""};
-            // Header: title (heading weight, the size of every dialog title) + hint line
+            // Header: title (heading weight, the size and height of every dialog title; left-aligned,
+            // it is a form) + hint line at the subtitle's height
             withHeadingFont([&] {
-                drawFit(-hub::kSmbHalfW + 0.055f, 0.399f, 0.95f, sc * 1.15f, themeTextCol,
+                drawFit(-hub::kSmbHalfW + tok::kPadL, hub::kSmbHalfH - 0.050f, 0.95f, scDlgTitle, themeTextCol,
                         actionMenu_.title);
             });
-            drawFit(-hub::kSmbHalfW + 0.055f, 0.352f, 1.0f, labelSc, slateCol, actionMenu_.subtitle);
+            drawFit(-hub::kSmbHalfW + tok::kPadL, hub::kSmbHalfH - 0.095f, 1.0f, labelSc, slateCol, actionMenu_.subtitle);
             // Why Save did not work: on the footer line next to the button just pressed.
             if (!actionMenu_.error.empty()) {
                 const bool hasDelete = optCount > 9 && !actionMenu_.options[9].empty();
@@ -10679,8 +10647,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 }
             }
             // Footer
-            const float darkText[4] = {0.03f, 0.05f, 0.09f, 1.0f};
-            const float redText[4] = {1.0f, 0.55f, 0.55f, 1.0f};
+            const tok::Rgba saveText = tok::labelOnAccent(themeAccentCol);
+            const float* darkText = saveText.data();
+            const float* redText = tok::kLabelLight.data();  // on the solid danger red
             for (int id : {7, 8, 9}) {
                 if (id == 9 && (optCount < 10 || actionMenu_.options[9].empty())) continue;
                 const UiRect r = hub::smbButton(id);
@@ -10699,30 +10668,30 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
     // =========================================================================
     if (drawPanelUi && keyboardModal_.visible && textReady_ && uiPipeline_ != VK_NULL_HANDLE) {
         bindPipe(uiPipeline_);
-        const float dimBg[4] = {0.0f, 0.0f, 0.0f, 0.62f};
-        drawUiElement(vpPanel, 0.0f, 0.0f, kPanelW, kPanelTop, UiShape::RoundedBox, dimBg, 0.09f);
+        // The same backdrop as every dialog.
+        drawBox(vpPanel, 0.0f, 0.0f, kPanelW, kPanelTop, tok::kScrim.data(), tok::kRadiusL);
 
-        const float sheetBg[4] = {0.040f, 0.050f, 0.070f, 0.96f * (0.6f + 0.4f * op)};
+        // The key sheet is a dialog surface; keys use the shared states (focus = accent rim + glow,
+        // Shift / ?123 on = selected tint, the laser = lighter fill).
+        const auto sheetBg = tok::modalSurface(op);
         const float sheetShadow[4] = {0.0f, 0.0f, 0.0f, 0.55f};
-        const float accentGlow[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.28f};
+        const float accentGlow[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], tok::kGlowAlpha};
         const float accentBord[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 1.0f};
-        const float keyHovBg[4] = {themeAccentCol[0] * 0.38f, themeAccentCol[1] * 0.38f,
-                                   themeAccentCol[2] * 0.46f, 0.97f};
+        const float* keyHovBg = glassCardHoverT.data();
         const float keySpecialBg[4] = {0.085f, 0.100f, 0.130f, 0.95f};
-        const float keyOnBg[4] = {themeAccentCol[0] * 0.26f, themeAccentCol[1] * 0.26f,
-                                  themeAccentCol[2] * 0.32f, 0.97f};
 
-        // Input field (prompt line + value well)
-        drawGlow(vpPanel, 0.0f, hub::kKbFieldY, hub::kKbFieldHalfW, hub::kKbFieldHalfH, 0.016f,
+        // Input field (prompt line + value well): the field being edited = the strong accent rim.
+        drawGlow(vpPanel, 0.0f, hub::kKbFieldY, hub::kKbFieldHalfW, hub::kKbFieldHalfH, tok::kGlowSpread,
                  accentGlow);
-        drawUiElement(vpPanel, 0.0f, hub::kKbFieldY, hub::kKbFieldHalfW, hub::kKbFieldHalfH,
-                      UiShape::RoundedBox, glassWellT.data(), 1.0f, 0.06f, accentBord);
+        drawBox(vpPanel, 0.0f, hub::kKbFieldY, hub::kKbFieldHalfW, hub::kKbFieldHalfH, glassWellT.data(),
+                tok::kRadiusPill, tok::kBorderStrong, accentBord);
 
         // Key sheet
+        const float sheetR = relM(tok::kRadiusL, hub::kKbSheetHalfW, hub::kKbSheetHalfH);
         drawGlow(vpPanel, 0.0f, hub::kKbSheetY - 0.01f, hub::kKbSheetHalfW, hub::kKbSheetHalfH,
-                 0.05f, sheetShadow, 0.12f, true);
-        drawGlass(0.0f, hub::kKbSheetY, hub::kKbSheetHalfW, hub::kKbSheetHalfH, sheetBg,
-                  0.12f, 0.008f, kGlassRim);
+                 0.05f, sheetShadow, sheetR, true);
+        drawGlass(0.0f, hub::kKbSheetY, hub::kKbSheetHalfW, hub::kKbSheetHalfH, sheetBg.data(),
+                  sheetR, relM(tok::kBorderStrong, hub::kKbSheetHalfW, hub::kKbSheetHalfH), kGlassRim);
 
         const auto& keys = hub::keyboardKeys();
         for (std::size_t k = 0; k < keys.size(); ++k) {
@@ -10731,35 +10700,29 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             const bool hov = (static_cast<int>(k) == keyboardKeyHovered_);
             const bool toggledOn = (key.code == hub::kKbShift && keyboardModal_.shift) ||
                                    (key.code == hub::kKbSymbols && keyboardModal_.symbols);
-            const float keyR = 0.012f / std::min(r.hw, r.hh);
-            // The key the stick / D-pad is on (A types it): a halo and a rim in the text colour.
+            // The key the stick / D-pad is on (A types it) = focus; the key under the laser = hover
+            // (the laser types it, so it is shown as focus too).
             const bool focus = static_cast<int>(k) == keyboardModal_.focusKey;
-            const float focusRim[4] = {themeTextCol[0], themeTextCol[1], themeTextCol[2], 0.95f};
             if (key.code == hub::kKbDone) {
-                const float doneBg[4] = {themeAccentCol[0] * (hov ? 1.0f : 0.85f),
-                                         themeAccentCol[1] * (hov ? 1.0f : 0.85f),
-                                         themeAccentCol[2] * (hov ? 1.0f : 0.90f), 0.98f};
-                if (hov || focus) drawGlow(vpPanel, r.cx, r.cy, r.hw, r.hh, 0.012f, accentGlow, keyR);
-                const float rim[4] = {1.0f, 1.0f, 1.0f, 0.35f};
-                drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox, doneBg, keyR,
-                              focus ? 0.10f : 0.06f, focus ? focusRim : rim);
+                drawPrimary(vpPanel, r, hov, focus, true, tok::kRadiusS);  // the key that finishes: the primary
                 continue;
             }
             if (key.code == hub::kKbFinish && !keyboardModal_.finishPill) continue;
             if (key.code == hub::kKbCancel || key.code == hub::kKbFinish) {
-                drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox,
-                              hov ? glassCardHoverT.data() : glassControlT.data(), 1.0f, 0.06f,
-                              hov ? kGlassRim : kGlassRimFaint);
+                tok::State st;
+                st.hover = hov;
+                drawControl(vpPanel, r, st);
                 continue;
             }
-            if (hov || focus) drawGlow(vpPanel, r.cx, r.cy, r.hw, r.hh, 0.010f, accentGlow, keyR);
             const bool special = key.code != hub::kKbChar && key.code != hub::kKbSpace;
-            // Caps lock: Shift in the full accent colour (one-shot Shift is the dim accent).
+            // Caps lock: Shift in the full accent colour (one-shot Shift is the selected tint).
             const float capsBg[4] = {themeAccentCol[0] * 0.70f, themeAccentCol[1] * 0.70f, themeAccentCol[2] * 0.78f, 0.98f};
             const bool caps = key.code == hub::kKbShift && keyboardModal_.capsLock;
-            const float* bg = hov ? keyHovBg : (caps ? capsBg : (toggledOn ? keyOnBg : (special ? keySpecialBg : glassControlT.data())));
-            drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox, bg, keyR, focus ? 0.10f : 0.05f,
-                          focus ? focusRim : ((hov || toggledOn) ? accentBord : kGlassRimFaint));
+            tok::State st;
+            st.focus = hov || focus;
+            st.selected = toggledOn && !caps;
+            drawControl(vpPanel, r, st, tok::kRadiusS, caps ? capsBg : (special ? keySpecialBg : glassControlT.data()),
+                        caps ? capsBg : keyHovBg);
             if (key.code == hub::kKbLeft || key.code == hub::kKbRight) {
                 const float chw = (key.code == hub::kKbLeft) ? -0.010f : 0.010f;
                 drawUiElement(vpPanel, r.cx, r.cy, chw, 0.010f, UiShape::Chevron, themeTextCol);
@@ -10769,7 +10732,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         }
 
         // Caret in the input field
-        const float fieldSc = ((0.034f * tScale) / fontAtlas_.lineHeight);
+        const float fieldSc = scLarge;
         const float fieldLeft = -hub::kKbFieldHalfW + 0.030f;
         const float fieldRight = keyboardModal_.revealToggle
             ? hub::kKbRevealBtn.cx - hub::kKbRevealBtn.hw - 0.020f
@@ -10789,10 +10752,10 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         const TextFieldLayout kbLay = layoutTextField(
             fieldLeft, fieldRight, fieldSc, kbShown, keyboardModal_.cursorPos, kbMasked && !kbPeek, false);
         if (keyboardModal_.revealToggle) {
-            const UiRect& rb = hub::kKbRevealBtn;
-            drawUiElement(vpPanel, rb.cx, rb.cy, rb.hw, rb.hh, UiShape::RoundedBox,
-                          keyboardRevealHovered_ ? keyHovBg : (keyboardModal_.revealed ? keyOnBg : keySpecialBg),
-                          1.0f, 0.05f, (keyboardRevealHovered_ || keyboardModal_.revealed) ? accentBord : kGlassRimFaint);
+            tok::State st;
+            st.hover = keyboardRevealHovered_;
+            st.selected = keyboardModal_.revealed;  // "Show" is on
+            drawControl(vpPanel, hub::kKbRevealBtn, st, tok::kRadiusPill, keySpecialBg);
         }
         if (viewIndex == 0 || layerPass) {
             // Caret stops at every character boundary of the visible text, so a
@@ -10821,20 +10784,19 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
             const auto idleMs = std::chrono::duration_cast<std::chrono::milliseconds>(nowT - sLastEditT).count();
             if (idleMs < 450 || ((idleMs / 480) % 2) == 0) {
-                const float caretCol[4] = {1.0f, 1.0f, 1.0f, 0.98f};
                 drawUiElement(vpPanel, kbLay.cursorX + 0.003f, hub::kKbFieldY, 0.0026f, 0.024f,
-                              UiShape::RoundedBox, caretCol, 1.0f);
+                              UiShape::RoundedBox, tok::kKnob.data(), 1.0f);
             }
         }
 
         // Text pass
         bindPipe(textPipeline_);
-        const float scKey = ((0.030f * tScale) / fontAtlas_.lineHeight);
-        const float kbSlateCol[4] = {themeTextCol[0] * 0.78f, themeTextCol[1] * 0.84f,
-                                     themeTextCol[2] * 0.94f, 0.95f};
-        const float darkText[4] = {0.03f, 0.05f, 0.09f, 1.0f};
+        const float scKey = scBody;
+        const float* kbSlateCol = textSecondaryCol;
+        const tok::Rgba doneText = tok::labelOnAccent(themeAccentCol);  // on the primary key
+        const float* darkText = doneText.data();
 
-        const float scPrompt = ((0.032f * tScale) / fontAtlas_.lineHeight) * 1.15f;  // as dialog titles
+        const float scPrompt = scTitle;  // as dialog titles
         withHeadingFont([&] {
             drawFit(-hub::kKbFieldHalfW + 0.010f, hub::kKbFieldY + 0.088f, keyboardModal_.finishPill ? 0.80f : 1.0f,
                     scPrompt, themeTextCol,
@@ -10842,7 +10804,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         });
         if (keyboardModal_.revealToggle) {
             drawFitCentered(hub::kKbRevealBtn.cx, hub::kKbRevealBtn.cy, hub::kKbRevealBtn.hw * 2.0f - 0.02f,
-                            scKey * 0.9f, keyboardRevealHovered_ ? themeAccentCol : themeTextCol,
+                            scSecondary, themeTextCol,
                             keyboardModal_.revealed ? "Hide" : "Show");
         }
         if (!kbLay.visibleStr.empty()) {
@@ -10875,10 +10837,11 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     drawFitCentered(r.cx, r.cy, r.hw * 2.0f - 0.01f, scKey, col, label);
                 });
             } else {
-                drawFitCentered(r.cx, r.cy, r.hw * 2.0f - 0.01f, small ? scKey * 0.9f : scKey, col, label);
+                // (Special keys: "Shift", "?123", "Space" one step smaller than the characters.)
+                drawFitCentered(r.cx, r.cy, r.hw * 2.0f - 0.01f, small ? scSecondary : scKey, col, label);
             }
         }
-        const float scHint = ((0.026f * tScale) / fontAtlas_.lineHeight);
+        const float scHint = scSecondary;
         drawFitCentered(0.0f, hub::kKbFieldY - hub::kKbFieldHalfH - 0.026f, 1.3f, scHint, kbSlateCol,
                         "Stick: Key  \xB7  A: Type  \xB7  X: Delete  \xB7  Y: Done  \xB7  B: Cancel  \xB7  Point into the text to move the cursor");
     }
@@ -10891,22 +10854,26 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         uiPipeline_ != VK_NULL_HANDLE && (hubOpen || actionMenu_.visible) && !keyboardModal_.visible &&
         !(actionMenu_.visible && actionMenu_.page == menupage::ShareEditor)) {
         const float a = std::clamp(panelToastAlpha_, 0.0f, 1.0f);
-        const float toastSc = (0.028f * tScale) / fontAtlas_.lineHeight;
+        const float toastSc = scBody;
         const float textW = std::min(measureString(toastSc, panelToast_), 1.08f);
         const float hw = std::min(0.60f, 0.5f * textW + 0.075f);
-        const float hh = 0.030f;
+        const float hh = tok::kCtlM;
         const float cy = -0.420f;
-        const float warnCol[4] = {1.0f, 0.72f, 0.36f, a};
+        // A warning: the fixed amber rim and a "!" mark (it does not rely on the colour, so an amber
+        // accent still reads as a warning); a result: the accent rim and a tick.
+        const float warnCol[4] = {tok::kWarning.rim[0], tok::kWarning.rim[1], tok::kWarning.rim[2], a};
         const float accent[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], a};
+        const float accentTxt[4] = {accentTextCol[0], accentTextCol[1], accentTextCol[2], a};
         const float fill[4] = {glassControlT[0], glassControlT[1], glassControlT[2], 0.95f * a};
         const float* rim = panelToastWarn_ ? warnCol : accent;
         bindPipe(uiPipeline_);
-        drawUiElement(vpPanel, 0.0f, cy, hw, hh, UiShape::RoundedBox, fill, 1.0f, 0.07f, rim);
+        drawBox(vpPanel, 0.0f, cy, hw, hh, fill, tok::kRadiusPill,
+                (panelToastWarn_ && accentLikeWarning) ? tok::kBorderStrong : tok::kBorderRest, rim);
         const float iconX = -hw + 0.034f;
         if (panelToastWarn_) {
-            drawUiElement(vpPanel, iconX, cy, 0.013f, 0.013f, UiShape::RoundedBox, warnCol, 1.0f);
+            drawUiElement(vpPanel, iconX, cy, tok::kIconS, tok::kIconS, UiShape::RoundedBox, warnCol, 1.0f);
         } else {
-            drawUiElement(vpPanel, iconX, cy, 0.013f, 0.013f, UiShape::Checkmark, accent);
+            drawUiElement(vpPanel, iconX, cy, tok::kIconS, tok::kIconS, UiShape::Checkmark, accentTxt);
         }
         bindPipe(textPipeline_);
         vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS,
@@ -10914,7 +10881,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         const float textCol[4] = {themeTextCol[0], themeTextCol[1], themeTextCol[2], a};
         if (panelToastWarn_) {
             const float dark[4] = {0.05f, 0.04f, 0.02f, a};
-            withHeadingFont([&] { drawFitCentered(iconX, cy, 0.024f, toastSc * 0.80f, dark, "!"); });
+            withHeadingFont([&] { drawFitCentered(iconX, cy, 0.024f, scCaption, dark, "!"); });
         }
         drawFitCentered(0.018f, cy, 2.0f * hw - 0.09f, toastSc, textCol, panelToast_);
     }
