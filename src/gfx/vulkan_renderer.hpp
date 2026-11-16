@@ -870,9 +870,21 @@ public:
         int steps = 0;
         int stepIdx = 0;
         bool enabled = true;
-        std::vector<std::string> options;
+        std::vector<std::string> options;  // choice (slider): each step's name, shown while the laser aims at it
+        std::string reason;                // a disabled row: why it is off, drawn instead of its value / control
     };
     static constexpr int kSettingsKindSegmented = 6;
+    static constexpr int kSettingsKindReadOnly = 11;  // a table line (the Buttons pages): no control, no hover
+    // Rail hover id of the Settings section list's 7th entry (3..8 are the first six, 9 is Lock Vault).
+    static constexpr int kSettingsRail7HoverId = 30;
+    // Settings with buttons: the rail entry of the page shown, the one marked while the focus is on
+    // the section list (-1: the focus is on the page, its selected row is drawn like a hovered one),
+    // and the colour picker control with the focus (-1 none).
+    void setSettingsFocus(int railPos, int railFocusPos, int pickerFocus) {
+        settingsRailPos_ = railPos;
+        settingsRailFocus_ = railFocusPos;
+        colorPickerFocus_ = pickerFocus;
+    }
     // Dialog pages (compact): a run of paragraph rows is one text panel (stepIdx 1 = heading line);
     // button rows sit side by side below it (stepIdx 1 = the main, accent-coloured button).
     static constexpr int kSettingsKindParagraph = 9;
@@ -1238,6 +1250,9 @@ private:
     bool colorPickerAdjusted_ = false;
     int colorPickerDrag_ = -1;
     int colorPickerZone_ = -1;
+    int colorPickerFocus_ = -1;  // the control with the button focus
+    int settingsRailPos_ = 0;    // the Settings rail entry of the page shown
+    int settingsRailFocus_ = -1; // the rail entry marked by the buttons (-1: the focus is on the page)
     float colorPickerPtr_[2] = {0.0f, 0.0f};  // the laser on the panel (panel units)
     bool colorPickerPtrValid_ = false;
     void colorPickerHitTest(float hx, float hy);

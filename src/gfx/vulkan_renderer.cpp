@@ -370,8 +370,12 @@ inline float subHalfH(float resting) { return resting * std::min(1.0f, railSubSq
 constexpr int kShortcutHoverBase = 10;
 constexpr int kShortcutIncogHoverBase = 20;
 inline int mainTabHoverId(int s) { return s < kFixedTabCount ? s : kShortcutHoverBase + (s - kFixedTabCount); }
-// Display, UI, Audio, Controls, Plugins, Vault (when unlocked).
-constexpr float kSettingsSubY[6] = {-0.01f, -0.088f, -0.166f, -0.244f, -0.322f, -0.400f};
+// Display, UI, Files & Web, Playback & Tracks, Controls, Plugins, Vault (when unlocked).
+constexpr float kSettingsSubY[7] = {-0.01f, -0.076f, -0.142f, -0.208f, -0.274f, -0.340f, -0.406f};
+// Rail hover id of a sub-navigation entry (the Settings list's 7th has its own: 9 is Lock Vault).
+inline int subHoverId(int page, int sub) {
+    return (page == 2 && sub >= 6) ? VulkanRenderer::kSettingsRail7HoverId : 3 + sub;
+}
 constexpr float kDownloadsSubY[3] = {-0.05f, -0.14f, -0.23f};
 constexpr float kFilesSubY[6] = {-0.04f, -0.11f, -0.18f, -0.25f, -0.32f, -0.39f};
 constexpr float kHitPad = 0.004f;  // laser targets are slightly larger than drawn
@@ -566,14 +570,26 @@ inline UiRect shortcutZone(const SettingsCard& L, int z, bool noHandle = false) 
     switch (z) {
         case 0: return {left + 0.032f, L.cy, noHandle ? 0.0f : 0.028f, noHandle ? 0.0f : L.halfH};
         case 1: return {left + (noHandle ? 0.056f : 0.104f), L.cy, 0.036f, L.halfH};
-        case 4: return {right - 0.272f, L.cy, 0.024f, 0.024f};  // plugin lines: the update icon
-        case 2: return {right - 0.178f, L.cy, 0.060f, L.halfH - 0.007f};
-        default: return {right - 0.062f, L.cy, 0.052f, L.halfH - 0.007f};
+        case 4: return {right - 0.315f, L.cy, 0.024f, 0.024f};  // plugin lines: the update icon
+        // Edit and the red Delete: the line's full height, 4 cm apart (a shaky aim at Edit stays off Delete).
+        case 2: return {right - 0.215f, L.cy, 0.060f, L.halfH - 0.002f};
+        default: return {right - 0.062f, L.cy, 0.052f, L.halfH - 0.002f};
     }
 }
 constexpr float kShortcutNameX = 0.160f;  // from the line's left edge
 constexpr float kPluginNameX = 0.112f;
+constexpr float kPluginStatusX = 0.520f;  // plugin lines: the status, after a 0.40 wide name
 constexpr float kShortcutUrlX = 0.480f;
+// Stepped slider (a choice card): step `s` of `n`. The track takes the right part of the control well,
+// the value text the left 0.24; each step's hit area is its share of the track at the well's full height.
+constexpr float kSliderLeftX = 0.240f;  // from the well's left edge
+constexpr float kSliderGap = 0.006f;
+inline UiRect settingsSliderStep(const SettingsCard& L, int s, int n) {
+    const float left = L.cx - L.ctrlHalfW + kSliderLeftX;
+    const float right = L.cx + L.ctrlHalfW - 0.022f;
+    const float w = (right - left - kSliderGap * static_cast<float>(n - 1)) / static_cast<float>(n);
+    return {left + w * 0.5f + static_cast<float>(s) * (w + kSliderGap), L.ctrlY, w * 0.5f, L.ctrlHalfH};
+}
 inline UiRect settingsSegment(const SettingsCard& L, int s, int n) {
     const float left = L.cx - L.ctrlHalfW + 0.006f;
     const float right = L.cx + L.ctrlHalfW - 0.006f;
@@ -3249,11 +3265,11 @@ void VulkanRenderer::updatePointer() {
                     }
                 }
                 if (browserSidebarHovered_ < 0) {
-                    const int numSub = (page == 1) ? 3 : (page == 2 ? (vaultUnlocked_ ? 6 : 5)
+                    const int numSub = (page == 1) ? 3 : (page == 2 ? (vaultUnlocked_ ? 7 : 6)
                                                                     : (vaultUnlocked_ ? 6 : 5));
                     for (int sub = 0; sub < numSub; ++sub) {
                         if (hub::subTab(page, sub).contains(hx, hyy, hub::kHitPad)) {
-                            browserSidebarHovered_ = 3 + sub;
+                            browserSidebarHovered_ = hub::subHoverId(page, sub);
                             break;
                         }
                     }
@@ -3377,6 +3393,7 @@ void VulkanRenderer::updatePointer() {
                     const hub::SettingsCard L = hub::settingsCard(i, layoutN, settingsCompact_);
                     const int rk = settingsRows_[static_cast<std::size_t>(i)].kind;
                     if (settingsCompact_ && rk == kSettingsKindParagraph) continue;
+                    if (rk == kSettingsKindReadOnly) continue;  // a table line: nothing to point at
                     float bx, by, bw, bh;
                     const bool isBtn = settingsCompact_ && dialogButtonRect(i, layoutN, bx, by, bw, bh);
                     if (isBtn ? UiRect{bx, by, bw, bh}.contains(hx, hyy) : UiRect{L.cx, L.cy, L.halfW, L.halfH}.contains(hx, hyy)) {
@@ -3408,11 +3425,10 @@ void VulkanRenderer::updatePointer() {
                                 if (UiRect{dotX, L.ctrlY, pitch * 0.5f, L.ctrlHalfH}.contains(hx, hyy)) settingsSegmentHovered_ = p;
                             }
                         } else if (row.enabled && !settingsCompact_ && row.kind == 0 /* Choice */ && row.steps > 1 && row.steps <= 8) {
-                            const float segRight = (L.cx + L.ctrlHalfW) - 0.022f, segLeft = L.cx + 0.035f, gap = 0.006f;
-                            const float segW = (segRight - segLeft - gap * static_cast<float>(row.steps - 1)) / static_cast<float>(row.steps);
                             for (int s = 0; s < row.steps; ++s) {
-                                const float sx = segLeft + segW * 0.5f + static_cast<float>(s) * (segW + gap);
-                                if (UiRect{sx, L.ctrlY, (segW + gap) * 0.5f, L.ctrlHalfH}.contains(hx, hyy)) settingsSegmentHovered_ = s;
+                                UiRect st = hub::settingsSliderStep(L, s, row.steps);
+                                st.hw += hub::kSliderGap * 0.5f;  // (the gaps belong to their neighbours)
+                                if (st.contains(hx, hyy)) settingsSegmentHovered_ = s;
                             }
                         }
                         break;
@@ -7407,12 +7423,12 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         const float* fileSubY = hub::kFilesSubY;
         const bool isSet = (activeMainTab == 2);
         const bool isDl = (activeMainTab == 1);
-        const int subCount = isDl ? 3 : (isSet ? (vaultUnlocked_ ? 6 : 5) : (vaultUnlocked_ ? 6 : 5));
+        const int subCount = isDl ? 3 : (isSet ? (vaultUnlocked_ ? 7 : 6) : (vaultUnlocked_ ? 6 : 5));
         int activeSubTab = browserQuickFilter_;
         if (activeMainTab == 1) {
             activeSubTab = downloadsFilter_;
         } else if (activeMainTab == 2) {
-            activeSubTab = (settingsSection_ >= 10 && settingsSection_ <= 12) ? 2 : ((settingsSection_ == 13 || settingsSection_ == 21 || settingsSection_ == 22 || settingsSection_ == 8 || settingsSection_ == 9) ? 1 : (settingsSection_ >= 23 && settingsSection_ < 30) ? 3 : (settingsSection_ == 15 || settingsSection_ == 16 || settingsSection_ == 18 || settingsSection_ == 19) ? 4 : (settingsSection_ == 4 || settingsSection_ == 20) ? 5 : settingsSection_);
+            activeSubTab = settingsRailPos_;  // (the settings menu knows which entry a sub-page belongs to)
         }
         const float subActBg[4] = {0.85f, 0.90f, 1.00f, 0.14f};
         const float slateIconCol[4] = {
@@ -7421,13 +7437,22 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         for (int sub = 0; sub < subCount; ++sub) {
             const float sy = hub::subY(isSet ? setSubY[sub] : (isDl ? dlSubY[sub] : fileSubY[sub]));
             const float sH = hub::subHalfH(isSet ? 0.030f : 0.032f);
-            const bool hov = (browserSidebarHovered_ == (3 + sub));
+            const bool hov = (browserSidebarHovered_ == hub::subHoverId(activeMainTab, sub));
             const bool subAct = (sub == activeSubTab);
-            if (subAct || hov) {
+            // Settings: the section marked with the buttons (Up from a page's first row), in the accent.
+            const bool btnFocus = isSet && sub == settingsRailFocus_;
+            if (btnFocus) {
+                const float focGlow[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.22f};
+                drawGlow(vpPanel, -0.695f, sy, 0.172f, sH, 0.012f, focGlow, 0.45f);
+                drawUiElement(vpPanel, -0.695f, sy, 0.172f, sH, UiShape::RoundedBox, subAct ? subActBg : kGlassVeil,
+                              0.45f, 0.08f, tabActiveBord);
+            } else if (subAct || hov) {
                 // Neutral veil for the current sub-section (accent stays on the main tab)
                 drawUiElement(vpPanel, -0.695f, sy, 0.172f, sH,
                               UiShape::RoundedBox, subAct ? subActBg : kGlassVeil,
                               0.45f, hov ? 0.05f : 0.0f, hov ? kGlassRim : nullptr);
+            }
+            if (subAct || hov) {
                 if (subAct) {
                     drawUiElement(vpPanel, -0.861f, sy, 0.0035f, sH * 0.55f,
                                   UiShape::RoundedBox, themeAccentCol, 1.0f);
@@ -8291,12 +8316,32 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             const float chipListenBg[4] = {
                 themeAccentCol[0] * 0.45f, themeAccentCol[1] * 0.45f,
                 themeAccentCol[2] * 0.52f, 0.98f};
+            // The row the buttons select (the focus on the page, the laser on no row): drawn like a
+            // hovered one, so it can be found at 2 m; a disabled one gets the full accent rim.
+            const float selFull[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 1.0f};
+            auto focusRow = [&](int r) {
+                return r == settingsSelected_ && settingsRailFocus_ < 0 && settingsHovered_ < 0 && colorPickerTarget_ < 0;
+            };
 
             for (int i = 0; i < total && i < maxVis; ++i) {
                 const SettingsRowVis& row = settingsRows_[static_cast<std::size_t>(i)];
                 const SetCard L = setCard(i);
                 const bool en = row.enabled;
-                const bool hov = (i == settingsHovered_) && en;
+                if (row.kind == kSettingsKindReadOnly && !settingsCompact_) {
+                    // A table line (the Buttons pages): a quiet strip, no well, no hover, no selection.
+                    drawUiElement(vpPanel, L.cx, L.cy, kSetCardHalfW, L.halfH * 0.62f, UiShape::RoundedBox, kGlassVeil,
+                                  0.012f / (L.halfH * 0.62f));
+                    const bool bound = !row.value.empty() && row.value != "Not bound" && row.value.find(" off") == std::string::npos;
+                    if (bound) {  // the button as a chip on the right (like the floating button labels)
+                        const float chipSc = L.textSc * 0.90f;
+                        const float chipHalfW = std::min(0.20f, 0.5f * measureString(chipSc, row.value) + 0.018f);
+                        drawUiElement(vpPanel, L.cx + kSetCtrlHalfW - chipHalfW, L.cy, chipHalfW, L.halfH * 0.42f,
+                                      UiShape::RoundedBox, glassControlT.data(), 0.45f, 0.08f, kGlassRim);
+                    }
+                    continue;
+                }
+                const bool focusSel = focusRow(i);
+                const bool hov = ((i == settingsHovered_) || focusSel) && en;
                 const bool sel = (i == settingsSelected_);
                 const bool optActive = (row.kind == kOption && row.stepIdx != 0);
                 const float cardR = 0.016f / L.halfH;
@@ -8323,7 +8368,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         }
                         float bx, by, bw, bh;
                         if (dialogButtonRect(r, layoutN, bx, by, bw, bh)) {
-                            const bool bhov = (r == settingsHovered_) && lr.enabled;
+                            const bool bhov = (r == settingsHovered_ || focusRow(r)) && lr.enabled;
                             const bool primary = lr.stepIdx == 1;
                             const float acc[4] = {themeAccentCol[0] * (bhov ? 0.95f : 0.78f), themeAccentCol[1] * (bhov ? 0.95f : 0.78f),
                                                   themeAccentCol[2] * (bhov ? 0.95f : 0.78f), lr.enabled ? 0.96f : 0.40f};
@@ -8335,7 +8380,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                             return;
                         }
                         const bool dragged = (r == settingsDragFrom_);
-                        const bool lhov = (r == settingsHovered_) && lr.enabled && settingsDragFrom_ < 0;
+                        const bool lhov = (r == settingsHovered_ || focusRow(r)) && lr.enabled && settingsDragFrom_ < 0;
+                        const bool lineOpt = lr.kind == kOption && lr.stepIdx != 0;  // the option in use (Download Folder)
                         const float lift = dragged ? 0.006f : 0.0f;
                         const float hw = hc.halfW + lift, hh = hc.halfH + lift * 0.5f;
                         if (dragged) {
@@ -8347,10 +8393,17 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         }
                         const bool danger = !lr.options.empty() && lr.options[0] == "danger";
                         const float* lineBg = danger ? (lhov ? dangerBgHov : dangerBg)
-                                                     : ((lhov || dragged) ? glassCardHoverT.data() : glassCardT.data());
-                        const float* lineBord = danger ? dangerRim : (dragged ? selBord : (lhov ? tabActiveBord : kGlassRimFaint));
+                                                     : ((lhov || dragged) ? glassCardHoverT.data()
+                                                                          : (lineOpt ? activeOptBg : glassCardT.data()));
+                        const float* lineBord = danger ? dangerRim
+                                                       : (dragged || lineOpt ? selBord : (lhov ? tabActiveBord : kGlassRimFaint));
+                        if (lhov && lineOpt) lineBord = tabActiveBord;
                         drawUiElement(vpPanel, hc.cx, hc.cy, hw, hh, UiShape::RoundedBox, lineBg, 0.014f / hh,
                                       (lhov || dragged ? 0.0019f : 0.0012f) / hh, lineBord);
+                        if (lineOpt) {  // a checkmark at the right end, like the track lists
+                            drawUiElement(vpPanel, hc.cx + hc.halfW - 0.034f, hc.cy, 0.016f, 0.016f, UiShape::Checkmark,
+                                          themeAccentCol);
+                        }
                         if (lr.kind != kSettingsKindShortcut && lr.kind != kSettingsKindPluginLine) {
                             // A plain line that is a control (a plugin's settings): show which kind.
                             const std::string ctl = lr.options.empty() ? std::string() : lr.options[0];
@@ -8428,7 +8481,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const float* cBg = dangerRow ? (hov ? dangerBgHov : dangerBg)
                                              : (hov ? glassCardHoverT.data() : (optActive ? activeOptBg : glassCardT.data()));
                 const float* cBord = dangerRow ? dangerRim
-                                               : (hov ? tabActiveBord : ((sel || optActive) ? selBord : kGlassRimFaint));
+                                               : (hov ? tabActiveBord
+                                                      : (focusSel ? selFull : ((sel || optActive) ? selBord : kGlassRimFaint)));
                 drawUiElement(vpPanel, L.cx, L.cy, kSetCardHalfW, L.halfH,
                               UiShape::RoundedBox, cBg, cardR,
                               hov ? cardBw * 1.6f : cardBw, cBord);
@@ -8451,6 +8505,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 // Recessed control well under the label
                 drawUiElement(vpPanel, L.cx, L.ctrlY, kSetCtrlHalfW, L.ctrlHalfH,
                               UiShape::RoundedBox, glassWellT.data(), 1.0f, 0.06f, kGlassRimFaint);
+                if (!en && !row.reason.empty()) continue;  // the well holds why it is off (text pass)
 
                 if (row.kind == kSegmented && !row.options.empty()) {
                     const hub::SettingsCard hc = hub::settingsCard(i, layoutN, settingsCompact_);
@@ -8489,26 +8544,22 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     drawUiElement(vpPanel, ctrlRight - 0.026f, L.ctrlY, 0.010f, 0.010f,
                                   UiShape::Chevron, en ? themeAccentCol : dimCol);
                 } else if (row.kind == kChoice && row.steps > 1 && row.steps <= 8) {
-                    // Stepped slider: one segment per option, filled up to the active one
-                    const float segRight = ctrlRight - 0.022f;
-                    const float segLeft = L.cx + 0.035f;
-                    const float gap = 0.006f;
-                    const float segW = (segRight - segLeft - gap * static_cast<float>(row.steps - 1)) /
-                                       static_cast<float>(row.steps);
-                    const float segHalfH = std::max(0.0035f, L.ctrlHalfH * 0.16f);
+                    // Stepped slider: one segment per option, filled up to the active one (the same
+                    // geometry as the laser's hit-test: hub::settingsSliderStep).
+                    const hub::SettingsCard hc = hub::settingsCard(i, layoutN, settingsCompact_);
+                    constexpr float segHalfH = 0.006f;  // the same on every card size: visible at 2 m
+                    constexpr float knobR = 0.012f;
                     for (int s = 0; s < row.steps; ++s) {
-                        const float sx = segLeft + segW * 0.5f + static_cast<float>(s) * (segW + gap);
+                        const UiRect st = hub::settingsSliderStep(hc, s, row.steps);
                         const bool filled = (s <= row.stepIdx);
                         const bool aimed = en && i == settingsHovered_ && s == settingsSegmentHovered_;  // click picks it
-                        drawUiElement(vpPanel, sx, L.ctrlY, segW * 0.5f, aimed ? segHalfH * 1.8f : segHalfH, UiShape::RoundedBox,
+                        drawUiElement(vpPanel, st.cx, L.ctrlY, st.hw, aimed ? segHalfH * 1.6f : segHalfH, UiShape::RoundedBox,
                                       (filled && en) ? themeAccentCol : (aimed ? knobOn : stepOff), 1.0f);
                     }
                     if (en) {
-                        const float kx = segLeft + segW * 0.5f +
-                                         static_cast<float>(std::clamp(row.stepIdx, 0, row.steps - 1)) * (segW + gap);
-                        drawGlow(vpPanel, kx, L.ctrlY, segHalfH * 2.2f, segHalfH * 2.2f, 0.008f, hovGlow);
-                        drawUiElement(vpPanel, kx, L.ctrlY, segHalfH * 2.2f, segHalfH * 2.2f,
-                                      UiShape::RoundedBox, knobOn, 1.0f);
+                        const float kx = hub::settingsSliderStep(hc, std::clamp(row.stepIdx, 0, row.steps - 1), row.steps).cx;
+                        drawGlow(vpPanel, kx, L.ctrlY, knobR, knobR, 0.008f, hovGlow);
+                        drawUiElement(vpPanel, kx, L.ctrlY, knobR, knobR, UiShape::RoundedBox, knobOn, 1.0f);
                     }
                 } else if (row.kind == kBinding) {
                     const float chipSc = L.textSc * 0.92f;
@@ -8535,7 +8586,15 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 uicolor::hsvToRgb(colorPickerHsv_[0], colorPickerHsv_[1], colorPickerHsv_[2], pkRaw);
                 const float pkWhite[4] = {1.0f, 1.0f, 1.0f, 0.95f};
                 const float pkDark[4] = {0.0f, 0.0f, 0.0f, 0.55f};
-                auto pkLit = [&](int z) { return colorPickerZone_ == z || colorPickerDrag_ == z; };
+                // The control with the button focus (while the laser is on none of them): lit like a
+                // hovered one, with an accent glow around it.
+                const int pkFocus = (colorPickerZone_ < 0 && colorPickerDrag_ < 0) ? colorPickerFocus_ : -1;
+                auto pkLit = [&](int z) { return colorPickerZone_ == z || colorPickerDrag_ == z || pkFocus == z; };
+                for (int z : {pkFocus, colorPickerDrag_}) {
+                    if (z < 0 || (z == colorPickerDrag_ && colorPickerZone_ == z)) continue;  // (a laser drag shows itself)
+                    const UiRect fr = hub::colorPickerZone(z);
+                    drawGlow(vpPanel, fr.cx, fr.cy, fr.hw, fr.hh, 0.014f, hovGlow, z < 5 || z > 6 ? 1.0f : 0.05f);
+                }
                 // Saturation / brightness square and hue strip, each with its marker.
                 const UiRect sq = hub::colorPickerZone(kColorPickerSquare);
                 drawUiElement(vpPanel, sq.cx, sq.cy, sq.hw, sq.hh, UiShape::SatValSquare, pkHue, 0.05f, 0.010f,
@@ -8559,7 +8618,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const int pkIn = uicolor::swatchIndex(pkAccent, uicolor::fromFloat(pkCur));
                 for (int z = 0; z < uicolor::kSwatchCount; ++z) {
                     const UiRect r = hub::colorPickerZone(z);
-                    const bool h = colorPickerZone_ == z && colorPickerDrag_ < 0;
+                    const bool h = (colorPickerZone_ == z || pkFocus == z) && colorPickerDrag_ < 0;
                     drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox,
                                   h ? glassCardHoverT.data() : glassControlT.data(), 1.0f, z == pkIn ? 0.10f : 0.06f,
                                   z == pkIn ? tabActiveBord : (h ? kGlassRim : kGlassRimFaint));
@@ -8570,7 +8629,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 }
                 for (int z : {kColorPickerReset, kColorPickerBack}) {
                     const UiRect r = hub::colorPickerZone(z);
-                    const bool h = colorPickerZone_ == z && colorPickerDrag_ < 0;
+                    const bool h = (colorPickerZone_ == z || pkFocus == z) && colorPickerDrag_ < 0;
                     drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox, h ? tabHovBg : tabNormBg, 1.0f,
                                   0.06f, h ? tabHovBord : tabNormBord);
                 }
@@ -8600,13 +8659,13 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                                     textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
 
             drawRailText();
-            const char* setSubLabels[6] = {"Display & Cinema", "UI & Appearance", "Audio & Tracks",
+            const char* setSubLabels[7] = {"Display & Cinema", "UI & Appearance", "Files & Web", "Playback & Tracks",
                                            "Controls & Input", "Plugins", "Vault & Privacy"};
-            const int effSec = (settingsSection_ >= 10 && settingsSection_ <= 12) ? 2 : ((settingsSection_ == 13 || settingsSection_ == 21 || settingsSection_ == 22 || settingsSection_ == 8 || settingsSection_ == 9) ? 1 : (settingsSection_ >= 23 && settingsSection_ < 30) ? 3 : (settingsSection_ == 15 || settingsSection_ == 16 || settingsSection_ == 18 || settingsSection_ == 19) ? 4 : (settingsSection_ == 4 || settingsSection_ == 20) ? 5 : settingsSection_);
-            const int sCount = vaultUnlocked_ ? 6 : 5;
+            const int effSec = settingsRailPos_;
+            const int sCount = vaultUnlocked_ ? 7 : 6;
             for (int sub = 0; sub < sCount; ++sub) {
                 drawFit(-0.84f, hub::subY(setSubY[sub]), 0.30f, scSub * 0.92f,
-                        (effSec == sub) ? themeTextCol : slateCol, setSubLabels[sub]);
+                        (effSec == sub || settingsRailFocus_ == sub) ? themeTextCol : slateCol, setSubLabels[sub]);
             }
 
             drawCrumbText(setCrumbs, 0.455f, scHeader * 0.90f, 0.40f);
@@ -8632,6 +8691,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 drawFitCentered(0.64f, 0.455f, 0.41f, scDetail, slateCol,
                                 std::string("PixelVR ") + PIXELVR_VERSION_STRING + " \xB7 Steam Frame");
             }
+            if (settingsSection_ >= 23 && settingsSection_ < 30) {  // the Buttons pages: a table, changed elsewhere
+                drawFit(-0.45f, 0.392f, 1.30f, scSub, slateCol, "Buttons are assigned in SteamVR > Controllers > Bindings.");
+            }
 
             for (int i = 0; i < total && i < maxVis; ++i) {
                 const SettingsRowVis& row = settingsRows_[static_cast<std::size_t>(i)];
@@ -8643,6 +8705,22 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                                      row.value == "Right controller off" || row.value == "Controllers off";
                 const float* valueCol = (en && !unbound) ? themeTextCol : dimCol;
                 const float ctrlLeft = L.cx - kSetCtrlHalfW;
+                if (row.kind == kSettingsKindReadOnly && !settingsCompact_) {
+                    // A table line: the action on the left, its button(s) on the right (in the chip when bound).
+                    const float chipSc = L.textSc * 0.90f;
+                    const float chipHalfW = std::min(0.20f, 0.5f * measureString(chipSc, row.value) + 0.018f);
+                    drawFit(ctrlLeft, L.cy, kSetCtrlHalfW * 2.0f - chipHalfW * 2.0f - 0.02f, L.textSc, themeTextCol, row.label);
+                    const bool bound = !row.value.empty() && !unbound && row.value.find(" off") == std::string::npos;
+                    drawFitCentered(L.cx + kSetCtrlHalfW - chipHalfW, L.cy, chipHalfW * 2.0f - 0.02f, chipSc,
+                                    bound ? themeTextCol : dimCol, row.value);
+                    continue;
+                }
+                if (!settingsCompact_ && !en && !row.reason.empty() && row.kind != kOption && !isNavRow(row) && !isDanger(row)) {
+                    // A disabled row: its name, and in the well why it is off (instead of value and control).
+                    withHeadingFont([&] { drawFit(ctrlLeft, L.labelY, 0.55f, L.textSc, labelCol, row.label); });
+                    drawFit(ctrlLeft + 0.020f, L.ctrlY, kSetCtrlHalfW * 2.0f - 0.04f, L.textSc * 0.92f, dimCol, row.reason);
+                    continue;
+                }
 
                 if (settingsCompact_) {
                     auto drawListText = [&](int r) {
@@ -8702,11 +8780,12 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                             return;
                         }
                         if (lr.kind == kSettingsKindPluginLine) {
-                            withHeadingFont([&] { drawFit(left + hub::kPluginNameX, hc.cy, 0.34f, sc, lc, lr.label); });
+                            withHeadingFont([&] { drawFit(left + hub::kPluginNameX, hc.cy, hub::kPluginStatusX - hub::kPluginNameX - 0.012f, sc, lc, lr.label); });
                             const bool updHov = !lr.options.empty() && lr.options[0] == "update" && r == settingsHovered_ &&
                                                 settingsSegmentHovered_ == 4;
                             const float greenText[4] = {0.45f, 0.92f, 0.58f, 1.0f};
-                            drawFit(left + hub::kShortcutUrlX, hc.cy, 0.42f, sc * 0.90f, updHov ? greenText : slateCol,
+                            // (up to the update icon, left of Edit)
+                            drawFit(left + hub::kPluginStatusX, hc.cy, 0.40f, sc * 0.90f, updHov ? greenText : slateCol,
                                     updHov ? std::string("Update available - press to see what's new") : lr.value);
                             const UiRect e = hub::shortcutZone(hc, 2, true);
                             drawFitCentered(e.cx, e.cy, e.hw * 2.0f - 0.012f, sc * 0.88f, themeTextCol, "Edit");
@@ -8773,16 +8852,27 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                                                      0.5f * measureString(valSc, row.value) + 0.022f);
                     const float chipCx = ctrlLeft + 0.010f + chipHalfW;
                     drawFitCentered(chipCx, L.ctrlY, chipHalfW * 2.0f - 0.02f, valSc, valueCol, row.value);
-                    if (i == settingsHovered_ && en && !isListening(row.value) && row.label.rfind("Vault Location", 0) != 0) {
+                    if ((i == settingsHovered_ || focusRow(i)) && en && !isListening(row.value) &&
+                        row.label.rfind("Vault Location", 0) != 0) {
+                        // (the vault's unlock combination: the one row that records buttons)
                         drawFit(chipCx + chipHalfW + 0.020f, L.ctrlY, L.cx + kSetCtrlHalfW - (chipCx + chipHalfW + 0.030f),
-                                scDetail, dimCol, "Trigger to rebind");
+                                valSc, slateCol, "A / Trigger: Record a new one");
                     }
+                } else if (row.kind == kChoice && row.steps > 1 && row.steps <= 8) {
+                    // A slider: its value left of the track; while the laser aims at a step, that step's
+                    // name (what a click sets). A long name shrinks a little before it is cut.
+                    const bool aiming = en && i == settingsHovered_ && settingsSegmentHovered_ >= 0 &&
+                                        settingsSegmentHovered_ < static_cast<int>(row.options.size());
+                    const std::string& shown = aiming ? row.options[static_cast<std::size_t>(settingsSegmentHovered_)] : row.value;
+                    const float maxW = hub::kSliderLeftX - 0.032f;
+                    const float w = measureString(valSc, shown);
+                    const float sc = w > maxW ? std::max(valSc * 0.80f, valSc * maxW / w) : valSc;
+                    drawFit(ctrlLeft + 0.020f, L.ctrlY, maxW, sc, aiming ? themeAccentCol : valueCol, shown);
                 } else {
                     // Value text on the left of the well; controls occupy the right side.
                     float maxW = 0.48f;
                     if (row.kind == kToggle) maxW = 0.36f;
                     else if (row.kind == kColor) maxW = 0.36f;
-                    else if (row.kind == kChoice && row.steps > 1 && row.steps <= 8) maxW = 0.28f;
                     drawFit(ctrlLeft + 0.020f, L.ctrlY, maxW, valSc, valueCol, row.value);
                 }
             }
@@ -8824,11 +8914,34 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
 
             if (!settingsStatus_.empty()) {
                 const float warnCol[4] = {1.0f, 0.72f, 0.36f, 1.0f};
-                // Shrink a long line (down to 75 %) before truncating: its end is the advice.
-                const float w = measureString(scDetail, settingsStatus_);
-                const float stSc = (w > 1.30f) ? std::max(scDetail * 0.75f, scDetail * 1.30f / w) : scDetail;
-                drawFit(-0.45f, -0.490f, 1.30f, stSc, settingsStatusWarn_ ? warnCol : slateCol,
-                        settingsStatus_);
+                // The page's most important sentences (where the recovery file is, why a row is off):
+                // in the body size and the text colour, wrapped onto a second line instead of shrunk.
+                // (Above the panel's lower edge, below the last card / list line at about -0.40.)
+                const float stCol[4] = {themeTextCol[0], themeTextCol[1], themeTextCol[2], 0.85f};
+                const float* col = settingsStatusWarn_ ? warnCol : stCol;
+                constexpr float kStatusW = 1.30f;
+                std::string first = settingsStatus_, second;
+                if (measureString(scSub, first) > kStatusW) {
+                    // Break at the last space that keeps the first line within the width.
+                    std::size_t cut = std::string::npos;
+                    for (std::size_t p = first.find(' '); p != std::string::npos; p = first.find(' ', p + 1)) {
+                        if (measureString(scSub, first.substr(0, p)) > kStatusW) break;
+                        cut = p;
+                    }
+                    if (cut != std::string::npos) {
+                        second = first.substr(cut + 1);
+                        first.resize(cut);
+                        // A break at a " | " separator: neither line keeps the bar.
+                        while (!first.empty() && (first.back() == ' ' || first.back() == '|')) first.pop_back();
+                        while (!second.empty() && (second.front() == ' ' || second.front() == '|')) second.erase(0, 1);
+                    }
+                }
+                if (second.empty()) {
+                    drawFit(-0.45f, -0.455f, kStatusW, scSub, col, first);
+                } else {
+                    drawFit(-0.45f, -0.440f, kStatusW, scSub, col, first);
+                    drawFit(-0.45f, -0.474f, kStatusW, scSub, col, second);
+                }
             }
         }
     }

@@ -157,6 +157,9 @@ private:
     int shortcutDragTo_ = -1;    // the row it would land on
     int colorDragZone_ = -1;     // colour picker: the square / hue strip being dragged (-1 = none)
     void updateColorPicker(XrInputState& in);  // the laser on the colour picker page
+    // Settings with the buttons alone (stick / D-pad, A): returns true when Left / Right changed a
+    // value; `act` is that row's action, which the caller applies like a click.
+    bool settingsButtons(XrInputState& in, std::chrono::steady_clock::time_point nowT, SettingsMenu::Action& act);
     bool returnFromPlex(int slot);  // false when the slot is not playing a Plex hand-off
     bool updatePlexPlayback(int slot);  // true once it ended and the page is back
     bool plexLoading_ = false;

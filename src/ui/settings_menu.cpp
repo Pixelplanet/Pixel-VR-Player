@@ -23,13 +23,12 @@ namespace pixelvr {
 
 namespace {
 
-const char* const kDefaultStatus = "Point + Trigger: Change Setting  |  B: Close";
-const char* const kShortcutsStatus = "Shortcuts appear as tabs on the hub's rail, in this order.";
-// Buttons are assigned in SteamVR only (OpenXR can't open that page for us).
-const char* const kButtonsStatus =
-    "Hold a bumper: this hand's buttons act as the other hand's  |  Change buttons: SteamVR > Controllers > Bindings";
-const char* const kButtonsPagesStatus =
-    "< > or Bumpers: Page  |  Hold a bumper: this hand's buttons act as the other hand's  |  Change buttons: SteamVR";
+// (The same text is status_'s first value in settings_menu.hpp.)
+const char* const kDefaultStatus = "Up / Down: Select  |  Left / Right or A: Change  |  B: Close";
+// Buttons are assigned in SteamVR only (OpenXR can't open that page for us); the Buttons pages say
+// so above their table.
+const char* const kButtonsStatus = "Hold a bumper: the buttons act as the other hand's.";
+const char* const kButtonsPagesStatus = "Bumpers or < >: Page";
 const char* kDownloadDirs[] = {"~/media", "~/Downloads", "~/Videos", "SD card"};  // SD card: <card>/Downloads
 constexpr int kDownloadDirCount = 4;
 
@@ -94,7 +93,7 @@ const char* kAmbilightNames[] = {"Off", "Subtle", "Medium", "Strong"};
 const float kAmbilightValues[] = {0.0f, 0.30f, 0.55f, 0.85f};
 constexpr int kAmbilightCount = 4;
 // How far the glow reaches from the screen's edge (in screen heights; Wide = as before).
-const char* kGlowReachNames[] = {"Close", "Short", "Medium", "Wide"};
+const char* kGlowReachNames[] = {"Tight", "Short", "Medium", "Wide"};
 const float kGlowReachValues[] = {0.14f, 0.24f, 0.34f, 0.46f};
 constexpr int kGlowReachCount = 4;
 
@@ -195,7 +194,9 @@ void SettingsMenu::open() {
     if (section_ == kVaultMoveSection) section_ = 4;
     if (colorPickerTarget() >= 0) section_ = 1;
     if (section_ == kPluginsSection && plugins_) plugins_->rescan();
-    if (section_ < 0 || (section_ > 4 && section_ != kPluginsSection) ||
+    railFocus_ = false;
+    pickGrab_ = -1;
+    if (section_ < 0 || (section_ > 4 && section_ != kPluginsSection && section_ != kFilesWebSection) ||
         (section_ == 4 && !VaultManager::instance().isUnlocked())) {
         section_ = 0;
     }
@@ -241,8 +242,8 @@ void SettingsMenu::move(int delta) {
 
 int SettingsMenu::parentOf(int s) const {
     if (s >= kButtonsSection && s < kButtonsSection + buttonsPages()) return 3;  // Controller Buttons -> Controls & Input
-    if (s == 10 || s == 11 || s == 12) return 2;  // track lists -> Audio & Video Tracks
-    if (s == 13 || s == 21 || s == 22) return 1;  // Download Folder, List Columns, Shortcuts -> UI & Appearance
+    if (s == 10 || s == 11 || s == 12) return 2;  // track lists -> Playback & Tracks
+    if (s == 13 || s == 21 || s == 22) return kFilesWebSection;  // Download Folder, List View Columns, Shortcuts
     if (s == kTextColorSection || s == kAccentColorSection) return 1;  // colour pickers -> UI & Appearance
     if (s == 17) return 22;                       // one shortcut -> Shortcuts
     if (s == kPluginSection || s == kStoreSection) return kPluginsSection;
@@ -275,6 +276,8 @@ bool SettingsMenu::navigateUpTo(int section) {
 }
 
 bool SettingsMenu::navigateBack() {
+    if (pickerRelease()) return true;  // B first lets go of a grabbed colour marker
+    railFocus_ = false;
     const int p = parentSection();
     if (p < 0) return false;
     const int from = section_;
@@ -290,6 +293,8 @@ bool SettingsMenu::navigateBack() {
     selected_ = from == 17 ? shortcutIdx_ : (from == kVaultMoveSection ? 4 : 0);
     if (from == kTextColorSection) selected_ = 1;  // back on the row the picker was opened from
     if (from == kAccentColorSection) selected_ = 2;
+    if (from == 21) selected_ = 1;  // Files & Web: List View Columns, Shortcuts
+    if (from == 22) selected_ = 2;
     deleteArmedIdx_ = -1;
     vaultMoveArmed_ = false;
     refresh();
@@ -297,7 +302,18 @@ bool SettingsMenu::navigateBack() {
 }
 
 const std::string& SettingsMenu::status() const {
-    static const std::string kSubStatus = "Point + Trigger: Change Setting  |  B: Back";
+    static const std::string kSubStatus = "Up / Down: Select  |  Left / Right or A: Change  |  B: Back";
+    static const std::string kRailStatus = "Up / Down: Section  |  A or Right: Open  |  B: Close";
+    static const std::string kGrabStatus = "Stick: Move the marker  |  A or B: Done";
+    if (pickGrab_ >= 0) return kGrabStatus;
+    // The page's own hint gives way to what the selected row has to say (why it is off, what it does).
+    const bool pageText = status_ == kDefaultStatus || (!pageHint_.empty() && status_ == pageHint_);
+    if (railFocus_ && pageText) return kRailStatus;
+    if (pageText && selected_ >= 0 && selected_ < static_cast<int>(rows_.size())) {
+        const Row& r = rows_[static_cast<std::size_t>(selected_)];
+        if (!r.enabled && !r.reason.empty()) return r.reason;
+        if (!r.note.empty()) return r.note;
+    }
     return (status_ == kDefaultStatus && parentSection() >= 0) ? kSubStatus : status_;
 }
 
@@ -315,13 +331,19 @@ void SettingsMenu::refresh() {
         pageHint_ = s;
     };
 
+    // (names: each step's name, shown while the laser is on that step of the slider)
     auto choice = [&](const std::string& label, const std::string& value, int steps,
-                      int idx, Action act, bool enabled = true) {
+                      int idx, Action act, bool enabled = true, const char* const* names = nullptr) {
         Row r{label, value, act, enabled};
         r.kind = Kind::Choice;
         r.steps = steps;
         r.stepIdx = idx;
+        for (int s = 0; names && s < steps; ++s) r.options.push_back(names[s]);
         rows_.push_back(r);
+    };
+    // A disabled row says why it is off: on the card instead of its value, and on the status line.
+    auto offBecause = [&](const std::string& why) {
+        if (!rows_.empty() && !rows_.back().enabled) rows_.back().reason = why;
     };
     auto toggle = [&](const std::string& label, bool on, Action act,
                       bool enabled = true) {
@@ -361,19 +383,23 @@ void SettingsMenu::refresh() {
     };
 
     if (section_ == 0) {
+        // (At most 12 cards fit a page: the two pause switches are on Playback & Tracks.)
         title_ = "Settings > Display & Cinema";
-        choice("Cinema Screen Curve", kCurvatureNames[curvatureIdx_ % kCurvatureCount],
-               kCurvatureCount, curvatureIdx_ % kCurvatureCount, Action::CycleCurvature);
+        const bool flat = projectionMode_ == 0;
+        const bool glowOn = ambilightIdx_ % kAmbilightCount > 0;
+        choice("Screen Curve", kCurvatureNames[curvatureIdx_ % kCurvatureCount],
+               kCurvatureCount, curvatureIdx_ % kCurvatureCount, Action::CycleCurvature, true, kCurvatureNames);
         segmented("Room", {"Midnight", "Black", "Slate", "Warm"}, roomIdx_ % 4, Action::CycleRoom);
-        choice("Ambient Screen Glow", kAmbilightNames[ambilightIdx_ % kAmbilightCount],
+        choice("Screen Glow", kAmbilightNames[ambilightIdx_ % kAmbilightCount],
                kAmbilightCount, ambilightIdx_ % kAmbilightCount, Action::CycleAmbilight,
-               projectionMode_ == 0);
-        choice("Glow Distance", kGlowReachNames[glowReachIdx_ % kGlowReachCount], kGlowReachCount,
-               glowReachIdx_ % kGlowReachCount, Action::CycleGlowReach,
-               projectionMode_ == 0 && (ambilightIdx_ % kAmbilightCount > 0));
+               flat, kAmbilightNames);
+        offBecause("Flat screens only");
+        choice("Glow Reach", kGlowReachNames[glowReachIdx_ % kGlowReachCount], kGlowReachCount,
+               glowReachIdx_ % kGlowReachCount, Action::CycleGlowReach, flat && glowOn, kGlowReachNames);
+        offBecause(!flat ? "Flat screens only" : "Turn on Screen Glow");
         segmented("Glow Around", {"Selected Screen", "All Screens"}, ambilightAllScreens_ ? 1 : 0,
-                  Action::CycleAmbilightScope,
-                  projectionMode_ == 0 && multiScreen_ && (ambilightIdx_ % kAmbilightCount > 0));
+                  Action::CycleAmbilightScope, flat && multiScreen_ && glowOn);
+        offBecause(!flat ? "Flat screens only" : (!glowOn ? "Turn on Screen Glow" : "Needs Multiple Screens"));
         std::ostringstream distStream;
         distStream << std::fixed;
         distStream.precision(1);
@@ -381,34 +407,42 @@ void SettingsMenu::refresh() {
         const int distIdx = std::clamp(
             static_cast<int>(std::lround((screenDistance_ - kDistanceMin) / kDistanceStep)),
             0, kDistanceSteps - 1);
+        std::vector<std::string> distNames;
+        for (int s = 0; s < kDistanceSteps; ++s) {
+            char buf[16];
+            std::snprintf(buf, sizeof(buf), "%.1f m", static_cast<double>(kDistanceMin + kDistanceStep * static_cast<float>(s)));
+            distNames.push_back(buf);
+        }
         choice("Default Screen Distance", distStream.str(), kDistanceSteps, distIdx,
                Action::CycleDistance);
-        choice("Screen Size", kScreenSizeNames[screenSizeIdx_ % kScreenSizeCount], kScreenSizeCount,
-               screenSizeIdx_ % kScreenSizeCount, Action::CycleScreenSize, projectionMode_ == 0);
+        rows_.back().options = distNames;
+        choice("Default Screen Size", kScreenSizeNames[screenSizeIdx_ % kScreenSizeCount], kScreenSizeCount,
+               screenSizeIdx_ % kScreenSizeCount, Action::CycleScreenSize, flat, kScreenSizeNames);
+        offBecause("Flat screens only");
         toggle("Swap Left/Right Eye", swapEyes_, Action::ToggleSwapEyes);
         toggle("Multiple Screens", multiScreen_, Action::ToggleMultiScreen);
         toggle("Remove Black Bars", removeBlackBars_, Action::ToggleRemoveBlackBars);
-        toggle("Pause When Headset Is Removed", pauseOnRemoval_, Action::TogglePauseOnRemoval);
-        toggle("Pause Livestreams Too", pauseLivestreams_, Action::TogglePauseLivestreams, pauseOnRemoval_);
         toggle("Debug Statistics", showStats_, Action::ToggleStats);
     } else if (section_ == 1) {
         title_ = "Settings > UI & Appearance";
-        choice("UI Text Size", kUiTextScaleNames[uiTextScaleIdx_ % kUiTextScaleCount],
-               kUiTextScaleCount, uiTextScaleIdx_ % kUiTextScaleCount, Action::CycleUiTextScale);
-        // (The renderer draws a swatch of the colour in these two rows; a click opens the picker.)
-        color("UI Text Color", colorRowValue(false, uiTextRgb_), 0, 0, Action::OpenUiTextColor);
-        color("UI Accent Theme", colorRowValue(true, uiAccentRgb_), 0, 0, Action::OpenUiAccentColor);
-        choice("UI Panel Distance", kUiDistanceNames[uiDistanceIdx_ % kUiDistanceCount],
-               kUiDistanceCount, uiDistanceIdx_ % kUiDistanceCount, Action::CycleUiDistance);
-        segmented("Main Panel Shape",
+        choice("Text Size", kUiTextScaleNames[uiTextScaleIdx_ % kUiTextScaleCount],
+               kUiTextScaleCount, uiTextScaleIdx_ % kUiTextScaleCount, Action::CycleUiTextScale, true, kUiTextScaleNames);
+        // (The renderer draws a swatch of the colour in these two rows, telling them apart by the word
+        // "Accent" in the label; a click opens the picker.)
+        color("Text Color", colorRowValue(false, uiTextRgb_), 0, 0, Action::OpenUiTextColor);
+        color("Accent Color", colorRowValue(true, uiAccentRgb_), 0, 0, Action::OpenUiAccentColor);
+        choice("Menu Distance", kUiDistanceNames[uiDistanceIdx_ % kUiDistanceCount],
+               kUiDistanceCount, uiDistanceIdx_ % kUiDistanceCount, Action::CycleUiDistance, true, kUiDistanceNames);
+        segmented("Menu Curve",
                   {kPanelCurveNames[0], kPanelCurveNames[1], kPanelCurveNames[2]},
                   panelCurveIdx_ % kPanelCurveCount, Action::CyclePanelCurve);
-        segmented("Panel Style", {kUiOpacityNames[0], kUiOpacityNames[1], kUiOpacityNames[2]},
+        segmented("Menu Transparency", {kUiOpacityNames[0], kUiOpacityNames[1], kUiOpacityNames[2]},
                   uiOpacityIdx_ % kUiOpacityCount, Action::CycleUiOpacity);
-        segmented("UI in 360/180 Videos", {"Fixed", "Follow Gaze"}, uiFollowMode_ % 2,
+        segmented("Menu in 360 / 180", {"Fixed", "Follow Gaze"}, uiFollowMode_ % 2,
                   Action::CycleUiFollowMode);
-        segmented("Web Browser Mode (full browser only)", {"Regular", "Incognito"}, privateBrowsing_ ? 1 : 0,
-                  Action::TogglePrivateBrowsing);
+    } else if (section_ == kFilesWebSection) {
+        // Where downloads go, how file lists look, the web shortcuts on the rail, private browsing.
+        title_ = "Settings > Files & Web";
         {
             // The SD card is offered while one is inserted; the label shows the free space where files go.
             const bool card = !sdCardMount().empty();
@@ -420,34 +454,45 @@ void SettingsMenu::refresh() {
             const int idx = custom ? static_cast<int>(opts.size()) - 1 : downloadDirIdx_ % kDownloadDirCount;
             const std::string dir = downloadDir();
             const uint64_t freeB = freeBytes(std::filesystem::exists(dir) ? dir : std::filesystem::path(dir).parent_path().string());
-            const std::string freeTxt = freeB ? " (" + gigabytes(freeB) + " free)" : std::string();
-            std::string label;
-            if (sdChosen && !card) {
-                label = "Download Folder (no SD card: saving to ~/Downloads)";
-            } else if (custom) {
-                std::string leaf = std::filesystem::path(downloadCustom_).filename().string();
-                if (leaf.empty()) leaf = downloadCustom_;
-                label = removableMissing(downloadCustom_) ? "Download Folder: " + leaf + " (drive removed)"
-                                                          : "Download Folder: " + leaf + freeTxt;
-            } else {
-                label = "Download Folder" + freeTxt;
-            }
-            // One row that opens its own page: five folder names don't fit side by side.
+            const std::string sep = "  \xC2\xB7  ";
+            const std::string freeTxt = freeB ? sep + gigabytes(freeB) + " free" : std::string();
+            // One row that opens its own page: five folder names don't fit side by side. The label stays
+            // "Download Folder"; the value is the folder and the free space there.
             std::string value = custom ? downloadCustom_ : std::string(opts[static_cast<std::size_t>(idx)]);
             if (const char* home = std::getenv("HOME"); custom && home && *home && value.rfind(home, 0) == 0) {
                 value = "~" + value.substr(std::strlen(home));
             }
             if (!custom && idx == 3) value = "SD card";
-            rows_.push_back({label, value, Action::EnterDownloadFolder});
+            if (sdChosen && !card) {
+                value = "No SD card: saving to ~/Downloads";
+            } else if (custom && removableMissing(downloadCustom_)) {
+                value += sep + "drive removed";
+            } else {
+                value += freeTxt;
+            }
+            rows_.push_back({"Download Folder", value, Action::EnterDownloadFolder});
+        }
+        {
+            // What the list view shows besides the name (like the Shortcuts row lists the rail's shortcuts).
+            std::string cols;
+            auto add = [&](bool on, const char* name) {
+                if (on) cols += (cols.empty() ? "" : ", ") + std::string(name);
+            };
+            add(listShowFormat_, "Format");
+            add(listShowRes_, "Resolution");
+            add(listShowSize_, "Size");
+            add(listShowDuration_, "Duration");
+            rows_.push_back({"List View Columns", cols.empty() ? "Name only" : cols, Action::EnterListColsConfig});
         }
         {
             std::string on;
             for (const RailShortcut& r : railShortcuts()) on += (on.empty() ? "" : ", ") + r.name;
             rows_.push_back({"Shortcuts", on.empty() ? "None on the rail" : on, Action::EnterRailShortcuts});
         }
-        rows_.push_back({"List View Columns", "Customize", Action::EnterListColsConfig});
+        toggle("Private Browsing", privateBrowsing_, Action::TogglePrivateBrowsing);
+        rows_.back().note = "Private Browsing: the full browser opens incognito (page-only shortcuts are not affected).";
     } else if (section_ == 2) {
-        title_ = "Settings > Audio & Video Tracks";
+        title_ = "Settings > Playback & Tracks";
         Row v{"Video Track",
               videoStreams_.empty()
                   ? "(none)"
@@ -456,6 +501,7 @@ void SettingsMenu::refresh() {
               Action::EnterVideoList};
         v.enabled = videoStreams_.size() > 1;  // nothing to pick with 0/1 track
         if (!v.enabled) v.action = Action::None;
+        if (!v.enabled) v.reason = videoStreams_.empty() ? "Nothing is playing" : "Only one track";
         rows_.push_back(v);
         Row a{"Audio Track",
               audioStreams_.empty()
@@ -465,18 +511,22 @@ void SettingsMenu::refresh() {
               Action::EnterAudioList};
         a.enabled = audioStreams_.size() > 1;
         if (!a.enabled) a.action = Action::None;
+        if (!a.enabled) a.reason = audioStreams_.empty() ? "Nothing is playing" : "Only one track";
         rows_.push_back(a);
         rows_.push_back({"Preferred Audio Language",
                          kLangNames[audioLangIdx_ % kLangCount],
                          Action::EnterLangList});
         // What a file starts with when no subtitle track was picked for it by hand.
-        segmented("Subtitles", {"Off", "Foreign parts only", "Always"}, subtitleMode_ % 3, Action::CycleSubtitleMode);
+        segmented("Subtitles", {"Off", "Foreign Parts Only", "Always"}, subtitleMode_ % 3, Action::CycleSubtitleMode);
         rows_.push_back({"Subtitle Language", kSubtitleLanguages[subLangIdx_ % kSubtitleLanguageCount].name,
                          Action::EnterSubLangList});
+        toggle("Pause When Headset Is Removed", pauseOnRemoval_, Action::TogglePauseOnRemoval);
+        toggle("Pause Livestreams Too", pauseLivestreams_, Action::TogglePauseLivestreams, pauseOnRemoval_);
+        offBecause("Needs Pause When Headset Is Removed");
     } else if (section_ == 3) {
         title_ = "Settings > Controls & Input";
         hint(kButtonsStatus);
-        rows_.push_back({"Controller Buttons", "Assigned in SteamOS", Action::EnterButtons});
+        rows_.push_back({"Controller Buttons", "Assigned in SteamVR", Action::EnterButtons});
         toggle("Button Labels", buttonLabels_, Action::ToggleButtonLabels);
         segmented("Keyboard Layout", {"US", "Deutsch", "UK", "Français", "Nordic"}, keyboardLayout_ % 5,
                   Action::CycleKeyboardLayout);
@@ -486,16 +536,23 @@ void SettingsMenu::refresh() {
         toggle("Laser Hover Rumble", hoverHapticsEnabled_, Action::ToggleHoverHaptics);
         choice("Rumble Strength", hoverHapticsStrengthStr(), kHoverHapticsStrengthCount,
                hoverHapticsStrengthIdx_ % kHoverHapticsStrengthCount,
-               Action::CycleHoverHapticsStrength, hoverHapticsEnabled_);
-        // Hidden controls stay hidden for these (only buttons bring them back).
-        toggle("Scrub / Skip Keeps Controls Hidden", silentScrub_, Action::ToggleSilentScrub);
-        toggle("Zoom / Distance Keeps Controls Hidden", silentZoom_, Action::ToggleSilentZoom);
-        toggle("Recenter Keeps Controls Hidden", silentRecenter_, Action::ToggleSilentRecenter);
+               Action::CycleHoverHapticsStrength, hoverHapticsEnabled_, kHoverHapticsStrengthNames);
+        offBecause("Turn on Laser Hover Rumble");
+        // With the controls hidden, do these bring them back? Shown as "on" = they do; saved as the
+        // old "keeps them hidden" values (silent = !shown), so a saved file keeps its meaning.
+        const char* const kShowNote = "Off: the controls stay hidden; only Show / Hide UI brings them back.";
+        toggle("Show Controls When Scrubbing", !silentScrub_, Action::ToggleSilentScrub);
+        rows_.back().note = kShowNote;
+        toggle("Show Controls When Zooming", !silentZoom_, Action::ToggleSilentZoom);
+        rows_.back().note = kShowNote;
+        toggle("Show Controls When Recentering", !silentRecenter_, Action::ToggleSilentRecenter);
+        rows_.back().note = kShowNote;
     } else if (section_ == kPluginsSection) {
         title_ = "Settings > Plugins";
         const auto& list = pluginList(plugins_);
         for (size_t i = 0; i < list.size(); ++i) {
-            Row r{list[i].name + (list[i].version.empty() ? "" : " " + list[i].version),
+            // (The name only: the version is in the plugin page's title.)
+            Row r{list[i].name,
                   list[i].enabled || !list[i].manifestError.empty() ? list[i].status : std::string("Off"), Action::OpenPlugin};
             r.kind = Kind::PluginLine;
             r.data = static_cast<int>(i);
@@ -559,10 +616,12 @@ void SettingsMenu::refresh() {
             pluginPackages_ = std::move(offered);
         }
         if (repo_) repo_->refresh();  // for the update icons and the Install plugins page
+        // The header button as a line too, so the buttons alone reach it.
+        if (repo_) rows_.push_back({"Install Plugins...", "From the plugin repository", Action::OpenStore});
         status_ = list.empty() && pluginPackages_.empty()
-                      ? "No plugins yet: press Install plugins (top right) to add some."
-                  : list.empty() ? "Plugin files found in Downloads: install one below, or press Install plugins."
-                                 : "Switch plugins on and off here. Install plugins (top right) adds more.";
+                      ? "No plugins yet: press Install Plugins (top right) to add some."
+                  : list.empty() ? "Plugin files found in Downloads: install one below, or press Install Plugins."
+                                 : "Switch plugins on and off here. Install Plugins (top right) adds more.";
     } else if (section_ == kStoreSection || section_ == kStoreItemSection || section_ == kVaultMoveSection) {
         // Install plugins, a plugin's details and its update share one dialog layout: a text panel
         // (paragraph rows) and buttons below it (the main one in the accent colour).
@@ -621,7 +680,7 @@ void SettingsMenu::refresh() {
         const auto& list = pluginList(plugins_);
         const std::vector<PluginRepo::Entry> entries = repo_ ? repo_->entries() : std::vector<PluginRepo::Entry>{};
         if (section_ == kStoreSection) {
-            title_ = "Settings > Plugins > Install plugins";
+            title_ = "Settings > Plugins > Install Plugins";
             int shown = 0;
             if (repo_) repo_->refresh();
             for (size_t ei = 0; ei < entries.size(); ++ei) {
@@ -683,7 +742,7 @@ void SettingsMenu::refresh() {
                 }
                 if (text.empty()) add("No change notes were published for this update.", false);
             } else {
-                title_ = "Settings > Plugins > Install plugins > " + e->name;
+                title_ = "Settings > Plugins > Install Plugins > " + e->name;
                 status_ = e->name + " " + e->version;
                 add("What it does", true);
                 for (const std::string& l : e->about) add(l, false);
@@ -810,18 +869,18 @@ void SettingsMenu::refresh() {
                 lines.push_back(r);  // a press cycles the value / runs the action / edits the text
             }
             if (VaultManager::instance().isUnlocked() && p.hasPermission("playback")) {
-                Row vg{"Use with vault videos", p.vaultGrant ? "On" : "Off", Action::PluginVaultGrant, p.enabled};
+                Row vg{"Use With Vault Videos", p.vaultGrant ? "On" : "Off", Action::PluginVaultGrant, p.enabled};
                 vg.options = {"switch"};
                 vg.stepIdx = p.vaultGrant ? 1 : 0;
                 lines.push_back(vg);
             }
-            Row rs{"Restart plugin", p.pid > 0 ? "Restart" : "not running", Action::PluginRestart, p.pid > 0};
+            Row rs{"Restart Plugin", p.pid > 0 ? "Restart" : "Not Running", Action::PluginRestart, p.pid > 0};
             if (p.pid > 0) rs.options = {"button"};
             lines.push_back(rs);
         }
         std::string perms;
         for (const std::string& perm : p.permissions) perms += (perms.empty() ? "" : ", ") + perm;
-        lines.push_back({"Permissions", perms.empty() ? "none" : perms, Action::None, false});
+        lines.push_back({"Permissions", perms.empty() ? "None" : perms, Action::None, false});
         {
             Row del{"Delete Plugin", "", Action::RemovePlugin};
             del.options = {"danger"};  // drawn in red: the one destructive row of the page
@@ -835,17 +894,17 @@ void SettingsMenu::refresh() {
         }
         rows_.push_back({"Back to Plugins", "", Action::BackToPlugins});
         if (!pluginNotice_.empty() && std::chrono::steady_clock::now() < pluginNoticeUntil_) status_ = pluginNotice_;
-        else if (pluginPages_ > 1) status_ = "Page " + std::to_string(pluginPage_ + 1) + " of " + std::to_string(pluginPages_) + ": " + status_;
+        // (Which page is shown: the header pager says it.)
     } else if (section_ == 4) {
         title_ = "Settings > Vault & Privacy";
         toggle("Auto-Lock on Headset Removal", VaultManager::instance().autoLockHeadsetOff(),
                Action::CycleVaultAutoLockHeadset);
-        toggle("Incognito Browser While Vault Open", vaultForceIncognito_, Action::ToggleVaultForceIncognito);
+        toggle("Private Browsing While Vault Is Open", vaultForceIncognito_, Action::ToggleVaultForceIncognito);
 
         const int toSec = VaultManager::instance().autoLockTimeoutSec();
         const int toIdx = (toSec == 120) ? 1 : (toSec == 300) ? 2 : (toSec == 600) ? 3 : 0;
-        const char* toNames[4] = {"Disabled", "2 Minutes", "5 Minutes", "10 Minutes"};
-        choice("Inactivity Auto-Lock", toNames[toIdx], 4, toIdx, Action::CycleVaultTimeout);
+        const char* toNames[4] = {"Off", "2 Minutes", "5 Minutes", "10 Minutes"};
+        choice("Inactivity Auto-Lock", toNames[toIdx], 4, toIdx, Action::CycleVaultTimeout, true, toNames);
 
         std::string comboLabel;
         if (VaultManager::instance().isRecordingCombo()) {
@@ -853,7 +912,7 @@ void SettingsMenu::refresh() {
         } else {
             comboLabel = VaultManager::instance().comboString();
         }
-        binding("Unlock Combo Sequence", comboLabel, Action::RecordVaultCombo);
+        binding("Unlock Combination", comboLabel, Action::RecordVaultCombo);
 
         VaultManager& vm = VaultManager::instance();
         {
@@ -862,12 +921,12 @@ void SettingsMenu::refresh() {
             const std::string card = sdCardMount();
             const bool moving = !vaultMoveStatus_.empty();
             const bool canOpenMove = moving || (onCard ? vm.available() : !card.empty());
-            const std::string label = onCard ? "Vault Location: SD Card" : "Vault Location: Headset";
+            // Like every other row: the name as the label, where it is (and what a press does) as the value.
+            const std::string sep = "  \xC2\xB7  ";
             const std::string value = moving ? "Moving... (Options / Cancel)"
-                : (onCard ? (vm.available() ? "Move to Headset..." : "SD card not inserted")
-                          : (!card.empty() ? "Move to SD Card..." : "No SD card inserted"));
-            rows_.push_back({label, value, Action::MoveVault, canOpenMove});
-        }
+                : (onCard ? "SD Card" + sep + (vm.available() ? "Move to Headset..." : "SD card not inserted")
+                          : "Headset" + sep + (!card.empty() ? "Move to SD Card..." : "No SD card inserted"));
+            rows_.push_back({"Vault Location", value, Action::MoveVault, canOpenMove});        }
         // One status line: the most important thing wins.
         std::string rec = vm.recoveryFile();
         if (const char* home = std::getenv("HOME"); home != nullptr && *home && rec.rfind(home, 0) == 0) {
@@ -886,21 +945,20 @@ void SettingsMenu::refresh() {
             hint("Files are encrypted (AES-256). Forgot the combination? It is written down in " + rec + ".");
         }
     } else if (showingButtons()) {
-        // Read-only: one row per action with the buttons SteamVR binds to it.
-        // Every card is a binding; the header pager (< n / m >) turns pages.
+        // Read-only: one row per action with the buttons SteamVR binds to it, drawn as a table (the
+        // renderer says above it where buttons are changed); the header pager (< n / m >) turns pages.
         const int page = section_ - kButtonsSection;
         title_ = "Settings > Controls & Input > Buttons";
-        hint(controlsNotice_.empty() ? std::string(kButtonsPagesStatus) : controlsNotice_);
+        hint(!controlsNotice_.empty() ? controlsNotice_ : (buttonsPages() > 1 ? std::string(kButtonsPagesStatus) : std::string(kButtonsStatus)));
         const int n = static_cast<int>(controlsInfo_.size());
         for (int i = page * kButtonsPerPage; i < std::min(n, (page + 1) * kButtonsPerPage); ++i) {
             Row r{controlsInfo_[static_cast<std::size_t>(i)].first,
                   controlsInfo_[static_cast<std::size_t>(i)].second, Action::None};
-            r.kind = Kind::Choice;  // plain value text, no control
+            r.kind = Kind::ReadOnly;  // plain value text, no control
             rows_.push_back(r);
         }
     } else if (section_ == 22) {
-        title_ = "Settings > UI & Appearance > Shortcuts";
-        hint(kShortcutsStatus);
+        title_ = "Settings > Files & Web > Shortcuts";
         // One line per shortcut, in rail order: grab handle, on / off, name, address, Edit, Delete.
         hint("Hold a shortcut's handle and drag it to reorder. The rail shows the first " +
              std::to_string(kMaxRailShortcuts) + " that are on.");
@@ -919,20 +977,20 @@ void SettingsMenu::refresh() {
         }
         {
             const bool full = shortcuts_.size() >= static_cast<size_t>(kMaxShortcuts);
-            Row add{"Add shortcut", full ? "The list is full" : "Name and address", Action::AddShortcut};
+            Row add{"Add Shortcut", full ? "The list is full" : "Name and address", Action::AddShortcut};
             add.enabled = !full;
             rows_.push_back(add);
         }
-        rows_.push_back({"Back to UI & Appearance", "", Action::BackToUI});
+        rows_.push_back({"Back to Files & Web", "", Action::BackToFilesWeb});
     } else if (section_ == 17) {
         if (shortcutIdx_ < 0 || shortcutIdx_ >= static_cast<int>(shortcuts_.size())) shortcutIdx_ = 0;
         const Shortcut& sc = shortcuts_.empty() ? Shortcut{} : shortcuts_[static_cast<size_t>(shortcutIdx_)];
-        title_ = "Settings > UI & Appearance > Shortcuts > " + sc.name;
+        title_ = "Settings > Files & Web > Shortcuts > " + sc.name;
         hint("Name and address open the keyboard.");
         rows_.push_back({"Name", sc.name, Action::EditShortcutName});
         rows_.push_back({"Address", sc.url.empty() ? std::string("Asked on first use") : sc.url, Action::EditShortcutUrl});
         toggle("Show on the Rail", sc.onRail, Action::ToggleShortcutRail);
-        segmented("Opens as", {"Page only", "Full browser"}, sc.kiosk ? 0 : 1, Action::CycleShortcutKiosk);
+        segmented("Opens As", {"Page Only", "Full Browser"}, sc.kiosk ? 0 : 1, Action::CycleShortcutKiosk);
         {
             const bool armed = deleteArmedIdx_ == shortcutIdx_ && std::chrono::steady_clock::now() < deleteArmedUntil_;
             (void)armed;
@@ -945,18 +1003,19 @@ void SettingsMenu::refresh() {
         // No rows: the renderer draws the picker (suggested colours, square, hue strip, Reset, Back).
         title_ = section_ == kTextColorSection ? "Settings > UI & Appearance > Text Color"
                                                : "Settings > UI & Appearance > Accent Color";
-        hint("Trigger: Pick  |  Hold Trigger and drag: Adjust  |  B: Back (the color is kept)");
+        hint("Stick: Choose  |  A or Trigger: Pick (square / strip: then move it with the stick, or drag)  |  "
+             "B: Back (the color is kept)");
     } else if (section_ == 21) {
-        title_ = "Settings > UI & Appearance > List Columns";
+        title_ = "Settings > Files & Web > List View Columns";
         toggle("Format / VR Badge", listShowFormat_, Action::ToggleListColFormat);
         toggle("Resolution & FPS", listShowRes_, Action::ToggleListColRes);
         toggle("File Size", listShowSize_, Action::ToggleListColSize);
         toggle("Video Duration", listShowDuration_, Action::ToggleListColDuration);
-        rows_.push_back({"Back to UI & Appearance", "", Action::BackToUI});
+        rows_.push_back({"Back to Files & Web", "", Action::BackToFilesWeb});
     } else if (section_ == 13) {
         // Download Folder: one full-width line per choice (a list page), each with the free space
         // of the drive it is on.
-        title_ = "Settings > UI & Appearance > Download Folder";
+        title_ = "Settings > Files & Web > Download Folder";
         const std::string card = sdCardMount();
         const bool custom = !downloadCustom_.empty();
         const int cur = downloadDirIdx_ % kDownloadDirCount;
@@ -969,8 +1028,11 @@ void SettingsMenu::refresh() {
             const uint64_t b = freeBytes(d);
             return b ? gigabytes(b) + " free" : std::string();
         };
+        // The folder in use is an active option (accent card and a checkmark, like the track lists).
         auto line = [&](const std::string& label, bool active, const std::string& free, Action act, int data, bool enabled = true) {
-            Row r{label, active ? "In use" + (free.empty() ? std::string() : "  ·  " + free) : free, act, enabled};
+            Row r{label, free, act, enabled};
+            r.kind = Kind::Option;
+            r.stepIdx = active ? 1 : 0;
             r.data = data;
             rows_.push_back(r);
         };
@@ -989,36 +1051,45 @@ void SettingsMenu::refresh() {
                  Action::PickDownloadFolder, 0);
         }
         rows_.push_back({"Other Folder...", "Choose in the file browser", Action::PickDownloadFolder});
-        rows_.push_back({"Back to UI & Appearance", "", Action::BackToUI});
-        hint("Downloads are saved to the folder marked In use.");
+        rows_.push_back({"Back to Files & Web", "", Action::BackToFilesWeb});
+        hint("Downloads are saved to the checked folder.");
     } else if (section_ == 10) {
-        title_ = "Settings > Tracks > Video Track";
+        title_ = "Settings > Playback & Tracks > Video Track";
         for (std::size_t i = 0; i < videoStreams_.size(); ++i) {
             option(videoStreams_[i].second, static_cast<int>(i) == videoSel_,
                    Action::PickVideoStream, static_cast<int>(i));
         }
-        rows_.push_back({"Back to Tracks", "", Action::Back});
+        rows_.push_back({"Back to Playback & Tracks", "", Action::Back});
     } else if (section_ == 11) {
-        title_ = "Settings > Tracks > Audio Track";
+        title_ = "Settings > Playback & Tracks > Audio Track";
         for (std::size_t i = 0; i < audioStreams_.size(); ++i) {
             option(audioStreams_[i].second, static_cast<int>(i) == audioSel_,
                    Action::PickAudioStream, static_cast<int>(i));
         }
-        rows_.push_back({"Back to Tracks", "", Action::Back});
+        rows_.push_back({"Back to Playback & Tracks", "", Action::Back});
     } else if (subLangList_) {  // section_ == 12, opened from Subtitle Language
-        title_ = "Settings > Tracks > Subtitle Language";
+        title_ = "Settings > Playback & Tracks > Subtitle Language";
         for (int i = 0; i < kSubtitleLanguageCount; ++i) {
             option(kSubtitleLanguages[i].name, i == subLangIdx_, Action::PickSubtitleLanguage, i);
         }
-        rows_.push_back({"Back to Tracks", "", Action::Back});
+        rows_.push_back({"Back to Playback & Tracks", "", Action::Back});
     } else {  // section_ == 12: preferred-language list
-        title_ = "Settings > Tracks > Preferred Language";
+        title_ = "Settings > Playback & Tracks > Preferred Audio Language";
         for (int i = 0; i < kLangCount; ++i) {
             option(kLangNames[i], i == audioLangIdx_, Action::PickLanguage, i);
         }
-        rows_.push_back({"Back to Tracks", "", Action::Back});
+        rows_.push_back({"Back to Playback & Tracks", "", Action::Back});
     }
     paginateList();  // (every branch above falls through to here)
+    // A card page shows at most 12 cards (6 rows of 2; a 7th row would sit on the status line):
+    // more rows than that would be invisible and still selectable. Pages longer than that must be
+    // shortened or paged.
+    if (!compactPage() && static_cast<int>(rows_.size()) > 12) {
+        static int warned = -1;
+        if (warned != section_) PIXELVR_LOG_WARN("Settings page %d has %d rows: only 12 are shown", section_, static_cast<int>(rows_.size()));
+        warned = section_;
+    }
+    fixListSelection();
 }
 
 void SettingsMenu::paginateList() {
@@ -1058,7 +1129,8 @@ void SettingsMenu::paginateList() {
     if (tail) page.push_back(rows_.back());
     rows_ = std::move(page);
     if (optionList && status_ == kDefaultStatus) {  // (the plugin pages keep their own text; a message stays)
-        status_ = "Page " + std::to_string(listPage_ + 1) + " of " + std::to_string(listPages_);
+        // (Which page is shown: the header pager says it.)
+        status_ = "Up / Down: Select  |  A: Pick  |  Bumpers or Left / Right: Page  |  B: Back";
         pageHint_ = status_;
     }
 }
@@ -1068,6 +1140,7 @@ SettingsMenu::Action SettingsMenu::activate() {
         return Action::None;
     }
     if (!rows_[static_cast<size_t>(selected_)].enabled) {
+        // (status() shows the row's reason while it is selected.)
         return Action::None;
     }
     const Action act = rows_[selected_].action;
@@ -1160,8 +1233,15 @@ SettingsMenu::Action SettingsMenu::activate() {
                 downloadCustom_.clear();
                 saveConfig();
             }
-            section_ = 1;
+            section_ = kFilesWebSection;
             selected_ = 0;
+            refresh();
+            break;
+        }
+        case Action::BackToFilesWeb: {
+            const int from = section_;
+            section_ = kFilesWebSection;
+            selected_ = from == 21 ? 1 : (from == 22 ? 2 : 0);  // on the row the page was opened from
             refresh();
             break;
         }
@@ -1237,6 +1317,10 @@ SettingsMenu::Action SettingsMenu::activate() {
             section_ = act == Action::OpenUiTextColor ? kTextColorSection : kAccentColorSection;
             selected_ = 0;
             pickerLoad();
+            // The button focus starts on the suggested colour in use (else the first one).
+            pickFocus_ = std::max(0, uicolor::swatchIndex(act == Action::OpenUiAccentColor,
+                                                          act == Action::OpenUiAccentColor ? uiAccentRgb_ : uiTextRgb_));
+            pickGrab_ = -1;
             refresh();
             break;
         case Action::CycleUiDistance:
@@ -1332,10 +1416,10 @@ SettingsMenu::Action SettingsMenu::activate() {
         case Action::RecordVaultCombo:
             if (VaultManager::instance().isRecordingCombo()) {
                 VaultManager::instance().cancelRecordingCombo();
-                status_ = "Combo recording cancelled";
+                status_ = "Recording cancelled: the combination stays as it was.";
             } else {
                 VaultManager::instance().startRecordingCombo();
-                status_ = "Press 6 face buttons (A, B, X, Y) to record new combo";
+                status_ = "Press 6 buttons (A, B, X, Y). Pull the trigger on this row to cancel.";
             }
             refresh();
             break;
@@ -2140,6 +2224,268 @@ void SettingsMenu::saveConfig() const {
     } catch (const std::exception& e) {
         PIXELVR_LOG_WARN("Could not save settings: %s", e.what());
     }
+}
+
+// ---------------------------------------------------------------------------
+// Settings with the controller's buttons alone: Up / Down walk the rows and onto the section list
+// on the rail, Left / Right change the selected value, A presses, B goes back one level.
+
+int SettingsMenu::railSectionCount() const { return VaultManager::instance().isUnlocked() ? 7 : 6; }
+
+int SettingsMenu::railPosOf(int s) const {
+    if (s == 1 || s == kTextColorSection || s == kAccentColorSection) return 1;
+    if (s == kFilesWebSection || s == 13 || s == 17 || s == 21 || s == 22) return 2;
+    if (s == 2 || s == 10 || s == 11 || s == 12) return 3;
+    if (s == 3 || s >= kButtonsSection) return 4;
+    if (s == kPluginsSection || s == kPluginSection || s == kStoreSection || s == kStoreItemSection) return 5;
+    if (s == 4 || s == kVaultMoveSection) return 6;
+    return 0;  // Display & Cinema
+}
+
+void SettingsMenu::openRailSection(int pos) {
+    railFocus_ = false;
+    pickerRelease();
+    pickerCommit();  // (leaving a colour picker keeps the colour)
+    switch (pos) {
+        case 0: setSection(0); break;
+        case 1: setSection(1); break;
+        case 2: setSection(kFilesWebSection); break;
+        case 3: setSection(2); break;
+        case 4: setSection(3); break;
+        case 5: openPluginsPage(); break;
+        case 6:
+            if (VaultManager::instance().isUnlocked()) setSection(4);
+            break;
+        default: break;
+    }
+}
+
+void SettingsMenu::enterRail() {
+    railFocus_ = true;
+    railFocusPos_ = std::clamp(railPos(), 0, railSectionCount() - 1);
+}
+
+bool SettingsMenu::pressRail() {
+    if (!railFocus_) return false;
+    const int pos = std::clamp(railFocusPos_, 0, railSectionCount() - 1);
+    railFocus_ = false;
+    if (pos == railPos() && parentSection() < 0) return true;  // the page shown: back onto its rows
+    openRailSection(pos);
+    return true;
+}
+
+void SettingsMenu::notePointer(int hovered) {
+    if (hovered >= 0 && hovered != lastPointerRow_) railFocus_ = false;
+    lastPointerRow_ = hovered;
+}
+
+void SettingsMenu::navUpDown(int d) {
+    if (d == 0) return;
+    if (railFocus_) {
+        railFocusPos_ = std::clamp(railFocusPos_ + d, 0, railSectionCount() - 1);
+        return;
+    }
+    if (colorPickerTarget() >= 0) {
+        pickerNav(0, d);
+        return;
+    }
+    if (showingButtons() || rows_.empty()) {  // a read-only table: nothing to select there
+        if (d < 0) enterRail();
+        return;
+    }
+    if (compactPage()) {
+        const int before = selected_;
+        move(d);  // (the lines that can act)
+        if (selected_ == before && d < 0) enterRail();
+        return;
+    }
+    if (selected_ + d < 0) {
+        enterRail();
+        return;
+    }
+    setSelected(selected_ + d);  // reading order: left card, right card, next row
+}
+
+SettingsMenu::Action SettingsMenu::navLeftRight(int d, bool& changed) {
+    changed = false;
+    if (d == 0) return Action::None;
+    if (railFocus_) {
+        if (d > 0) pressRail();
+        return Action::None;
+    }
+    if (colorPickerTarget() >= 0) {
+        pickerNav(d, 0);
+        return Action::None;
+    }
+    if (showingButtons()) {
+        if (!turnButtonsPage(d, true) && d < 0) enterRail();
+        return Action::None;
+    }
+    const int n = static_cast<int>(rows_.size());
+    if (selected_ >= 0 && selected_ < n) {
+        const Row& r = rows_[static_cast<std::size_t>(selected_)];
+        const bool wantOn = d > 0;
+        if (!r.enabled && (r.kind == Kind::Choice || r.kind == Kind::Segmented || r.kind == Kind::Toggle)) {
+            return Action::None;  // (the status line says why it is off)
+        }
+        if (r.enabled && (r.kind == Kind::Choice || r.kind == Kind::Segmented) && r.steps > 1) {
+            const int to = std::clamp(r.stepIdx + d, 0, r.steps - 1);
+            if (to == r.stepIdx) return Action::None;  // at an end: it stays there
+            changed = true;
+            return activateSegment(to);
+        }
+        if (r.enabled && r.kind == Kind::Toggle) {  // Left = off, Right = on
+            if ((r.stepIdx != 0) == wantOn) return Action::None;
+            changed = true;
+            return activate();
+        }
+        if (r.enabled && compactPage() && (r.kind == Kind::Shortcut || r.kind == Kind::PluginLine)) {
+            // The line's on / off switch (on the rail / plugin running).
+            if ((r.stepIdx != 0) == wantOn) return Action::None;
+            const int idx = r.data;
+            if (r.kind == Kind::Shortcut) shortcutToggle(idx);
+            else pluginToggle(idx);
+            changed = true;
+            return Action::None;
+        }
+        if (r.enabled && compactPage() && !r.options.empty() && r.options[0] == "switch") {  // a plugin's switch
+            if ((r.stepIdx != 0) == wantOn) return Action::None;
+            changed = true;
+            return activate();
+        }
+        if (r.kind == Kind::Button) {  // dialog buttons sit side by side
+            for (int i = selected_ + d; i >= 0 && i < n && rows_[static_cast<std::size_t>(i)].kind == Kind::Button; i += d) {
+                if (rows_[static_cast<std::size_t>(i)].enabled) {
+                    selected_ = i;
+                    return Action::None;
+                }
+            }
+        }
+    }
+    if (turnButtonsPage(d, true)) return Action::None;  // a paged list
+    if (d < 0) enterRail();
+    return Action::None;
+}
+
+SettingsMenu::Action SettingsMenu::press() {
+    if (selected_ >= 0 && selected_ < static_cast<int>(rows_.size())) {
+        const Row& r = rows_[static_cast<std::size_t>(selected_)];
+        if (r.enabled && r.kind == Kind::Choice && r.steps > 1 && r.stepIdx >= r.steps - 1) {
+            return Action::None;  // the top step: no jump back to the first (Left lowers it)
+        }
+    }
+    return activate();
+}
+
+void SettingsMenu::fixListSelection() {
+    const int n = static_cast<int>(rows_.size());
+    if (!compactPage() || n == 0) return;
+    auto ok = [&](int i) {
+        const Row& r = rows_[static_cast<std::size_t>(i)];
+        return r.enabled && r.kind != Kind::Paragraph;
+    };
+    if (selected_ >= 0 && selected_ < n && ok(selected_)) return;
+    // A dialog page (text, buttons below it) starts on its last button (Back), so a quick second
+    // press never starts the main action (Install, Move Vault); a list on its first line.
+    bool dialog = false;
+    for (const Row& r : rows_) dialog = dialog || r.kind == Kind::Button;
+    for (int k = 0; k < n; ++k) {
+        const int i = dialog ? n - 1 - k : k;
+        if (ok(i)) {
+            selected_ = i;
+            return;
+        }
+    }
+}
+
+// Colour picker zones (the renderer's): 0..4 suggested colours (a column on the right), 5 the
+// square, 6 the hue strip, 7 Reset and 8 Back (below the column).
+void SettingsMenu::pickerNav(int dx, int dy) {
+    if (colorPickerTarget() < 0 || pickGrab_ >= 0) return;
+    int z = pickFocus_;
+    if (dy != 0) {
+        if (z >= 0 && z < uicolor::kSwatchCount) {
+            const int t = z + dy;
+            if (t < 0) {
+                enterRail();
+                return;
+            }
+            z = t >= uicolor::kSwatchCount ? 7 : t;
+        } else if (z == 7 || z == 8) {
+            if (dy < 0) z = uicolor::kSwatchCount - 1;
+        } else {  // the square or the strip
+            if (dy < 0) {
+                enterRail();
+                return;
+            }
+            z = 7;
+        }
+    }
+    if (dx != 0) {
+        switch (z) {
+            case 5:
+                if (dx < 0) {
+                    enterRail();
+                    return;
+                }
+                z = 6;
+                break;
+            case 6: z = dx > 0 ? 0 : 5; break;
+            case 7: z = dx > 0 ? 8 : 6; break;
+            case 8:
+                if (dx < 0) z = 7;
+                break;
+            default:  // a suggested colour
+                if (dx < 0) z = 6;
+                break;
+        }
+    }
+    pickFocus_ = z;
+}
+
+bool SettingsMenu::pickerPress(int zone) {
+    if (colorPickerTarget() < 0) return false;
+    pickFocus_ = zone;
+    if (zone == 5 || zone == 6) {  // the stick moves this marker now
+        pickGrab_ = zone;
+        pickNudgeAt_ = std::chrono::steady_clock::now();
+        return false;
+    }
+    if (zone == 7) {
+        pickerReset();
+        return false;
+    }
+    if (zone == 8) {
+        navigateBack();
+        return true;
+    }
+    pickerPickSwatch(zone);
+    return false;
+}
+
+void SettingsMenu::pickerNudge(float x, float y) {
+    if (pickGrab_ < 0) return;
+    if (colorPickerTarget() < 0) {
+        pickGrab_ = -1;
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    const float dt = std::clamp(std::chrono::duration<float>(now - pickNudgeAt_).count(), 0.0f, 0.1f);
+    pickNudgeAt_ = now;
+    auto dz = [](float v) { return std::fabs(v) < 0.15f ? 0.0f : v; };  // a resting stick does nothing
+    constexpr float kRate = 0.5f;  // a full push crosses the square / strip in two seconds
+    if (pickGrab_ == 6) {
+        if (dz(y) != 0.0f) pickerSetHue(pickH_ - dz(y) * kRate * dt);  // the strip's top is hue 0
+    } else if (dz(x) != 0.0f || dz(y) != 0.0f) {
+        pickerSetSatVal(pickS_ + dz(x) * kRate * dt, pickV_ + dz(y) * kRate * dt);  // right: richer, up: brighter
+    }
+}
+
+bool SettingsMenu::pickerRelease() {
+    if (pickGrab_ < 0) return false;
+    pickGrab_ = -1;
+    pickerCommit();
+    return true;
 }
 
 } // namespace pixelvr
