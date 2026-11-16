@@ -314,11 +314,17 @@ inline CtrlButtonRect get_ctrl_button_rect(int b) {
     }
 }
 
-// The level bar on the right half of the VOLUME pill (drawing and hit test).
+// The level bar of the VOLUME pill: everything right of the speaker icon (drawing and hit test).
+// About 25 cm for 0..100 %, so the laser can set a level; the percentage shows as a tooltip.
 inline void volume_bar_span(float& x0, float& x1) {
     const CtrlButtonRect r = get_ctrl_button_rect(static_cast<int>(VulkanRenderer::CtrlButton::Volume));
-    x0 = r.cx + 0.010f;
+    x0 = r.cx - 0.090f;
     x1 = r.cx + r.hw - 0.030f;
+}
+// Left of this the VOLUME pill is the mute button (the speaker icon).
+inline float volume_mute_edge() {
+    const CtrlButtonRect r = get_ctrl_button_rect(static_cast<int>(VulkanRenderer::CtrlButton::Volume));
+    return r.cx - r.hw + 0.065f;
 }
 
 // ---------------------------------------------------------------------------
@@ -833,13 +839,13 @@ inline const std::vector<KbKey>& keyboardKeys() {
 // part of the video frame (music::kCover*); this is everything drawn on top.
 namespace musicui {
 constexpr float kInfoCx = -0.80f;
-constexpr float kTitleY = -0.35f, kArtistY = -0.45f, kAlbumY = -0.535f;
+constexpr float kTitleY = -0.35f, kArtistY = -0.45f, kAlbumY = -0.545f;
 constexpr float kButtonsY = -0.71f;
 constexpr float kButtonX[5] = {-1.22f, -1.01f, -0.80f, -0.59f, -0.38f};  // shuffle, prev, play, next, repeat
 constexpr float kButtonR = 0.062f, kPlayR = 0.085f;
 constexpr UiRect kPanel{0.73f, 0.0f, 0.79f, 0.82f};
 constexpr float kHeaderY = 0.705f;
-constexpr float kRowsTop = 0.62f, kRowH = 0.128f;
+constexpr float kRowsTop = 0.62f, kRowH = 0.150f;  // (kMusicRows of them: text near subtitle size)
 inline UiRect row(int i) { return {kPanel.cx, kRowsTop - kRowH * (static_cast<float>(i) + 0.5f), kPanel.hw - 0.04f, kRowH * 0.5f - 0.006f}; }
 inline UiRect button(int i) {
     const float r = (i == 2) ? kPlayR : kButtonR;
@@ -3315,6 +3321,7 @@ void VulkanRenderer::updatePointer() {
     pointerOnTimeline_ = false;
     pointerOnTimeToggle_ = false;
     pointerOnPanel_ = false;
+    pointerOnDock_ = false;
     pointerHand_ = -1;
     browserHovered_ = -1;
     browserSidebarHovered_ = -1;
@@ -3873,7 +3880,7 @@ void VulkanRenderer::updatePointer() {
                 const float my = (0.5f - screenHitV) * 1.8f;
                 musicHoverSlot_ = screenHitSlot;
                 for (int i = 0; i < 5; ++i) {
-                    if (hub::musicui::button(i).contains(mx, my, 0.015f)) musicHoverId_ = kMusicShuffle + i;
+                    if (hub::musicui::button(i).contains(mx, my, 0.03f)) musicHoverId_ = kMusicShuffle + i;
                 }
                 if (hub::musicui::kPanel.contains(mx, my)) {
                     musicHoverId_ = kMusicList;
@@ -3906,6 +3913,7 @@ void VulkanRenderer::updatePointer() {
                 hx >= -0.58f && hx <= 0.58f) {
                 hitHere(world.x, world.y, world.z);
                 pointerOnTimeline_ = true;
+                pointerOnDock_ = true;
                 pointerScrub_ = std::clamp((hx + 0.56f) / 1.12f, 0.0f, 1.0f);
                 break;
             }
@@ -3916,22 +3924,38 @@ void VulkanRenderer::updatePointer() {
             hyy >= kBarY + 0.105f && hyy <= kBarY + 0.195f) {
             hitHere(world.x, world.y, world.z);
             pointerOnTimeToggle_ = true;
+            pointerOnDock_ = true;
             break;
         }
 
-        // Control dock buttons
-        for (int b = 0; b < kBtnCount; ++b) {
-            const auto cb = static_cast<CtrlButton>(b);
-            if (cb == CtrlButton::AudioToggle && !hudAudioEnabled_) continue;
-            if (is_screen_row_button(b) && !screenControlsVisible_) continue;
-            if (cb == CtrlButton::FormatToggle && !hudFormatEnabled_) continue;
-            const CtrlButtonRect r = get_ctrl_button_rect(b);
-            if (r.hw <= 0.0f) continue;
-            if (hx >= r.cx - r.hw && hx <= r.cx + r.hw &&
-                hyy >= r.cy - r.hh && hyy <= r.cy + r.hh) {
+        // Control dock buttons: the drawn shape first; a laser just beside one still takes the
+        // nearest (pills by half the gap between their rows, round buttons by 1 cm), so a shaky beam
+        // between two targets does not land on the plate.
+        {
+            int best = -1;
+            float bestOut = 1e9f;
+            for (int b = 0; b < kBtnCount; ++b) {
+                const auto cb = static_cast<CtrlButton>(b);
+                if (cb == CtrlButton::AudioToggle && !hudAudioEnabled_) continue;
+                if (is_screen_row_button(b) && !screenControlsVisible_) continue;
+                if (cb == CtrlButton::FormatToggle && !hudFormatEnabled_) continue;
+                const CtrlButtonRect r = get_ctrl_button_rect(b);
+                if (r.hw <= 0.0f) continue;
+                const bool pill = r.hw > r.hh * 1.5f;
+                const float pad = pill ? 0.006f : 0.010f;
+                const float dx = std::max(std::fabs(hx - r.cx) - r.hw, 0.0f);
+                const float dy = std::max(std::fabs(hyy - r.cy) - r.hh, 0.0f);
+                if (dx > pad || dy > pad) continue;
+                const float out = std::max(dx, dy);  // 0 = on the drawn shape
+                if (out < bestOut) {
+                    bestOut = out;
+                    best = b;
+                }
+            }
+            if (best >= 0) {
                 hitHere(world.x, world.y, world.z);
-                pointerButton_ = b;
-                break;
+                pointerButton_ = best;
+                pointerOnDock_ = true;
             }
         }
         if (pointerActive_) {
@@ -3945,6 +3969,7 @@ void VulkanRenderer::updatePointer() {
             hyy >= dockBottom && hyy <= kBarY + kDockHalfH) {
             hitHere(world.x, world.y, world.z);
             pointerButton_ = -1;
+            pointerOnDock_ = true;
             break;
         }
         if (takeScreenHit()) break;
@@ -5006,8 +5031,11 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
         };
         // No soft glow here: its partial alpha would cut a dark disc out of
         // the screen behind (SteamVR layers), so just the dot with an accent ring.
+        // A fully opaque dark outline around the ring keeps it visible on a bright frame.
         const float ring[4] = {ac[0], ac[1], ac[2], 1.0f};
         const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+        const float outline[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        draw(0.74f, UiShape::Cursor, outline, 0.0f);
         draw(0.62f, UiShape::Cursor, ring, 0.0f);
         draw(0.5f, UiShape::Cursor, white, 0.0f);
         vkCmdEndRenderPass(commandBuffer_);
@@ -5116,9 +5144,15 @@ void VulkanRenderer::renderLayersAfter(XrContext& xr, const XrView* views, uint3
         // Beyond 3 m it grows, but slower than the distance: on a big screen far away the 8 cm image
         // was a few pixels wide and showed as a white speck without its ring. (Growing WITH the
         // distance keeps its apparent size, which reads as a circle swelling as it moves away.)
-        const float farGrow = std::clamp(std::sqrt(eyeDist / 3.0f), 1.0f, 2.5f);
-        cl.width = 0.08f * shrink * farGrow;
-        cl.height = 0.08f * shrink * farGrow;
+        // (distance^0.75: about a degree at 6 m, still not swelling 1:1.)
+        const float farGrow = std::clamp(std::pow(eyeDist / 3.0f, 0.75f), 1.0f, 3.5f);
+        // A little bigger over something it can click on the picture (skip pill, episode arrow, the
+        // music view's buttons and rows): hover feedback.
+        const bool onTarget = screenSkipSlot_ >= 0 || (screenNavSlot_ >= 0 && screenNavHover_ >= 0) ||
+                              (musicHoverId_ != kMusicNone && musicHoverId_ != kMusicList);
+        const float hoverGrow = onTarget ? 1.3f : 1.0f;
+        cl.width = 0.08f * shrink * farGrow * hoverGrow;
+        cl.height = 0.08f * shrink * farGrow * hoverGrow;
         const Quat q = quatFromMat(m);
         cl.pose.orientation = {q.x, q.y, q.z, q.w};
         cl.pose.position = {pos.x, pos.y, pos.z};
@@ -5321,12 +5355,17 @@ void VulkanRenderer::recordScreenCopy(int slot, const ScreenLayer& L, uint32_t i
     vkCmdEndRenderPass(commandBuffer_);
 }
 
-void VulkanRenderer::setScreenTitle(int slot, const std::string& text, float seconds) {
+void VulkanRenderer::setScreenTitle(int slot, const std::string& text, float seconds, bool warn) {
     if (slot < 0 || slot >= kMaxVideoSlots) return;
     ScreenOverlay& so = screenOverlay_[slot];
     const auto now = std::chrono::steady_clock::now();
-    if (so.title != text || now >= so.until) so.shownAt = now;  // a new message fades in
+    // A new message fades in (the dots of "Loading..." / "Buffering..." changing do not count).
+    std::string base = text, oldBase = so.title;
+    while (!base.empty() && base.back() == '.') base.pop_back();
+    while (!oldBase.empty() && oldBase.back() == '.') oldBase.pop_back();
+    if (base != oldBase || now >= so.until) so.shownAt = now;
     so.title = text;
+    so.warn = warn;
     so.until = now + std::chrono::milliseconds(static_cast<int>(std::max(0.0f, seconds) * 1000.0f));
 }
 
@@ -5354,6 +5393,7 @@ int VulkanRenderer::screenOverlayKey(int slot) const {
     h = h * 1000003u + std::hash<std::string>{}(subs);
     h = h * 1000003u + static_cast<std::size_t>(pic);
     h = h * 1000003u + static_cast<std::size_t>(alphaStep + 32 * hover + 4096 * skipKey);
+    h = h * 1000003u + (screenOverlay_[slot].warn ? 1u : 0u) + (skip.empty() ? 0u : 2u * std::hash<std::string>{}(skipTag_));
     return 1 + static_cast<int>(h & 0x3FFFFFFF);
 }
 
@@ -5417,6 +5457,156 @@ void VulkanRenderer::drawCopyText(const std::string& utf8, float cx, float cy, f
     vkCmdDraw(commandBuffer_, 6, glyphCursor - first, 0, first);
 }
 
+namespace {
+// UTF-8 -> the Latin-1 glyph slots drawCopyText draws ('?' for what the atlas lacks), the same way.
+std::vector<unsigned char> copyTextGlyphs(const std::string& utf8) {
+    std::vector<unsigned char> cps;
+    for (size_t i = 0; i < utf8.size();) {
+        const unsigned char c = static_cast<unsigned char>(utf8[i]);
+        unsigned cp = c;
+        int n = 1;
+        if (c >= 0xC0 && c < 0xE0 && i + 1 < utf8.size()) {
+            cp = ((c & 0x1Fu) << 6) | (static_cast<unsigned char>(utf8[i + 1]) & 0x3Fu);
+            n = 2;
+        } else if (c >= 0xE0) {
+            cp = '?';
+            n = (c >= 0xF0) ? 4 : 3;
+        }
+        cps.push_back(cp < 256 ? static_cast<unsigned char>(cp) : static_cast<unsigned char>('?'));
+        i += static_cast<size_t>(n);
+    }
+    return cps;
+}
+// Back to UTF-8 (for drawCopyText).
+std::string latin1Utf8(const std::vector<unsigned char>& g) {
+    std::string s;
+    for (unsigned char c : g) {
+        if (c < 0x80) {
+            s.push_back(static_cast<char>(c));
+        } else {
+            s.push_back(static_cast<char>(0xC0 | (c >> 6)));
+            s.push_back(static_cast<char>(0x80 | (c & 0x3F)));
+        }
+    }
+    return s;
+}
+}  // namespace
+
+void VulkanRenderer::drawScreenTitlePill(int slot, float ax, float alpha, const math::Mat4& ortho,
+                                         uint32_t& glyphCursor) {
+    using namespace math;
+    const FontAtlas& font = fontAtlasBold_.ok ? fontAtlasBold_ : fontAtlas_;
+    if (!font.ok || font.lineHeight <= 0.0f) return;
+    const ScreenOverlay& so = screenOverlay_[slot];
+    const float textH = 0.080f;
+    const float maxTextW = 2.6f;  // drawn units (the screen is 3.2 wide)
+    const float pitch = 0.104f;   // between the two lines
+    const float k = textH / font.lineHeight * ax;  // drawn width per glyph advance
+    std::vector<unsigned char> g = copyTextGlyphs(so.title);
+    // Animated dots ("Loading name...", "Buffering..."): laid out as three, so the pill keeps its width
+    // and the text its place while they change.
+    int dots = 0;
+    while (!g.empty() && g.back() == '.' && dots < 3) {
+        g.pop_back();
+        ++dots;
+    }
+    // ("Loading" / "Buffering" keep the slot also while they show no dot at all.)
+    const bool animated = so.title.rfind("Loading ", 0) == 0 || so.title.rfind("Buffering", 0) == 0;
+    const float dotSlot =
+        (dots > 0 || animated) ? 3.0f * font.glyphs[static_cast<unsigned char>('.')].advance * k : 0.0f;
+    auto widthOf = [&](const std::vector<unsigned char>& v) {
+        float w = 0.0f;
+        for (unsigned char c : v) w += font.glyphs[c].advance * k;
+        return w;
+    };
+    // At most two lines at full size, broken after a space (or after '.', '_' or '-', which file names
+    // use instead); a word longer than a line is cut where the line ends.
+    std::vector<std::vector<unsigned char>> lines;
+    std::size_t start = 0;
+    const std::size_t n = g.size();
+    while (start < n && lines.size() < 2) {
+        while (start < n && g[start] == ' ') ++start;
+        if (start >= n) break;
+        std::vector<unsigned char> rest(g.begin() + static_cast<long>(start), g.end());
+        if (widthOf(rest) + dotSlot <= maxTextW) {
+            lines.push_back(std::move(rest));
+            start = n;
+            break;
+        }
+        float w = 0.0f;
+        std::size_t end = start, lastBreak = start;
+        for (std::size_t i = start; i < n; ++i) {
+            w += font.glyphs[g[i]].advance * k;
+            if (w > maxTextW) break;
+            end = i + 1;
+            if (g[i] == ' ' || g[i] == '.' || g[i] == '_' || g[i] == '-') lastBreak = i + 1;
+        }
+        std::size_t cut = lastBreak > start ? lastBreak : end;
+        if (cut <= start) cut = start + 1;
+        std::vector<unsigned char> line(g.begin() + static_cast<long>(start), g.begin() + static_cast<long>(cut));
+        while (!line.empty() && line.back() == ' ') line.pop_back();
+        lines.push_back(std::move(line));
+        start = cut;
+    }
+    if (start < n && lines.size() == 2) {
+        // Still more: the second line shows the end of the text instead (an episode number or the end
+        // of a file name sits there), after "...".
+        const std::vector<unsigned char> ell = {'.', '.', '.'};
+        float w = widthOf(ell) + dotSlot;
+        std::size_t from = n;
+        while (from > lines[0].size() && w + font.glyphs[g[from - 1]].advance * k <= maxTextW) {
+            w += font.glyphs[g[from - 1]].advance * k;
+            --from;
+        }
+        std::vector<unsigned char> tail = ell;
+        tail.insert(tail.end(), g.begin() + static_cast<long>(from), g.end());
+        lines[1] = std::move(tail);
+    }
+    if (lines.empty()) lines.emplace_back();
+    const int count = static_cast<int>(lines.size());
+    float boxW = 0.0f;
+    for (int i = 0; i < count; ++i) boxW = std::max(boxW, widthOf(lines[i]) + (i == count - 1 ? dotSlot : 0.0f));
+    boxW = std::min(boxW, maxTextW);
+    // Same top edge with one line or two.
+    const float pillHw = (0.5f * boxW + 0.07f) / ax;
+    const float pillHh = 0.068f + 0.5f * pitch * static_cast<float>(count - 1);
+    const float pillCy = 0.70f - 0.5f * pitch * static_cast<float>(count - 1);
+    const float bg[4] = {0.03f, 0.04f, 0.06f, 0.74f * alpha};
+    // A problem gets an amber rim, a plain title the faint white one.
+    const float rim[4] = {so.warn ? 1.0f : 1.0f, so.warn ? 0.72f : 1.0f, so.warn ? 0.25f : 1.0f,
+                          (so.warn ? 0.80f : 0.16f) * alpha};
+    {
+        const Mat4 mvp = multiply(ortho, scaling(Vec3{ax, 1.0f, 1.0f}));
+        UiPush up{};
+        std::memcpy(up.mvp, mvp.m, sizeof(up.mvp));
+        std::memcpy(up.color, bg, sizeof(up.color));
+        up.params[0] = static_cast<float>(UiShape::RoundedBox);
+        up.params[1] = std::min(1.0f, 0.068f / pillHh);  // the same corner as a one-line pill
+        up.params[2] = (so.warn ? 0.06f : 0.04f) * 0.068f / pillHh;
+        up.params[3] = 0.0f;
+        std::memcpy(up.borderColor, rim, sizeof(up.borderColor));
+        up.rect[0] = 0.0f;
+        up.rect[1] = pillCy;
+        up.rect[2] = pillHw;
+        up.rect[3] = pillHh;
+        vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_GRAPHICS, uiPipelineLayer_);
+        vkCmdPushConstants(commandBuffer_, uiPipelineLayout_, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0,
+                           sizeof(UiPush), &up);
+        vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
+    }
+    const float white[4] = {1.0f, 1.0f, 1.0f, alpha};
+    for (int i = 0; i < count; ++i) {
+        std::vector<unsigned char> shown = lines[i];
+        const bool last = i == count - 1;
+        const float slotW = widthOf(shown) + (last ? dotSlot : 0.0f);
+        if (last) shown.insert(shown.end(), static_cast<std::size_t>(dots), '.');
+        // Each line centred as laid out (with its dot slot); the text starts at the left of that.
+        const float cx = -0.5f * slotW + 0.5f * widthOf(shown);
+        drawCopyText(latin1Utf8(shown), cx, 0.70f - pitch * static_cast<float>(i), textH, maxTextW + 0.2f, white, ax,
+                     ortho, glyphCursor);
+    }
+}
+
 void VulkanRenderer::drawScreenOverlay(int slot, float ax, const math::Mat4& ortho, uint32_t& glyphCursor, int eye,
                                        int stereo) {
     using namespace math;
@@ -5443,22 +5633,7 @@ void VulkanRenderer::drawScreenOverlay(int slot, float ax, const math::Mat4& ort
     };
     // Title pill near the top: series, season / episode and name, or a short message.
     const float a = screenTitleAlpha(slot);
-    if (a > 0.01f) {
-        const float textH = 0.080f;
-        const float maxTextW = 2.6f;  // drawn units (the screen is 3.2 wide)
-        const FontAtlas& font = fontAtlasBold_.ok ? fontAtlasBold_ : fontAtlas_;
-        float textW = 0.0f;
-        if (font.ok && font.lineHeight > 0.0f) {
-            for (unsigned char ch : screenOverlay_[slot].title) textW += font.glyphs[ch].advance * (textH / font.lineHeight);
-        }
-        textW = std::min(textW * ax, maxTextW);
-        const float pillHw = (0.5f * textW + 0.07f) / ax, pillHh = 0.068f;
-        const float bg[4] = {0.03f, 0.04f, 0.06f, 0.74f * a};
-        const float rim[4] = {1.0f, 1.0f, 1.0f, 0.16f * a};
-        shape(0.0f, 0.70f, pillHw, pillHh, UiShape::RoundedBox, bg, 1.0f, 0.04f, rim);
-        const float white[4] = {1.0f, 1.0f, 1.0f, a};
-        drawCopyText(screenOverlay_[slot].title, 0.0f, 0.70f, textH, maxTextW, white, ax, ortho, glyphCursor);
-    }
+    if (a > 0.01f) drawScreenTitlePill(slot, ax, a, ortho, glyphCursor);
     // A picture subtitle (Blu-ray / DVD): drawn where its track puts it. An HD canvas has square pixels
     // and is as wide as the picture, centred on it (a 1920x1080 canvas over a film cropped to 1920x800
     // reaches into the bars); an SD canvas (DVD) covers the frame as the video does. A picture that
@@ -5590,12 +5765,16 @@ void VulkanRenderer::drawScreenOverlay(int slot, float ax, const math::Mat4& ort
         const float rim[4] = {hov ? ac[0] : 1.0f, hov ? ac[1] : 1.0f, hov ? ac[2] : 1.0f, hov ? 1.0f : 0.45f};
         shape(cx / ax, cy, 0.440f / ax, 0.100f, UiShape::RoundedBox, bg, 1.0f, hov ? 0.07f : 0.05f, rim);
         const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-        // The button that does the same without pointing: a tap on the right bumper.
-        const float tagBg[4] = {1.0f, 1.0f, 1.0f, 0.16f};
-        const float tagRim[4] = {1.0f, 1.0f, 1.0f, 0.70f};
-        shape((cx - 0.315f) / ax, cy, 0.082f / ax, 0.056f, UiShape::RoundedBox, tagBg, 0.55f, 0.07f, tagRim);
-        drawCopyText("RB", cx - 0.315f, cy, 0.060f, 0.14f, white, ax, ortho, glyphCursor);
-        drawCopyText(screenOverlay_[slot].skip, cx + 0.070f, cy, 0.082f, 0.60f, white, ax, ortho, glyphCursor);
+        // The button that does the same without pointing: a tap on Next (as bound in SteamVR; no tag
+        // when that is not one plain button).
+        if (!skipTag_.empty()) {
+            const float tagBg[4] = {1.0f, 1.0f, 1.0f, 0.16f};
+            const float tagRim[4] = {1.0f, 1.0f, 1.0f, 0.70f};
+            shape((cx - 0.315f) / ax, cy, 0.082f / ax, 0.056f, UiShape::RoundedBox, tagBg, 0.55f, 0.07f, tagRim);
+            drawCopyText(skipTag_, cx - 0.315f, cy, 0.060f, 0.14f, white, ax, ortho, glyphCursor);
+        }
+        drawCopyText(screenOverlay_[slot].skip, skipTag_.empty() ? cx : cx + 0.070f, cy, 0.082f, 0.60f, white, ax, ortho,
+                     glyphCursor);
     }
     // Previous / next episode arrows at the edges while the laser is on this screen.
     if (screenOverlay_[slot].nav && screenNavSlot_ == slot) {
@@ -6902,7 +7081,6 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     const float rowCur[4] = {themeAccentCol[0] * 0.35f, themeAccentCol[1] * 0.35f,
                                              themeAccentCol[2] * 0.42f, 0.85f};
                     const float rowHov[4] = {1.0f, 1.0f, 1.0f, 0.08f};
-                    const float btnBg[4] = {1.0f, 1.0f, 1.0f, 0.10f};
                     const float btnHov[4] = {1.0f, 1.0f, 1.0f, 0.22f};
                     const float dim[4] = {themeTextCol[0] * 0.72f, themeTextCol[1] * 0.76f, themeTextCol[2] * 0.84f, 0.9f};
                     const float off[4] = {themeTextCol[0], themeTextCol[1], themeTextCol[2], 0.38f};
@@ -6932,14 +7110,23 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     for (int i = 0; i < 5; ++i) {
                         const UiRect b = hub::musicui::button(i);
                         const bool h = hovHere && hov == kMusicShuffle + i;
+                        // One family with the dock: Play filled with the accent and a dark icon, the
+                        // others glass with a faint rim.
                         if (i == 2) {
-                            drawUiElement(mvpUi, b.cx, b.cy, b.hw, b.hh, UiShape::RoundedBox,
-                                          h ? themeAccentCol : btnHov, 1.0f);
+                            const float heroBg[4] = {themeAccentCol[0] * 0.80f, themeAccentCol[1] * 0.80f,
+                                                     themeAccentCol[2] * 0.88f, 0.98f};
+                            const float heroRim[4] = {1.0f, 1.0f, 1.0f, 0.35f};
+                            drawUiElement(mvpUi, b.cx, b.cy, b.hw, b.hh, UiShape::RoundedBox, h ? themeAccentCol : heroBg,
+                                          1.0f, 0.03f, heroRim);
                         } else {
-                            drawUiElement(mvpUi, b.cx, b.cy, b.hw, b.hh, UiShape::RoundedBox, h ? btnHov : btnBg, 1.0f);
+                            drawUiElement(mvpUi, b.cx, b.cy, b.hw, b.hh, UiShape::RoundedBox, h ? btnHov : kGlassControl,
+                                          1.0f, 0.03f, kGlassRimFaint);
                         }
                         const bool lit = (i == 0 && mv.shuffle) || (i == 4 && mv.repeat != 0);
-                        const float* col = (i == 0 || i == 4) ? (lit ? themeAccentCol : off) : themeTextCol;
+                        const float darkIcon[4] = {0.04f, 0.07f, 0.12f, 0.98f};
+                        const float* col = (i == 0 || i == 4) ? (lit ? themeAccentCol : off)
+                                         : (i == 2)           ? darkIcon
+                                                              : themeTextCol;
                         const float k = (i == 2) ? 0.42f : 0.48f;
                         UiShape icon = UiShape::Shuffle;
                         if (i == 1) icon = UiShape::SkipBack;
@@ -6961,10 +7148,11 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         drawFit(hub::musicui::kPanel.cx - hub::musicui::kPanel.hw + 0.06f, hub::musicui::kHeaderY, 0.6f, 0.058f / lh,
                                 themeTextCol, "Queue");
                     });
-                    drawFitCentered(hub::musicui::kInfoCx, hub::musicui::kArtistY, infoW, 0.056f / lh, themeTextCol, mv.artist);
-                    drawFitCentered(hub::musicui::kInfoCx, hub::musicui::kAlbumY, infoW, 0.046f / lh, dim, mv.album);
+                    // (Sizes near the subtitles' 0.088: readable from the couch and on a wall of screens.)
+                    drawFitCentered(hub::musicui::kInfoCx, hub::musicui::kArtistY, infoW, 0.064f / lh, themeTextCol, mv.artist);
+                    drawFitCentered(hub::musicui::kInfoCx, hub::musicui::kAlbumY, infoW, 0.056f / lh, dim, mv.album);
                     {
-                        const float sc = 0.040f / lh;
+                        const float sc = 0.048f / lh;
                         const float w = measureString(sc, mv.queueInfo);
                         drawFit(hub::musicui::kPanel.cx + hub::musicui::kPanel.hw - 0.06f - w, hub::musicui::kHeaderY, 0.9f, sc, dim,
                                 mv.queueInfo);
@@ -6978,15 +7166,15 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         const MusicView::Row& row = mv.rows[static_cast<size_t>(i)];
                         const float left = r.cx - r.hw + 0.11f;
                         if (!row.current) {
-                            drawFitCentered(r.cx - r.hw + 0.055f, r.cy, 0.08f, 0.036f / lh, dim,
+                            drawFitCentered(r.cx - r.hw + 0.055f, r.cy, 0.08f, 0.044f / lh, dim,
                                             std::to_string(mv.first + i + 1));
                         }
-                        const float durSc = 0.038f / lh;
+                        const float durSc = 0.048f / lh;
                         const float durW = measureString(durSc, row.duration);
                         const float maxW = 2.0f * r.hw - 0.16f - durW - 0.05f;
-                        drawFit(left, r.cy + (row.artist.empty() ? 0.0f : 0.022f), maxW, 0.047f / lh,
+                        drawFit(left, r.cy + (row.artist.empty() ? 0.0f : 0.026f), maxW, 0.060f / lh,
                                 row.current ? themeAccentCol : themeTextCol, row.title);
-                        if (!row.artist.empty()) drawFit(left, r.cy - 0.030f, maxW, 0.034f / lh, dim, row.artist);
+                        if (!row.artist.empty()) drawFit(left, r.cy - 0.036f, maxW, 0.044f / lh, dim, row.artist);
                         drawFit(r.cx + r.hw - 0.03f - durW, r.cy, durW + 0.01f, durSc, dim, row.duration);
                     }
                     flushText();
@@ -7204,10 +7392,17 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     themeAccentCol[2] * 0.88f, 0.98f};
                 const float heroBgHover[4] = {
                     themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 1.0f};
+                // Waiting for data (a stalled stream): the glow pulses until frames come again.
+                float stallPulse = 0.0f;
+                if (transportStalled_) {
+                    const double t = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+                    stallPulse = 0.5f + 0.5f * static_cast<float>(std::sin(t * 5.0));
+                }
                 const float heroGlow[4] = {
                     themeAccentCol[0], themeAccentCol[1], themeAccentCol[2],
-                    hovered ? 0.50f : 0.32f};
-                drawGlow(vpPanel, r.cx, r.cy, r.hw, r.hh, hovered ? 0.022f : 0.016f, heroGlow);
+                    transportStalled_ ? 0.20f + 0.50f * stallPulse : (hovered ? 0.50f : 0.32f)};
+                drawGlow(vpPanel, r.cx, r.cy, r.hw, r.hh,
+                         transportStalled_ ? 0.016f + 0.020f * stallPulse : (hovered ? 0.022f : 0.016f), heroGlow);
                 const float heroRim[4] = {1.0f, 1.0f, 1.0f, 0.35f};
                 drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh,
                               UiShape::RoundedBox, hovered ? heroBgHover : heroBgNormal,
@@ -7280,6 +7475,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 else if (cb == CtrlButton::ScreenLayout) iconShape = UiShape::Layout;
                 else if (cb == CtrlButton::ScreenClose) iconShape = UiShape::Close;
                 const float iconK = is_screen_row_button(b) ? 0.64f : 0.42f;
+                // The seek buttons carry their step ("10") under the icon: the icon moves up a little.
+                if (cb == CtrlButton::SeekBack || cb == CtrlButton::SeekFwd) r.cy += 0.009f;
                 const float framesOffCol[4] = {themeTextCol[0], themeTextCol[1], themeTextCol[2], 0.38f};
                 const float* iconCol = (cb == CtrlButton::ScreenAudioFollow && audioFollow_) ? themeAccentCol
                                      : (cb == CtrlButton::ScreenAudioFollow) ? framesOffCol
@@ -7294,23 +7491,13 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         const float trackHalfW = 0.56f;
         const float trackHalfH = 0.009f;
         const float trackY = kBarY + 0.150f;  // centred in the groove, same as the hit test
-        // Brighter with chapters, so the dark gaps between them stand out.
-        const bool chapterTrack = !transportChapters_.empty() && transportLive_ == 0;
-        const float trackBg[4] = {chapterTrack ? 0.38f : 0.16f, chapterTrack ? 0.42f : 0.19f,
-                                  chapterTrack ? 0.50f : 0.25f, 0.95f};
+        // One colour with or without chapters (a brightened track turned dense chapters into a
+        // barcode); no ruler ticks (they meant neither minutes nor chapters).
+        const float trackBg[4] = {0.16f, 0.19f, 0.25f, 0.95f};
         const float thumbCol[4] = {0.95f, 0.97f, 1.0f, 1.0f};
-        const float tickCol[4] = {0.45f, 0.52f, 0.62f, 0.45f};
 
         drawUiElement(vpPanel, 0.0f, trackY, trackHalfW, trackHalfH,
                       UiShape::RoundedBox, trackBg, 1.0f);
-
-        // Subtle timeline ruler ticks below track
-        for (int t = 0; t <= 16; ++t) {
-            const float tx = -trackHalfW + (2.0f * trackHalfW * static_cast<float>(t)) / 16.0f;
-            const float th = (t % 4 == 0) ? 0.006f : 0.0035f;
-            drawUiElement(vpPanel, tx, trackY - 0.022f, 0.0015f, th,
-                          UiShape::RoundedBox, tickCol, 0.0f);
-        }
 
         const float p = std::clamp(transportProgress_, 0.0f, 1.0f);
         if (p > 0.002f) {
@@ -7333,11 +7520,15 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             return c;
         };
         if (chaptersOn) {
+            // Thin marks; one closer than 1.2 cm to the last drawn is left out (dense chapters).
             const float gapCol[4] = {0.02f, 0.025f, 0.04f, 1.0f};
+            float lastX = -1e9f;
             for (const Chapter& ch : transportChapters_) {
                 if (ch.start <= 0.5 || ch.start >= transportDuration_ - 0.5) continue;
                 const float cx = -trackHalfW + 2.0f * trackHalfW * static_cast<float>(ch.start / transportDuration_);
-                drawUiElement(vpPanel, cx, trackY, 0.0022f, trackHalfH * 1.5f, UiShape::RoundedBox, gapCol, 0.0f);
+                if (cx - lastX < 0.012f) continue;
+                lastX = cx;
+                drawUiElement(vpPanel, cx, trackY, 0.0012f, trackHalfH * 1.5f, UiShape::RoundedBox, gapCol, 0.0f);
             }
         }
         // Plugin heat (e.g. funscript intensity) as a small graph just above the track: one rounded
@@ -7513,19 +7704,40 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 rowTipHw = std::max(rowTipHw, 0.5f * measureString(tipSc, rowTipText) + 0.022f);
             }
         }
+        // Every other button (and the time readout) says what a click does: round buttons right above
+        // themselves, the flank pills just above the dock (right above them sits the next row).
+        std::string dockTip;
+        float dockTipX = 0.0f, dockTipY = 0.0f, dockTipHw = 0.068f;
+        if (!rowTip) {
+            const bool timeTip = pointerOnTimeToggle_ && transportLive_ == 0 && transportDuration_ > 0.0;
+            if (timeTip) dockTip = timeShowRemaining_ ? "Show total time" : "Show time left";
+            else if (pointerButton_ >= 0) dockTip = dockTooltip(pointerButton_);
+            if (!dockTip.empty()) {
+                const CtrlButtonRect rT = timeTip ? CtrlButtonRect{0.70f, kBarY + 0.150f, 0.115f, 0.040f}
+                                                  : get_ctrl_button_rect(pointerButton_);
+                if (textReady_) {
+                    const float tipScD = (0.029f * tScale) / fontAtlas_.lineHeight * 0.90f;
+                    dockTipHw = std::max(0.052f, 0.5f * measureString(tipScD, dockTip) + 0.022f);
+                }
+                const bool above = timeTip || rT.hw > rT.hh * 1.5f;
+                const bool hintUp = dockHintAlpha_ > 0.005f && !dockHintText_.empty();
+                dockTipX = std::clamp(rT.cx, -kDockHalfW + dockTipHw + 0.01f, kDockHalfW - dockTipHw - 0.01f);
+                dockTipY = above ? kBarY + kDockHalfH + 0.040f + (hintUp ? 0.062f : 0.0f) : rT.cy + 0.075f;
+            }
+            // The time readout is clickable: it lights up like a button under the laser.
+            if (pointerOnTimeToggle_ && transportDuration_ > 0.0) {
+                drawUiElement(vpPanel, 0.70f, kBarY + 0.150f, 0.115f, 0.036f, UiShape::RoundedBox, btnBgHover, 1.0f,
+                              0.03f, btnBorderHover);
+            }
+        }
         if (rowTip) {
             const CtrlButtonRect rT = get_ctrl_button_rect(pointerButton_);
             const float tipCx = std::clamp(rT.cx, -kDockHalfW + rowTipHw + 0.01f, kDockHalfW - rowTipHw - 0.01f);
             drawUiElement(vpPanel, tipCx, rT.cy + 0.080f, rowTipHw, 0.026f,
                           UiShape::RoundedBox, glassControlT.data(), 1.0f, 0.06f, kGlassRim);
-        } else if (pointerButton_ == static_cast<int>(CtrlButton::HideHud)) {
-            const CtrlButtonRect rH = get_ctrl_button_rect(static_cast<int>(CtrlButton::HideHud));
-            drawUiElement(vpPanel, rH.cx, rH.cy + 0.075f, 0.068f, 0.024f,
-                          UiShape::RoundedBox, glassControlT.data(), 1.0f, 0.06f, kGlassRim);
-        } else if (pointerButton_ == static_cast<int>(CtrlButton::Stop)) {
-            const CtrlButtonRect rSt = get_ctrl_button_rect(static_cast<int>(CtrlButton::Stop));
-            drawUiElement(vpPanel, rSt.cx, rSt.cy + 0.075f, 0.052f, 0.024f,
-                          UiShape::RoundedBox, glassControlT.data(), 1.0f, 0.06f, kGlassRim);
+        } else if (!dockTip.empty()) {
+            drawUiElement(vpPanel, dockTipX, dockTipY, dockTipHw, 0.024f, UiShape::RoundedBox, glassControlT.data(), 1.0f,
+                          0.06f, kGlassRim);
         }
 
         // Return hint: a glass pill 1.4 cm above the dock's top edge (centre
@@ -7582,7 +7794,10 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     const std::string rightStr = timeShowRemaining_
                         ? "-" + format_time(transportDuration_ - transportElapsed_)
                         : format_time(transportDuration_);
-                    drawFit(trackHalfW + 0.026f, trackY, 0.25f, timeSc, themeAccentCol, rightStr);
+                    // Plain text colour: the accent stays for the played bar and LIVE.
+                    const float rightCol[4] = {themeTextCol[0], themeTextCol[1], themeTextCol[2],
+                                               pointerOnTimeToggle_ ? 1.0f : 0.80f};
+                    drawFit(trackHalfW + 0.026f, trackY, 0.25f, timeSc, rightCol, rightStr);
                 }
 
                 if (pointerOnTimeline_) {
@@ -7601,14 +7816,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         drawFitCentered(bubbleX, bubbleY - 0.018f, 2.0f * bubbleHw - 0.03f, tipSc * 0.9f,
                                         themeAccentCol, hoverChapter);
                     }
-                } else if (chaptersOn) {
-                    // The chapter playing now, above the timeline.
-                    if (const Chapter* c = chapterAt(transportElapsed_); c && !c->title.empty()) {
-                        const float chapCol[4] = {themeTextCol[0] * 0.80f, themeTextCol[1] * 0.85f,
-                                                  themeTextCol[2] * 0.95f, 0.92f};
-                        drawFitCentered(0.0f, trackY + 0.042f, 2.0f * trackHalfW, pillSc, chapCol, c->title);
-                    }
                 }
+                // (No always-on chapter line above the track: it sat on the groove's rim and mostly
+                // read "Chapter 12". The hovered chapter's name is in the scrub bubble.)
             }
 
             if (dockHintAlpha_ > 0.005f && hintHw > 0.0f) {
@@ -7622,14 +7832,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
 
             // Left flank pills: HUB and RECENTER
             const CtrlButtonRect rHub = get_ctrl_button_rect(static_cast<int>(CtrlButton::Files));
-            drawFitCentered(rHub.cx + 0.012f, rHub.cy, rHub.hw * 1.6f, pillSc, themeTextCol, "Hub");
-            {
-                const CtrlButtonRect rV = get_ctrl_button_rect(static_cast<int>(CtrlButton::Volume));
-                char vol[16];
-                std::snprintf(vol, sizeof(vol), "%d%%", static_cast<int>(std::lround(volumeDisplay_ * 100.0f)));
-                drawFitCentered(rV.cx - 0.070f, rV.cy, 0.10f, pillSc, volumeMuted_ ? pillDisabledCol : themeTextCol,
-                                volumeMuted_ ? "Muted" : vol);
-            }
+            // (The same name as the Menu button's label.)
+            drawFitCentered(rHub.cx + 0.012f, rHub.cy, rHub.hw * 1.6f, pillSc, themeTextCol, "Main Menu");
+            // VOLUME: the bar fills the pill right of the speaker; the percentage is its tooltip.
 
             // Right flank pills: projection / format, audio, screen
             const CtrlButtonRect rF = get_ctrl_button_rect(static_cast<int>(CtrlButton::FormatToggle));
@@ -7656,13 +7861,16 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const float tipCx = std::clamp(rT.cx, -kDockHalfW + rowTipHw + 0.01f, kDockHalfW - rowTipHw - 0.01f);
                 drawFitCentered(tipCx, rT.cy + 0.080f, 2.0f * rowTipHw - 0.02f, pillSc * 0.90f, themeTextCol,
                                 rowTipText);
-            } else if (pointerButton_ == static_cast<int>(CtrlButton::HideHud)) {
-                const CtrlButtonRect rH = get_ctrl_button_rect(static_cast<int>(CtrlButton::HideHud));
-                drawFitCentered(rH.cx, rH.cy + 0.075f, 0.12f, pillSc * 0.90f, themeTextCol, "Hide UI");
-            } else if (pointerButton_ == static_cast<int>(CtrlButton::Stop)) {
-                const CtrlButtonRect rSt = get_ctrl_button_rect(static_cast<int>(CtrlButton::Stop));
-                drawFitCentered(rSt.cx, rSt.cy + 0.075f, 0.09f, pillSc * 0.90f, themeTextCol, "Stop");
+            } else if (!dockTip.empty()) {
+                drawFitCentered(dockTipX, dockTipY, 2.0f * dockTipHw - 0.02f, pillSc * 0.90f, themeTextCol, dockTip);
             }
+            // The seek buttons' step, under their icon.
+            withHeadingFont([&] {
+                for (const CtrlButton sb : {CtrlButton::SeekBack, CtrlButton::SeekFwd}) {
+                    const CtrlButtonRect rk = get_ctrl_button_rect(static_cast<int>(sb));
+                    drawFitCentered(rk.cx, rk.cy - 0.026f, 0.05f, pillSc * 0.72f, themeTextCol, "10");
+                }
+            });
         }
     }
 
@@ -11565,6 +11773,7 @@ void VulkanRenderer::layoutButtonLabels(const XrView* views, uint32_t viewCount)
             eyes[v] = Vec3{views[v].pose.position.x, views[v].pose.position.y, views[v].pose.position.z};
         }
         const Vec3 faceN = normalize(rotate(q, fN));
+        const std::size_t firstDraw = labelDraws_.size();  // this hand's cards (pushed apart below)
         for (Item& it : items) {
             LabelCardDraw dr;
             dr.hand = h;
@@ -11712,6 +11921,33 @@ void VulkanRenderer::layoutButtonLabels(const XrView* views, uint32_t viewCount)
             if (dr.alpha <= 0.001f) continue;
             dr.lines = std::move(it.lines);
             labelDraws_.push_back(std::move(dr));
+        }
+        // Seen end-on (the controller pointing forward, as when aiming at the screen) the stacks fold
+        // onto one another. In the plane the cards face the head in, push overlapping cards apart,
+        // top to bottom and downward, until 4 mm lie between them; each card takes the end of its
+        // line along, so the line still reaches it.
+        {
+            std::vector<std::size_t> order;
+            for (std::size_t i = firstDraw; i < labelDraws_.size(); ++i) order.push_back(i);
+            auto px = [&](std::size_t i) { return dot(labelDraws_[i].centre - o, r); };
+            auto py = [&](std::size_t i) { return dot(labelDraws_[i].centre - o, u); };
+            std::stable_sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) { return py(a) > py(b); });
+            constexpr float kCardGap = 0.004f;
+            for (std::size_t k = 1; k < order.size(); ++k) {
+                LabelCardDraw& c = labelDraws_[order[k]];
+                float drop = 0.0f;
+                for (std::size_t j = 0; j < k; ++j) {
+                    const LabelCardDraw& above = labelDraws_[order[j]];
+                    if (std::fabs(px(order[k]) - px(order[j])) >= c.hw + above.hw + kCardGap) continue;
+                    const float highest = py(order[j]) - above.hh - kCardGap - c.hh;  // its centre at most here
+                    drop = std::max(drop, py(order[k]) - highest);
+                }
+                if (drop > 0.0f) {
+                    c.centre = c.centre - u * drop;
+                    c.edge = c.edge - u * drop;
+                    c.leader = length(c.tip - c.edge) > 0.006f;
+                }
+            }
         }
     }
 }
@@ -14208,6 +14444,25 @@ void VulkanRenderer::updateVideoTexture(int width, int height, const uint8_t* y,
     ++frameSerial_[slot];
 }
 
+std::string VulkanRenderer::dockTooltip(int button) const {
+    switch (static_cast<CtrlButton>(button)) {
+        case CtrlButton::SeekBack: return "Back 10 s";
+        case CtrlButton::SeekFwd: return "Forward 10 s";
+        case CtrlButton::Stop: return "Stop";
+        case CtrlButton::HideHud: return "Hide UI";
+        case CtrlButton::FormatToggle: return hudTipFormat_;
+        case CtrlButton::AudioToggle: return hudTipAudio_;
+        case CtrlButton::ScreenToggle: return hudTipScreen_;
+        case CtrlButton::Volume: {
+            if (volumeMuted_) return "Muted: click the speaker to unmute";
+            char vol[32];
+            std::snprintf(vol, sizeof(vol), "Volume %d %%", static_cast<int>(std::lround(volumeDisplay_ * 100.0f)));
+            return vol;
+        }
+        default: return std::string();
+    }
+}
+
 float VulkanRenderer::volumeLevelAtPointer(bool drag) const {
     if (!pointerActive_ || !pointerOnPanel_) return -1.0f;
     float x0 = 0.0f, x1 = 0.0f;
@@ -14215,9 +14470,11 @@ float VulkanRenderer::volumeLevelAtPointer(bool drag) const {
     const float x = pointerPanel_[0];
     if (!drag) {
         if (pointerButton_ != static_cast<int>(CtrlButton::Volume)) return -1.0f;
-        if (x < x0 - 0.014f) return -1.0f;  // the speaker icon side: mute
+        if (x < volume_mute_edge()) return -1.0f;  // the speaker icon: mute
     }
-    return std::clamp((x - x0) / std::max(x1 - x0, 1e-4f), 0.0f, 1.0f);
+    // In 5 % steps, like the D-pad.
+    const float v = std::clamp((x - x0) / std::max(x1 - x0, 1e-4f), 0.0f, 1.0f);
+    return std::round(v * 20.0f) / 20.0f;
 }
 
 // Colour picker page: the control under the laser, and where the laser is on the panel (a dragged

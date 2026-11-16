@@ -42,6 +42,10 @@ struct ButtonLabelState {
     // the shifted meanings.
     bool previousHeld = false;
     bool nextHeld = false;
+    // Watching a video: what a tap on Previous / Next does right now ("Skip Intro", "Next Episode",
+    // "Next Video"; empty = nothing). Shown above the bumper's hold meaning.
+    std::string previousTap;
+    std::string nextTap;
 };
 
 // The text for `a` in this state; empty when the action does nothing there.

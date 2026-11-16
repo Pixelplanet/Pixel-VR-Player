@@ -270,7 +270,7 @@ public:
         int repeat = 0;  // 0 off, 1 all, 2 one
         bool paused = false;
     };
-    static constexpr int kMusicRows = 10;
+    static constexpr int kMusicRows = 9;  // (taller rows for readable text: one fewer)
     // musicHover() ids besides queue indices (0..count-1).
     enum MusicHit { kMusicNone = -1, kMusicShuffle = 100000, kMusicPrev, kMusicPlay, kMusicNext, kMusicRepeat,
                     kMusicList };
@@ -856,7 +856,27 @@ public:
     // On-screen messages and episode navigation, drawn into the screen layer itself (no
     // head-locked floating text): a title pill at the top that fades after `seconds`, and
     // previous / next arrows at the screen's edges while the laser is on an episode screen.
-    void setScreenTitle(int slot, const std::string& text, float seconds);
+    // `warn`: a problem (it can't play, skipped, software decoding): an amber rim instead of the plain one.
+    // The pill wraps a long text at words to two lines instead of shrinking it.
+    void setScreenTitle(int slot, const std::string& text, float seconds, bool warn = false);
+    // The button the skip pill names ("RB", "A", ...; empty: no tag).
+    void setSkipTag(const std::string& tag) { skipTag_ = tag; }
+    // The selected screen is waiting for data: the dock's Play button pulses.
+    void setTransportStalled(bool stalled) { transportStalled_ = stalled; }
+    // Hover tooltips for the three right-hand dock pills (what a click does).
+    void setHudTips(const std::string& format, const std::string& audio, const std::string& screen) {
+        hudTipFormat_ = format;
+        hudTipAudio_ = audio;
+        hudTipScreen_ = screen;
+    }
+    // What the laser is on in the dock, for keeping it up while aimed at: -2 = not the dock, -1 = its
+    // plate, a CtrlButton, 100 + a twentieth of the timeline, or 200 = the time readout.
+    int dockHoverKey() const {
+        if (!pointerActive_ || !pointerOnDock_) return -2;
+        if (pointerOnTimeline_) return 100 + static_cast<int>(pointerScrub_ * 20.0f);
+        if (pointerOnTimeToggle_) return 200;
+        return pointerButton_;
+    }
     // Letterbox bars to leave out (share of the picture height at the top and at the bottom each, per
     // eye view). Applied to flat screens shown as compositor layers: the layer shows only the picture
     // and the screen takes its shape.
@@ -1454,7 +1474,17 @@ private:
         bool nav = false;  // an episode: previous / next arrows while the laser is on it
         std::string skip;  // "Skip Intro" / "Skip Credits" pill at the lower right (empty: none)
         std::string subs;  // subtitle lines
+        bool warn = false;  // the title is a problem (amber rim), not a plain title
     };
+    std::string skipTag_ = "RB";  // the button named on the skip pill (empty: none)
+    bool transportStalled_ = false;  // the selected screen waits for data (the Play button pulses)
+    bool pointerOnDock_ = false;     // the laser is on the dock (a button, the timeline, the plate)
+    // Hover tooltips of the three right-hand dock pills (format, tracks, screen); empty = none.
+    std::string hudTipFormat_, hudTipAudio_, hudTipScreen_;
+    // The dock tooltip text for a button ("" = none).
+    std::string dockTooltip(int button) const;
+    // The title pill at the top of a screen: wrapped at words to two lines at full size.
+    void drawScreenTitlePill(int slot, float ax, float alpha, const math::Mat4& ortho, uint32_t& glyphCursor);
     int screenSkipSlot_ = -1;  // the screen whose skip pill the laser is on
     ScreenOverlay screenOverlay_[kMaxVideoSlots];
     int screenNavSlot_ = -1;   // the episode screen the laser is on

@@ -548,6 +548,8 @@ void SettingsMenu::refresh() {
         rows_.back().note = kShowNote;
         toggle("Show Controls When Recentering", !silentRecenter_, Action::ToggleSilentRecenter);
         rows_.back().note = kShowNote;
+        // Off: a hand that moves (rolling over in bed) does not bring faded controls back.
+        toggle("Moving a Controller Shows the UI", moveShowsUi_, Action::ToggleMoveShowsUi);
     } else if (section_ == kPluginsSection) {
         title_ = "Settings > Plugins";
         const auto& list = pluginList(plugins_);
@@ -1479,6 +1481,11 @@ SettingsMenu::Action SettingsMenu::activate() {
             saveConfig();
             refresh();
             break;
+        case Action::ToggleMoveShowsUi:
+            moveShowsUi_ = !moveShowsUi_;
+            saveConfig();
+            refresh();
+            break;
         case Action::TogglePauseOnRemoval:
             pauseOnRemoval_ = !pauseOnRemoval_;
             saveConfig();
@@ -2131,6 +2138,7 @@ void SettingsMenu::loadConfig() {
             else if (key == "silent_scrub") silentScrub_ = (val == "1");
             else if (key == "silent_zoom") silentZoom_ = (val == "1");
             else if (key == "silent_recenter") silentRecenter_ = (val == "1");
+            else if (key == "move_shows_ui") moveShowsUi_ = (val == "1");
             else if (key == "keyboard_layout") keyboardLayout_ = std::clamp(std::stoi(val), 0, 4);
             else if (key == "pause_livestreams") pauseLivestreams_ = (val == "1" || val == "true");
             else if (key == "private_browsing") privateBrowsing_ = (val == "1" || val == "true");
@@ -2211,6 +2219,7 @@ void SettingsMenu::saveConfig() const {
             file << "silent_scrub=" << (silentScrub_ ? 1 : 0) << "\n";
             file << "silent_zoom=" << (silentZoom_ ? 1 : 0) << "\n";
             file << "silent_recenter=" << (silentRecenter_ ? 1 : 0) << "\n";
+            file << "move_shows_ui=" << (moveShowsUi_ ? 1 : 0) << "\n";
             file << "keyboard_layout=" << keyboardLayout_ << "\n";
             file << "pause_livestreams=" << (pauseLivestreams_ ? 1 : 0) << "\n";
             file << "private_browsing=" << (privateBrowsing_ ? 1 : 0) << "\n";

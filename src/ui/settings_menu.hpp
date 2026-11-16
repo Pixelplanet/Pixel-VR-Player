@@ -106,6 +106,7 @@ public:
         OpenStore,          // the Install plugins page
         OpenStorePlugin,    // one repository plugin's details
         BackToFilesWeb,     // from Download Folder / List View Columns / Shortcuts
+        ToggleMoveShowsUi,  // moving a controller brings faded player controls back
     };
 
     // How a row's value is presented: the renderer draws a stepped slider for
@@ -340,6 +341,8 @@ public:
     bool silentScrub() const { return silentScrub_; }
     bool silentZoom() const { return silentZoom_; }
     bool silentRecenter() const { return silentRecenter_; }
+    // Moving a controller brings faded player controls back (off: only buttons, stick and trigger do).
+    bool moveShowsUi() const { return moveShowsUi_; }
     // In-app keyboard: 0 = English (QWERTY), 1 = German (QWERTZ).
     int keyboardLayout() const { return keyboardLayout_; }
     int laserSmoothing() const { return laserSmoothing_; }  // 0 Off, 1 Low, 2 Medium, 3 High
@@ -538,6 +541,7 @@ private:
     bool silentScrub_ = false;
     bool silentZoom_ = false;
     bool silentRecenter_ = false;
+    bool moveShowsUi_ = true;
     int keyboardLayout_ = 0;
     int laserSmoothing_ = 2;
     int roomIdx_ = 0;
