@@ -377,6 +377,17 @@ private:
         float letterbox = 0.0f;      // black bars left out (share of the height, top and bottom each)
         bool letterboxPending = false;  // the measurement is still running
         bool formatByHand = false;   // the viewer's remembered choice applies
+        // The videos of the folder this file was opened from, in the file browser's order: a bumper tap
+        // steps to the previous / next one. Memory only; emptied when the screen closes.
+        std::vector<std::string> folderVideos;
+        // Stalled stream: neither a new frame nor a moving clock for a while although it plays.
+        uint64_t stallFrames = 0;
+        double stallPos = -1.0;
+        std::chrono::steady_clock::time_point stallSince{};
+        bool stalled = false;
+        // Music queue: tracks skipped because they can't be played, said once the next one plays.
+        int skippedTracks = 0;
+        std::string skippedNote;
     };
     ScreenState screens_[VulkanRenderer::kMaxVideoSlots];
     int selectedScreen_ = 0;
@@ -496,6 +507,19 @@ private:
     // laser leaves a web screen (no screen push from a slipped hit test).
     OneEuroPose aimFilter_[2];  // laser smoothing per hand (L1)
     bool volumeDragging_ = false;  // trigger held after a click on the volume bar
+    // The dock stays up while the laser rests on it (it fades 3 s after the laser leaves); a laser
+    // resting there untouched lets it go after a while all the same.
+    int dockHoverKey_ = -2;
+    std::chrono::steady_clock::time_point dockHoverSince_{};
+    // Bumper taps on a flat video (no skip pill): previous (-1) / next (+1) episode of a Plex / Jellyfin
+    // show, or the previous / next video of the folder. False when a tap means nothing there.
+    bool stepVideo(int slot, int dir);
+    // What that tap does right now, for the button label ("" = nothing).
+    std::string bumperTapText(int dir);
+    // The skip pill's text for a screen ("Skip Intro" / "Skip Credits"), or "".
+    const char* skipPillLabel(int slot);
+    void noteFolderVideos(int slot, const std::string& path);  // fills ScreenState::folderVideos
+    void updateStalls(std::chrono::steady_clock::time_point now);  // "Buffering..." on a stalled stream
     bool webStickLatched_ = false;
     std::chrono::steady_clock::time_point webStickUntil_{};
     // YouTube / Browser tabs: pick a screen (or use the main one) for `url`;
@@ -539,6 +563,9 @@ private:
     // bumper was not used as a shift meanwhile (held long, a stick moved, the other bumper held).
     bool skipTapDown_ = false;
     bool skipTapSpoiled_ = false;
+    // The left bumper's tap, by the same rules (previous episode / previous video of the folder).
+    bool prevTapDown_ = false;
+    bool prevTapSpoiled_ = false;
     // The right stick's gesture: 0 none, 1 up / down (distance, size, zoom), 2 left / right (scrub).
     // The other direction needs a firm push until the stick is back in the middle.
     int stickAxis_ = 0;

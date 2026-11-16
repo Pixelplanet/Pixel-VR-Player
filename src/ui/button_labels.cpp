@@ -40,7 +40,7 @@ const LabelTexts kLabelTexts[] = {
     {InputAction::Select, "Select", "Select / Drag", nullptr, nullptr, "Type", 0},
     {InputAction::LaserHand, "Laser Hand", "Laser Hand", nullptr, nullptr, nullptr, 0},
     {InputAction::PlayOk, "OK", "Play / Pause", nullptr, nullptr, nullptr, kNeedsMedia},
-    {InputAction::Back, "Back", "Hide Controls", nullptr, "Page Back", "Cancel", kNeedsControls},
+    {InputAction::Back, "Back", "Hide UI", nullptr, "Page Back", "Cancel", kNeedsControls},
     {InputAction::MainMenu, "Close Menu", "Main Menu", nullptr, nullptr, nullptr, 0},
     {InputAction::ToggleUi, nullptr, "Show / Hide UI", nullptr, nullptr, nullptr, 0},
     {InputAction::Options, "Options", nullptr, nullptr, nullptr, nullptr, kMenusNeedOptions},  // Stage 2: playback
@@ -92,6 +92,20 @@ std::string capitalized(std::string s) {
     return s;
 }
 
+// A text with '\n' in it is several lines of the card (the prefix goes on the first one only).
+void pushLabelLines(std::vector<std::string>& lines, const std::string& prefix, const std::string& text) {
+    std::size_t start = 0;
+    bool first = true;
+    while (start <= text.size()) {
+        const std::size_t nl = text.find('\n', start);
+        const std::string part = text.substr(start, nl == std::string::npos ? std::string::npos : nl - start);
+        if (!part.empty()) lines.push_back((first ? prefix : std::string()) + part);
+        first = false;
+        if (nl == std::string::npos) break;
+        start = nl + 1;
+    }
+}
+
 } // namespace
 
 std::string buttonLabelText(InputAction a, const ButtonLabelState& s) {
@@ -108,10 +122,13 @@ std::string buttonLabelText(InputAction a, const ButtonLabelState& s) {
         return t->menus ? t->menus : "";
     }
     if ((t->flags & kNeedsMedia) && !s.mediaOpen) return std::string();
-    // Flat video: a held bumper turns the sticks' up / down into the screen's size.
+    // Flat video: a held bumper turns the sticks' up / down into the screen's size; a tap does what
+    // the app says (skip, previous / next episode or video), on a line of its own above.
     const bool flatVideo = !s.sphere && s.mediaOpen && !s.music && !s.web;
     if (flatVideo && (a == InputAction::Previous || a == InputAction::Next)) {
-        return s.panShift ? "Release: Scrub \xC2\xB7 Distance" : "Hold: Size";
+        if (s.panShift) return "Release: Scrub \xC2\xB7 Distance";
+        const std::string& tap = a == InputAction::Previous ? s.previousTap : s.nextTap;
+        return tap.empty() ? std::string("Hold: Size") : tap + "\nHold: Size";
     }
     if (flatVideo && s.panShift && (a == InputAction::StickRight || a == InputAction::StickLeft)) return "Size";
     if ((t->flags & kNeedsMusic) && !s.music && !(s.sphere && t->sphere)) return std::string();
@@ -125,6 +142,10 @@ std::string buttonLabelText(InputAction a, const ButtonLabelState& s) {
         return "Pan · Tilt";
     }
     if (s.sphere && s.panShift && (a == InputAction::Previous || a == InputAction::Next)) return "Release: Scrub · Zoom";
+    // 360 / 180: a tap on Next still skips an intro / credits while the pill shows.
+    if (s.sphere && s.mediaOpen && !s.music && !s.web && a == InputAction::Next && !s.nextTap.empty() && t->sphere) {
+        return s.nextTap + "\n" + t->sphere;
+    }
     const char* w = (s.sphere && t->sphere) ? t->sphere : t->watching;
     return w ? w : "";
 }
@@ -282,10 +303,10 @@ std::vector<ButtonLabelCard> buildButtonLabelCards(
                     dirCards.push_back(std::move(d));
                     it = dirCards.end() - 1;
                 }
-                it->lines.push_back(l.text);
+                pushLabelLines(it->lines, std::string(), l.text);
                 continue;
             }
-            c.lines.push_back(l.prefix + l.text);
+            pushLabelLines(c.lines, l.prefix, l.text);
         }
         if (!c.lines.empty()) out.push_back(std::move(c));
         for (ButtonLabelCard& d : dirCards) out.push_back(std::move(d));

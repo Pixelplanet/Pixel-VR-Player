@@ -37,6 +37,10 @@ struct ButtonLabelState {
     bool sphere = false;           // 360 / 180 projection
     bool panShift = false;         // a bumper held: 360 / 180 pans and tilts the view, flat video changes size
     bool controlsVisible = false;  // the player controls are shown (Back hides them)
+    // Watching a video: what a tap on Previous / Next does right now ("Skip Intro", "Next Episode",
+    // "Next Video"; empty = nothing). Shown above the bumper's hold meaning.
+    std::string previousTap;
+    std::string nextTap;
 };
 
 // The text for `a` in this state; empty when the action does nothing there.

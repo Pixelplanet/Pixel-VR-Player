@@ -568,6 +568,11 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
     }
     sc.open = false;
     sc.path = path;
+    if (!fromQueue) {
+        noteFolderVideos(slot, path);  // the bumper taps step through them
+        sc.skippedTracks = 0;          // (a queue's skipped tracks belong to that queue)
+        sc.skippedNote.clear();
+    }
     pluginNamePath_[slot].clear();  // re-read the reported name (a vault file may have been renamed)
     const bool privatePath = VaultManager::isPrivatePath(path) || sc.webSuspended;
     if (!sameFile) sc.fingerprint = privatePath ? std::string() : PlaybackMemory::fingerprintOf(path);
@@ -819,17 +824,38 @@ void App::finishLoadMedia(int slot) {
         lastLoadFailed_ = true;
         if (fromQueue) {  // the queue moves on to the next track
             PIXELVR_LOG_WARN("Failed to open %s: %s", path.c_str(), why.c_str());
+            // Said on the music screen once the next track plays (never silently skipped).
+            ++sc.skippedTracks;
+            sc.skippedNote = sc.skippedTracks == 1
+                                 ? "Skipped " + std::filesystem::path(formatName(path)).filename().string() + ": " + why
+                                 : "Skipped " + std::to_string(sc.skippedTracks) + " tracks that can't be played";
             const int next = sc.queue.next(false);
             if (next >= 0 && sc.openQueueTries + 1 < sc.queue.size()) {
                 ++sc.openQueueTries;
                 playQueueTrack(slot, next);
             } else {
                 closeMedia(slot);
+                sc.skippedTracks = 0;
+                sc.skippedNote.clear();
+#ifdef PIXELVR_HAVE_FREETYPE
+                if (why != "cancelled") {  // none of them plays: say so in the file browser
+                    showNotice("None of the tracks here can be played: " + why, true);
+                    if (openScreenCount() == 0) browser_.open();
+                }
+#endif
             }
             return;
         }
+        // (The title the page sent, before the hand-off is undone.)
+        const std::string webTitle = !plexTitles_[slot].empty() ? plexTitles_[slot] : plexPlay.title;
         if (returnFromPlex(slot)) {
             PIXELVR_LOG_WARN("Failed to open %s: %s", path.c_str(), why.c_str());
+            // Back on the page: say why nothing plays.
+            if (why != "cancelled") {
+                renderer_.setScreenTitle(slot, "Can't play " + (webTitle.empty() ? std::string("this") : webTitle) +
+                                                   (why.empty() ? std::string() : ": " + why),
+                                         8.0f, true);
+            }
             return;
         }
         closeMedia(slot);
@@ -845,6 +871,11 @@ void App::finishLoadMedia(int slot) {
     }
     sc.openQueueTries = 0;
     sc.engine.setPaused(startPaused);
+    if (!sc.skippedNote.empty()) {  // tracks of the queue skipped on the way here
+        renderer_.setScreenTitle(slot, sc.skippedNote, 5.0f, true);
+        sc.skippedNote.clear();
+    }
+    sc.skippedTracks = 0;
 
     const bool privatePath = VaultManager::isPrivatePath(path) || sc.webSuspended;
     const PlaybackMemory::Entry* remembered = privatePath ? nullptr : playbackMemory_.find(path, sc.fingerprint);
@@ -1037,9 +1068,10 @@ void App::finishLoadMedia(int slot) {
     // since at 4K+ that means stutter the viewer would otherwise blame on us.
     const std::string blockedBy = sc.engine.hardwareBlockedBy();
     if (!blockedBy.empty() && static_cast<long long>(w) * h >= 3840LL * 2000LL) {
-        const std::string msg = "Software decoding: the hardware decoder is held by " + blockedBy +
-                                " - close that video (Steam overlay / store) or restart Steam";
-        renderer_.setScreenTitle(slot, msg, 12.0f);
+        // (Short enough for the two lines of the title pill.)
+        const std::string msg = "Software decoding: hardware decoder busy (" + blockedBy +
+                                "). Close that video or restart Steam";
+        renderer_.setScreenTitle(slot, msg, 12.0f, true);
         PIXELVR_LOG_WARN("%s", msg.c_str());
     }
     if (isPlex && sc.webSuspended) {
@@ -1082,8 +1114,8 @@ void App::noteAutoSubtitle(int slot, int track) {
         const bool forced = (st.flags & SI::kForced) != 0;
         // Says why subtitles appear, and where to change it.
         renderer_.setScreenTitle(slot,
-                                 "Subtitles: " + languageName(lang) + (forced ? ", foreign-language parts only" : "") +
-                                     "  (preferred subtitles, change in Settings or Tracks)",
+                                 "Subtitles: " + languageName(lang) + (forced ? " (foreign parts only)" : "") +
+                                     ". Preferred in Settings, change in Tracks",
                                  6.0f);
         PIXELVR_LOG_INFO("Subtitles: screen %d track %d picked by the preferred-subtitles setting", slot + 1, track);
         return;
@@ -1428,6 +1460,181 @@ void App::musicNext(int slot) {
 #endif
 }
 
+void App::noteFolderVideos(int slot, const std::string& path) {
+    ScreenState& sc = screens_[slot];
+    // A step to the next video of the list keeps the list.
+    if (std::find(sc.folderVideos.begin(), sc.folderVideos.end(), path) != sc.folderVideos.end()) return;
+    sc.folderVideos.clear();
+    if (path.empty() || isHttpUrl(path) || path == kWebPath || plexLoading_ || sc.webSuspended) return;
+    const auto parentOf = [](const std::string& p) {
+        const std::size_t s = p.find_last_of('/');
+        return s == std::string::npos ? std::string() : p.substr(0, s);
+    };
+    const std::string dir = parentOf(path);
+#ifdef PIXELVR_HAVE_FREETYPE
+    // As the file browser lists the folder (its sort order; network shares and the vault too). Only
+    // rows of the file's own folder count (Bookmarks shows files from everywhere).
+    bool listed = false;
+    for (const Browser::Entry& e : browser_.entries()) listed = listed || e.path == path;
+    if (listed) {
+        for (const Browser::Entry& e : browser_.entries()) {
+            if (e.isDir || e.isBack || !e.isVideo || e.path.empty() || parentOf(e.path) != dir) continue;
+            if (isAudioFile(e.label) || isAudioFile(e.path)) continue;  // videos only
+            sc.folderVideos.push_back(e.path);
+        }
+    }
+#endif
+    // Not on show in the browser: a local folder is read from the disk, in the browser's sort order
+    // (never the vault: its file names on disk say nothing).
+    if (sc.folderVideos.empty() && path[0] == '/' && !VaultManager::isPrivatePath(path)) {
+        struct File {
+            std::string path, name;
+            long long mtime = 0, size = 0;
+        };
+        std::vector<File> files;
+        std::error_code ec;
+        for (const auto& it : std::filesystem::directory_iterator(std::filesystem::path(dir), ec)) {
+            const std::string name = it.path().filename().string();
+            std::error_code fec;
+            if (name.empty() || name[0] == '.' || !it.is_regular_file(fec)) continue;
+            if (!isPlayableFile(name) || isAudioFile(name)) continue;
+            File f{it.path().string(), name};
+            f.size = static_cast<long long>(it.file_size(fec));
+            const auto wt = it.last_write_time(fec);
+            if (!fec) f.mtime = std::chrono::duration_cast<std::chrono::seconds>(wt.time_since_epoch()).count();
+            files.push_back(std::move(f));
+            if (files.size() > 5000) break;
+        }
+#ifdef PIXELVR_HAVE_FREETYPE
+        const int mode = browser_.sortMode();
+#else
+        const int mode = 0;
+#endif
+        std::stable_sort(files.begin(), files.end(), [mode](const File& a, const File& b) {
+            if (mode == 1 && a.mtime != b.mtime) return a.mtime > b.mtime;
+            if (mode == 2 && a.size != b.size) return a.size > b.size;
+            return a.name < b.name;
+        });
+        for (File& f : files) sc.folderVideos.push_back(std::move(f.path));
+    }
+    if (std::find(sc.folderVideos.begin(), sc.folderVideos.end(), path) == sc.folderVideos.end()) sc.folderVideos.clear();
+}
+
+const char* App::skipPillLabel(int slot) {
+#ifdef PIXELVR_HAVE_MEDIA
+    // Skip Intro / Skip Credits: while the part the server marked plays (its last second left out).
+    const ScreenState& es = screens_[slot];
+    const char* skip = "";
+    if (es.open && es.webSuspended && !es.plexAwaitingNext && !es.openAbandoned) {
+        const double pos = es.engine.position();
+        for (const auto& m : es.plexMarkers) {
+            if (pos >= m.start && pos < m.end - 1.0) skip = m.credits ? "Skip Credits" : "Skip Intro";
+        }
+    }
+    return skip;
+#else
+    (void)slot;
+    return "";
+#endif
+}
+
+bool App::stepVideo(int slot, int dir) {
+#ifdef PIXELVR_HAVE_MEDIA
+    if (slot < 0 || slot >= VulkanRenderer::kMaxVideoSlots) return false;
+    ScreenState& sc = screens_[slot];
+    if (!sc.open || sc.opening || sc.web || sc.openAbandoned || sc.engine.audioOnly()) return false;
+    if (slot == selectedScreen_ ? settings_.projectionMode() != 0 : sc.projection != 0) return false;  // flat only
+    const auto now = std::chrono::steady_clock::now();
+    if (sc.webSuspended) {  // a Plex / Jellyfin hand-off: the show's previous / next episode
+        if (!sc.plexEpisode || sc.plexAwaitingNext) return false;
+        const int64_t ms = static_cast<int64_t>(sc.engine.position() * 1000.0);
+        if (dir < 0) webHosts_[slot].plexPrev(ms);
+        else webHosts_[slot].plexNext(ms);
+        sc.plexAwaitingNext = true;
+        sc.plexNavManual = true;
+        sc.plexNextSince = now;
+        renderer_.setScreenTitle(slot, dir < 0 ? "Previous episode..." : "Next episode...", 20.0f);
+        xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.02f, 0.0f, 0.4f);
+        PIXELVR_LOG_INFO("Web play: %s episode asked for on screen %d (bumper)", dir < 0 ? "previous" : "next",
+                         slot + 1);
+        return true;
+    }
+    const auto it = std::find(sc.folderVideos.begin(), sc.folderVideos.end(), sc.path);
+    if (it == sc.folderVideos.end()) return false;
+    const long at = static_cast<long>(it - sc.folderVideos.begin()) + dir;
+    if (at < 0 || at >= static_cast<long>(sc.folderVideos.size())) {
+        // The end of the folder: no wrap-around, just say so.
+        renderer_.setScreenTitle(slot, dir < 0 ? "First video in this folder" : "Last video in this folder", 3.0f);
+        return true;
+    }
+    const std::string target = sc.folderVideos[static_cast<std::size_t>(at)];
+    xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.02f, 0.0f, 0.4f);
+    PIXELVR_LOG_INFO("Bumper: %s video of the folder on screen %d", dir < 0 ? "previous" : "next", slot + 1);
+    loadMedia(target, slot);
+    return true;
+#else
+    (void)slot;
+    (void)dir;
+    return false;
+#endif
+}
+
+std::string App::bumperTapText(int dir) {
+#ifdef PIXELVR_HAVE_MEDIA
+    if (dir > 0) {  // the right bumper's tap skips first (the selected screen, else any with the pill)
+        const char* skip = skipPillLabel(selectedScreen_);
+        for (int s = 0; s < VulkanRenderer::kMaxVideoSlots && skip[0] == '\0'; ++s) skip = skipPillLabel(s);
+        if (skip[0] != '\0') return skip;
+    }
+    const ScreenState& sc = cur();
+    if (!sc.open || sc.opening || sc.web || sc.openAbandoned || sc.engine.audioOnly()) return std::string();
+    if (settings_.projectionMode() != 0) return std::string();  // 360 / 180: the bumpers pan (stepVideo: flat only)
+    if (sc.webSuspended) {
+        if (!sc.plexEpisode || sc.plexAwaitingNext) return std::string();
+        return dir < 0 ? "Previous Episode" : "Next Episode";
+    }
+    const auto it = std::find(sc.folderVideos.begin(), sc.folderVideos.end(), sc.path);
+    if (it == sc.folderVideos.end() || sc.folderVideos.size() < 2) return std::string();
+    return dir < 0 ? "Previous Video" : "Next Video";
+#else
+    (void)dir;
+    return std::string();
+#endif
+}
+
+void App::updateStalls(std::chrono::steady_clock::time_point now) {
+#ifdef PIXELVR_HAVE_MEDIA
+    for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
+        ScreenState& sc = screens_[slot];
+        const bool playing = sc.open && !sc.web && !sc.opening && !sc.openAbandoned && !sc.engine.paused() &&
+                             !sc.engine.eof() && !sc.plexAwaitingNext;
+        const uint64_t frames = playing ? sc.engine.decodedFrames() : 0;
+        const double pos = playing ? sc.engine.position() : -1.0;
+        // Moving on: a new frame (video) or a clock that runs (music has no frames).
+        const bool moving = !playing || frames != sc.stallFrames ||
+                            (sc.engine.audioOnly() && std::fabs(pos - sc.stallPos) > 0.05);
+        if (moving) {
+            sc.stallFrames = frames;
+            sc.stallPos = pos;
+            sc.stallSince = now;
+            sc.stalled = false;
+            continue;
+        }
+        // Waiting for data for over a second and a half: say so, until frames come again.
+        if (now - sc.stallSince > std::chrono::milliseconds(1500)) {
+            if (!sc.stalled) PIXELVR_LOG_INFO("Playback: screen %d is waiting for data", slot + 1);
+            sc.stalled = true;
+            const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - sc.stallSince).count();
+            renderer_.setScreenTitle(slot, "Buffering" + std::string(static_cast<std::size_t>((ms / 400) % 4), '.'),
+                                     1.0f);
+        }
+    }
+    renderer_.setTransportStalled(cur().stalled);
+#else
+    (void)now;
+#endif
+}
+
 void App::updateMusicView(int slot) {
 #ifdef PIXELVR_HAVE_MEDIA
     ScreenState& sc = screens_[slot];
@@ -1540,6 +1747,8 @@ void App::closeMedia(int slot) {
     renderer_.setMusicView(slot, {});
     sc.open = false;
     sc.path.clear();
+    sc.folderVideos.clear();  // (no vault file names stay in memory)
+    sc.stalled = false;
 #ifdef PIXELVR_HAVE_MEDIA
     sc.extraSubs.clear();  // (a vault file's subtitles do not stay in memory)
 #endif
@@ -2183,7 +2392,28 @@ void App::updateButtonLabels(std::chrono::steady_clock::time_point nowT, bool la
     st.sphere = settings_.projectionMode() != 0;
     st.panShift = panShiftLatched_;  // 360 / 180: pan and tilt; flat video: size
     st.controlsVisible = cur().open && !hudDismissed_ && renderer_.controlBarVisible();
+    if (shown && st.context == ButtonLabelState::Context::Watching) {
+        st.previousTap = bumperTapText(-1);
+        st.nextTap = bumperTapText(1);
+    }
     renderer_.setButtonLabels(shown, buildButtonLabelCards(labelSources_, st));
+    // The skip pill names the button whose tap skips (Next, as bound in SteamVR): "RB" until the
+    // bindings are known, nothing when Next has no single plain button.
+    std::string skipTag = "RB";
+    if (labelSourcesRead_ && labelSources_.size() > static_cast<std::size_t>(InputAction::Next)) {
+        skipTag.clear();
+        const std::vector<std::string>& src = labelSources_[static_cast<std::size_t>(InputAction::Next)];
+        int hand = 1;
+        std::string component, detail;
+        if (src.size() == 1 && parseLabelSource(src[0], hand, component, detail) && detail.empty()) {
+            if (component == "bumper") skipTag = hand == 0 ? "LB" : "RB";
+            else if (component == "trigger") skipTag = hand == 0 ? "LT" : "RT";
+            else if (component.compare(0, 7, "button_") == 0 && component.size() == 8) {
+                skipTag = std::string(1, static_cast<char>(std::toupper(static_cast<unsigned char>(component[7]))));
+            }
+        }
+    }
+    renderer_.setSkipTag(skipTag);
 }
 
 void App::openSmbModal(bool isNew, const std::string& smbPath) {
@@ -4199,6 +4429,7 @@ int App::run() {
 #ifdef PIXELVR_HAVE_MEDIA
             pollMediaOpens(now);
             pollSubtitleLookups();
+            updateStalls(now);
             // Feed every open screen's newest frame into its renderer slot. Held
             // dma-buf frames are released when a decoder is about to seek so it
             // can reclaim its V4L2 capture buffers (otherwise it wedges).
@@ -4253,15 +4484,7 @@ int App::run() {
             for (int s = 0; s < VulkanRenderer::kMaxVideoSlots; ++s) {
                 const ScreenState& es = screens_[s];
                 renderer_.setScreenNav(s, es.open && es.webSuspended && es.plexEpisode && !es.plexAwaitingNext);
-                // Skip Intro / Skip Credits: while the part the server marked plays (its last second left out).
-                const char* skip = "";
-                if (es.open && es.webSuspended && !es.plexAwaitingNext && !es.openAbandoned) {
-                    const double pos = es.engine.position();
-                    for (const auto& m : es.plexMarkers) {
-                        if (pos >= m.start && pos < m.end - 1.0) skip = m.credits ? "Skip Credits" : "Skip Intro";
-                    }
-                }
-                renderer_.setScreenSkip(s, skip);
+                renderer_.setScreenSkip(s, skipPillLabel(s));
                 // (A flat screen carries its subtitle in its picture; 360 / 180 floats it below the view centre.)
                 std::string subs;
                 if (es.open && !es.web && !es.openAbandoned) {
@@ -4353,9 +4576,27 @@ int App::run() {
                         // The selected screen first, else any screen showing the pill.
                         bool done = skipPart(selectedScreen_);
                         for (int s = 0; s < VulkanRenderer::kMaxVideoSlots && !done; ++s) done = skipPart(s);
+                        // No skip pill: on to the next episode / the next video of the folder (flat video).
+                        if (!done && !textEntry_.active) done = stepVideo(selectedScreen_, 1);
                         if (done) in.next = false;  // the skip took the tap (no Next track on a music screen too)
                     }
                     skipTapDown_ = false;
+                }
+                // The left bumper's tap, by the same rules: the previous episode / video of the folder.
+                const bool prevBlocked = stickOff || in.nextHeld || browser_.isOpen() || settings_.isOpen() ||
+                                         downloadsWindow_ || actionMenu_.visible || textEntry_.active;
+                if (in.previousHeld) {
+                    if (!prevTapDown_) {
+                        prevTapDown_ = true;
+                        prevTapSpoiled_ = false;
+                    }
+                    if (prevBlocked) prevTapSpoiled_ = true;
+                } else {
+                    if (in.previous && !prevBlocked && !(prevTapDown_ && prevTapSpoiled_) &&
+                        stepVideo(selectedScreen_, -1)) {
+                        in.previous = false;
+                    }
+                    prevTapDown_ = false;
                 }
             }
             if (in.select) {
@@ -4711,7 +4952,7 @@ int App::run() {
                             startPlexPlay(slot, play);
                         } else {
                             PIXELVR_LOG_WARN("Web play: the server did not send \"%s\"", play.title.c_str());
-                            renderer_.setScreenTitle(slot, "The server did not start the video. Try again.", 6.0f);
+                            renderer_.setScreenTitle(slot, "The server did not start the video. Try again.", 6.0f, true);
                             host.plexRelease();
                         }
                     } else {
@@ -5227,8 +5468,14 @@ int App::run() {
                     for (int k = 0; k < 3; ++k) activityAnchorPos_[h][k] = c.position[k];
                     for (int k = 0; k < 4; ++k) activityAnchorOrient_[h][k] = c.orientation[k];
                 } else if (moveDist > 0.06f || rotDiff < 0.985f) {
-                    // Normal threshold: filters micro-tremors from resting hands
-                    activity = true;
+                    // Normal threshold: filters micro-tremors from resting hands.
+                    // Settings > Controls & Input can keep a moved hand from bringing faded controls
+                    // back while watching (rolling over in bed); shown ones stay up while it moves.
+                    const bool engagedNow = (nowT - lastControllerActivity_) < std::chrono::milliseconds(3000);
+                    if (settings_.moveShowsUi() || engagedNow || hubShown || actionMenu_.visible ||
+                        textEntry_.active) {
+                        activity = true;
+                    }
                     for (int k = 0; k < 3; ++k) activityAnchorPos_[h][k] = c.position[k];
                     for (int k = 0; k < 4; ++k) activityAnchorOrient_[h][k] = c.orientation[k];
                 }
@@ -5347,6 +5594,20 @@ int App::run() {
                     hudDismissed_ = false;
                     lastControllerActivity_ = nowT;
                     VaultManager::instance().recordActivity(nowT);
+                }
+            }
+            // Aiming at the dock keeps it up (reading the scrub preview or a chapter, deciding on a
+            // pill): it fades 3 s after the laser leaves it, not under the cursor. A laser that rests on
+            // one spot lets it go after 20 s all the same (a controller lying on the bed must not hold it
+            // up for ever); moving to another button or along the timeline counts afresh.
+            {
+                const int key = renderer_.dockHoverKey();
+                if (key != dockHoverKey_) {
+                    dockHoverKey_ = key;
+                    dockHoverSince_ = nowT;
+                }
+                if (key >= -1 && !hudDismissed_ && nowT - dockHoverSince_ < std::chrono::seconds(20)) {
+                    lastControllerActivity_ = nowT;
                 }
             }
             const bool controllersEngaged =
@@ -7503,30 +7764,47 @@ int App::run() {
                              (settings_.stereoMode() == 1) ? "VR360 SBS" : "VR360";
                 }
 
-                std::string aLabel = "Audio";
+                // The Tracks pill: the audio language and the subtitle state ("ENG \xC2\xB7 Subs GER",
+                // "ENG \xC2\xB7 Subs Off"); "Audio 2" when the track names no language (never the codec).
+                // Nothing to choose: "Tracks" in the disabled colour.
+                std::string aLabel = "Tracks";
                 bool aEnabled = false;
                 if (cur().open && !cur().web && !cur().openAbandoned) {  // only an engine that is this screen's
                     const auto aStreams = cur().engine.audioStreams();
+                    const auto sStreams = cur().engine.subtitleStreams();  // also ones that only explain themselves
                     const int curA = cur().engine.currentAudioStream();
-                    for (const auto& as : aStreams) {
-                        if (as.index == curA) {
-                            std::string l = as.language;
-                            for (char& c : l) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
-                            if (l.empty() || l == "und" || l == "undef" || l == "undefined") {
-                                aLabel = (as.label.empty() || as.label == "und" || as.label == "undef") ? "Default" : as.label;
-                            } else {
-                                // Language codes read best in capitals ("ENG").
-                                aLabel = as.language;
-                                for (char& c : aLabel) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
-                            }
-                            if (aLabel.size() > 8) aLabel = aLabel.substr(0, 8);
-                            aLabel = "Audio: " + aLabel;
+                    const auto upper = [](std::string s) {
+                        for (char& c : s) c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+                        return s.size() > 8 ? s.substr(0, 8) : s;
+                    };
+                    std::string audioPart;
+                    for (std::size_t i = 0; i < aStreams.size(); ++i) {
+                        const auto& as = aStreams[i];
+                        if (as.index != curA) continue;
+                        std::string l = as.language;
+                        for (char& c : l) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                        if (l.empty() || l == "und" || l == "undef" || l == "undefined") {
+                            audioPart = "Audio " + std::to_string(i + 1);
+                        } else {
+                            audioPart = upper(as.language);  // language codes read best in capitals ("ENG")
+                        }
+                        break;
+                    }
+                    if (audioPart.empty()) audioPart = "Audio";
+                    aEnabled = (aStreams.size() > 1) || cur().engine.videoStreams().size() > 1 || !sStreams.empty();
+                    if (!sStreams.empty()) {
+                        std::string subPart = "Subs Off";
+                        const int curS = cur().engine.subtitleStream();
+                        for (const auto& ss : sStreams) {
+                            if (ss.index != curS || curS < 0) continue;
+                            const std::string sl = subtitleTrackLanguage(ss);
+                            subPart = sl.empty() || sl == "und" ? "Subs On" : "Subs " + upper(sl);
                             break;
                         }
+                        aLabel = audioPart + " \xC2\xB7 " + subPart;
+                    } else if (aEnabled) {
+                        aLabel = audioPart.rfind("Audio", 0) == 0 ? audioPart : "Audio: " + audioPart;
                     }
-                    // Only enable audio cycling if there is more than 1 audio stream
-                    const bool haveSubs = !cur().engine.subtitleStreams().empty();  // also ones that only explain themselves
-                    aEnabled = (aStreams.size() > 1) || cur().engine.videoStreams().size() > 1 || haveSubs;
                 }
 
                 std::string sLabel = "Reset Horizon";
@@ -7535,21 +7813,32 @@ int App::run() {
                     const float curv = (selectedScreen_ > 0 || selPl.active) ? selPl.curvature
                                                                             : renderer_.screenCurvature();
                     const int cPct = static_cast<int>(curv * 100.0f + 0.5f);
+                    // One pattern for both states: "Curve: Off" / "Curve: 55 %".
                     if (cPct <= 2) {
-                        sLabel = "Screen: Flat";
+                        sLabel = "Curve: Off";
                     } else {
                         char cbuf[32];
-                        std::snprintf(cbuf, sizeof(cbuf), "Curved %d%%", cPct);
+                        std::snprintf(cbuf, sizeof(cbuf), "Curve: %d %%", cPct);
                         sLabel = cbuf;
                     }
+                }
+                // What a click on each right-hand pill does (their hover tooltips).
+                std::string fTip = "3D Format...", aTip = aEnabled ? "Audio & Subtitles..." : "Only one track",
+                            sTip = "Reset the view";
+                if (settings_.projectionMode() == 0) {
+                    const bool wall = groupedScreen(selectedScreen_) && !arrangement_.flat && arrangement_.order.size() > 1;
+                    sTip = wall ? "Curve on / off" : "More curve (then flat again)";
                 }
 
                 if (cur().web) {  // browser screens: F11 and the keyboard instead
                     fLabel = "Fullscreen";
                     aLabel = "Keyboard";
                     aEnabled = true;
+                    fTip = "Page fullscreen (F11)";
+                    aTip = "Type into the page";
                 }
                 renderer_.setHudLabels(fLabel, aLabel, sLabel, true, aEnabled);
+                renderer_.setHudTips(fTip, aTip, sTip);
                 renderer_.setTransport(controlsUp, progress, paused, elapsed, total);
 #else
                 (void)interacted;
