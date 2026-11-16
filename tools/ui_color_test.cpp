@@ -130,7 +130,7 @@ int main() {
               "they are saved as RGB");
 
         // The picker pages.
-        check(openPicker(m, "UI Accent Theme") && m.colorPickerTarget() == 1 && m.rows().empty(), "the accent row opens its picker");
+        check(openPicker(m, "Accent Color") && m.colorPickerTarget() == 1 && m.rows().empty(), "the accent row opens its picker");
         std::printf("      title: %s | status: %s\n", m.title().c_str(), m.status().c_str());
         float f3[3], h = 0.0f, s2 = 0.0f, v = 0.0f;
         uicolor::toFloat(uicolor::kAccentSwatches[4].rgb, f3);
@@ -150,7 +150,7 @@ int main() {
         check(slurp(conf).find("ui_accent_rgb=" + uicolor::toHex(picked)) != std::string::npos, "Back keeps (saves) the colour");
         std::printf("      row value: %s\n", m.rows()[2].value.c_str());
 
-        check(openPicker(m, "UI Text Color") && m.colorPickerTarget() == 0, "the text row opens its picker");
+        check(openPicker(m, "Text Color") && m.colorPickerTarget() == 0, "the text row opens its picker");
         m.pickerSetHue(2.0f / 3.0f);  // blue
         m.pickerSetSatVal(1.0f, 1.0f);
         check(m.pickerAdjusted() && lum(m.uiTextRgb()) >= uicolor::kMinTextLuminance - 0.006f, "a pure blue text colour is lightened");
