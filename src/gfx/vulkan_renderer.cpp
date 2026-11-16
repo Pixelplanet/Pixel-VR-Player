@@ -9059,8 +9059,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             // the focus): drawn like a hovered one, so it can be found at 2 m; a disabled one gets the
             // full accent rim.
             const float selFull[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 1.0f};
+            auto beamRow = [&](int r) { return r == settingsHovered_ && laserOwnsFocus_; };  // a resting beam highlights nothing
             auto focusRow = [&](int r) {
-                return r == settingsSelected_ && settingsRailFocus_ < 0 && (settingsHovered_ < 0 || !laserOwnsFocus_) &&
+                return r == settingsSelected_ && settingsRailFocus_ < 0 && !beamRow(settingsHovered_) &&
                        colorPickerTarget_ < 0;
             };
 
@@ -9082,7 +9083,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     continue;
                 }
                 const bool focusSel = focusRow(i);
-                const bool hov = ((i == settingsHovered_) || focusSel) && en;
+                const bool hov = (beamRow(i) || focusSel) && en;
                 const bool sel = (i == settingsSelected_);
                 const bool optActive = (row.kind == kOption && row.stepIdx != 0);
                 const float cardR = 0.016f / L.halfH;
@@ -9109,7 +9110,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         }
                         float bx, by, bw, bh;
                         if (dialogButtonRect(r, layoutN, bx, by, bw, bh)) {
-                            const bool bhov = (r == settingsHovered_ || focusRow(r)) && lr.enabled;
+                            const bool bhov = (beamRow(r) || focusRow(r)) && lr.enabled;
                             const bool primary = lr.stepIdx == 1;
                             const float acc[4] = {themeAccentCol[0] * (bhov ? 0.95f : 0.78f), themeAccentCol[1] * (bhov ? 0.95f : 0.78f),
                                                   themeAccentCol[2] * (bhov ? 0.95f : 0.78f), lr.enabled ? 0.96f : 0.40f};
@@ -9121,7 +9122,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                             return;
                         }
                         const bool dragged = (r == settingsDragFrom_);
-                        const bool lhov = (r == settingsHovered_ || focusRow(r)) && lr.enabled && settingsDragFrom_ < 0;
+                        const bool lhov = (beamRow(r) || focusRow(r)) && lr.enabled && settingsDragFrom_ < 0;
                         const bool lineOpt = lr.kind == kOption && lr.stepIdx != 0;  // the option in use (Download Folder)
                         const float lift = dragged ? 0.006f : 0.0f;
                         const float hw = hc.halfW + lift, hh = hc.halfH + lift * 0.5f;
@@ -9330,7 +9331,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 // The control with the button focus (while the laser is on none of them, or the buttons
                 // own the focus): lit like a hovered one, with an accent glow around it.
                 const int pkFocus = ((colorPickerZone_ < 0 || !laserOwnsFocus_) && colorPickerDrag_ < 0) ? colorPickerFocus_ : -1;
-                auto pkLit = [&](int z) { return colorPickerZone_ == z || colorPickerDrag_ == z || pkFocus == z; };
+                const bool pkBeam = laserOwnsFocus_ || colorPickerDrag_ >= 0;  // (a resting beam lights nothing)
+                auto pkLit = [&](int z) { return (pkBeam && colorPickerZone_ == z) || colorPickerDrag_ == z || pkFocus == z; };
                 for (int z : {pkFocus, colorPickerDrag_}) {
                     if (z < 0 || (z == colorPickerDrag_ && colorPickerZone_ == z)) continue;  // (a laser drag shows itself)
                     const UiRect fr = hub::colorPickerZone(z);
@@ -9359,7 +9361,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const int pkIn = uicolor::swatchIndex(pkAccent, uicolor::fromFloat(pkCur));
                 for (int z = 0; z < uicolor::kSwatchCount; ++z) {
                     const UiRect r = hub::colorPickerZone(z);
-                    const bool h = (colorPickerZone_ == z || pkFocus == z) && colorPickerDrag_ < 0;
+                    const bool h = ((pkBeam && colorPickerZone_ == z) || pkFocus == z) && colorPickerDrag_ < 0;
                     drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox,
                                   h ? glassCardHoverT.data() : glassControlT.data(), 1.0f, z == pkIn ? 0.10f : 0.06f,
                                   z == pkIn ? tabActiveBord : (h ? kGlassRim : kGlassRimFaint));
@@ -9370,7 +9372,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 }
                 for (int z : {kColorPickerReset, kColorPickerBack}) {
                     const UiRect r = hub::colorPickerZone(z);
-                    const bool h = (colorPickerZone_ == z || pkFocus == z) && colorPickerDrag_ < 0;
+                    const bool h = ((pkBeam && colorPickerZone_ == z) || pkFocus == z) && colorPickerDrag_ < 0;
                     drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox, h ? tabHovBg : tabNormBg, 1.0f,
                                   0.06f, h ? tabHovBord : tabNormBord);
                 }
@@ -9593,7 +9595,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                                                      0.5f * measureString(valSc, row.value) + 0.022f);
                     const float chipCx = ctrlLeft + 0.010f + chipHalfW;
                     drawFitCentered(chipCx, L.ctrlY, chipHalfW * 2.0f - 0.02f, valSc, valueCol, row.value);
-                    if ((i == settingsHovered_ || focusRow(i)) && en && !isListening(row.value) &&
+                    if ((beamRow(i) || focusRow(i)) && en && !isListening(row.value) &&
                         row.label.rfind("Vault Location", 0) != 0) {
                         // (the vault's unlock combination: the one row that records buttons)
                         drawFit(chipCx + chipHalfW + 0.020f, L.ctrlY, L.cx + kSetCtrlHalfW - (chipCx + chipHalfW + 0.030f),

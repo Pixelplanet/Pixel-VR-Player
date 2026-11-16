@@ -229,6 +229,13 @@ int App::updateHubNav(XrInputState& in, std::chrono::steady_clock::time_point no
     // (sbHover is -1 while the buttons own the focus: a resting beam does not undo D-pad steps).
     if (hubNavZone_ == VR::kNavRail && sbHover >= 0 && sbHover != hubNavHoverSeen_) hubNavId_ = sbHover;
     hubNavHoverSeen_ = sbHover;
+    // Last input wins: a laser that took the focus back and points at the page (not the rail) takes it
+    // out of the rail / header zone too, so A acts where the ring shows. The header zone keeps it while
+    // the laser is on a header button or path part.
+    if (hubNavZone_ != VR::kNavContent && laserFocus_.laserOwns() && sbHover < 0 && renderer_.laserOnPanelTarget() &&
+        !(headerZone && (renderer_.browserPageBtnHovered() >= 0 || renderer_.browserCrumbHovered() >= 0))) {
+        hubNavZone_ = VR::kNavContent;
+    }
 
     auto laserOnHeader = [&]() {  // the laser owns the focus and is on a header button / path part
         return laserFocus_.laserOwns() &&

@@ -2131,7 +2131,9 @@ bool App::settingsButtons(XrInputState& in, std::chrono::steady_clock::time_poin
     if (const int dx = navStepX(in.thumbstickX, nowT)) act = settings_.navLeftRight(dx, changed);
     takeSettingsRailExit();  // Left / Up / Down off the section list: the hub's rail takes the focus
     // A on the section list (unless the laser owns the focus and points at a row: then that row).
-    if (in.togglePlay && settings_.railFocus() && !(laserOwns && renderer_.settingsHovered() >= 0)) {
+    if (in.togglePlay && settings_.railFocus() &&
+        !(laserOwns && (renderer_.settingsHovered() >= 0 || renderer_.settingsCrumbHovered() >= 0 ||
+                        renderer_.settingsPagerHovered() >= 0))) {
         settings_.pressRail();
         xr_.triggerHaptic(hand, 0.02f, 0.0f, 0.4f);
         in.togglePlay = false;
@@ -8051,7 +8053,7 @@ int App::run() {
                     in.select = in.togglePlay = false;
                 }
                 const int hovered = renderer_.settingsHovered();
-                settings_.notePointer(hovered);
+                settings_.notePointer(laserActs ? hovered : -1);  // a resting beam does not take the section list's focus away
                 // A click on a row, or the laser owning the focus on one: the focus is there, not on the
                 // section list (read live: a stick step this frame gave the focus to the buttons).
                 if (hovered >= 0 && (in.select || laserFocus_.laserOwns())) settings_.leaveRail();
