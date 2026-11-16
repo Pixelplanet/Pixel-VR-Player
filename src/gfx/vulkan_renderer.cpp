@@ -389,7 +389,7 @@ constexpr float kFilesSubY[6] = {-0.04f, -0.11f, -0.18f, -0.25f, -0.32f, -0.39f}
 constexpr float kHitPad = 0.004f;  // laser targets are slightly larger than drawn
 
 inline UiRect mainTab(int s) { return {kRailCx, mainTabY(s), kRailItemHalfW, mainTabHalfH()}; }
-inline UiRect mainTabIncogBtn(int s) { return {-0.568f, mainTabY(s), 0.038f, mainTabHalfH() * 0.74f}; }
+inline UiRect mainTabIncogBtn(int s) { return {-0.574f, mainTabY(s), 0.044f, mainTabHalfH() * 0.74f}; }
 // page: 0 = Files, 1 = Downloads, 2 = Settings
 inline UiRect subTab(int page, int sub) {
     if (page == 2) return {kRailCx, subY(kSettingsSubY[sub]), kRailItemHalfW, subHalfH(0.030f)};
@@ -434,8 +434,8 @@ inline UiRect headerButton(int id, bool pick = false) {
     switch (id) {
         case 5: return {-0.292f, kBrowserBtnY, 0.168f, kBrowserBtnHH};  // outline of the sort segments
         case 2: return {0.031f, kBrowserBtnY, 0.135f, kBrowserBtnHH};   // outline of the view segments
-        case 3: return {0.286f, kBrowserBtnY, 0.100f, kBrowserBtnHH};
-        case 6: return {pick ? 0.490f : 0.501f, kBrowserBtnY, 0.095f, kBrowserBtnHH};
+        case 3: return {0.304f, kBrowserBtnY, 0.118f, kBrowserBtnHH};
+        case 6: return {pick ? 0.490f : 0.537f, kBrowserBtnY, 0.095f, kBrowserBtnHH};
         case 7: return {0.735f, kBrowserBtnY, 0.120f, kBrowserBtnHH};   // pick mode: Move / Copy here
         case 8: return {-0.395f, kBrowserBtnY, 0.065f, kBrowserBtnHH};  // pick mode: Cancel
         default: return {0.0f, -10.0f, 0.0f, 0.0f};  // removed buttons (pager, Up)
@@ -6807,6 +6807,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
     const float scBody = tok::kTextBody * tScale / lineH;
     const float scSecondary = tok::kTextSecondary * tScale / lineH;
     const float scCaption = tok::kTextCaption * tScale / lineH;
+    // A label at its step, or one step down to Caption when it does not fit its room (never smaller).
+    auto fitStep = [&](float sc, float maxW, const std::string& s) { return measureString(sc, s) <= maxW ? sc : scCaption; };
     // Text roles from the picked text colour, each with its own contrast guard.
     const auto textSecondaryC = tok::textSecondary(themeTextCol);
     const auto textDisabledC = tok::textDisabled(themeTextCol);
@@ -6849,11 +6851,17 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
     // glow under the laser or the focus. Returns the label colour, dark or light by contrast.
     auto drawPrimary = [&](const Mat4& vp, const UiRect& r, bool hover, bool focus, bool enabled = true,
                            float radiusM = tok::kRadiusPill) -> tok::Rgba {
-        const float k = (hover || focus) && enabled ? 1.0f : tok::kPrimaryRest;
-        const float fill[4] = {themeAccentCol[0] * k, themeAccentCol[1] * k, themeAccentCol[2] * k,
-                               enabled ? 0.98f : 0.40f};
+        if (!enabled) {
+            // Off: the shared disabled look (a faded accent would leave its label hard to read).
+            tok::State st;
+            st.disabled = true;
+            drawControl(vp, r, st, radiusM);
+            return {textDisabledCol[0], textDisabledCol[1], textDisabledCol[2], 1.0f};
+        }
+        const float k = (hover || focus) ? 1.0f : tok::kPrimaryRest;
+        const float fill[4] = {themeAccentCol[0] * k, themeAccentCol[1] * k, themeAccentCol[2] * k, 0.98f};
         tok::Rgba label = tok::labelOnAccent(themeAccentCol);
-        if ((hover || focus) && enabled) {
+        if (hover || focus) {
             const float glow[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], focus ? 0.45f : 0.30f};
             drawGlow(vp, r.cx, r.cy, r.hw, r.hh, tok::kGlowSpread, glow, std::min(1.0f, relM(radiusM, r.hw, r.hh)));
         }
@@ -6861,7 +6869,6 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         const float rim[4] = {focus ? label[0] : 1.0f, focus ? label[1] : 1.0f, focus ? label[2] : 1.0f,
                               focus ? 0.95f : 0.35f};
         drawBox(vp, r.cx, r.cy, r.hw, r.hh, fill, radiusM, focus ? tok::kBorderStrong : tok::kBorderRest, rim);
-        if (!enabled) label[3] = 0.6f;
         return label;
     };
     // A button / row whose colour means something (Delete): its fixed palette, never the accent.
@@ -8450,7 +8457,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     else if (item.isVideo) iconShape = UiShape::Play;
                     const float iconSize = (browserViewMode_ == BrowserViewMode::CompactList) ? 0.020f :
                                            (browserViewMode_ == BrowserViewMode::MiniCards) ? 0.026f : 0.032f;
-                    drawUiElement(vpCard, lay.thumbCx, lay.thumbCy, iconSize, iconSize, iconShape, themeAccentCol);
+                    drawUiElement(vpCard, lay.thumbCx, lay.thumbCy, iconSize, iconSize, iconShape, accentTextCol);
                 }
             }
 
@@ -8635,7 +8642,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     drawFitCentered(okR.cx + 0.014f, okR.cy, okR.hw * 2.0f - 0.05f, scSub, pickOkLabel.data(),
                                     browserPick_.confirmLabel);
                 });
-                drawFitCentered(noR.cx + 0.012f, noR.cy, noR.hw * 2.0f - 0.04f, scSub, themeTextCol, "Cancel");
+                const float noW = noR.hw * 2.0f - 0.04f;
+                drawFitCentered(noR.cx + 0.012f, noR.cy, noW, fitStep(scSub, noW, "Cancel"), themeTextCol, "Cancel");
             } else {
             {
                 // The segment labels: the one in use in the text colour on the accent, the others dimmer.
@@ -8645,16 +8653,19 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const int viewIdx = static_cast<int>(browserViewMode_) % 3;
                 for (int s = 0; s < 3; ++s) {
                     const UiRect sr = hub::headerButton(hub::kSortSegBase + s);
-                    drawFitCentered(sr.cx, sr.cy, sr.hw * 2.0f - 0.008f, scSub,
+                    const float segW = sr.hw * 2.0f - 0.008f;
+                    drawFitCentered(sr.cx, sr.cy, segW, fitStep(scSub, segW, kSortNames[s]),
                                     s == sortIdx ? themeTextCol : slateCol, kSortNames[s]);
                     const UiRect vr = hub::headerButton(hub::kViewSegBase + s);
-                    drawFitCentered(vr.cx, vr.cy, vr.hw * 2.0f - 0.008f, scSub,
+                    const float viewW = vr.hw * 2.0f - 0.008f;
+                    drawFitCentered(vr.cx, vr.cy, viewW, fitStep(scSub, viewW, kViewNames[s]),
                                     s == viewIdx ? themeTextCol : slateCol, kViewNames[s]);
                 }
             }
             const char* qpLabel = browserBookmarked_ ? "Bookmarked" : "Bookmark";
             const UiRect bmR = hub::headerButton(3);
-            drawFitCentered(bmR.cx + 0.014f, bmR.cy, bmR.hw * 2.0f - 0.05f, scSub,
+            const float bmW = bmR.hw * 2.0f - 0.05f;
+            drawFitCentered(bmR.cx + 0.014f, bmR.cy, bmW, fitStep(scSub, bmW, qpLabel),
                             browserBookmarked_ ? accentTextCol : themeTextCol, qpLabel);
             if (browserCanCreateFolder_) {
                 const UiRect nfR = hub::headerButton(6);
@@ -8663,8 +8674,12 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
             // Where the visible cards are in the folder ("13-18 of 500"), at the right end of the row.
             if (!browserReadout_.empty()) {
-                const float rw = measureString(scSub, browserReadout_);
-                drawFit(0.855f - rw, hub::kBrowserBtnY, rw + 0.01f, scSub, slateCol, browserReadout_);
+                const UiRect lastR = hub::headerButton(browserCanCreateFolder_ ? 6 : 3);
+                const float avail = 0.855f - (lastR.cx + lastR.hw + 0.015f);
+                const float rsc = fitStep(scSub, avail, browserReadout_);
+                const std::string shown = truncateString(rsc, avail, browserReadout_);
+                const float rw = measureString(rsc, shown);
+                drawFit(0.855f - rw, hub::kBrowserBtnY, rw + 0.01f, rsc, slateCol, shown);
             }
             }  // not picking
 
@@ -8894,7 +8909,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 drawBox(vpPanel, -0.36f, card.cy, 0.060f, 0.048f, glassWellT.data(), tok::kRadiusS);
                 drawUiElement(vpPanel, -0.36f, card.cy, 0.020f, 0.020f,
                               (state == 1) ? UiShape::Play : UiShape::Download,
-                              (state == 1) ? emeraldCol : themeAccentCol);
+                              (state == 1) ? emeraldCol : accentTextCol);
 
                 // Progress bar track
                 const float barHalfW = 0.5f * (kBarRight - kBarLeft);
@@ -8929,7 +8944,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     const UiShape icon = (b == 1) ? UiShape::Close
                                        : (state == 2 || state == 3) ? UiShape::Repeat
                                        : (downloadJobs_[i].paused ? UiShape::Play : UiShape::Pause);
-                    drawUiElement(vpPanel, r.cx, cy, tok::kIconS, tok::kIconS, icon, themeTextCol);
+                    drawUiElement(vpPanel, r.cx, cy, tok::kIconS, tok::kIconS, icon,
+                                  (b == 1 && bHov) ? tok::kLabelLight.data() : themeTextCol);
                 }
             }
 
@@ -8954,7 +8970,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             drawRailText();
             const char* dlSubLabels[3] = {"All Tasks", "Active Transfers", "Completed"};
             for (int sub = 0; sub < 3; ++sub) {
-                drawFit(-0.84f, hub::subY(hub::kDownloadsSubY[sub]), 0.30f, scSub,
+                drawFit(-0.84f, hub::subY(hub::kDownloadsSubY[sub]), 0.30f, fitStep(scSub, 0.30f, dlSubLabels[sub]),
                         (downloadsFilter_ == sub) ? themeTextCol : slateCol, dlSubLabels[sub]);
             }
 
@@ -9342,12 +9358,14 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         drawUiElement(vpPanel, kx, L.ctrlY, knobR, knobR, UiShape::RoundedBox, knobOn, 1.0f);
                     }
                 } else if (row.kind == kBinding) {
-                    const float chipSc = L.textSc;
+                    // (Dense pages: the chip text one step down so it stays inside the chip.)
+                    const float chipSc = L.ctrlHalfH < 0.025f ? scCaption : L.textSc;
+                    const float chipHalfH = L.ctrlHalfH * 0.92f;
                     const float chipHalfW = std::min(kSetCtrlHalfW - 0.02f,
                                                      0.5f * measureString(chipSc, row.value) + 0.022f);
                     const float chipCx = L.cx - kSetCtrlHalfW + 0.010f + chipHalfW;
                     const bool listening = isListening(row.value);
-                    drawBox(vpPanel, chipCx, L.ctrlY, chipHalfW, L.ctrlHalfH * 0.74f,
+                    drawBox(vpPanel, chipCx, L.ctrlY, chipHalfW, chipHalfH,
                             listening ? chipListenBg : glassControlT.data(), tok::kRadiusS,
                             listening ? tok::kBorderStrong : tok::kBorderRest, listening ? tabActiveBord : kGlassRim);
                 } else if (row.kind == kAction) {
@@ -9446,7 +9464,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             const int effSec = settingsRailPos_;
             const int sCount = vaultUnlocked_ ? 7 : 6;
             for (int sub = 0; sub < sCount; ++sub) {
-                drawFit(-0.84f, hub::subY(setSubY[sub]), 0.30f, scSub,
+                drawFit(-0.84f, hub::subY(setSubY[sub]), 0.30f, fitStep(scSub, 0.30f, setSubLabels[sub]),
                         (effSec == sub || settingsRailFocus_ == sub) ? themeTextCol : slateCol, setSubLabels[sub]);
             }
 
@@ -9557,8 +9575,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         float bx, by, bw, bh;
                         if (dialogButtonRect(r, layoutN, bx, by, bw, bh)) {
                             // On the primary button: dark or light by contrast with the accent (drawPrimary's).
-                            tok::Rgba onAcc = tok::labelOnAccent(themeAccentCol);
-                            if (!lr.enabled) onAcc[3] = 0.6f;
+                            tok::Rgba onAcc = lr.enabled ? tok::labelOnAccent(themeAccentCol)
+                                                         : tok::Rgba{textDisabledCol[0], textDisabledCol[1],
+                                                                     textDisabledCol[2], 1.0f};
                             withHeadingFont([&] {
                                 drawFitCentered(bx, by, bw * 2.0f - 0.03f, scBody,
                                                 lr.stepIdx == 1 ? onAcc.data() : (lr.enabled ? themeTextCol : dimCol), lr.label);
@@ -9634,10 +9653,12 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                                         row.options[static_cast<std::size_t>(sg)]);
                     }
                 } else if (row.kind == kBinding) {
+                    // (The chip's size as drawn in the box pass.)
+                    const float chipSc = L.ctrlHalfH < 0.025f ? scCaption : L.textSc;
                     const float chipHalfW = std::min(kSetCtrlHalfW - 0.02f,
-                                                     0.5f * measureString(valSc, row.value) + 0.022f);
+                                                     0.5f * measureString(chipSc, row.value) + 0.022f);
                     const float chipCx = ctrlLeft + 0.010f + chipHalfW;
-                    drawFitCentered(chipCx, L.ctrlY, chipHalfW * 2.0f - 0.02f, valSc, valueCol, row.value);
+                    drawFitCentered(chipCx, L.ctrlY, chipHalfW * 2.0f - 0.02f, chipSc, valueCol, row.value);
                     if ((beamRow(i) || focusRow(i)) && en && !isListening(row.value) &&
                         row.label.rfind("Vault Location", 0) != 0) {
                         // (the vault's unlock combination: the one row that records buttons)
@@ -9670,10 +9691,12 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const float* pkCur = pkAccent ? themeAccentCol : themeTextCol;
                 const float* pkWarn = tok::kWarning.text.data();
                 // (Large text sizes: a line is shrunk to its room before it would be cut off, but never
-                // below the Caption step.)
-                auto pkFit = [&](float x, float y, float maxW, float sc, const float* col, const std::string& s) {
+                // below the Caption step; only the two note lines may shrink further, so they stay whole.)
+                auto pkFit = [&](float x, float y, float maxW, float sc, const float* col, const std::string& s,
+                                 bool mayShrink = false) {
                     const float w = measureString(sc, s);
-                    drawFit(x, y, maxW, w > maxW ? std::max(std::min(sc, scCaption), sc * maxW / w) : sc, col, s);
+                    const float floorSc = mayShrink ? 0.0f : std::min(sc, scCaption);
+                    drawFit(x, y, maxW, w > maxW ? std::max(floorSc, sc * maxW / w) : sc, col, s);
                 };
                 const UiRect cur = hub::colorPickerCurrent();
                 const float colL = cur.cx - cur.hw;                    // the right column's left edge
@@ -9695,14 +9718,14 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const char* likeWhat = accentLikeDanger ? "Delete" : accentLikeSuccess ? "finished" : "warnings";
                 if (pkAccent && !colorPickerAdjusted_ && (accentLikeDanger || accentLikeSuccess || accentLikeWarning)) {
                     pkFit(colL, hub::kColorPickerNoteY, colW, scDetail, slateCol,
-                          std::string("Close to the color of ") + likeWhat + ":");
+                          std::string("Close to the color of ") + likeWhat + ":", true);
                     pkFit(colL, hub::kColorPickerNoteY - 0.030f, colW, scDetail, slateCol,
-                          "those get a bold rim / mark.");
+                          "those get a bold rim / mark.", true);
                 } else {
                     pkFit(colL, hub::kColorPickerNoteY, colW, scDetail, noteCol,
-                          colorPickerAdjusted_ ? "Too dark here: brightened" : "Very dark colors are brightened");
+                          colorPickerAdjusted_ ? "Too dark here: brightened" : "Very dark colors are brightened", true);
                     pkFit(colL, hub::kColorPickerNoteY - 0.030f, colW, scDetail, noteCol,
-                          pkAccent ? "so highlights stay visible." : "so text stays readable.");
+                          pkAccent ? "so highlights stay visible." : "so text stays readable.", true);
                 }
                 const UiRect rr = hub::colorPickerZone(kColorPickerReset);
                 const UiRect rb = hub::colorPickerZone(kColorPickerBack);
@@ -10708,7 +10731,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             const bool toggledOn = (key.code == hub::kKbShift && keyboardModal_.shift) ||
                                    (key.code == hub::kKbSymbols && keyboardModal_.symbols);
             // The key the stick / D-pad is on (A types it) = focus; the key under the laser = hover
-            // (the laser types it, so it is shown as focus too).
+            // (looks different, so it is clear which key A types).
             const bool focus = static_cast<int>(k) == keyboardModal_.focusKey;
             if (key.code == hub::kKbDone) {
                 drawPrimary(vpPanel, r, hov, focus, true, tok::kRadiusS);  // the key that finishes: the primary
@@ -10726,7 +10749,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             const float capsBg[4] = {themeAccentCol[0] * 0.70f, themeAccentCol[1] * 0.70f, themeAccentCol[2] * 0.78f, 0.98f};
             const bool caps = key.code == hub::kKbShift && keyboardModal_.capsLock;
             tok::State st;
-            st.focus = hov || focus;
+            st.hover = hov;
+            st.focus = focus;
             st.selected = toggledOn && !caps;
             drawControl(vpPanel, r, st, tok::kRadiusS, caps ? capsBg : (special ? keySpecialBg : glassControlT.data()),
                         caps ? capsBg : keyHovBg);
@@ -10819,6 +10843,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             drawString(kbLay.startX, baseline, fieldSc, themeTextCol, kbLay.visibleStr);
         }
 
+        // CAPS sits on an accent fill (capsBg): its label dark or light by contrast.
+        const float capsFill[3] = {themeAccentCol[0] * 0.70f, themeAccentCol[1] * 0.70f, themeAccentCol[2] * 0.78f};
+        const tok::Rgba capsLabel = tok::labelOn(capsFill);
         for (std::size_t k = 0; k < keys.size(); ++k) {
             const hub::KbKey& key = keys[k];
             const UiRect& r = key.r;
@@ -10837,7 +10864,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
             if (label.empty()) continue;
             const bool small = key.code != hub::kKbChar;
+            const bool capsKey = key.code == hub::kKbShift && keyboardModal_.capsLock;
             const float* col = (key.code == hub::kKbDone) ? darkText
+                             : capsKey ? capsLabel.data()
                              : (key.code == hub::kKbSpace ? kbSlateCol : themeTextCol);
             if (key.code == hub::kKbDone) {
                 withHeadingFont([&] {
