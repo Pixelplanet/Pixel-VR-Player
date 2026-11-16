@@ -392,32 +392,46 @@ constexpr float kHeaderY = 0.455f;
 // File browser header, two slim rows: the folder path on top (full width, each
 // level clickable), the buttons below, left-aligned: 5 = sort order,
 // 2 = view mode, 3 = bookmark, 6 = new folder (last: hidden on network shares).
-constexpr float kBrowserPathY = 0.472f;
-constexpr float kBrowserBtnY = 0.418f;
-constexpr float kBrowserBtnHH = 0.021f;
+// Sort and view are three-segment controls: 10..12 = Name / Newest / Largest,
+// 13..15 = Large / Grid / List (5 and 2 are their outlines). A 2 cm gap between
+// the path's hit band and the buttons keeps a shaky laser off the wrong row.
+constexpr float kBrowserPathY = 0.480f;
+constexpr float kBrowserBtnY = 0.414f;
+constexpr float kBrowserBtnHH = 0.026f;  // (bottom edge stays above the divider at 0.385)
+constexpr int kSortSegBase = 10;
+constexpr int kViewSegBase = 13;
 constexpr float kBrowserDividerY = 0.385f;  // under the button row
 constexpr float kBrowserContentTop = 0.372f;
 // List view: column captions sit in their own band between the header buttons and the first row.
 constexpr float kListCaptionY = 0.371f;
 constexpr float kListDividerY = 0.3525f;
-// Captions in front of Sort and View ("Sort by", "View").
 constexpr float kPickDarkText[4] = {0.03f, 0.05f, 0.09f, 1.0f};  // on the accent-filled confirm pill
-constexpr float kBrowserSortCaptionX = -0.455f;
-constexpr float kBrowserViewCaptionX = -0.195f;
-constexpr float kBrowserCaptionMaxW = 0.085f;
 // Close button of the hub: top right corner, above the header rows of every tab.
 inline UiRect closeButton() { return {0.853f, 0.522f, 0.027f, 0.027f}; }
-inline UiRect headerButton(int id) {
+// pick: the Move / Copy bar's layout (Cancel at the left end, next to its text, far from the
+// confirm pill at the right end; New folder between them).
+inline UiRect headerButton(int id, bool pick = false) {
+    if (id >= kSortSegBase && id < kSortSegBase + 3) {
+        return {-0.410f + 0.100f * static_cast<float>(id - kSortSegBase), kBrowserBtnY, 0.050f, kBrowserBtnHH};
+    }
+    if (id >= kViewSegBase && id < kViewSegBase + 3) {
+        return {-0.095f + 0.090f * static_cast<float>(id - kViewSegBase), kBrowserBtnY, 0.045f, kBrowserBtnHH};
+    }
     switch (id) {
-        case 5: return {-0.290f, kBrowserBtnY, 0.075f, kBrowserBtnHH};
-        case 2: return {-0.030f, kBrowserBtnY, 0.075f, kBrowserBtnHH};
-        case 3: return {0.160f, kBrowserBtnY, 0.100f, kBrowserBtnHH};
-        case 6: return {0.375f, kBrowserBtnY, 0.095f, kBrowserBtnHH};
-        case 7: return {0.600f, kBrowserBtnY, 0.115f, kBrowserBtnHH};  // pick mode: Move / Copy here
-        case 8: return {0.790f, kBrowserBtnY, 0.065f, kBrowserBtnHH};  // pick mode: Cancel
+        case 5: return {-0.310f, kBrowserBtnY, 0.150f, kBrowserBtnHH};  // outline of the sort segments
+        case 2: return {-0.005f, kBrowserBtnY, 0.135f, kBrowserBtnHH};  // outline of the view segments
+        case 3: return {0.250f, kBrowserBtnY, 0.100f, kBrowserBtnHH};
+        case 6: return {pick ? 0.490f : 0.465f, kBrowserBtnY, 0.095f, kBrowserBtnHH};
+        case 7: return {0.735f, kBrowserBtnY, 0.120f, kBrowserBtnHH};   // pick mode: Move / Copy here
+        case 8: return {-0.395f, kBrowserBtnY, 0.065f, kBrowserBtnHH};  // pick mode: Cancel
         default: return {0.0f, -10.0f, 0.0f, 0.0f};  // removed buttons (pager, Up)
     }
 }
+// The file list's scrollbar on the right edge: drawn slim, grabbed in a 5 cm band.
+constexpr float kBrowserScrollCx = 0.880f;
+constexpr float kBrowserScrollCy = -0.030f;
+constexpr float kBrowserScrollHalfH = 0.400f;
+inline UiRect browserScrollHit() { return {kBrowserScrollCx, kBrowserScrollCy, 0.024f, kBrowserScrollHalfH + 0.010f}; }
 // Settings header button ("+ Install plugins"): in the pager's place, or left of it when both show.
 inline UiRect settingsHeaderButton(bool withPager) {
     return {withPager ? 0.34f : 0.64f, kHeaderY, 0.13f, 0.028f};
@@ -2391,6 +2405,17 @@ void VulkanRenderer::scrollBrowser(int deltaRows) {
     browserFirst_ = std::clamp(browserFirst_ + deltaRows * rowStep, 0, maxFirst);
 }
 
+int VulkanRenderer::scrollBrowserTo(float frac) {
+    const int total = static_cast<int>(browserItems_.size());
+    const int perPage = hub::cardsPerPage(browserViewMode_);
+    const int rowStep = hub::cardColumns(browserViewMode_);
+    const int maxFirst = std::max(0, ((total + rowStep - 1) / rowStep * rowStep) - perPage);
+    const int maxRow = maxFirst / rowStep;
+    const int row = static_cast<int>(std::lround(std::clamp(frac, 0.0f, 1.0f) * static_cast<float>(maxRow)));
+    browserFirst_ = std::clamp(row * rowStep, 0, maxFirst);
+    return browserFirst_;
+}
+
 void VulkanRenderer::releaseThumbSlot(int i) {
     if (cardThumbs_[i].view != VK_NULL_HANDLE) {
         vkDestroyImageView(device_, cardThumbs_[i].view, nullptr);
@@ -2975,6 +3000,8 @@ void VulkanRenderer::updatePointer() {
     browserHovered_ = -1;
     browserSidebarHovered_ = -1;
     browserPageBtnHovered_ = -1;
+    browserScrollHovered_ = false;
+    browserScrollFracValid_ = false;
     browserCrumbHovered_ = -1;
     settingsCrumbHovered_ = -1;
     hubCloseHovered_ = false;
@@ -3231,6 +3258,10 @@ void VulkanRenderer::updatePointer() {
             hitHere(world.x, world.y, world.z);
             const int page = settingsVisible_ ? 2 : (downloadsVisible_ ? 1 : 0);
             if (settingsVisible_) colorPickerHitTest(hx, hyy);  // (anywhere on the panel: a drag may slide onto the rail)
+            if (browserVisible_) {  // along the file list's scrollbar (anywhere on the panel: a drag goes on)
+                browserScrollFrac_ = (hub::kBrowserScrollCy + hub::kBrowserScrollHalfH - hyy) / (2.0f * hub::kBrowserScrollHalfH);
+                browserScrollFracValid_ = true;
+            }
 
             // Left navigation rail
             if (hx <= kRailRight) {
@@ -3270,7 +3301,13 @@ void VulkanRenderer::updatePointer() {
                 break;
             }
             if (browserVisible_) {
-                if (std::fabs(hyy - hub::kBrowserPathY) <= hub::kBrowserBtnHH + hub::kHitPad) {
+                // The scrollbar (before the cards: its band touches the right column's edge).
+                if (!browserLoading_ && static_cast<int>(browserItems_.size()) > hub::cardsPerPage(browserViewMode_) &&
+                    hub::browserScrollHit().contains(hx, hyy)) {
+                    browserScrollHovered_ = true;
+                    break;
+                }
+                if (std::fabs(hyy - hub::kBrowserPathY) <= 0.020f + hub::kHitPad) {
                     for (const CrumbHit& c : browserCrumbHits_) {
                         if (hx >= c.x0 - 0.006f && hx <= c.x1 + 0.006f) {
                             browserCrumbHovered_ = c.index;
@@ -3279,21 +3316,25 @@ void VulkanRenderer::updatePointer() {
                     }
                     if (browserCrumbHovered_ >= 0) break;
                 }
-                static const int kNormalBtns[] = {2, 3, 5, 6};
+                static const int kNormalBtns[] = {hub::kSortSegBase, hub::kSortSegBase + 1, hub::kSortSegBase + 2,
+                                                  hub::kViewSegBase, hub::kViewSegBase + 1, hub::kViewSegBase + 2, 3, 6};
                 static const int kPickBtns[] = {6, 7, 8};
                 const int* btns = browserPick_.active ? kPickBtns : kNormalBtns;
-                const int nBtns = browserPick_.active ? 3 : 4;
+                const int nBtns = browserPick_.active ? 3 : 8;
                 for (int bi = 0; bi < nBtns; ++bi) {
                     const int id = btns[bi];
                     if (id == 6 && !browserCanCreateFolder_) continue;
-                    if (hub::headerButton(id).contains(hx, hyy, hub::kHitPad)) {
+                    // (Segments touch: no sideways padding between them.)
+                    const UiRect r = hub::headerButton(id, browserPick_.active);
+                    const float padX = (id >= hub::kSortSegBase) ? 0.0f : hub::kHitPad;
+                    if (std::fabs(hx - r.cx) <= r.hw + padX && std::fabs(hyy - r.cy) <= r.hh + hub::kHitPad) {
                         browserPageBtnHovered_ = id;
                         break;
                     }
                 }
                 if (browserPageBtnHovered_ >= 0) break;
 
-                const int total = static_cast<int>(browserItems_.size());
+                const int total = browserLoading_ ? 0 : static_cast<int>(browserItems_.size());
                 const int perPage = hub::cardsPerPage(browserViewMode_);
                 for (int slot = 0; slot < perPage; ++slot) {
                     const hub::CardLayout lay = hub::browserCard(browserViewMode_, slot);
@@ -5985,6 +6026,23 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         }
         return trunc + "...";
     };
+    // Cuts in the middle instead: the last 12 characters (an episode number, the extension) stay,
+    // so the files of one series still look different. Too narrow even for that: cut at the end.
+    auto truncateMiddle = [&](float scale, float maxW, const std::string& str) -> std::string {
+        if (str.empty() || maxW <= 0.0f) return "";
+        if (measureString(scale, str) <= maxW) return str;
+        std::size_t tail = str.size() > 12 ? str.size() - 12 : 0;
+        while (tail < str.size() && (static_cast<unsigned char>(str[tail]) & 0xC0) == 0x80) ++tail;
+        const std::string end = str.substr(tail);
+        if (tail == 0 || measureString(scale, "..." + end) > maxW * 0.7f) return truncateString(scale, maxW, str);
+        std::string head = str.substr(0, tail);
+        while (!head.empty() && measureString(scale, head + "..." + end) > maxW) {
+            while (!head.empty() && (static_cast<unsigned char>(head.back()) & 0xC0) == 0x80) head.pop_back();
+            if (!head.empty()) head.pop_back();
+        }
+        while (!head.empty() && head.back() == ' ') head.pop_back();
+        return head + "..." + end;
+    };
     auto drawFit = [&](float x, float centerY, float maxW, float fixedScale,
                        const float col[4], const std::string& str) {
         if (str.empty()) return;
@@ -7577,7 +7635,8 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         // Page A: FILES (Spatial Media Browser - Multi-Mode)
         // ---------------------------------------------------------------------
         if (browserVisible_) {
-            const int total = static_cast<int>(browserItems_.size());
+            // A folder still opening shows no cards (its placeholder row is not a file), only the message.
+            const int total = browserLoading_ ? 0 : static_cast<int>(browserItems_.size());
             const int first = browserFirst_;
             const int perPage = (browserViewMode_ == BrowserViewMode::BigCards) ? 6 :
                                 (browserViewMode_ == BrowserViewMode::MiniCards ? 12 : 8);
@@ -7617,7 +7676,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
 
             // Header buttons (shared layout with the pointer hit-test)
             auto headerBtn = [&](int id, bool active) {
-                const UiRect r = hub::headerButton(id);
+                const UiRect r = hub::headerButton(id, browserPick_.active);
                 const bool hov = (browserPageBtnHovered_ == id);
                 if (active) {
                     drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh,
@@ -7634,9 +7693,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 // Move / Copy target: a prominent accent-tinted bar behind the row, confirm and cancel pills.
                 const float barCol[4] = {themeAccentCol[0] * 0.28f, themeAccentCol[1] * 0.28f, themeAccentCol[2] * 0.34f, 0.96f};
                 const float barGlow[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.18f};
-                drawGlow(vpPanel, 0.195f, hub::kBrowserBtnY, 0.665f, 0.027f, 0.012f, barGlow);
-                drawUiElement(vpPanel, 0.195f, hub::kBrowserBtnY, 0.665f, 0.027f, UiShape::RoundedBox, barCol, 1.0f,
-                              0.08f, tabActiveBord);
+                drawGlow(vpPanel, 0.195f, hub::kBrowserBtnY, 0.665f, hub::kBrowserBtnHH + 0.005f, 0.012f, barGlow);
+                drawUiElement(vpPanel, 0.195f, hub::kBrowserBtnY, 0.665f, hub::kBrowserBtnHH + 0.005f, UiShape::RoundedBox,
+                              barCol, 1.0f, 0.08f, tabActiveBord);
                 if (browserCanCreateFolder_) {
                     const UiRect r = headerBtn(6, false);
                     drawUiElement(vpPanel, headerIconX(r), r.cy, 0.012f, 0.012f, UiShape::Files, slateIconCol);
@@ -7663,17 +7722,33 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 }
             } else {
             {
-                const UiRect r = headerBtn(2, false);  // view mode
-                drawUiElement(vpPanel, headerIconX(r), r.cy, 0.012f, 0.012f, UiShape::List, slateIconCol);
+                // Sort order and view mode: every choice visible, the one in use accent-filled, one click to any.
+                const int sortIdx = browserSortLabel_ == "Newest" ? 1 : (browserSortLabel_ == "Largest" ? 2 : 0);
+                const int viewIdx = static_cast<int>(browserViewMode_) % 3;
+                for (int outline : {5, 2}) {
+                    const UiRect r = hub::headerButton(outline);
+                    drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox, tabNormBg, 1.0f, 0.06f, tabNormBord);
+                }
+                for (int s = 0; s < 3; ++s) {
+                    for (int base : {hub::kSortSegBase, hub::kViewSegBase}) {
+                        const int id = base + s;
+                        const bool on = s == (base == hub::kSortSegBase ? sortIdx : viewIdx);
+                        const bool hov = browserPageBtnHovered_ == id;
+                        const UiRect r = hub::headerButton(id);
+                        if (on) {
+                            drawUiElement(vpPanel, r.cx, r.cy, r.hw - 0.003f, r.hh - 0.004f, UiShape::RoundedBox,
+                                          tabActiveBg, 1.0f, 0.07f, tabActiveBord);
+                        } else if (hov) {
+                            drawUiElement(vpPanel, r.cx, r.cy, r.hw - 0.003f, r.hh - 0.004f, UiShape::RoundedBox,
+                                          tabHovBg, 1.0f, 0.06f, tabHovBord);
+                        }
+                    }
+                }
             }
             {
                 const UiRect r = headerBtn(3, browserBookmarked_);  // bookmark
                 drawUiElement(vpPanel, headerIconX(r), r.cy, 0.014f, 0.014f, UiShape::Star,
                               browserBookmarked_ ? themeAccentCol : slateIconCol);
-            }
-            {
-                const UiRect r = headerBtn(5, false);  // sort order
-                drawUiElement(vpPanel, headerIconX(r), r.cy, 0.012f, 0.012f, UiShape::Sort, slateIconCol);
             }
             if (browserCanCreateFolder_) {
                 const UiRect r = headerBtn(6, false);  // new folder
@@ -7698,7 +7773,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
 
             for (int i = 0; i < perPage && i < 12; ++i) {
                 const int entryIdx = first + i;
-                const float target = (entryIdx >= 0 && entryIdx < total && entryIdx == browserHovered_) ? 1.0f : 0.0f;
+                // The focused card (laser or buttons, whichever moved last) grows; a card merely under
+                // a resting beam does not.
+                const float target = (entryIdx >= 0 && entryIdx < total && entryIdx == browserSelected_) ? 1.0f : 0.0f;
                 cardHoverAnim_[i] += (target - cardHoverAnim_[i]) * std::clamp(14.0f * dtCard, 0.0f, 1.0f);
             }
             // Hovered card grows 2.5% around its centre (a z-lift does nothing
@@ -7725,14 +7802,16 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const float cardR = 0.016f / std::min(lay.cardHalfW, lay.cardHalfH);
                 const float thumbR = 0.018f / std::min(lay.thumbHalfW, lay.thumbHalfH);
                 const float cardBw = 0.0015f / std::min(lay.cardHalfW, lay.cardHalfH);
-                if (hovered) {
+                // One focus: only the focused card has the accent rim and glow (A / Y act on it). A card
+                // under the laser while the buttons own the focus gets the plain hover fill.
+                if (selected) {
                     drawGlow(vpCard, lay.cx, lay.cy, lay.cardHalfW, lay.cardHalfH, 0.018f,
                              glowCol, cardR * 0.6f);
                     drawUiElement(vpCard, lay.cx, lay.cy, lay.cardHalfW, lay.cardHalfH,
-                                  UiShape::RoundedBox, hovCardBg, cardR, cardBw * 1.6f, tabActiveBord);
-                } else if (selected) {
+                                  UiShape::RoundedBox, hovered ? hovCardBg : selCardBg, cardR, cardBw * 1.6f, tabActiveBord);
+                } else if (hovered) {
                     drawUiElement(vpCard, lay.cx, lay.cy, lay.cardHalfW, lay.cardHalfH,
-                                  UiShape::RoundedBox, selCardBg, cardR, cardBw * 1.3f, tabActiveBord);
+                                  UiShape::RoundedBox, hovCardBg, cardR, cardBw, kGlassRim);
                 } else {
                     drawUiElement(vpCard, lay.cx, lay.cy, lay.cardHalfW, lay.cardHalfH,
                                   UiShape::RoundedBox, normCardBg, cardR, cardBw, normCardBorder);
@@ -7757,7 +7836,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const std::string& thumbKey = !item.previewPath.empty() ? item.previewPath : item.path;
                 if (!cardThumbs_[i].ready || cardThumbs_[i].path != thumbKey) {
                     UiShape iconShape = UiShape::Play;
-                    if (item.isBack) iconShape = UiShape::Chevron;
+                    if (item.isBack) iconShape = UiShape::UpArrow;  // up a level (a chevron read as "go into")
                     else if (item.isDir) iconShape = UiShape::Files;
                     else if (item.isVideo) iconShape = UiShape::Play;
                     const float iconSize = (browserViewMode_ == BrowserViewMode::CompactList) ? 0.020f :
@@ -7815,25 +7894,26 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const auto& item = browserItems_[static_cast<std::size_t>(entryIdx)];
                 const CardLayout lay = getCardLayout(i);
                 const Mat4 vpCard = cardHoverVp(i, lay);
-
+                if (item.isBack) continue;  // the Up card has no badge
+                // (Badges carry what tells similar files apart: sized for 2.2 cm text.)
                 if (browserViewMode_ == BrowserViewMode::BigCards) {
-                    drawUiElement(vpCard, lay.cx - lay.thumbHalfW + 0.062f, lay.thumbCy + lay.thumbHalfH - 0.024f,
-                                  0.056f, 0.018f, UiShape::RoundedBox, badgeBg, 1.0f, 0.06f, badgeRim);
+                    drawUiElement(vpCard, lay.cx - lay.thumbHalfW + 0.066f, lay.thumbCy + lay.thumbHalfH - 0.026f,
+                                  0.060f, 0.020f, UiShape::RoundedBox, badgeBg, 1.0f, 0.06f, badgeRim);
                     if (!item.durationTag.empty()) {
-                        drawUiElement(vpCard, lay.cx + lay.thumbHalfW - 0.050f, lay.thumbCy - lay.thumbHalfH + 0.024f,
-                                      0.044f, 0.017f, UiShape::RoundedBox, badgeBg, 1.0f, 0.06f, badgeRim);
+                        drawUiElement(vpCard, lay.cx + lay.thumbHalfW - 0.054f, lay.thumbCy - lay.thumbHalfH + 0.026f,
+                                      0.048f, 0.020f, UiShape::RoundedBox, badgeBg, 1.0f, 0.06f, badgeRim);
                     }
                 } else if (browserViewMode_ == BrowserViewMode::MiniCards) {
-                    drawUiElement(vpCard, lay.cx - lay.thumbHalfW + 0.046f, lay.thumbCy + lay.thumbHalfH - 0.018f,
-                                  0.042f, 0.014f, UiShape::RoundedBox, badgeBg, 1.0f, 0.07f, badgeRim);
+                    drawUiElement(vpCard, lay.cx - lay.thumbHalfW + 0.052f, lay.thumbCy + lay.thumbHalfH - 0.021f,
+                                  0.048f, 0.017f, UiShape::RoundedBox, badgeBg, 1.0f, 0.07f, badgeRim);
                     if (!item.durationTag.empty()) {
-                        drawUiElement(vpCard, lay.cx + lay.thumbHalfW - 0.038f, lay.thumbCy - lay.thumbHalfH + 0.018f,
-                                      0.034f, 0.014f, UiShape::RoundedBox, badgeBg, 1.0f, 0.07f, badgeRim);
+                        drawUiElement(vpCard, lay.cx + lay.thumbHalfW - 0.044f, lay.thumbCy - lay.thumbHalfH + 0.021f,
+                                      0.040f, 0.017f, UiShape::RoundedBox, badgeBg, 1.0f, 0.07f, badgeRim);
                     }
                 } else { // CompactList
-                    if (listShowFormat_) {
+                    if (listShowFormat_) {  // the accent only as the rim: the text on it stays in the text colour
                         drawUiElement(vpCard, listCols.fmtCx, lay.cy,
-                                      0.055f, 0.016f, UiShape::RoundedBox, listBadgeBg, 1.0f, 0.07f, kGlassRimFaint);
+                                      0.060f, 0.017f, UiShape::RoundedBox, listBadgeBg, 1.0f, 0.07f, tabActiveBord);
                     }
                 }
             }
@@ -7843,7 +7923,44 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
 
             // Right-edge vertical scrollbar
-            drawScrollbar(vpPanel, 0.880f, -0.030f, 0.0035f, 0.400f, first, perPage, total);
+            // (Wider while the laser is on it: it can be grabbed.)
+            drawScrollbar(vpPanel, hub::kBrowserScrollCx, hub::kBrowserScrollCy, browserScrollHovered_ ? 0.006f : 0.0035f,
+                          hub::kBrowserScrollHalfH, first, perPage, total);
+
+            // Footer key caps ("A" Play, "B" Up, ...), right-aligned on the bottom row; their pills here,
+            // the words in the text pass. hintLeft: where the row's left part (status / name) must end.
+            const float hintKeySc = scDetail;
+            const float hintActSc = scSub;
+            struct HintSlot {
+                float keyX, keyW, actX;
+            };
+            std::vector<HintSlot> hintSlots;
+            float hintLeft = 0.855f;
+            if (!browserHints_.empty()) {
+                hintSlots.resize(browserHints_.size());
+                float x = 0.855f;
+                for (std::size_t k = browserHints_.size(); k-- > 0;) {
+                    const float actW = measureString(hintActSc, browserHints_[k].action);
+                    const float keyW = std::max(0.032f, measureString(hintKeySc, browserHints_[k].key) + 0.020f);
+                    x -= actW;
+                    hintSlots[k].actX = x;
+                    x -= 0.010f + keyW;
+                    hintSlots[k].keyX = x;
+                    hintSlots[k].keyW = keyW;
+                    x -= 0.030f;
+                }
+                hintLeft = x;
+            }
+            // A notice too long for the row's left part takes the whole row (the hint steps aside).
+            const bool hintsHidden = hintSlots.empty() ||
+                                     (!browserNotice_.empty() && measureString(scDetail, browserNotice_) > hintLeft + 0.43f);
+            if (hintsHidden) hintLeft = 0.855f;
+            if (!hintsHidden) {
+                for (const HintSlot& hs : hintSlots) {
+                    drawUiElement(vpPanel, hs.keyX + hs.keyW * 0.5f, -0.490f, hs.keyW * 0.5f, 0.016f, UiShape::RoundedBox,
+                                  glassControlT.data(), 1.0f, 0.10f, kGlassRim);
+                }
+            }
 
             // Breadcrumb trail (chevrons drawn now, segment text in the text pass)
             const float breadX = -0.460f;  // the path has the whole top row
@@ -7873,8 +7990,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                                     textPipelineLayout_, 0, 1, &textSet_, 0, nullptr);
 
             drawRailText();
-            drawFit(-0.855f, hub::railDividerY() - 0.015f, 0.34f, scBadge, dimCol, "QUICK FILTERS");
-            const char* qLabels[6] = {"Local Storage", "Videos", "Network", "Downloads", "Bookmarks", "Vault (Private)"};
+            // Places, named like the folder path names them ("Home"); "Download folder", not a second "Downloads".
+            drawFit(-0.855f, hub::railDividerY() - 0.015f, 0.34f, scDetail, dimCol, "PLACES");
+            const char* qLabels[6] = {"Home", "Videos", "Network", "Download folder", "Bookmarks", "Vault"};
             const int qCount = vaultUnlocked_ ? 6 : 5;
             for (int sub = 0; sub < qCount; ++sub) {
                 const float* col = (browserQuickFilter_ == sub) ? themeTextCol : slateCol;
@@ -7895,64 +8013,98 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
 
             // Header button labels (icons sit at the left edge of each pill)
             if (browserPick_.active) {
+                const UiRect noR = hub::headerButton(8, true);
+                const float textX = noR.cx + noR.hw + 0.020f;
+                const float textRight = browserCanCreateFolder_ ? hub::headerButton(6, true).cx - hub::headerButton(6, true).hw
+                                                                : hub::headerButton(7, true).cx - hub::headerButton(7, true).hw;
                 withHeadingFont([&] {
-                    drawFit(-0.455f, hub::kBrowserBtnY, browserCanCreateFolder_ ? 0.72f : 0.92f, scSub, themeTextCol,
-                            browserPick_.text);
+                    drawFit(textX, hub::kBrowserBtnY, textRight - 0.015f - textX, scSub, themeTextCol, browserPick_.text);
                 });
                 if (browserCanCreateFolder_) {
-                    const UiRect nfR = hub::headerButton(6);
+                    const UiRect nfR = hub::headerButton(6, true);
                     drawFitCentered(nfR.cx + 0.014f, nfR.cy, nfR.hw * 2.0f - 0.05f, scSub * 0.90f, themeTextCol, "+ Folder");
                 }
-                const UiRect okR = hub::headerButton(7);
+                const UiRect okR = hub::headerButton(7, true);
                 drawFitCentered(okR.cx + 0.014f, okR.cy, okR.hw * 2.0f - 0.05f, scSub * 0.90f,
                                 browserPick_.canConfirm ? hub::kPickDarkText : dimCol, browserPick_.confirmLabel);
-                const UiRect noR = hub::headerButton(8);
                 drawFitCentered(noR.cx + 0.012f, noR.cy, noR.hw * 2.0f - 0.04f, scSub * 0.90f, themeTextCol, "Cancel");
             } else {
-            drawFit(hub::kBrowserSortCaptionX, hub::kBrowserBtnY, hub::kBrowserCaptionMaxW, scSub * 0.90f, dimCol, "Sort by");
-            drawFit(hub::kBrowserViewCaptionX, hub::kBrowserBtnY, hub::kBrowserCaptionMaxW, scSub * 0.90f, dimCol, "View");
-            const char* vModeLabels[3] = {"Large", "Grid", "List"};
-            const UiRect viewR = hub::headerButton(2);
-            drawFitCentered(viewR.cx + 0.014f, viewR.cy, viewR.hw * 2.0f - 0.05f, scSub * 0.90f,
-                            themeTextCol, vModeLabels[static_cast<int>(browserViewMode_) % 3]);
+            {
+                // The segment labels: the one in use in the text colour on the accent, the others dimmer.
+                static const char* const kSortNames[3] = {"Name", "Newest", "Largest"};
+                static const char* const kViewNames[3] = {"Large", "Grid", "List"};
+                const int sortIdx = browserSortLabel_ == "Newest" ? 1 : (browserSortLabel_ == "Largest" ? 2 : 0);
+                const int viewIdx = static_cast<int>(browserViewMode_) % 3;
+                for (int s = 0; s < 3; ++s) {
+                    const UiRect sr = hub::headerButton(hub::kSortSegBase + s);
+                    drawFitCentered(sr.cx, sr.cy, sr.hw * 2.0f - 0.008f, scSub * 0.90f,
+                                    s == sortIdx ? themeTextCol : slateCol, kSortNames[s]);
+                    const UiRect vr = hub::headerButton(hub::kViewSegBase + s);
+                    drawFitCentered(vr.cx, vr.cy, vr.hw * 2.0f - 0.008f, scSub * 0.90f,
+                                    s == viewIdx ? themeTextCol : slateCol, kViewNames[s]);
+                }
+            }
             const char* qpLabel = browserBookmarked_ ? "Bookmarked" : "Bookmark";
             const UiRect bmR = hub::headerButton(3);
             drawFitCentered(bmR.cx + 0.014f, bmR.cy, bmR.hw * 2.0f - 0.05f, scSub * 0.90f,
                             browserBookmarked_ ? themeAccentCol : themeTextCol, qpLabel);
-            const UiRect sortR = hub::headerButton(5);
-            drawFitCentered(sortR.cx + 0.014f, sortR.cy, sortR.hw * 2.0f - 0.05f, scSub * 0.90f,
-                            themeTextCol, browserSortLabel_);
             if (browserCanCreateFolder_) {
                 const UiRect nfR = hub::headerButton(6);
                 drawFitCentered(nfR.cx + 0.014f, nfR.cy, nfR.hw * 2.0f - 0.05f, scSub * 0.90f,
                                 themeTextCol, "+ Folder");
             }
+            // Where the visible cards are in the folder ("13-18 of 500"), at the right end of the row.
+            if (!browserReadout_.empty()) {
+                const float rw = measureString(scSub * 0.90f, browserReadout_);
+                drawFit(0.855f - rw, hub::kBrowserBtnY, rw + 0.01f, scSub * 0.90f, slateCol, browserReadout_);
+            }
             }  // not picking
 
             if (browserViewMode_ == BrowserViewMode::CompactList) {
-                drawFit(-0.315f, hub::kListCaptionY, listCols.nameMaxW, scDetail * 0.92f, dimCol, "Name");
+                drawFit(-0.315f, hub::kListCaptionY, listCols.nameMaxW, scDetail, dimCol, "Name");
                 if (listShowFormat_) {
-                    drawFitCentered(listCols.fmtCx, hub::kListCaptionY, 0.14f, scDetail * 0.92f, dimCol, "Format");
+                    drawFitCentered(listCols.fmtCx, hub::kListCaptionY, 0.14f, scDetail, dimCol, "Format");
                 }
                 if (listShowRes_) {
-                    drawFitCentered(listCols.resCx, hub::kListCaptionY, 0.19f, scDetail * 0.92f, dimCol, "Resolution");
+                    drawFitCentered(listCols.resCx, hub::kListCaptionY, 0.19f, scDetail, dimCol, "Resolution");
                 }
                 if (listShowSize_) {
-                    drawFitCentered(listCols.sizeCx, hub::kListCaptionY, 0.13f, scDetail * 0.92f, dimCol, "Size");
+                    drawFitCentered(listCols.sizeCx, hub::kListCaptionY, 0.13f, scDetail, dimCol, "Size");
                 }
                 if (listShowDuration_) {
-                    drawFitCentered(listCols.durCx, hub::kListCaptionY, 0.15f, scDetail * 0.92f, dimCol, "Duration");
+                    drawFitCentered(listCols.durCx, hub::kListCaptionY, 0.15f, scDetail, dimCol, "Duration");
                 }
             }
 
+            // Grid view's detail line in short forms, so it fits one card at full detail size:
+            // "1920x1080 · 24 FPS · 611 KB" -> "1080p · 24 fps · 611 KB".
+            auto gridDetail = [](const std::string& d) {
+                std::string s = d;
+                std::size_t i = 0;
+                while (i < s.size() && s[i] >= '0' && s[i] <= '9') ++i;
+                if (i > 0 && i < s.size() && s[i] == 'x') {
+                    std::size_t j = i + 1;
+                    while (j < s.size() && s[j] >= '0' && s[j] <= '9') ++j;
+                    if (j > i + 1) {
+                        const long w = std::strtol(s.substr(0, i).c_str(), nullptr, 10);
+                        const long h = std::strtol(s.substr(i + 1, j - i - 1).c_str(), nullptr, 10);
+                        s = std::to_string(std::min(w, h)) + "p" + s.substr(j);
+                    }
+                }
+                const std::size_t fps = s.find(" FPS");
+                if (fps != std::string::npos) s.replace(fps, 4, " fps");
+                return s;
+            };
             // Card titles, details, and badges
             for (int i = 0; i < perPage; ++i) {
                 const int entryIdx = first + i;
                 if (entryIdx >= total) break;
                 const auto& item = browserItems_[static_cast<std::size_t>(entryIdx)];
                 const CardLayout lay = getCardLayout(i);
-                const std::string cardDet = item.detail.empty() ? (item.isDir ? "Folder" : "Media") : item.detail;
-                const std::string& bTag = item.tag.empty() ? (item.isVideo ? "VIDEO" : "FILE") : item.tag;
+                // (The Up card: no detail line, no badge.)
+                const std::string cardDet = item.isBack ? std::string()
+                                          : item.detail.empty() ? (item.isDir ? "Folder" : "Media") : item.detail;
+                const std::string bTag = item.isBack ? std::string() : item.tag.empty() ? (item.isVideo ? "VIDEO" : "FILE") : item.tag;
                 const Mat4 vpCard = cardHoverVp(i, lay);
                 curTextVp = &vpCard;
 
@@ -7975,34 +8127,44 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         std::string first = item.name.substr(0, cut);
                         while (!first.empty() && first.back() == ' ') first.pop_back();
                         drawFit(textLeft, bottom + 0.118f, maxTextW, scSub, themeTextCol, first);
-                        drawFit(textLeft, bottom + 0.087f, maxTextW, scSub, themeTextCol, item.name.substr(cut));
+                        drawFit(textLeft, bottom + 0.087f, maxTextW, scSub, themeTextCol,
+                                truncateMiddle(scSub, maxTextW, item.name.substr(cut)));
                     } else {
-                        drawFit(textLeft, bottom + 0.118f, maxTextW, scSub, themeTextCol, item.name);
+                        drawFit(textLeft, bottom + 0.118f, maxTextW, scSub, themeTextCol, truncateMiddle(scSub, maxTextW, item.name));
                     }
                     drawFit(textLeft, bottom + 0.042f, maxTextW, scDetail, slateCol, cardDet);
-                    drawFitCentered(lay.cx - lay.thumbHalfW + 0.062f, lay.thumbCy + lay.thumbHalfH - 0.024f,
-                                    0.104f, scBadge, themeTextCol, bTag);
+                    drawFitCentered(lay.cx - lay.thumbHalfW + 0.066f, lay.thumbCy + lay.thumbHalfH - 0.026f,
+                                    0.112f, scDetail, themeTextCol, bTag);
                     if (!item.durationTag.empty()) {
-                        drawFitCentered(lay.cx + lay.thumbHalfW - 0.050f, lay.thumbCy - lay.thumbHalfH + 0.024f,
-                                        0.080f, scBadge, themeTextCol, item.durationTag);
+                        drawFitCentered(lay.cx + lay.thumbHalfW - 0.054f, lay.thumbCy - lay.thumbHalfH + 0.026f,
+                                        0.088f, scDetail, themeTextCol, item.durationTag);
                     }
                 } else if (browserViewMode_ == BrowserViewMode::MiniCards) {
                     const float textLeft = lay.cx - lay.cardHalfW + 0.012f;
                     const float maxTextW = lay.cardHalfW * 2.0f - 0.024f;
                     const float bottom = lay.cy - lay.cardHalfH;
-                    drawFit(textLeft, bottom + 0.053f, maxTextW, scSub * 0.88f, themeTextCol, item.name);
-                    drawFit(textLeft, bottom + 0.021f, maxTextW, scDetail * 0.88f, slateCol, cardDet);
-                    drawFitCentered(lay.cx - lay.thumbHalfW + 0.046f, lay.thumbCy + lay.thumbHalfH - 0.018f,
-                                    0.080f, scBadge * 0.88f, themeTextCol, bTag);
+                    // One line only: the extension goes (the badge and the detail line say what it is) and
+                    // a long name is cut in the middle; the detail line uses short forms ("1080p · 24 fps").
+                    std::string gridName = item.name;
+                    if (!item.isDir && !item.isBack) {
+                        const std::size_t dot = gridName.rfind('.');
+                        if (dot != std::string::npos && dot > 0 && gridName.size() - dot <= 6) gridName.resize(dot);
+                    }
+                    drawFit(textLeft, bottom + 0.053f, maxTextW, scSub * 0.88f, themeTextCol,
+                            truncateMiddle(scSub * 0.88f, maxTextW, gridName));
+                    drawFit(textLeft, bottom + 0.021f, maxTextW, scDetail, slateCol, gridDetail(cardDet));
+                    drawFitCentered(lay.cx - lay.thumbHalfW + 0.052f, lay.thumbCy + lay.thumbHalfH - 0.021f,
+                                    0.092f, scDetail, themeTextCol, bTag);
                     if (!item.durationTag.empty()) {
-                        drawFitCentered(lay.cx + lay.thumbHalfW - 0.038f, lay.thumbCy - lay.thumbHalfH + 0.018f,
-                                        0.065f, scBadge * 0.88f, themeTextCol, item.durationTag);
+                        drawFitCentered(lay.cx + lay.thumbHalfW - 0.044f, lay.thumbCy - lay.thumbHalfH + 0.021f,
+                                        0.078f, scDetail, themeTextCol, item.durationTag);
                     }
                 } else { // CompactList
                     const float textLeft = -0.315f;
-                    drawFit(textLeft, lay.cy, listCols.nameMaxW, scSub * 0.95f, themeTextCol, item.name);
+                    drawFit(textLeft, lay.cy, listCols.nameMaxW, scSub * 0.95f, themeTextCol,
+                            truncateMiddle(scSub * 0.95f, listCols.nameMaxW, item.name));
                     if (listShowFormat_) {
-                        drawFitCentered(listCols.fmtCx, lay.cy, 0.11f, scBadge * 0.90f, themeAccentCol, bTag);
+                        drawFitCentered(listCols.fmtCx, lay.cy, 0.115f, scDetail, themeTextCol, bTag);
                     }
                     if (listShowRes_) {
                         const std::string resStr = item.resolutionTag.empty() ? (item.isDir || item.isBack ? "" : "--") : item.resolutionTag;
@@ -8021,18 +8183,44 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
 
             // Bottom status bar: a notice (progress, results, warnings) wins over the browser's status.
+            // Otherwise the focused entry's full name (cut in the middle only when even this row is too
+            // short), so files that look alike on their cards can be told apart.
             static const float kWarnCol[4] = {1.0f, 0.72f, 0.36f, 1.0f};
+            const float statusW = hintLeft - 0.02f - (-0.45f);
             if (!browserNotice_.empty()) {
-                drawFit(-0.45f, -0.490f, 1.28f, scDetail, browserNoticeWarn_ ? kWarnCol : themeAccentCol, browserNotice_);
+                drawFit(-0.45f, -0.490f, statusW, scDetail, browserNoticeWarn_ ? kWarnCol : themeAccentCol, browserNotice_);
             } else if (!browserStatus_.empty()) {
-                drawFit(-0.45f, -0.490f, 0.62f, scDetail, themeAccentCol, browserStatus_);
+                drawFit(-0.45f, -0.490f, statusW, scDetail, themeAccentCol, browserStatus_);
+            } else if (!browserLoading_ && browserSelected_ >= 0 && browserSelected_ < total) {
+                const std::string& nm = browserItems_[static_cast<std::size_t>(browserSelected_)].name;
+                drawFit(-0.45f, -0.490f, statusW, scSub, themeTextCol, truncateMiddle(scSub, statusW, nm));
             }
-            const std::string hintText = browserPick_.active && !browserPick_.hint.empty() ? browserPick_.hint
-                : browserOnNetwork_
-                ? "Stick: Scroll  |  Trigger: Stream  |  Y: Download"
-                : "Stick: Scroll  |  Trigger: Play  |  Y: Actions";
-            if (browserNotice_.empty() || measureString(scDetail, browserNotice_) <= 0.60f) {
-                drawFit(0.18f, -0.490f, 0.68f, scDetail, dimCol, hintText);  // a long notice uses the whole row
+            if (!hintsHidden) {
+                for (std::size_t k = 0; k < hintSlots.size(); ++k) {
+                    const HintSlot& hs = hintSlots[k];
+                    withHeadingFont([&] {
+                        drawFitCentered(hs.keyX + hs.keyW * 0.5f, -0.490f, hs.keyW, hintKeySc, themeTextCol, browserHints_[k].key);
+                    });
+                    drawFit(hs.actX, -0.490f, 0.40f, hintActSc, slateCol, browserHints_[k].action);
+                }
+            }
+
+            // The middle of the content area: an empty place says so (and what to do), a folder still
+            // opening says that, with three pulsing dots.
+            if (!browserMsgTitle_.empty()) {
+                const float msgY = -0.100f;
+                std::string title = browserMsgTitle_;
+                if (browserLoading_) {
+                    const double t = std::chrono::duration<double>(std::chrono::steady_clock::now().time_since_epoch()).count();
+                    const int dots = 1 + static_cast<int>(std::fmod(t * 2.5, 3.0));
+                    title += std::string(static_cast<std::size_t>(dots), '.');
+                }
+                // (Placed for the full three dots, so the words do not shift while they pulse.)
+                const float titleX = kContentCx - 0.5f * measureString(scStd, browserLoading_ ? browserMsgTitle_ + "..." : browserMsgTitle_);
+                withHeadingFont([&] { drawFit(titleX, msgY, 1.20f, scStd, slateCol, title); });
+                if (!browserMsgLine_.empty()) {
+                    drawFitCentered(kContentCx, msgY - 0.050f, 1.20f, scSub, dimCol, browserMsgLine_);
+                }
             }
         }
 
@@ -9169,17 +9357,25 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             const float btnHalfH = 0.028f;
             for (int i = 0; i < menuOptCount; ++i) {
                 const float cy = hub::actionMenuOption(i, menuOptCount).cy;
-                const bool hov = (actionMenuBtnHovered_ == i) || (actionMenu_.selectedOption == i);
+                // One highlight: the selected row (the laser moves it while it owns the focus); a row
+                // under a resting beam only gets the plain hover fill.
+                const bool hov = (actionMenu_.selectedOption == i);
+                const bool ptrOnly = !hov && actionMenuBtnHovered_ == i;
                 const std::string& optStr = actionMenu_.options[i];
                 const bool isDelete = (optStr.find("Delete") != std::string::npos);
                 const bool isVault = (optStr.find("Vault") != std::string::npos);
 
                 const float* bg = hov ? (isDelete ? redBgHov : (isVault ? goldBgHov : tabHovBg))
-                                      : (isDelete ? redBg : (isVault ? goldBg : tabNormBg));
+                                      : (isDelete ? redBg : (isVault ? goldBg : (ptrOnly ? tabHovBg : tabNormBg)));
                 const float* bord = hov ? (isDelete ? redBorder : (isVault ? goldBorder : tabActiveBord))
                                         : (isDelete ? redBorder : (isVault ? goldBorder : tabNormBord));
                 drawUiElement(vpPanel, 0.0f, cy, btnHalfW, btnHalfH,
                               UiShape::RoundedBox, bg, 1.0f, 0.06f, bord);
+                if (actionMenu_.page == menupage::Main && i == actionMenu_.dividerBefore && i > 0) {
+                    // A thin line between the entry's own rows and the folder's (bookmark) row.
+                    drawUiElement(vpPanel, 0.0f, cy + 0.5f * hub::kActionMenuStepY, btnHalfW - 0.04f, 0.0012f,
+                                  UiShape::RoundedBox, kGlassDivider, 1.0f);
+                }
                 // Track rows: what kind of track it is, readable without the text. Audio = speaker in the
                 // accent colour, subtitles = a caption box in amber, video = a screen in grey; the one in
                 // use has a tick at the right.
@@ -9215,8 +9411,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             const float cy = -0.12f;
             const float btnHalfW = 0.13f;
             const float btnHalfH = 0.042f;
-            const bool delHov = (actionMenuBtnHovered_ == 0) || (actionMenu_.selectedOption == 0);
-            const bool canHov = (actionMenuBtnHovered_ == 1) || (actionMenu_.selectedOption == 1);
+            // The highlighted answer is the one A gives (the laser moves it only while it owns the focus).
+            const bool delHov = (actionMenu_.selectedOption == 0);
+            const bool canHov = (actionMenu_.selectedOption == 1);
             // Red only for a destructive answer ("Yes, Delete"); anything else ("Download") in the accent colour.
             const bool destructive = !actionMenu_.options.empty() &&
                                      (actionMenu_.options[0].find("Delete") != std::string::npos ||
@@ -9549,9 +9746,12 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
 
         if (actionMenu_.page == menupage::Main || actionMenu_.page == menupage::MoveTo || actionMenu_.page == menupage::Format || actionMenu_.page == menupage::Tracks || actionMenu_.page == menupage::Chromium ||
             actionMenu_.page == menupage::VrQuestion) {
+            if (actionMenu_.page == menupage::Main && !actionMenu_.footer.empty()) {  // "B: Close" under the rows
+                drawFitCentered(0.0f, -mHalfH + 0.034f, mHalfW * 1.8f, sc * 0.75f, dimCol, actionMenu_.footer);
+            }
             for (int i = 0; i < menuOptCount; ++i) {
                 const float cy = hub::actionMenuOption(i, menuOptCount).cy;
-                const bool hov = (actionMenuBtnHovered_ == i) || (actionMenu_.selectedOption == i);
+                const bool hov = (actionMenu_.selectedOption == i);
                 const std::string& o = actionMenu_.options[static_cast<std::size_t>(i)];
                 const size_t bar = o.find('|');
                 const int kindRaw = (actionMenu_.page == menupage::Tracks && static_cast<std::size_t>(i) < actionMenu_.optionKinds.size())

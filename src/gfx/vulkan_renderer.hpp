@@ -470,9 +470,38 @@ public:
         std::string text;          // "Moving 8 Mile.mkv..."
         std::string confirmLabel;  // "Move here" / "Copy here" / "Use this folder"
         bool canConfirm = false;
-        std::string hint;          // footer hint instead of the usual one
     };
     void setBrowserPickBar(const BrowserPickBar& b) { browserPick_ = b; }
+    // Footer of the Files tab: what the buttons do here, drawn as key caps ("A" + "Play").
+    struct BrowserHint {
+        std::string key;     // the bound button's name ("A", "Trigger", "Bumpers")
+        std::string action;  // what it does here ("Play", "Up", "Options")
+    };
+    void setBrowserHints(std::vector<BrowserHint> hints) { browserHints_ = std::move(hints); }
+    // A message in the middle of the content area: an empty folder / Bookmarks / Network list, or
+    // a folder still opening (loading: no cards are drawn, the title gets three pulsing dots).
+    void setBrowserMessage(const std::string& title, const std::string& line, bool loading) {
+        browserMsgTitle_ = title;
+        browserMsgLine_ = line;
+        browserLoading_ = loading;
+    }
+    // "13-18 of 500" at the right end of the header row (empty = none).
+    void setBrowserReadout(const std::string& text) { browserReadout_ = text; }
+    // The file list's scrollbar is a laser target: hovered, and where the laser is along it
+    // (0 = top, 1 = bottom; also past its ends while a drag goes on). False while off the panel.
+    bool browserScrollbarHovered() const { return browserScrollHovered_; }
+    bool browserScrollbarPointer(float& frac) const {
+        frac = browserScrollFrac_;
+        return browserScrollFracValid_;
+    }
+    // Scrolls the file list so the thumb sits at `frac` of the track; returns the new first entry.
+    int scrollBrowserTo(float frac);
+    // Where the laser is on the hub panel (panel metres); false when it is not on the panel.
+    bool pointerOnPanel(float& x, float& y) const {
+        x = pointerPanel_[0];
+        y = pointerPanel_[1];
+        return pointerActive_ && pointerOnPanel_;
+    }
     // Footer message that outlives folder scans (progress, results, warnings); empty = browser status.
     void setBrowserNotice(const std::string& text, bool warn) {
         browserNotice_ = text;
@@ -587,6 +616,10 @@ public:
         int selectedOption = -1;
         int editingRow = -1;
         int cursorPos = 0;
+        // File Options (page Main): a thin line above this row (-1 = none), and a dim line under
+        // the rows ("B: Close"; empty = none).
+        int dividerBefore = -1;
+        std::string footer;
     };
     void setActionMenu(const ActionMenuData& data) { actionMenu_ = data; }
     const ActionMenuData& actionMenu() const { return actionMenu_; }
@@ -1439,6 +1472,13 @@ private:
     BrowserPickBar browserPick_;
     std::string browserNotice_;
     bool browserNoticeWarn_ = false;
+    std::vector<BrowserHint> browserHints_;
+    std::string browserMsgTitle_, browserMsgLine_;
+    bool browserLoading_ = false;
+    std::string browserReadout_;
+    bool browserScrollHovered_ = false;
+    float browserScrollFrac_ = 0.0f;
+    bool browserScrollFracValid_ = false;
     bool keyboardRevealHovered_ = false;  // header "New folder" button shown
     KeyboardModalData keyboardModal_{};
     int uiFollowMode_ = 0; // 0 = World Lock (Default, zero drift/tilt), 1 = Smooth Gaze Follow
