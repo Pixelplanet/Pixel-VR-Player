@@ -533,7 +533,8 @@ void SettingsMenu::refresh() {
         segmented("Laser Smoothing", {"Off", "Low", "Medium", "High"}, laserSmoothing_ % 4,
                   Action::CycleLaserSmoothing);
         toggle("Controller Models", drawModels_, Action::ToggleModels);
-        toggle("Laser Hover Rumble", hoverHapticsEnabled_, Action::ToggleHoverHaptics);
+        // (Also the tick of a D-pad / stick step in the menus.)
+        toggle("Hover / Focus Rumble", hoverHapticsEnabled_, Action::ToggleHoverHaptics);
         choice("Rumble Strength", hoverHapticsStrengthStr(), kHoverHapticsStrengthCount,
                hoverHapticsStrengthIdx_ % kHoverHapticsStrengthCount,
                Action::CycleHoverHapticsStrength, hoverHapticsEnabled_, kHoverHapticsStrengthNames);

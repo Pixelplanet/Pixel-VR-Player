@@ -3075,6 +3075,178 @@ float VulkanRenderer::listLineY(int r, int layoutN) const {
     return hub::settingsCard(r, layoutN, true).cy + off;
 }
 
+// ---------------------------------------------------------------------------
+// Button navigation (D-pad / stick, A): the hub's focus outside the page's own selection, the
+// Downloads focus, and where a button press lands (for the click ring).
+
+namespace {
+// A rail item's rectangle by its hover id (page: 0 Files, 1 Downloads, 2 Settings).
+bool railItemRect(int page, int id, UiRect& r) {
+    if (id >= 0 && id < hub::kFixedTabCount) {
+        r = hub::mainTab(id);
+    } else if (id >= hub::kShortcutIncogHoverBase && id - hub::kShortcutIncogHoverBase < hub::gShortcutCount) {
+        r = hub::mainTabIncogBtn(hub::kFixedTabCount + id - hub::kShortcutIncogHoverBase);
+    } else if (id >= hub::kShortcutHoverBase && id - hub::kShortcutHoverBase < hub::gShortcutCount) {
+        r = hub::mainTab(hub::kFixedTabCount + id - hub::kShortcutHoverBase);
+    } else if (id >= 3 && id <= 8) {
+        if (page == 1 && id - 3 >= 3) return false;  // Downloads has three filters
+        r = hub::subTab(page, id - 3);
+    } else if (id == 9) {
+        r = hub::lockVaultButton(page);
+    } else {
+        return false;
+    }
+    return true;
+}
+}  // namespace
+
+int VulkanRenderer::railSubCount() const {
+    // (The same counts the rail draws and the laser tests.)
+    if (!settingsVisible_ && downloadsVisible_) return 3;
+    return vaultUnlocked_ ? 6 : 5;
+}
+
+int VulkanRenderer::railActiveSub() const {
+    // (The same choice as the rail's drawing: the place, filter or section in use.)
+    if (settingsVisible_) {
+        const int s = settingsSection_;
+        if (s >= 10 && s <= 12) return 2;
+        if (s == 13 || s == 21 || s == 22 || s == 8 || s == 9) return 1;
+        if (s >= 23 && s < 30) return 3;
+        if (s == 15 || s == 16 || s == 18 || s == 19) return 4;
+        if (s == 4 || s == 20) return 5;
+        return (s >= 0 && s < railSubCount()) ? s : -1;
+    }
+    if (downloadsVisible_) return downloadsFilter_;
+    return (browserQuickFilter_ >= 0 && browserQuickFilter_ < railSubCount()) ? browserQuickFilter_ : -1;
+}
+
+std::vector<int> VulkanRenderer::downloadsShownJobs() const {
+    std::vector<int> out;
+    for (int i = 0; i < static_cast<int>(downloadJobs_.size()); ++i) {
+        if (downloadJobVisible(downloadJobs_[static_cast<std::size_t>(i)].state)) out.push_back(i);
+    }
+    return out;
+}
+
+void VulkanRenderer::setDownloadsFocus(int job) {
+    if (job == downloadsFocus_) return;  // (the list is only scrolled when the focus moves)
+    downloadsFocus_ = job;
+    const std::vector<int> shown = downloadsShownJobs();
+    const auto it = std::find(shown.begin(), shown.end(), job);
+    if (it == shown.end()) return;
+    const int pos = static_cast<int>(it - shown.begin());
+    if (pos < downloadsFirst_) downloadsFirst_ = pos;
+    if (pos >= downloadsFirst_ + hub::kMaxDownloadCards) downloadsFirst_ = pos - hub::kMaxDownloadCards + 1;
+}
+
+bool VulkanRenderer::laserOnPanelTarget() const {
+    if (!pointerActive_ || !pointerOnPanel_) return false;
+    return browserHovered_ >= 0 || browserSidebarHovered_ >= 0 || browserPageBtnHovered_ >= 0 ||
+           browserCrumbHovered_ >= 0 || settingsCrumbHovered_ >= 0 || hubCloseHovered_ ||
+           settingsPagerHovered_ >= 0 || settingsHeaderHovered_ || settingsHovered_ >= 0 ||
+           colorPickerZone_ >= 0 || downloadsHovered_ >= 0 || downloadsBtnHovered_ >= 0 ||
+           actionMenuBtnHovered_ >= 0 || keyboardKeyHovered_ >= 0;
+}
+
+bool VulkanRenderer::focusedElementCentre(float& x, float& y) const {
+    auto at = [&](const UiRect& r) {
+        x = r.cx;
+        y = r.cy;
+        return true;
+    };
+    if (keyboardModal_.visible) return false;
+    if (actionMenu_.visible) {
+        const int sel = actionMenu_.selectedOption;
+        const int n = static_cast<int>(actionMenu_.options.size());
+        if (sel < 0) return false;
+        const int page = actionMenu_.page;
+        if (page == menupage::Main || page == menupage::MoveTo || page == menupage::Format || page == menupage::Tracks ||
+            page == menupage::Chromium || page == menupage::VrQuestion) {
+            if (sel >= n) return false;
+            return at(hub::actionMenuOption(sel, n, page == menupage::Tracks ? hub::kTracksRowHalfW : 0.38f));
+        }
+        if (page == menupage::Confirm) return sel < 2 && at(hub::deleteConfirmButton(sel));
+        if (page == menupage::ShareEditor) {
+            if (sel == 7 || sel == 8 || sel == 9) return at(hub::smbButton(sel));
+            return (sel <= 6 || sel == 10) && at(hub::smbFieldWell(sel));
+        }
+        if (page == menupage::ScreenPicker) {
+            if (sel == 3) return at(hub::pickerCancel());
+            if (sel >= kMaxVideoSlots) return false;
+            if (pickerSpatial_) {
+                if (!arrangeTileValid_[sel]) return false;
+                const float* tr = arrangeTileRect_[sel];
+                x = 0.5f * (tr[0] + tr[1]);
+                y = 0.5f * (tr[2] + tr[3]);
+                return true;
+            }
+            int order[kMaxVideoSlots];
+            screenOrderLeftToRight(order);
+            for (int i = 0; i < kMaxVideoSlots; ++i) {
+                if (order[i] == sel) return at(hub::pickerTile(i));
+            }
+            return false;
+        }
+        if (page == menupage::Arrange) {
+            const int presetCount = std::max(0, n - hub::kArrangeButtons);
+            if (sel < presetCount) return at(hub::arrangeOption(sel));
+            if (sel < n) return at(hub::arrangeButton(sel - presetCount));
+        }
+        return false;
+    }
+    const int page = settingsVisible_ ? 2 : (downloadsVisible_ ? 1 : 0);
+    if (!(browserVisible_ || settingsVisible_ || downloadsVisible_)) return false;
+    if (hubNavZone_ == kNavRail) {
+        UiRect r;
+        return railItemRect(page, hubNavId_, r) && at(r);
+    }
+    if (page == 0 && hubNavZone_ == kNavHeader) return at(hub::headerButton(hubNavId_));
+    if (page == 0 && hubNavZone_ == kNavCrumb) {
+        for (const CrumbHit& c : browserCrumbHits_) {
+            if (c.index != hubNavId_) continue;
+            x = 0.5f * (c.x0 + c.x1);
+            y = hub::kBrowserPathY;
+            return true;
+        }
+        return false;
+    }
+    if (page == 1) {
+        const std::vector<int> shown = downloadsShownJobs();
+        const auto it = std::find(shown.begin(), shown.end(), downloadsFocus_);
+        if (it == shown.end()) return false;
+        const int v = static_cast<int>(it - shown.begin()) - downloadsFirst_;
+        return v >= 0 && v < hub::kMaxDownloadCards && at(hub::downloadCard(v));
+    }
+    if (page == 2) {
+        const int layoutN = settingsLayoutRows();
+        const int sel = settingsSelected_;
+        if (sel < 0 || sel >= static_cast<int>(settingsRows_.size()) ||
+            sel >= hub::settingsMaxVisible(layoutN, settingsCompact_)) {
+            return false;
+        }
+        float cx = 0.0f, cy = 0.0f, hw = 0.0f, hh = 0.0f;
+        if (settingsCompact_ && dialogButtonRect(sel, layoutN, cx, cy, hw, hh)) {
+            x = cx;
+            y = cy;
+            return true;
+        }
+        const hub::SettingsCard c = hub::settingsCard(sel, layoutN, settingsCompact_);
+        x = c.cx;
+        y = settingsCompact_ ? listLineY(sel, layoutN) : c.cy;
+        return true;
+    }
+    const int slot = browserSelected_ - browserFirst_;
+    if (slot < 0 || slot >= hub::cardsPerPage(browserViewMode_) ||
+        browserSelected_ >= static_cast<int>(browserItems_.size())) {
+        return false;
+    }
+    const hub::CardLayout lay = hub::browserCard(browserViewMode_, slot);
+    x = lay.cx;
+    y = lay.cy;
+    return true;
+}
+
 void VulkanRenderer::advanceListAnim(int total, int layoutN) {
     // Called from both eyes' passes; the second call of a frame sees dt ~ 0 and changes nothing.
     const auto now = std::chrono::steady_clock::now();
@@ -7656,6 +7828,21 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                           UiShape::RoundedBox, lockBg, 0.55f, 0.05f, lockBord);
         }
 
+        // Button focus outside the page's own selection (setHubNavFocus): a glow and a full accent
+        // rim around what A acts on. Not while a dialog is up (it has the buttons then).
+        auto drawNavFocus = [&](const UiRect& r) {
+            const float glow[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.30f};
+            const float fill[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 0.10f};
+            drawGlow(vpPanel, r.cx, r.cy, r.hw, r.hh, 0.016f, glow, 0.55f);
+            drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox, fill, 0.55f,
+                          0.0035f / std::max(0.001f, std::min(r.hw, r.hh)), tabActiveBord);
+        };
+        const bool navFocusShown = !actionMenu_.visible && !keyboardModal_.visible;
+        if (navFocusShown && hubNavZone_ == kNavRail) {
+            UiRect r;
+            if (railItemRect(activeMainTab, hubNavId_, r)) drawNavFocus(r);
+        }
+
         // Standardized, generously readable font scales across the entire Unified Spatial Hub
         // Base sizes boosted ~35% and multiplied by user-configurable uiTextScale_!
         const float scHeader = (0.038f * tScale) / fontAtlas_.lineHeight;
@@ -7904,6 +8091,16 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 drawUiElement(vpPanel, headerIconX(r), r.cy, 0.012f, 0.012f, UiShape::Files, slateIconCol);
             }
             }  // not picking
+            // The button focus on a header button or a path part (last frame's path layout).
+            if (navFocusShown && hubNavZone_ == kNavHeader) drawNavFocus(hub::headerButton(hubNavId_));
+            if (navFocusShown && hubNavZone_ == kNavCrumb) {
+                for (const CrumbHit& c : browserCrumbHits_) {
+                    if (c.index == hubNavId_) {
+                        drawNavFocus({0.5f * (c.x0 + c.x1), hub::kBrowserPathY, 0.5f * (c.x1 - c.x0) + 0.012f,
+                                      hub::kBrowserBtnHH});
+                    }
+                }
+            }
 
             const float* normCardBg = glassCardT.data();
             const float* normCardBorder = kGlassRimFaint;
@@ -8421,11 +8618,14 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const UiRect card = hub::downloadCard(v);
                 const int state = downloadJobs_.empty() ? 0 : downloadJobs_[i].state;
                 const float prog = downloadJobs_.empty() ? 0.0f : std::clamp(downloadJobs_[i].progress, 0.0f, 1.0f);
-                const bool hov = (i == downloadsHovered_);
+                // One accent card: the focused one (A acts on it; the laser moving onto a card focuses
+                // it). A card merely under the laser gets the neutral hover look.
+                const bool laserHov = (i == downloadsHovered_);
+                const bool hov = (downloadsFocus_ >= 0) ? (i == downloadsFocus_) : laserHov;
                 const float cardR = 0.016f / card.hh;
                 const float cardBw = 0.0015f / card.hh;
-                const float* cBg = hov ? glassCardHoverT.data() : (state == 1 ? cardDoneBg : glassCardT.data());
-                const float* cBord = hov ? tabActiveBord : (state == 1 ? cardDoneBord : cardBorder);
+                const float* cBg = (hov || laserHov) ? glassCardHoverT.data() : (state == 1 ? cardDoneBg : glassCardT.data());
+                const float* cBord = hov ? tabActiveBord : (laserHov ? kGlassRim : (state == 1 ? cardDoneBord : cardBorder));
 
                 if (hov) {
                     drawGlow(vpPanel, card.cx, card.cy, card.hw, card.hh, 0.016f, hovGlow, cardR * 0.6f);
@@ -8456,7 +8656,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 for (int b = 0; b < 2; ++b) {
                     if (!jobHasButton(state, b)) continue;
                     const UiRect r = hub::downloadJobButton(v, b);
-                    const bool bHov = hov && downloadsJobBtnHovered_ == b;
+                    const bool bHov = laserHov && downloadsJobBtnHovered_ == b;
                     if (b == 0 && state == 1) {
                         drawUiElement(vpPanel, r.cx, r.cy, r.hw, 0.030f, UiShape::RoundedBox,
                                       playPillBg, 1.0f, bHov ? 0.12f : 0.06f,

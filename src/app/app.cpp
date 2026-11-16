@@ -1281,6 +1281,7 @@ void App::updateStats() {
 
 int App::navStep(float axisY, std::chrono::steady_clock::time_point now) {
     using namespace std::chrono_literals;
+    if (navStickOwned_) return 0;  // the rail / header took this frame's stick (and its repeat state stays)
     if (axisY > 0.38f || axisY < -0.38f) {
         const int dir = (axisY > 0.0f) ? -1 : 1;  // push up = toward the top row
         if (navArmed_) {  // first press: step now, then pause before repeating
@@ -1290,6 +1291,7 @@ int App::navStep(float axisY, std::chrono::steady_clock::time_point now) {
             navLastStepFirst_ = true;
             laserFocus_.hold();  // the buttons move the highlight now, not a resting beam
             navLastFresh_ = true;
+            navStepFired_ = true;  // (the focus tick / end tick, navFeedbackEnd)
             return dir;
         }
         if (now >= navNextRepeat_) {  // held down: auto-repeat
@@ -1297,6 +1299,7 @@ int App::navStep(float axisY, std::chrono::steady_clock::time_point now) {
             navLastStepFirst_ = false;
             laserFocus_.hold();
             navLastFresh_ = false;
+            navStepFired_ = true;
             return dir;
         }
         return 0;
@@ -1307,6 +1310,7 @@ int App::navStep(float axisY, std::chrono::steady_clock::time_point now) {
 
 int App::navStepX(float axisX, std::chrono::steady_clock::time_point now) {
     using namespace std::chrono_literals;
+    if (navStickOwned_) return 0;
     if (axisX > 0.38f || axisX < -0.38f) {
         const int dir = (axisX > 0.0f) ? 1 : -1;  // push right = next col, push left = prev col
         if (navArmedX_) {
@@ -1314,12 +1318,14 @@ int App::navStepX(float axisX, std::chrono::steady_clock::time_point now) {
             navNextRepeatX_ = now + 350ms;
             laserFocus_.hold();
             navLastFresh_ = true;
+            navStepFired_ = true;
             return dir;
         }
         if (now >= navNextRepeatX_) {
             navNextRepeatX_ = now + 140ms;
             laserFocus_.hold();
             navLastFresh_ = false;
+            navStepFired_ = true;
             return dir;
         }
         return 0;
@@ -2260,13 +2266,13 @@ void App::updateButtonLabels(std::chrono::steady_clock::time_point nowT, bool la
                          (actionMenu_.page == menupage::Confirm || actionMenu_.page == menupage::ScreenPicker ||
                           actionMenu_.page == menupage::Arrange || actionMenu_.page == menupage::ShareEditor);
 #ifdef PIXELVR_HAVE_FREETYPE
-    // Options opens File Actions on the Files tab and closes an open action
-    // menu; it does nothing in Settings, Downloads or the download confirm.
-    st.optionsWork = !settings_.isOpen() && !downloadsWindow_ &&
-                     (actionMenu_.visible ? actionMenu_.page != menupage::ShareEditor : browser_.isOpen());
+    // Options opens File Actions on the Files tab, a download's menu on the Downloads tab, and closes
+    // an open action menu (not the share editor); it does nothing in Settings.
+    st.optionsWork = !settings_.isOpen() &&
+                     (actionMenu_.visible ? actionMenu_.page != menupage::ShareEditor : (browser_.isOpen() || downloadsWindow_));
     st.recenterWorks = browser_.isOpen() || downloadsWindow_ || settings_.isOpen();
-    // Downloads (laser only) reads neither stick nor D-pad.
-    st.noStick = downloadsWindow_ && !settings_.isOpen() && !actionMenu_.visible;
+    // Every hub tab takes the stick and the D-pad now (Downloads moves its focused card).
+    st.noStick = false;
 #else
     st.recenterWorks = settings_.isOpen();
 #endif
@@ -2279,6 +2285,8 @@ void App::updateButtonLabels(std::chrono::steady_clock::time_point nowT, bool la
     st.sphere = settings_.projectionMode() != 0;
     st.panShift = panShiftLatched_;  // 360 / 180: pan and tilt; flat video: size
     st.controlsVisible = cur().open && !hudDismissed_ && renderer_.controlBarVisible();
+    st.previousHeld = xr_.input().previousHeld;  // (as read, before anything consumed them)
+    st.nextHeld = xr_.input().nextHeld;
     renderer_.setButtonLabels(shown, buildButtonLabelCards(labelSources_, st));
 }
 
@@ -6213,6 +6221,7 @@ int App::run() {
                 settings_.setButtonLabels(!settings_.buttonLabels());
                 PIXELVR_LOG_INFO("Button labels %s", settings_.buttonLabels() ? "on" : "off");
             }
+            hubNavBack(in);  // B with the button focus on the rail / header: back into the content
             // Back: one step back, never opens anything. (The keyboard, a grab and
             // a web page under the laser took theirs already.)
             if (in.back) {
@@ -6257,6 +6266,10 @@ int App::run() {
                     if (!returnFromPlex(selectedScreen_)) closeMedia(selectedScreen_);
 #endif
                     if (openScreenCount() == 0) browser_.open();
+                } else if (cur().open && cur().web && !cur().webSuspended) {
+                    // A web page as the selected screen: B is always its page back, wherever the laser
+                    // is (the dock hides with View / bumper + Menu / its own button there).
+                    webHosts_[selectedScreen_].back();
                 } else if (cur().open && renderer_.controlBarVisible()) {
                     dismissHud(in, nowT);  // HUD shown during playback: hide it
                 }
@@ -6396,7 +6409,7 @@ int App::run() {
                 dlWin, "Downloads", drows,
                 browser_.downloadActive()
                     ? browser_.downloadText()
-                    : "Stick: Scroll  |  Trigger: Play Completed  |  B: Back",
+                    : "D-pad: Select  |  A: Play / Pause  |  Y: Options  |  B: Back",
                 dbtns, djList);
 
             // Folder-download confirmation (the shared confirm dialog): its text shows the size so far.
@@ -6809,8 +6822,9 @@ int App::run() {
                 renderer_.setControllers(build(0), build(1));
             }
             updateButtonLabels(nowT, laserOnWeb);
-            // Click feedback on the panel (the renderer checks the laser is on it).
-            if (in.select || in.togglePlay) renderer_.notifyPress();
+            // Click feedback on the panel: the ring under the laser, or for A on the focused element
+            // (and the focus ticks of the menu input below, navFeedbackEnd).
+            navFeedbackBegin(in, nowT);
 
             // Spatial haptic feedback on pointer hover transitions
             static int lastBrowserHov = -1;
@@ -6883,7 +6897,11 @@ int App::run() {
                 in.select = in.togglePlay = false;
                 interacted = true;
             }
-            if (hubActive && (in.togglePlay || in.select) && sbHover >= 0) {
+            // The rail with buttons: Left at the content's edge focuses it, A presses the focused item.
+            const int railButtonPress = updateHubNav(in, nowT, sbHover, hubActive);
+            if (const int railItem = railButtonPress >= 0 ? railButtonPress : ((in.togglePlay || in.select) ? sbHover : -1);
+                hubActive && railItem >= 0) {
+                const int sbHover = railItem;  // the laser's rail item, or the focused one A pressed
                 if ((sbHover >= 10 && sbHover < 10 + static_cast<int>(settings_.railShortcuts().size())) ||
                     (sbHover >= 20 && sbHover < 20 + static_cast<int>(settings_.railShortcuts().size()))) {
                     // A web shortcut tab (Settings > UI & Appearance): a streaming
@@ -6956,30 +6974,32 @@ int App::run() {
             }
 
             // Downloads view interaction inside Unified Spatial Hub
-            // More than four downloads: the stick scrolls the list.
-            if (dlWin && sbHover < 0 && !actionMenu_.visible) {
-                if (const int d = navStep(in.thumbstickY, nowT)) renderer_.scrollDownloads(d);
-            }
+            // Buttons: the D-pad / stick moves a focused card (the list scrolls to keep it in view; the
+            // laser moving onto a card focuses it too), A runs its main action, Y opens its Options.
+            if (dlWin && !actionMenu_.visible) updateDownloadsNav(in, nowT, sbHover);
             if (dlWin && (in.select || in.togglePlay) && sbHover < 0) {
                 const int bi = renderer_.downloadsButtonHovered();
                 if (bi >= 0) {
                     if (browser_.downloadActive() || browser_.hasQueuedDownloads()) {
                         if (bi == 0) browser_.togglePause();
-                        else if (bi == 1) browser_.stopDownload();
+                        else if (bi == 1) askStopDownload();  // "Cancel Active": asks first
                         else if (bi == 2) browser_.clearFinished();
                     } else if (bi == 0) {
                         browser_.clearFinished();
                     }
                     interacted = true;
+                    in.select = in.togglePlay = false;  // (the question it may open must not take this press)
                 } else {
                     const int hov = renderer_.downloadsHovered();
                     const auto& jobs = browser_.downloadJobs();
                     const int jobBtn = renderer_.downloadsJobButtonHovered();
                     if (hov >= 0 && hov < static_cast<int>(jobs.size()) && jobBtn == 1) {
-                        // Per-job X: stop the active transfer, otherwise drop the
-                        // row (queued items leave the queue, partial files go).
+                        // Per-job X: the active transfer is stopped after a question (its part is
+                        // deleted); other rows go at once (queued items leave the queue, a failed
+                        // row's part goes: a retry starts over anyway).
                         if (jobs[static_cast<std::size_t>(hov)].state == 0) {
-                            browser_.stopDownload();
+                            askStopDownload();
+                            in.select = in.togglePlay = false;
                         } else {
                             browser_.removeJob(hov);
                         }
@@ -7021,10 +7041,12 @@ int App::run() {
             if (!actionMenu_.visible && !menuStack_.empty()) menuStack_.clear();  // (closed: no way back)
             if (actionMenu_.visible) {
                 // (A question asked with askConfirm() belongs to whatever page asked it, Settings included.)
+                // (A download's Options menu belongs to the Downloads tab: it stays while that is shown.)
                 if (!confirmYes_ &&
+                    (actionMenu_.page == menupage::DownloadJob ? !dlWin :
                     ((!browser_.isOpen() && actionMenu_.page != menupage::Format && actionMenu_.page != menupage::Arrange && actionMenu_.page != menupage::Chromium &&
                       actionMenu_.page != menupage::Tracks) ||
-                     downloadsWindow_ || settings_.isOpen())) {
+                     downloadsWindow_ || settings_.isOpen()))) {
                     actionMenu_.visible = false;
                 } else {
                     const Browser::Entry* fe = browser_.focused();
@@ -7445,6 +7467,8 @@ int App::run() {
                                     } else {
                                         actionMenu_.visible = false;
                                     }
+                                } else if (actionMenu_.page == menupage::DownloadJob) {
+                                    chooseDownloadMenu(opt, in);  // a download's Options (Downloads tab)
                                 }
                             }
                             interacted = true;
@@ -7591,6 +7615,9 @@ int App::run() {
                         }
                     }
                 }
+            } else if (actionBtnPressed && dlWin) {
+                openDownloadMenu();  // the focused download's Options
+                interacted = true;
             } else if (actionBtnPressed && browser_.isOpen() && !downloadsWindow_ &&
                        !settings_.isOpen()) {
                 // While choosing a folder Y is still Options: its menu confirms (first row), makes a
@@ -7624,9 +7651,10 @@ int App::run() {
                     interacted = true;
                 }
 
-                // Check header pagination & action buttons
-                const int pbHover = renderer_.browserPageBtnHovered();
-                const int crumbHover = renderer_.browserCrumbHovered();
+                // Check header pagination & action buttons (or A on the one the button focus is on)
+                const int pbHover = headerPress_ >= 0 ? headerPress_ : renderer_.browserPageBtnHovered();
+                const int crumbHover = crumbPress_ >= 0 ? crumbPress_
+                                       : (headerPress_ >= 0 ? -1 : renderer_.browserCrumbHovered());
                 if ((in.togglePlay || in.select) && crumbHover >= 0 && sbHover < 0) {
                     browser_.openCrumb(crumbHover);  // jump to that level of the folder path
                     xr_.triggerHaptic(1, 0.025f, 0.0f, 0.5f);
@@ -7891,6 +7919,8 @@ int App::run() {
                     recenterView(in);
                 }
             }
+
+            navFeedbackEnd();  // a tick for each focus step the menu input above made (or the end tick)
 
             // Cinema Transport Dock is only active when the Unified Spatial Hub is closed.
             const bool barOk = !browserOpen && !settingsOpen && !downloadsWindow_ &&
@@ -8185,13 +8215,13 @@ int App::run() {
                     interacted = true;
                 }
                 // D-pad: Up / Down = volume of the selected screen, Left / Right =
-                // seek 10 s like the dock buttons; held, it repeats. Web pages are
-                // left alone for now.
+                // seek 10 s like the dock buttons; held, it repeats. On web pages only
+                // the volume (the page has its own way to seek).
                 {
                     using namespace std::chrono_literals;
                     const bool held[5] = {false, in.dpadUpHeld, in.dpadDownHeld, in.dpadLeftHeld, in.dpadRightHeld};
                     int dir = in.dpadUp ? 1 : in.dpadDown ? 2 : in.dpadLeft ? 3 : in.dpadRight ? 4 : 0;
-                    if (cur().web || laserOnWeb) {
+                    if ((cur().web || laserOnWeb) && (dir == 3 || dir == 4 || (dir == 0 && dpadRepeatDir_ >= 3))) {
                         dir = 0;
                         dpadRepeatDir_ = 0;
                     } else if (dir != 0) {

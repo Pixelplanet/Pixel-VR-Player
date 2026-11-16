@@ -25,6 +25,7 @@ namespace menupage {
 enum : int {
     Main = 0,          // File Actions
     MoveTo = 1,        // (old fixed destinations list; plain list page)
+    DownloadJob = 1,   // a download's Options menu (the Downloads tab): the same plain list page
     Confirm = 2,       // two buttons: delete, share delete, folder download
     ShareEditor = 4,   // network share form
     Format = 5,        // Change 3D / VR Format (and every page from here on is a plain list unless named)
@@ -377,6 +378,53 @@ public:
     }
     int downloadsFilter() const { return downloadsFilter_; }
     void setActiveDownloadCount(int c) { activeDownloadCount_ = c; }
+
+    // Button navigation (D-pad / stick, A) -------------------------------------------------------
+    // Where the button focus is on the hub besides the page's own selection: a rail item (id = a
+    // rail hover id: 0..2 tabs, 3.. sections, 9 Lock Vault, 10.. shortcuts, 20.. their Incog badge),
+    // a Files header button (id = header button id) or a Files path part (id = crumb index). It is
+    // drawn as a glow with an accent rim; zone kNavContent draws nothing (the page shows its own).
+    static constexpr int kNavContent = 0, kNavRail = 1, kNavHeader = 2, kNavCrumb = 3;
+    void setHubNavFocus(int zone, int id) {
+        hubNavZone_ = zone;
+        hubNavId_ = id;
+    }
+    // The rail as the laser sees it: shortcut tabs (and whether one has an Incog badge), the section
+    // tabs of the page shown (Files places, Downloads filters, Settings sections) and the one in use
+    // (-1 = none).
+    int railShortcutCount() const { return static_cast<int>(railShortcuts_.size()); }
+    bool railShortcutHasIncog(int sc) const {
+        return sc >= 0 && sc < static_cast<int>(railShortcuts_.size()) && !railShortcuts_[sc].kiosk;
+    }
+    int railSubCount() const;
+    int railActiveSub() const;
+    // Files header: the path parts that can be clicked (crumb indexes, root first).
+    std::vector<int> browserCrumbLevels() const {
+        std::vector<int> out;
+        for (const CrumbHit& c : browserCrumbHits_) out.push_back(c.index);
+        return out;
+    }
+    // Downloads: the jobs the filter lets through, in card order (indexes into the jobs). The focused
+    // one (-1 = none) gets the selection look and is scrolled into view when it changes.
+    std::vector<int> downloadsShownJobs() const;
+    void setDownloadsFocus(int job);
+    // The laser is on something on the panel that a press acts on (a card, row, button, rail item...).
+    bool laserOnPanelTarget() const;
+    // Centre (panel metres) of what a button press acts on now: the dialog's highlighted option, the
+    // focused rail item / header button / path part, the focused download, the selected settings row
+    // or the selected file card. False when nothing focused is on the panel.
+    bool focusedElementCentre(float& x, float& y) const;
+    // The click ring a laser press draws (notifyPress), drawn on the focused element instead: the
+    // feedback for A when the laser is not on what A acts on. False when nothing is focused.
+    bool notifyFocusPress() {
+        float x = 0.0f, y = 0.0f;
+        if (!focusedElementCentre(x, y)) return false;
+        pressAnim_ = 1.0f;
+        pressPos_[0] = x;
+        pressPos_[1] = y;
+        pressDockBtn_ = -1;
+        return true;
+    }
     void setSettingsSection(int s) { settingsSection_ = s; }
     void setVaultUnlocked(bool u) { vaultUnlocked_ = u; }
     bool vaultUnlocked() const { return vaultUnlocked_; }
@@ -1598,6 +1646,9 @@ private:
     int browserQuickFilter_ = 0;  // 0=Local, 1=Videos, 2=SMB, 3=Downloads, 4=Bookmarks, 5=Vault
     int downloadsFilter_ = 0;  // 0=All, 1=Active, 2=Completed
     int downloadsFirst_ = 0;   // first shown job among those the filter lets through
+    int downloadsFocus_ = -1;  // button focus: job index (-1 = none), see setDownloadsFocus
+    int hubNavZone_ = 0;       // see setHubNavFocus
+    int hubNavId_ = -1;
     int activeDownloadCount_ = 0;
     int settingsSection_ = 0;
     float uiTextScale_ = 1.20f;

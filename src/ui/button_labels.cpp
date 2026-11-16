@@ -49,10 +49,10 @@ const LabelTexts kLabelTexts[] = {
      kNeedsMedia | kNeedsMusic | kNotInDialog},
     {InputAction::Next, "Next Tab", "Next Track", "Hold: Pan \xC2\xB7 Tilt", nullptr, nullptr,
      kNeedsMedia | kNeedsMusic | kNotInDialog},
-    {InputAction::DpadUp, "Up", "Volume +", nullptr, nullptr, "Up", kNeedsMedia | kNotWeb | kNotLaserOnWeb | kMenusStick},
-    {InputAction::DpadDown, "Down", "Volume \xE2\x80\x93", nullptr, nullptr, "Down",
-     kNeedsMedia | kNotWeb | kNotLaserOnWeb | kMenusStick},
-    {InputAction::DpadLeft, "Left", "\xE2\x80\x93" "10 s", nullptr, nullptr, "Left",
+    // Up / Down are the selected screen's volume, web pages included; Left / Right seek (not on pages).
+    {InputAction::DpadUp, "Up", "Volume +", nullptr, nullptr, "Up", kNeedsMedia | kMenusStick},
+    {InputAction::DpadDown, "Down", "Volume â", nullptr, nullptr, "Down", kNeedsMedia | kMenusStick},
+    {InputAction::DpadLeft, "Left", "â" "10 s", nullptr, nullptr, "Left",
      kNeedsMedia | kNotWeb | kNotLaserOnWeb | kMenusStick | kMenusLeftRight},
     {InputAction::DpadRight, "Right", "+10 s", nullptr, nullptr, "Right",
      kNeedsMedia | kNotWeb | kNotLaserOnWeb | kMenusStick | kMenusLeftRight},
@@ -92,6 +92,38 @@ std::string capitalized(std::string s) {
     return s;
 }
 
+// The action a button acts as while one bumper is held (XrContext's one-hand shift), so its card
+// shows that action's text. Count = the button does nothing then (its press is taken by the shift).
+InputAction shiftedAction(InputAction a, const ButtonLabelState& s) {
+    using IA = InputAction;
+    if (s.context == ButtonLabelState::Context::Keyboard) return a;
+    if (s.nextHeld && !s.previousHeld) {  // A B X Y and Menu stand in for the D-pad and View
+        switch (a) {
+            case IA::PlayOk: return IA::DpadDown;
+            case IA::Back: return IA::DpadRight;
+            case IA::Recenter: return IA::DpadLeft;
+            case IA::Options: return IA::DpadUp;
+            case IA::MainMenu: return IA::ToggleUi;
+            case IA::DpadUp: case IA::DpadDown: case IA::DpadLeft: case IA::DpadRight: case IA::ToggleUi:
+                return IA::Count;
+            default: return a;
+        }
+    }
+    if (s.previousHeld && !s.nextHeld) {  // the D-pad and View stand in for A B X Y and Menu
+        switch (a) {
+            case IA::DpadDown: return IA::PlayOk;
+            case IA::DpadRight: return IA::Back;
+            case IA::DpadLeft: return IA::Recenter;
+            case IA::DpadUp: return IA::Options;
+            case IA::ToggleUi: return IA::MainMenu;
+            case IA::PlayOk: case IA::Back: case IA::Recenter: case IA::Options: case IA::MainMenu:
+                return IA::Count;
+            default: return a;
+        }
+    }
+    return a;
+}
+
 } // namespace
 
 std::string buttonLabelText(InputAction a, const ButtonLabelState& s) {
@@ -99,7 +131,11 @@ std::string buttonLabelText(InputAction a, const ButtonLabelState& s) {
     if (t == nullptr) return std::string();
     using C = ButtonLabelState::Context;
     if (s.context == C::Keyboard) return t->keyboard ? t->keyboard : "";
+    // This bumper alone is held: it is the shift (the hand's other buttons show what they do now).
+    const bool shiftBumper = (a == InputAction::Previous && s.previousHeld && !s.nextHeld) ||
+                             (a == InputAction::Next && s.nextHeld && !s.previousHeld);
     if (s.context == C::Menus) {
+        if (shiftBumper) return "Shift";
         if ((t->flags & kNotInDialog) && s.dialog) return std::string();
         if ((t->flags & kMenusNeedOptions) && !s.optionsWork) return std::string();
         if ((t->flags & kMenusNeedRecenter) && !s.recenterWorks) return std::string();
@@ -114,11 +150,15 @@ std::string buttonLabelText(InputAction a, const ButtonLabelState& s) {
         return s.panShift ? "Release: Scrub \xC2\xB7 Distance" : "Hold: Size";
     }
     if (flatVideo && s.panShift && (a == InputAction::StickRight || a == InputAction::StickLeft)) return "Size";
+    // (360 / 180 keep "Hold: Pan · Tilt" on the bumpers.)
+    if (shiftBumper && !s.sphere) return "Shift";
     if ((t->flags & kNeedsMusic) && !s.music && !(s.sphere && t->sphere)) return std::string();
     if ((t->flags & kNotWeb) && s.web) return std::string();
     if ((t->flags & kNotLaserOnWeb) && s.laserOnWeb) return std::string();
     // On a web page the page takes B (page back) and the stick's Y (scroll).
     if (s.laserOnWeb && t->webPage && !(s.sphere && t->sphere)) return t->webPage;
+    // A web page as the selected screen: B is always its page back (wherever the laser is).
+    if (s.web && a == InputAction::Back) return "Page Back";
     if ((t->flags & kNeedsControls) && !s.controlsVisible) return std::string();
     // 360 / 180 with a bumper held: both sticks pan (left / right) and tilt (up / down) the view.
     if (s.sphere && s.panShift && (a == InputAction::StickRight || a == InputAction::StickLeft)) {
@@ -210,7 +250,9 @@ std::vector<ButtonLabelCard> buildButtonLabelCards(
         const std::vector<std::string>& src = boundSources[static_cast<std::size_t>(i)];
         if (src.empty()) continue;
         if ((t->flags & kSingleSource) && src.size() != 1) continue;  // a chord
-        const std::string text = buttonLabelText(a, s);
+        const InputAction shown = shiftedAction(a, s);  // a held bumper: what this button does now
+        if (shown == InputAction::Count) continue;
+        const std::string text = buttonLabelText(shown, s);
         if (text.empty()) continue;
         for (const std::string& path : src) {
             int hand = 1;

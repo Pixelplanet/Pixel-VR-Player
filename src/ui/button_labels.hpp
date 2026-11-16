@@ -37,13 +37,19 @@ struct ButtonLabelState {
     bool sphere = false;           // 360 / 180 projection
     bool panShift = false;         // a bumper held: 360 / 180 pans and tilts the view, flat video changes size
     bool controlsVisible = false;  // the player controls are shown (Back hides them)
+    // The bumpers as they are held right now (Previous = left, Next = right on the defaults). While
+    // one is held its hand's buttons act as the other hand's (XrContext's shift): the cards then show
+    // the shifted meanings.
+    bool previousHeld = false;
+    bool nextHeld = false;
 };
 
 // The text for `a` in this state; empty when the action does nothing there.
 std::string buttonLabelText(InputAction a, const ButtonLabelState& s);
 
 // Builds the cards from each action's bound source paths (indexed by
-// InputAction, e.g. "/user/hand/right/input/a/click").
+// InputAction, e.g. "/user/hand/right/input/a/click"). With a bumper held, a
+// button shows the text of the action the shift turns it into.
 std::vector<ButtonLabelCard> buildButtonLabelCards(
     const std::vector<std::vector<std::string>>& boundSources, const ButtonLabelState& s);
 
