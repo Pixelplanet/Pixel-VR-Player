@@ -12,8 +12,12 @@ libswresample.so.6) for the Steam Frame (Qualcomm "Iris" V4L2-M2M decoder):
                     (AVDRMFrameDescriptor: dmabuf fd + DRM fourcc + format
                     modifier + per-plane offset/pitch + crop). Includes the
                     Qualcomm compressed 10-bit format (Q10C) -> P010 with the
-                    UBWC modifier, and a capture-format-change state machine for
-                    mid-stream resolution changes. This lets us import the
+                    UBWC modifier, a capture-format-change state machine for
+                    mid-stream resolution changes, and a cap of 20 capture
+                    buffers for linear NV12 frames larger than 32 MiB (the
+                    Iris firmware rejects more at STREAMON, so 7200x3600 8-bit
+                    HEVC never produced a picture: POLLERR on every packet).
+                    UBWC Q10C and smaller frames keep up to 32. This lets us import the
                     decoder output straight into Vulkan (zero-copy) and sample
                     it via a VkSamplerYcbcrConversion, which fixes the swscale
                     NV12 chroma issue and unlocks HEVC/10-bit.

@@ -2572,6 +2572,14 @@ bool MediaEngine::open(const std::string& path) {
                 constexpr int64_t kBudget = 640ll << 20;  // ~640 MiB: 8K gets 12 buffers (6 left no slack)
                 impl_->captureBuffers = static_cast<int>(std::clamp<int64_t>(
                     kBudget / std::max<int64_t>(frameBytes, 1), 4, 20));
+                // The Iris firmware starts a session only with at most 20 plain NV12 capture buffers
+                // once a frame (in the decoder's aligned size) is over 32 MiB; more and STREAMON fails,
+                // every packet then ends in POLLERR and no picture ever comes (7200x3600 asked for 24).
+                // The dmabuf patch adds the driver's minimum (7) to what is asked here: ask for 13.
+                // (10-bit frames use the compressed Q10C format, which has no such limit.)
+                const int64_t alignedNv12 = ((static_cast<int64_t>(stream->codecpar->width) + 127) / 128 * 128) *
+                                            ((static_cast<int64_t>(stream->codecpar->height) + 31) / 32 * 32) * 3 / 2;
+                if (!highBitDepth && alignedNv12 > (32ll << 20)) impl_->captureBuffers = std::min(impl_->captureBuffers, 13);
                 av_opt_set_int(impl_->codec->priv_data, "num_capture_buffers",
                                impl_->captureBuffers, 0);
                 av_opt_set_int(impl_->codec->priv_data, "drm_prime", 1, 0);

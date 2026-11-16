@@ -90,6 +90,8 @@ int run_probe(const std::string& path) {
     }
     PIXELVR_LOG_INFO("probe: opened %s  %dx%d  %.1fs", path.c_str(), media.width(),
                      media.height(), media.duration());
+    // PIXELVR_PROBE_SEEK=<seconds>: jump there first (as a resumed film does).
+    if (const char* seekEnv = std::getenv("PIXELVR_PROBE_SEEK")) media.seek(std::atof(seekEnv));
     pixelvr::VideoFrame frame;
     int got = 0;
     for (int i = 0; i < 600 && got < 5; ++i) {

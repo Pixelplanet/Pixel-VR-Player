@@ -193,15 +193,16 @@
      if  (ctx->av_codec_id == AV_CODEC_ID_RAWVIDEO) {
          ret = v4l2_get_raw_format(ctx, &fmt.av_fmt);
          if (ret)
-@@ -714,6 +765,7 @@
+@@ -714,6 +765,8 @@
      V4L2m2mContext *s = ctx_to_m2mctx(ctx);
      struct v4l2_requestbuffers req;
      int ret, i;
 +    unsigned required = 0;
++    unsigned min_count = 0;
  
      if (!v4l2_type_supported(ctx)) {
          av_log(logger(ctx), AV_LOG_ERROR, "type %i not supported\n", ctx->type);
-@@ -728,12 +780,23 @@
+@@ -728,12 +781,42 @@
      req.count = ctx->num_buffers;
      req.memory = V4L2_MEMORY_MMAP;
      req.type = ctx->type;
@@ -211,9 +212,28 @@
 +        if (ioctl(s->fd, VIDIOC_REQBUFS, &req))
 +            return AVERROR(errno);
 +        req.memory = V4L2_MEMORY_MMAP;
++        min_count = req.count;
 +        req.count += ((V4L2m2mPriv *)s->priv)->num_capture_buffers;
-+        required = req.count;
 +    }
++    if (!V4L2_TYPE_IS_OUTPUT(ctx->type) && V4L2_TYPE_IS_MULTIPLANAR(ctx->type) &&
++        ctx->format.fmt.pix_mp.pixelformat == V4L2_PIX_FMT_NV12) {
++        /* The Qualcomm Iris decoder takes at most 20 linear NV12 capture
++         * buffers once a frame is larger than 32 MiB (7200x3600 is 39.6 MB;
++         * smaller frames, and UBWC Q10C at any size, take up to 32). With
++         * more, the firmware rejects the session at capture STREAMON (-ENOMEM)
++         * and every packet then fails with POLLERR: no picture, no error. */
++        size_t frame_size = 0;
++        unsigned limit = FFMAX(min_count, 20);
++        for (i = 0; i < ctx->format.fmt.pix_mp.num_planes; i++)
++            frame_size += ctx->format.fmt.pix_mp.plane_fmt[i].sizeimage;
++        if (frame_size > (32u << 20) && req.count > limit) {
++            av_log(logger(ctx), AV_LOG_VERBOSE, "%s: %u buffers of %zu bytes exceed the decoder's limit, requesting %u\n",
++                   ctx->name, req.count, frame_size, limit);
++            req.count = limit;
++        }
++    }
++    if (min_count)
++        required = req.count;
      ret = ioctl(s->fd, VIDIOC_REQBUFS, &req);
      if (ret < 0) {
          av_log(logger(ctx), AV_LOG_ERROR, "%s VIDIOC_REQBUFS failed: %s\n", ctx->name, strerror(errno));
