@@ -23,7 +23,7 @@ namespace pixelvr {
 
 namespace {
 
-const char* const kDefaultStatus = "Point + Trigger: Change Setting  |  B: Close";
+const char* const kDefaultStatus = "D-pad: Select  |  A: Change  |  B: Close  |  Bumpers: Tab";
 const char* const kShortcutsStatus = "Shortcuts appear as tabs on the hub's rail, in this order.";
 // Buttons are assigned in SteamVR only (OpenXR can't open that page for us).
 const char* const kButtonsStatus =
@@ -297,7 +297,7 @@ bool SettingsMenu::navigateBack() {
 }
 
 const std::string& SettingsMenu::status() const {
-    static const std::string kSubStatus = "Point + Trigger: Change Setting  |  B: Back";
+    static const std::string kSubStatus = "D-pad: Select  |  A: Change  |  B: Back";
     return (status_ == kDefaultStatus && parentSection() >= 0) ? kSubStatus : status_;
 }
 
@@ -483,7 +483,8 @@ void SettingsMenu::refresh() {
         segmented("Laser Smoothing", {"Off", "Low", "Medium", "High"}, laserSmoothing_ % 4,
                   Action::CycleLaserSmoothing);
         toggle("Controller Models", drawModels_, Action::ToggleModels);
-        toggle("Laser Hover Rumble", hoverHapticsEnabled_, Action::ToggleHoverHaptics);
+        // (Also the tick of a D-pad / stick step in the menus.)
+        toggle("Hover / Focus Rumble", hoverHapticsEnabled_, Action::ToggleHoverHaptics);
         choice("Rumble Strength", hoverHapticsStrengthStr(), kHoverHapticsStrengthCount,
                hoverHapticsStrengthIdx_ % kHoverHapticsStrengthCount,
                Action::CycleHoverHapticsStrength, hoverHapticsEnabled_);

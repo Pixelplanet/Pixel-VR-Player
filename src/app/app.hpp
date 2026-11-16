@@ -131,6 +131,59 @@ private:
     // Menu nav stick auto-repeat: -1/+1 to step (initial press + hold), else 0.
     int navStep(float axisY, std::chrono::steady_clock::time_point now);
     int navStepX(float axisX, std::chrono::steady_clock::time_point now);
+
+    // Button navigation feedback (app/hub_nav.cpp), the same on every menu screen without each
+    // screen doing anything: a light tick when a D-pad / stick step moved the focus, a short double
+    // tick when it hit the end, and for A the click ring on the focused element plus one standard
+    // tick. Screens only have to step with navStep / navStepX and keep their selection in the
+    // renderer (see VulkanRenderer::focusedElementCentre).
+    bool navStepFired_ = false;  // navStep / navStepX stepped this frame
+    std::vector<int> navBefore_;  // the focus before this frame's menu input
+    bool navEndTickPending_ = false;
+    std::chrono::steady_clock::time_point navEndTickAt_{};
+    std::vector<int> navFocusSnapshot() const;
+    int navHand() const;          // the hand the ticks go to: the laser hand (one controller: that one)
+    void navFocusTick();          // a focus move (hover strength, only with Hover / Focus Rumble on)
+    void navEndTick();            // a step at the end of a list (two short ticks)
+    void navActivateTick();       // A / trigger acted on something
+    // At the start of the menu input: the press ring (laser target or focused element) and tick.
+    void navFeedbackBegin(const XrInputState& in, std::chrono::steady_clock::time_point now);
+    // After the menu input: the focus tick / end tick for this frame's steps.
+    void navFeedbackEnd();
+
+    // Hub focus zones: the rail and (Files) the header row, reached with the D-pad / stick at the
+    // content's edge (Left in the first column = rail, Up in the top row = header), Up / Down /
+    // Left / Right inside them, A presses, Right / Down / B go back into the content.
+    int hubNavZone_ = 0;     // VulkanRenderer::kNavContent / kNavRail / kNavHeader / kNavCrumb
+    int hubNavId_ = -1;      // rail hover id, header button id or crumb index
+    int hubNavHoverSeen_ = -1;   // the laser's rail item last frame (a new one moves the focus)
+    int hubNavPage_ = -1;        // the tab shown last frame (0 Files, 1 Downloads, 2 Settings)
+    // The rail / header used this frame's stick: navStep / navStepX give the content nothing (and
+    // keep their repeat state, so a held push does not step again at once). Cleared each frame.
+    bool navStickOwned_ = false;
+    int headerPress_ = -1;   // A on a header button this frame (read where the laser's clicks are)
+    int crumbPress_ = -1;    // ... on a path part
+    std::vector<int> railNavItems() const;    // rail hover ids top to bottom
+    std::vector<int> headerNavItems() const;  // Files header button ids left to right
+    int railEntryId() const;                  // where the focus lands on the rail
+    // Moves the focus between zones and inside the rail / header; returns the rail item A pressed
+    // (-1 = none). Consumes the stick while the focus is outside the content.
+    int updateHubNav(XrInputState& in, std::chrono::steady_clock::time_point now, int sbHover, bool hubActive);
+    bool hubNavBack(XrInputState& in);  // B with the focus on the rail / header: back into the content
+
+    // Downloads tab with buttons: a focused card (D-pad / stick up / down, the laser moving onto a
+    // card), A = its main action, Y = its Options menu. Stopping a transfer asks first.
+    int dlFocus_ = -1;            // index into the jobs
+    std::string dlFocusUri_;      // ... and which job that is (indexes move when jobs go)
+    int dlFocusPos_ = 0;          // its place in the shown list (kept when the job goes)
+    int dlHoverSeen_ = -1;
+    std::string dlMenuUri_;       // the job the Options menu was opened for
+    void updateDownloadsNav(XrInputState& in, std::chrono::steady_clock::time_point now, int sbHover);
+    void downloadPrimaryAction(int job, XrInputState& in);  // Play / Pause / Retry
+    void openFinishedDownload(int job, XrInputState& in);
+    void openDownloadMenu();
+    void chooseDownloadMenu(const std::string& opt, XrInputState& in);
+    void askStopDownload();       // the running transfer: asks, then stops it (its part is deleted)
     void performVaultLock();
     // Closes the current clip and returns the renderer to flat/mono so the hub
     // panel stops behaving as if 180/360 content were still playing.

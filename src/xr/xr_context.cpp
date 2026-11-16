@@ -855,13 +855,16 @@ void XrContext::syncActions() {
     input_.dpadRight = read_bool(act(IA::DpadRight), &input_.dpadRightHeld);
     // One-handed use: while a bumper is held, this hand's buttons act as the other hand's, by
     // position. Right bumper (Next): Play / Back / Recenter / Options (A B X Y) become D-pad down /
-    // right / left / up. Left bumper (Previous): the D-pad becomes those four. Both held: no swap.
+    // right / left / up, and Main Menu (Menu) becomes Show / Hide UI. Left bumper (Previous): the
+    // D-pad becomes those four, and Show / Hide UI (View) becomes Main Menu. Both held: no swap.
     // It swaps ACTIONS, so it follows whatever SteamVR has bound to them.
     {
         const bool toDpad = input_.nextHeld && !input_.previousHeld;
         const bool toFace = input_.previousHeld && !input_.nextHeld;
         if (toDpad) {
-            if (input_.togglePlay || input_.back || input_.recenter || input_.options) bumperUsed_[1] = true;
+            if (input_.togglePlay || input_.back || input_.recenter || input_.options || input_.mainMenu) {
+                bumperUsed_[1] = true;
+            }
             input_.dpadDown = input_.togglePlay;
             input_.dpadRight = input_.back;
             input_.dpadLeft = input_.recenter;
@@ -871,14 +874,20 @@ void XrContext::syncActions() {
             input_.dpadLeftHeld = recenterHeld;
             input_.dpadUpHeld = optionsHeld;
             input_.togglePlay = input_.back = input_.recenter = input_.options = false;
+            input_.toggleUi = input_.mainMenu;  // the right hand alone can hide / show the UI
+            input_.mainMenu = false;
         } else if (toFace) {
-            if (input_.dpadDown || input_.dpadRight || input_.dpadLeft || input_.dpadUp) bumperUsed_[0] = true;
+            if (input_.dpadDown || input_.dpadRight || input_.dpadLeft || input_.dpadUp || input_.toggleUi) {
+                bumperUsed_[0] = true;
+            }
             input_.togglePlay = input_.dpadDown;
             input_.back = input_.dpadRight;
             input_.recenter = input_.dpadLeft;
             input_.options = input_.dpadUp;
             input_.dpadUp = input_.dpadDown = input_.dpadLeft = input_.dpadRight = false;
             input_.dpadUpHeld = input_.dpadDownHeld = input_.dpadLeftHeld = input_.dpadRightHeld = false;
+            input_.mainMenu = input_.toggleUi;  // the left hand alone can open / close the Main Menu
+            input_.toggleUi = false;
         }
         // Previous / Next themselves: a tap, counted when the bumper is let go (pressing it must not
         // turn a hub tab or a track before it is known to be a shift).

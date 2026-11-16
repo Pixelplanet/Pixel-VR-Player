@@ -149,6 +149,7 @@ add_library(pixelvr_core STATIC
     src/app/vault_crypto.cpp
     src/app/file_ops.cpp
     src/app/chromium_installer.cpp
+    src/app/hub_nav.cpp
     src/app/app.cpp)
 
 target_include_directories(pixelvr_core PUBLIC
