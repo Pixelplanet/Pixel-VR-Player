@@ -177,6 +177,17 @@ public:
     // opens it. -1 while the focus is on the page.
     bool railFocus() const { return railFocus_; }
     int railFocusPos() const { return railFocus_ ? railFocusPos_ : -1; }
+    // The section list is Settings' part of the hub rail. A step that would leave it (Left, Up from
+    // the first entry, Down from the last) is reported here once, for the hub to take the focus to
+    // the tabs above or Lock Vault below; the focus stays on the list until leaveRail().
+    static constexpr int kRailExitNone = 0, kRailExitLeft = 1, kRailExitUp = 2, kRailExitDown = 3;
+    int takeRailExit() {
+        const int e = railExit_;
+        railExit_ = kRailExitNone;
+        return e;
+    }
+    void leaveRail() { railFocus_ = false; }
+    void focusRail(int pos);  // the hub hands the focus back onto the list, on entry `pos`
     // Up / Down: the rows in reading order (list pages: the lines that can act); up from the first
     // one onto the section list.
     void navUpDown(int d);
@@ -526,6 +537,7 @@ private:
     std::chrono::steady_clock::time_point pickNudgeAt_{};
     bool railFocus_ = false;  // the focus is on the section list
     int railFocusPos_ = 0;
+    int railExit_ = kRailExitNone;  // takeRailExit()
     int lastPointerRow_ = -1;
     void enterRail();
     void fixListSelection();  // list pages: the selection on a line that can act

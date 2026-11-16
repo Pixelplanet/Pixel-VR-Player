@@ -134,7 +134,7 @@ private:
     int navStep(float axisY, std::chrono::steady_clock::time_point now);
     int navStepX(float axisX, std::chrono::steady_clock::time_point now);
     // Up / down hold: when the current hold began, and whether the last step was its first one
-    // (the file list wraps at its ends only on a fresh press, and pages through after 1.5 s).
+    // (the file list leaves for the rail / header only on a fresh press, and pages through after 1.5 s).
     std::chrono::steady_clock::time_point navHoldStart_{};
     bool navLastStepFirst_ = false;
     bool navHeldLong(std::chrono::steady_clock::time_point now) const {
@@ -167,7 +167,13 @@ private:
 
     // Hub focus zones: the rail and (Files) the header row, reached with the D-pad / stick at the
     // content's edge (Left in the first column = rail, Up in the top row = header), Up / Down /
-    // Left / Right inside them, A presses, Right / Down / B go back into the content.
+    // Left / Right inside them, A presses, Right / Down / B go back into the content. The page
+    // decides where its edge is (moveBrowserFocus, SettingsMenu's section list) and then calls
+    // hubNavLeaveContent. Settings' section list is that page's part of the rail: the hub's rail
+    // focus hands over to it when it reaches a section entry.
+    static constexpr int kNavEdgeNone = 0, kNavEdgeLeft = 1, kNavEdgeUp = 2;
+    void hubNavLeaveContent(int edge);
+    void takeSettingsRailExit();  // a step off Settings' section list: onto the hub's tabs / Lock Vault
     int hubNavZone_ = 0;     // VulkanRenderer::kNavContent / kNavRail / kNavHeader / kNavCrumb
     int hubNavId_ = -1;      // rail hover id, header button id or crumb index
     int hubNavHoverSeen_ = -1;   // the laser's rail item last frame (a new one moves the focus)
@@ -253,10 +259,11 @@ private:
     // Options (Y) while choosing a folder: Move here / New folder / Stop moving, the confirm row first.
     void openPickMenu();
     // The file grid, by buttons: A opens / plays the focused entry; the stick / D-pad moves the focus
-    // (rows keep their column, List view pages with left / right, the ends wrap on a fresh press,
-    // a long hold pages through).
+    // (rows keep their column and stop at its ends, List view pages with left / right, a long hold
+    // pages through). Returns kNavEdgeLeft / kNavEdgeUp when a fresh press went past the first
+    // column (List view: Left with the list's top in view) or the top row: the rail / header next.
     void activateBrowserFocus();
-    void moveBrowserFocus(int dx, int dy, std::chrono::steady_clock::time_point now);
+    int moveBrowserFocus(int dx, int dy, std::chrono::steady_clock::time_point now, bool fresh);
     void openNewFolderKeyboard(const XrInputState& in);
     bool browserScrollDrag_ = false;  // trigger held after grabbing the file list's scrollbar
     // The controller button an action is bound to right now ("A", "Trigger", "Bumpers"), from the

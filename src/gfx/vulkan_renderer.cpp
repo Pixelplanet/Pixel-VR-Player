@@ -3090,6 +3090,9 @@ namespace {
 bool railItemRect(int page, int id, UiRect& r) {
     if (id >= 0 && id < hub::kFixedTabCount) {
         r = hub::mainTab(id);
+    } else if (id == VulkanRenderer::kSettingsRail7HoverId) {
+        if (page != 2) return false;  // the Settings list's 7th entry (Vault) has its own id: 9 is Lock Vault
+        r = hub::subTab(2, 6);
     } else if (id >= hub::kShortcutIncogHoverBase && id - hub::kShortcutIncogHoverBase < hub::gShortcutCount) {
         r = hub::mainTabIncogBtn(hub::kFixedTabCount + id - hub::kShortcutIncogHoverBase);
     } else if (id >= hub::kShortcutHoverBase && id - hub::kShortcutHoverBase < hub::gShortcutCount) {
@@ -3107,24 +3110,37 @@ bool railItemRect(int page, int id, UiRect& r) {
 }  // namespace
 
 int VulkanRenderer::railSubCount() const {
-    // (The same counts the rail draws and the laser tests.)
-    if (!settingsVisible_ && downloadsVisible_) return 3;
+    // (The same counts the rail draws and the laser tests.) Settings: Display, UI, Files & Web,
+    // Playback & Tracks, Controls, Plugins and, while it is unlocked, Vault.
+    if (settingsVisible_) return vaultUnlocked_ ? 7 : 6;
+    if (downloadsVisible_) return 3;
     return vaultUnlocked_ ? 6 : 5;
 }
 
 int VulkanRenderer::railActiveSub() const {
     // (The same choice as the rail's drawing: the place, filter or section in use.)
     if (settingsVisible_) {
-        const int s = settingsSection_;
-        if (s >= 10 && s <= 12) return 2;
-        if (s == 13 || s == 21 || s == 22 || s == 8 || s == 9) return 1;
-        if (s >= 23 && s < 30) return 3;
-        if (s == 15 || s == 16 || s == 18 || s == 19) return 4;
-        if (s == 4 || s == 20) return 5;
-        return (s >= 0 && s < railSubCount()) ? s : -1;
+        // The settings menu says which entry a page (or sub-page) belongs to (SettingsMenu::railPos).
+        return (settingsRailPos_ >= 0 && settingsRailPos_ < railSubCount()) ? settingsRailPos_ : -1;
     }
     if (downloadsVisible_) return downloadsFilter_;
     return (browserQuickFilter_ >= 0 && browserQuickFilter_ < railSubCount()) ? browserQuickFilter_ : -1;
+}
+
+int VulkanRenderer::headerButtonAbove(const std::vector<int>& ids) const {
+    if (ids.empty()) return -1;
+    const int slot = std::clamp(browserSelected_ - browserFirst_, 0, std::max(0, hub::cardsPerPage(browserViewMode_) - 1));
+    const float cx = hub::browserCard(browserViewMode_, slot).cx;
+    int best = ids.front();
+    float bestD = 1e9f;
+    for (int id : ids) {
+        const float d = std::fabs(hub::headerButton(id, browserPick_.active).cx - cx);
+        if (d < bestD) {
+            bestD = d;
+            best = id;
+        }
+    }
+    return best;
 }
 
 std::vector<int> VulkanRenderer::downloadsShownJobs() const {
@@ -3207,7 +3223,7 @@ bool VulkanRenderer::focusedElementCentre(float& x, float& y) const {
         UiRect r;
         return railItemRect(page, hubNavId_, r) && at(r);
     }
-    if (page == 0 && hubNavZone_ == kNavHeader) return at(hub::headerButton(hubNavId_));
+    if (page == 0 && hubNavZone_ == kNavHeader) return at(hub::headerButton(hubNavId_, browserPick_.active));
     if (page == 0 && hubNavZone_ == kNavCrumb) {
         for (const CrumbHit& c : browserCrumbHits_) {
             if (c.index != hubNavId_) continue;
@@ -3225,6 +3241,9 @@ bool VulkanRenderer::focusedElementCentre(float& x, float& y) const {
         return v >= 0 && v < hub::kMaxDownloadCards && at(hub::downloadCard(v));
     }
     if (page == 2) {
+        // Settings' own section list on the rail, or the colour picker's control with the focus.
+        if (settingsRailFocus_ >= 0) return settingsRailFocus_ < railSubCount() && at(hub::subTab(2, settingsRailFocus_));
+        if (colorPickerTarget_ >= 0) return colorPickerFocus_ >= 0 && at(hub::colorPickerZone(colorPickerFocus_));
         const int layoutN = settingsLayoutRows();
         const int sel = settingsSelected_;
         if (sel < 0 || sel >= static_cast<int>(settingsRows_.size()) ||
@@ -8300,7 +8319,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             }
             }  // not picking
             // The button focus on a header button or a path part (last frame's path layout).
-            if (navFocusShown && hubNavZone_ == kNavHeader) drawNavFocus(hub::headerButton(hubNavId_));
+            if (navFocusShown && hubNavZone_ == kNavHeader) drawNavFocus(hub::headerButton(hubNavId_, browserPick_.active));
             if (navFocusShown && hubNavZone_ == kNavCrumb) {
                 for (const CrumbHit& c : browserCrumbHits_) {
                     if (c.index == hubNavId_) {
@@ -9036,11 +9055,13 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             const float chipListenBg[4] = {
                 themeAccentCol[0] * 0.45f, themeAccentCol[1] * 0.45f,
                 themeAccentCol[2] * 0.52f, 0.98f};
-            // The row the buttons select (the focus on the page, the laser on no row): drawn like a
-            // hovered one, so it can be found at 2 m; a disabled one gets the full accent rim.
+            // The row the buttons select (the focus on the page; the laser on no row, or the buttons own
+            // the focus): drawn like a hovered one, so it can be found at 2 m; a disabled one gets the
+            // full accent rim.
             const float selFull[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], 1.0f};
             auto focusRow = [&](int r) {
-                return r == settingsSelected_ && settingsRailFocus_ < 0 && settingsHovered_ < 0 && colorPickerTarget_ < 0;
+                return r == settingsSelected_ && settingsRailFocus_ < 0 && (settingsHovered_ < 0 || !laserOwnsFocus_) &&
+                       colorPickerTarget_ < 0;
             };
 
             for (int i = 0; i < total && i < maxVis; ++i) {
@@ -9306,9 +9327,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 uicolor::hsvToRgb(colorPickerHsv_[0], colorPickerHsv_[1], colorPickerHsv_[2], pkRaw);
                 const float pkWhite[4] = {1.0f, 1.0f, 1.0f, 0.95f};
                 const float pkDark[4] = {0.0f, 0.0f, 0.0f, 0.55f};
-                // The control with the button focus (while the laser is on none of them): lit like a
-                // hovered one, with an accent glow around it.
-                const int pkFocus = (colorPickerZone_ < 0 && colorPickerDrag_ < 0) ? colorPickerFocus_ : -1;
+                // The control with the button focus (while the laser is on none of them, or the buttons
+                // own the focus): lit like a hovered one, with an accent glow around it.
+                const int pkFocus = ((colorPickerZone_ < 0 || !laserOwnsFocus_) && colorPickerDrag_ < 0) ? colorPickerFocus_ : -1;
                 auto pkLit = [&](int z) { return colorPickerZone_ == z || colorPickerDrag_ == z || pkFocus == z; };
                 for (int z : {pkFocus, colorPickerDrag_}) {
                     if (z < 0 || (z == colorPickerDrag_ && colorPickerZone_ == z)) continue;  // (a laser drag shows itself)

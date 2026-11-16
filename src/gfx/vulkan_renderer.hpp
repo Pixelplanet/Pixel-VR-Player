@@ -398,6 +398,9 @@ public:
     }
     int railSubCount() const;
     int railActiveSub() const;
+    // Files header: of the header button ids given, the one drawn closest above the selected card
+    // (Up from the top row lands there). -1 when the list is empty.
+    int headerButtonAbove(const std::vector<int>& ids) const;
     // Files header: the path parts that can be clicked (crumb indexes, root first).
     std::vector<int> browserCrumbLevels() const {
         std::vector<int> out;
@@ -1024,6 +1027,10 @@ public:
         settingsRailFocus_ = railFocusPos;
         colorPickerFocus_ = pickerFocus;
     }
+    // Last input wins (the app's LaserFocus): false while the stick / D-pad own the focus. Then the
+    // Settings row / colour picker control the buttons selected stays drawn as the focus even with a
+    // beam resting on another one (A acts on the selected one).
+    void setLaserOwnsFocus(bool owns) { laserOwnsFocus_ = owns; }
     // Dialog pages (compact): a run of paragraph rows is one text panel (stepIdx 1 = heading line);
     // button rows sit side by side below it (stepIdx 1 = the main, accent-coloured button).
     static constexpr int kSettingsKindParagraph = 9;
@@ -1392,6 +1399,7 @@ private:
     int colorPickerFocus_ = -1;  // the control with the button focus
     int settingsRailPos_ = 0;    // the Settings rail entry of the page shown
     int settingsRailFocus_ = -1; // the rail entry marked by the buttons (-1: the focus is on the page)
+    bool laserOwnsFocus_ = true; // setLaserOwnsFocus
     float colorPickerPtr_[2] = {0.0f, 0.0f};  // the laser on the panel (panel units)
     bool colorPickerPtrValid_ = false;
     void colorPickerHitTest(float hx, float hy);

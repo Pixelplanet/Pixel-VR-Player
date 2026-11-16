@@ -96,7 +96,7 @@ std::string capitalized(std::string s) {
 // shows that action's text. Count = the button does nothing then (its press is taken by the shift).
 InputAction shiftedAction(InputAction a, const ButtonLabelState& s) {
     using IA = InputAction;
-    if (s.context == ButtonLabelState::Context::Keyboard) return a;
+    // (The shift also works while the keyboard is open: the cards show the moved keys there too.)
     if (s.nextHeld && !s.previousHeld) {  // A B X Y and Menu stand in for the D-pad and View
         switch (a) {
             case IA::PlayOk: return IA::DpadDown;
@@ -144,10 +144,13 @@ std::string buttonLabelText(InputAction a, const ButtonLabelState& s) {
     const LabelTexts* t = textsFor(a);
     if (t == nullptr) return std::string();
     using C = ButtonLabelState::Context;
-    if (s.context == C::Keyboard) return t->keyboard ? t->keyboard : "";
     // This bumper alone is held: it is the shift (the hand's other buttons show what they do now).
     const bool shiftBumper = (a == InputAction::Previous && s.previousHeld && !s.nextHeld) ||
                              (a == InputAction::Next && s.nextHeld && !s.previousHeld);
+    if (s.context == C::Keyboard) {
+        if (shiftBumper) return "Shift";
+        return t->keyboard ? t->keyboard : "";
+    }
     if (s.context == C::Menus) {
         if (shiftBumper) return "Shift";
         if ((t->flags & kNotInDialog) && s.dialog) return std::string();

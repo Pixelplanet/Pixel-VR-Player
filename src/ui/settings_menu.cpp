@@ -303,7 +303,7 @@ bool SettingsMenu::navigateBack() {
 
 const std::string& SettingsMenu::status() const {
     static const std::string kSubStatus = "Up / Down: Select  |  Left / Right or A: Change  |  B: Back";
-    static const std::string kRailStatus = "Up / Down: Section  |  A or Right: Open  |  B: Close";
+    static const std::string kRailStatus = "Up / Down: Section  |  A or Right: Open  |  Left: Tabs  |  B: Close";
     static const std::string kGrabStatus = "Stick: Move the marker  |  A or B: Done";
     if (pickGrab_ >= 0) return kGrabStatus;
     // The page's own hint gives way to what the selected row has to say (why it is off, what it does).
@@ -538,7 +538,7 @@ void SettingsMenu::refresh() {
         choice("Rumble Strength", hoverHapticsStrengthStr(), kHoverHapticsStrengthCount,
                hoverHapticsStrengthIdx_ % kHoverHapticsStrengthCount,
                Action::CycleHoverHapticsStrength, hoverHapticsEnabled_, kHoverHapticsStrengthNames);
-        offBecause("Turn on Laser Hover Rumble");
+        offBecause("Turn on Hover / Focus Rumble");
         // With the controls hidden, do these bring them back? Shown as "on" = they do; saved as the
         // old "keeps them hidden" values (silent = !shown), so a saved file keeps its meaning.
         const char* const kShowNote = "Off: the controls stay hidden; only Show / Hide UI brings them back.";
@@ -2275,6 +2275,12 @@ void SettingsMenu::enterRail() {
     railFocusPos_ = std::clamp(railPos(), 0, railSectionCount() - 1);
 }
 
+void SettingsMenu::focusRail(int pos) {
+    railFocus_ = true;
+    railFocusPos_ = std::clamp(pos, 0, railSectionCount() - 1);
+    railExit_ = kRailExitNone;
+}
+
 bool SettingsMenu::pressRail() {
     if (!railFocus_) return false;
     const int pos = std::clamp(railFocusPos_, 0, railSectionCount() - 1);
@@ -2292,7 +2298,10 @@ void SettingsMenu::notePointer(int hovered) {
 void SettingsMenu::navUpDown(int d) {
     if (d == 0) return;
     if (railFocus_) {
-        railFocusPos_ = std::clamp(railFocusPos_ + d, 0, railSectionCount() - 1);
+        const int to = railFocusPos_ + d;
+        if (to < 0) railExit_ = kRailExitUp;  // above the first section: the hub's tabs
+        else if (to >= railSectionCount()) railExit_ = kRailExitDown;  // below the last: Lock Vault
+        else railFocusPos_ = to;
         return;
     }
     if (colorPickerTarget() >= 0) {
@@ -2321,6 +2330,7 @@ SettingsMenu::Action SettingsMenu::navLeftRight(int d, bool& changed) {
     if (d == 0) return Action::None;
     if (railFocus_) {
         if (d > 0) pressRail();
+        else railExit_ = kRailExitLeft;  // the edge of Settings: the hub's tabs (App::settingsButtons)
         return Action::None;
     }
     if (colorPickerTarget() >= 0) {

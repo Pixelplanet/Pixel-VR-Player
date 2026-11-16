@@ -23,6 +23,7 @@
 #include <chrono>
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
@@ -1374,6 +1375,9 @@ void App::updateLaserFocus(const XrInputState& in) {
     uint64_t key = (actionMenu_.visible ? 1u : 0u) | (static_cast<uint64_t>(actionMenu_.page & 0xFF) << 1) |
                    (settings_.isOpen() ? 1u << 9 : 0u) | (downloadsWindow_ ? 1u << 10 : 0u) |
                    (textEntry_.active ? 1u << 11 : 0u);
+    // A Settings page opened by a click (a dialog page such as Move Vault starts on Back) keeps its
+    // preselection too: the section is part of the key.
+    if (settings_.isOpen()) key |= static_cast<uint64_t>(settings_.section() & 0xFFFF) << 16;
     bool newPlace = false;
 #ifdef PIXELVR_HAVE_FREETYPE
     key |= browser_.isOpen() ? 1u << 12 : 0u;
@@ -1517,7 +1521,12 @@ void App::noteFolderVideos(int slot, const std::string& path) {
     // rows of the file's own folder count (Bookmarks shows files from everywhere).
     bool listed = false;
     for (const Browser::Entry& e : browser_.entries()) listed = listed || e.path == path;
-    if (listed) {
+    // Only while the browser shows that folder itself: a view that gathers files from many folders
+    // (Bookmarks, Videos) holds just part of it, and a local file then gets the whole folder from
+    // the disk below. (A network file has no disk read: the part listed is better than nothing.)
+    std::string loc = browser_.currentLocation();
+    while (loc.size() > 1 && loc.back() == '/') loc.pop_back();
+    if (listed && (loc == dir || path[0] != '/')) {
         for (const Browser::Entry& e : browser_.entries()) {
             if (e.isDir || e.isBack || !e.isVideo || e.path.empty() || parentOf(e.path) != dir) continue;
             if (isAudioFile(e.label) || isAudioFile(e.path)) continue;  // videos only
@@ -1534,23 +1543,28 @@ void App::noteFolderVideos(int slot, const std::string& path) {
         };
         std::vector<File> files;
         std::error_code ec;
+#ifdef PIXELVR_HAVE_FREETYPE
+        const int mode = browser_.sortMode();
+#else
+        const int mode = 0;
+#endif
         for (const auto& it : std::filesystem::directory_iterator(std::filesystem::path(dir), ec)) {
             const std::string name = it.path().filename().string();
             std::error_code fec;
             if (name.empty() || name[0] == '.' || !it.is_regular_file(fec)) continue;
             if (!isPlayableFile(name) || isAudioFile(name)) continue;
             File f{it.path().string(), name};
-            f.size = static_cast<long long>(it.file_size(fec));
-            const auto wt = it.last_write_time(fec);
-            if (!fec) f.mtime = std::chrono::duration_cast<std::chrono::seconds>(wt.time_since_epoch()).count();
+            // (This runs on the frame thread: only the one value the sort order needs is read.)
+            if (mode == 2) {
+                const auto sz = it.file_size(fec);
+                if (!fec) f.size = static_cast<long long>(sz);
+            } else if (mode == 1) {
+                const auto wt = it.last_write_time(fec);
+                if (!fec) f.mtime = std::chrono::duration_cast<std::chrono::seconds>(wt.time_since_epoch()).count();
+            }
             files.push_back(std::move(f));
             if (files.size() > 5000) break;
         }
-#ifdef PIXELVR_HAVE_FREETYPE
-        const int mode = browser_.sortMode();
-#else
-        const int mode = 0;
-#endif
         std::stable_sort(files.begin(), files.end(), [mode](const File& a, const File& b) {
             if (mode == 1 && a.mtime != b.mtime) return a.mtime > b.mtime;
             if (mode == 2 && a.size != b.size) return a.size > b.size;
@@ -1634,8 +1648,11 @@ std::string App::bumperTapText(int dir) {
         if (!sc.plexEpisode || sc.plexAwaitingNext) return std::string();
         return dir < 0 ? "Previous Episode" : "Next Episode";
     }
+    // Only when there is a video that way (at the folder's end the tap just says so: no label).
     const auto it = std::find(sc.folderVideos.begin(), sc.folderVideos.end(), sc.path);
-    if (it == sc.folderVideos.end() || sc.folderVideos.size() < 2) return std::string();
+    if (it == sc.folderVideos.end()) return std::string();
+    const long at = static_cast<long>(it - sc.folderVideos.begin()) + dir;
+    if (at < 0 || at >= static_cast<long>(sc.folderVideos.size())) return std::string();
     return dir < 0 ? "Previous Video" : "Next Video";
 #else
     (void)dir;
@@ -2078,12 +2095,11 @@ void App::updateColorPicker(XrInputState& in) {
 // picker has its own focus: A on a suggested colour picks it, A on the square / strip lets the stick
 // move its marker until A or B lets go.
 bool App::settingsButtons(XrInputState& in, std::chrono::steady_clock::time_point nowT, SettingsMenu::Action& act) {
+    // (The focus / end ticks of these steps come from navFeedbackEnd: one per real move.)
     act = SettingsMenu::Action::None;
     const int pH = renderer_.pointerHand();
     const int hand = (pH >= 0 && pH <= 1) ? pH : 1;
-    auto tick = [&] {  // a step of the focus or the value: the laser's hover tick
-        if (settings_.hoverHapticsEnabled()) xr_.triggerHaptic(hand, 0.008f, 0.0f, settings_.hoverHapticsStrength());
-    };
+    const bool laserOwns = laserFocus_.laserOwns();
     if (settings_.colorPickerTarget() >= 0 && !settings_.railFocus()) {
         if (settings_.pickerGrab() >= 0) {
             settings_.pickerNudge(in.thumbstickX, in.thumbstickY);
@@ -2096,13 +2112,12 @@ bool App::settingsButtons(XrInputState& in, std::chrono::steady_clock::time_poin
         }
         const int dy = navStep(in.thumbstickY, nowT);
         const int dx = navStepX(in.thumbstickX, nowT);
-        if (dx != 0 || dy != 0) {
-            settings_.pickerNav(dx, dy);
-            tick();
-        }
-        // A: the control under the laser, else the one with the focus (the header path takes its own).
-        if (in.togglePlay && colorDragZone_ < 0 && renderer_.settingsCrumbHovered() < 0) {
-            const int z = renderer_.colorPickerZone() >= 0 ? renderer_.colorPickerZone() : settings_.pickerFocus();
+        if (dx != 0 || dy != 0) settings_.pickerNav(dx, dy);
+        takeSettingsRailExit();
+        // A: the control with the button focus; the one under the laser only while the laser owns
+        // the focus (a resting beam does not take A over). The header path takes its own.
+        if (in.togglePlay && colorDragZone_ < 0 && !(laserOwns && renderer_.settingsCrumbHovered() >= 0)) {
+            const int z = (laserOwns && renderer_.colorPickerZone() >= 0) ? renderer_.colorPickerZone() : settings_.pickerFocus();
             if (z >= 0) {
                 settings_.pickerPress(z);
                 xr_.triggerHaptic(hand, 0.02f, 0.0f, 0.4f);
@@ -2111,16 +2126,12 @@ bool App::settingsButtons(XrInputState& in, std::chrono::steady_clock::time_poin
         }
         return false;
     }
-    if (const int d = navStep(in.thumbstickY, nowT)) {
-        settings_.navUpDown(d);
-        tick();
-    }
+    if (const int d = navStep(in.thumbstickY, nowT)) settings_.navUpDown(d);
     bool changed = false;
-    if (const int dx = navStepX(in.thumbstickX, nowT)) {
-        act = settings_.navLeftRight(dx, changed);
-        tick();
-    }
-    if (in.togglePlay && settings_.railFocus()) {
+    if (const int dx = navStepX(in.thumbstickX, nowT)) act = settings_.navLeftRight(dx, changed);
+    takeSettingsRailExit();  // Left / Up / Down off the section list: the hub's rail takes the focus
+    // A on the section list (unless the laser owns the focus and points at a row: then that row).
+    if (in.togglePlay && settings_.railFocus() && !(laserOwns && renderer_.settingsHovered() >= 0)) {
         settings_.pressRail();
         xr_.triggerHaptic(hand, 0.02f, 0.0f, 0.4f);
         in.togglePlay = false;
@@ -4029,7 +4040,6 @@ void App::navigateShareEditor(int dx, int dy, bool fresh) {
             }
         }
     }
-    const int hand = renderer_.pointerHand() == 0 ? 0 : 1;
     if (r < 0) {  // nothing (or a field that is off) highlighted: start at the server
         actionMenu_.selectedOption = 0;
         return;
@@ -4046,15 +4056,13 @@ void App::navigateShareEditor(int dx, int dy, bool fresh) {
             if (next != cur) {
                 smbModal_.protocol = kProtocols[next];
                 smbModal_.port.clear();
-                updateSmbModalMenu();
-                xr_.triggerHaptic(hand, 0.010f, 0.0f, 0.35f);
+                updateSmbModalMenu();  // (its focus tick comes from navFeedbackEnd, like every step)
             }
         } else if (id == 2) {  // Sign in: Left = guest, Right = username & password
             const bool anon = dx < 0;
             if (anon != smbModal_.anon) {
                 smbModal_.anon = anon;
                 updateSmbModalMenu();
-                xr_.triggerHaptic(hand, 0.010f, 0.0f, 0.35f);
             }
         } else {
             const std::vector<Item>& row = rows[static_cast<std::size_t>(r)];
@@ -4761,10 +4769,12 @@ void App::cancelPick(bool backToSettings) {
     // Never silently: the footer (or Settings) says that nothing was moved / changed.
     if (was == PickState::Kind::Move) showNotice("Move cancelled: nothing was moved", false, false, 3.0);
     else if (was == PickState::Kind::Copy) showNotice("Copy cancelled: nothing was copied", false, false, 3.0);
-    if (wasDownloadDir) settings_.showStatus("The download folder was not changed.");
     if (wasDownloadDir && backToSettings) {
         settings_.open();
         settings_.setSection(SettingsMenu::kFilesWebSection);  // where the Download Folder row is
+        // (Only here, on the page it is about: a Settings status line stays until replaced, and set
+        // while Settings is closed it would hide the row reasons of every page opened later.)
+        settings_.showStatus("The download folder was not changed.");
     } else if (wasDownloadDir) {
         showNotice("The download folder was not changed", false, false, 3.0);
     }
@@ -4891,46 +4901,47 @@ void App::activateBrowserFocus() {
 #endif
 }
 
-void App::moveBrowserFocus(int dx, int dy, std::chrono::steady_clock::time_point now) {
+int App::moveBrowserFocus(int dx, int dy, std::chrono::steady_clock::time_point now, bool fresh) {
 #ifdef PIXELVR_HAVE_FREETYPE
     const int n = static_cast<int>(browser_.entries().size());
-    if (n <= 0) return;
+    // An empty folder: a fresh Left / Up still reaches the rail / header.
+    if (n <= 0) return !fresh ? kNavEdgeNone : (dx < 0 ? kNavEdgeLeft : (dy < 0 ? kNavEdgeUp : kNavEdgeNone));
     const VulkanRenderer::BrowserViewMode mode = renderer_.browserViewMode();
     const bool list = mode == VulkanRenderer::BrowserViewMode::CompactList;
     const int cols = (mode == VulkanRenderer::BrowserViewMode::MiniCards) ? 4 : (list ? 1 : 3);
     const int perPage = (mode == VulkanRenderer::BrowserViewMode::MiniCards) ? 12 : (list ? 8 : 6);
     const int sel = std::clamp(browser_.selected(), 0, n - 1);
-    const int lastRow = (n - 1) / cols;
     int target = sel;
-    bool wrapped = false;
     if (dy != 0) {
-        if (navHeldLong(now)) {
-            target = sel + dy * perPage;  // held for 1.5 s: a page per step, same column
-        } else if (navLastStepFirst_ && dy > 0 && sel / cols == lastRow && lastRow > 0) {
-            target = sel % cols;  // down on the last row (a fresh press): the first row
-            wrapped = true;
-        } else if (navLastStepFirst_ && dy < 0 && sel / cols == 0 && lastRow > 0) {
-            target = std::min(n - 1, lastRow * cols + sel % cols);  // up on the first row: the last row
-            wrapped = true;
-        } else {
-            target = sel + dy * cols;
+        if (dy < 0 && sel < cols) {
+            // The top row: a fresh Up goes on to the header; a held one stops here.
+            return fresh ? kNavEdgeUp : kNavEdgeNone;
         }
+        // Held for 1.5 s: a page per step, same column. The last row stops (no wrap).
+        target = navHeldLong(now) ? sel + dy * perPage : sel + dy * cols;
     } else if (list) {
-        target = sel + dx * perPage;  // List view: left / right turn a page (up / down step a row)
+        // List view: left / right turn a page (up / down step a row). Left with the top of the list
+        // in view (the first page) goes on to the rail.
+        if (dx < 0 && renderer_.browserFirst() == 0) return fresh ? kNavEdgeLeft : kNavEdgeNone;
+        target = sel + dx * perPage;
     } else {
+        const int col = sel % cols + dx;
+        if (col < 0) return fresh ? kNavEdgeLeft : kNavEdgeNone;  // the first column: the rail next
+        if (col >= cols) return kNavEdgeNone;  // the row's end: a held push stops here
         target = sel + dx;
     }
     target = std::clamp(target, 0, n - 1);
-    if (target == sel) return;
+    if (target == sel) return kNavEdgeNone;
     browser_.setSelected(target);
     renderer_.setBrowserSelected(target);
     renderer_.scrollBrowser(0);
-    if (wrapped) xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.012f, 0.0f, 0.35f);  // one tick: back at the other end
 #else
     (void)dx;
     (void)dy;
     (void)now;
+    (void)fresh;
 #endif
+    return kNavEdgeNone;
 }
 
 void App::openNewFolderKeyboard(const XrInputState& in) {
@@ -4998,7 +5009,13 @@ void App::publishBrowserGuide() {
     const std::string opts = buttonName(InputAction::Options);
     // B goes up a folder; at a location's root it closes the hub (or stops choosing a folder).
     const bool hasUp = !ents.empty() && ents[0].isBack;
-    if (picking()) {
+    // The button focus on the rail, a header button or the folder path (hub_nav.cpp): A presses it,
+    // B goes back to the cards.
+    const bool outside = hubNavZone_ != VulkanRenderer::kNavContent;
+    if (outside) {
+        hints.push_back({ok, "Press"});
+        hints.push_back({back, "Back to the files"});
+    } else if (picking()) {
         const bool dlDir = pick_.kind == PickState::Kind::DownloadDir;
         hints.push_back({ok, "Open folder"});
         hints.push_back({back, hasUp || loading ? "Up" : "Stop"});
@@ -6453,7 +6470,13 @@ int App::run() {
             // up for ever); moving to another button or along the timeline counts afresh.
             {
                 const int key = renderer_.dockHoverKey();
-                if (key != dockHoverKey_) {
+                // On the timeline (keys 100..199, one per twentieth) a beam resting on a boundary
+                // flickers between two neighbours: that is still resting. dockHoverKey_ is the key the
+                // 20 s window started on, so only moving two twentieths or more away counts afresh.
+                const bool onTimeline = key >= 100 && key < 200;
+                const bool wasTimeline = dockHoverKey_ >= 100 && dockHoverKey_ < 200;
+                const bool tremor = onTimeline && wasTimeline && std::abs(key - dockHoverKey_) <= 1;
+                if (key != dockHoverKey_ && !tremor) {
                     dockHoverKey_ = key;
                     dockHoverSince_ = nowT;
                 }
@@ -7083,6 +7106,9 @@ int App::run() {
                 renderer_.setControllers(build(0), build(1));
             }
             updateButtonLabels(nowT, laserOnWeb);
+            // Laser or buttons: who moves the highlight in the lists below (and so where A acts and
+            // its ring shows).
+            updateLaserFocus(in);
             // Click feedback on the panel: the ring under the laser, or for A on the focused element
             // (and the focus ticks of the menu input below, navFeedbackEnd).
             navFeedbackBegin(in, nowT);
@@ -7144,15 +7170,20 @@ int App::run() {
             lastSettingsHov = curSettingsHov;
             lastSettingsPagerHov = curSettingsPagerHov;
             lastCtrlBtnHov = curCtrlBtnHov;
-            updateLaserFocus(in);  // laser or buttons: who moves the highlight in the lists below
 
+            // One focus per screen, last input wins: the trigger acts on what the laser points at; A
+            // acts on the button focus, or on what the laser points at only while the laser owns the
+            // focus (it moved since the last stick / D-pad step). A beam resting on a button does not
+            // take A away from the focused one.
+            const bool laserActs = in.select || laserFocus_.laserOwns();
 #ifdef PIXELVR_HAVE_FREETYPE
             // Unified Spatial Hub left navigation rail clicks (shared across Files, Downloads, Settings)
             const bool hubActive = (browserOpen || settingsOpen || downloadsWindow_) &&
                                    !actionMenu_.visible;
-            const int sbHover = renderer_.browserSidebarHovered();
+            // The rail item under the laser, while the laser owns the focus (else -1).
+            const int sbHover = laserActs ? renderer_.browserSidebarHovered() : -1;
             // The hub's close button (top right): like the Menu button, for laser-only use.
-            if (hubActive && (in.togglePlay || in.select) && renderer_.hubCloseHovered()) {
+            if (hubActive && (in.togglePlay || in.select) && laserActs && renderer_.hubCloseHovered()) {
                 closeHub();
                 xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.025f, 0.0f, 0.5f);
                 in.select = in.togglePlay = false;
@@ -7238,7 +7269,7 @@ int App::run() {
             // Buttons: the D-pad / stick moves a focused card (the list scrolls to keep it in view; the
             // laser moving onto a card focuses it too), A runs its main action, Y opens its Options.
             if (dlWin && !actionMenu_.visible) updateDownloadsNav(in, nowT, sbHover);
-            if (dlWin && (in.select || in.togglePlay) && sbHover < 0) {
+            if (dlWin && (in.select || in.togglePlay) && laserActs && sbHover < 0) {
                 const int bi = renderer_.downloadsButtonHovered();
                 if (bi >= 0) {
                     if (browser_.downloadActive() || browser_.hasQueuedDownloads()) {
@@ -7824,6 +7855,10 @@ int App::run() {
 
                         if (in.select || in.togglePlay) {
                             int chosen = (hov >= 0 && (in.select || laserFocus_.laserOwns())) ? hov : actionMenu_.selectedOption;
+                            // The segment under the laser picks that choice only on the row the press acts
+                            // on, and only while the laser acts (else A steps the focused row's choice).
+                            const int laserSeg = (hov == chosen && (in.select || laserFocus_.laserOwns()))
+                                                     ? renderer_.actionMenuKeyHovered() : -1;
                             if (chosen >= 0) {
                                 xr_.triggerHaptic(0, 0.025f, 0.0f, 0.5f);
                                 xr_.triggerHaptic(1, 0.025f, 0.0f, 0.5f);
@@ -7835,7 +7870,7 @@ int App::run() {
                                     openSmbField(chosen, true);
                                 } else if (chosen == 2) {
                                     // Pointing at a segment picks it; stick + A toggles.
-                                    const int seg = renderer_.actionMenuKeyHovered();
+                                    const int seg = laserSeg;
                                     smbModal_.anon = (seg >= 0) ? (seg == 0) : !smbModal_.anon;
                                     updateSmbModalMenu();
                                 } else if (chosen == 7) {
@@ -7859,7 +7894,7 @@ int App::run() {
                                     actionMenu_.selectedOption = 1;
                                 } else if (chosen == 10) {
                                     static const char* const kProtocols[4] = {"smb", "sftp", "dav", "davs"};
-                                    const int seg = renderer_.actionMenuKeyHovered();
+                                    const int seg = laserSeg;
                                     int cur = 0;
                                     for (int k = 0; k < 4; ++k) {
                                         if (smbModal_.protocol == kProtocols[k]) cur = k;
@@ -7888,10 +7923,15 @@ int App::run() {
                 interacted = true;
             } else if (browser_.isOpen() && !browser_.isScanning() && !downloadsWindow_ &&
                        !settings_.isOpen()) {
-                // Stick / D-pad: rows keep their column; see moveBrowserFocus.
+                // Stick / D-pad: rows keep their column; see moveBrowserFocus. Past the first column /
+                // the top row (a fresh press) the focus goes on to the rail / header.
                 const int dy = navStep(in.thumbstickY, nowT);
                 const int dx = navStepX(in.thumbstickX, nowT);
-                if (dy != 0 || dx != 0) moveBrowserFocus(dx, dy, nowT);
+                if (dy != 0 || dx != 0) {
+                    if (const int edge = moveBrowserFocus(dx, dy, nowT, navLastFresh_); edge != kNavEdgeNone) {
+                        hubNavLeaveContent(edge);
+                    }
+                }
 
                 // The scrollbar: a click or a drag moves the list (and the focus with it, so it stays on screen).
                 if (in.select && renderer_.browserScrollbarHovered() && sbHover < 0) {
@@ -7913,9 +7953,11 @@ int App::run() {
                 }
 
                 // Check header pagination & action buttons (or A on the one the button focus is on)
-                const int pbHover = headerPress_ >= 0 ? headerPress_ : renderer_.browserPageBtnHovered();
+                // (The laser's header button / path part only while the laser owns the focus: else A
+                // goes to the focused card or the focused header button.)
+                const int pbHover = headerPress_ >= 0 ? headerPress_ : (laserActs ? renderer_.browserPageBtnHovered() : -1);
                 const int crumbHover = crumbPress_ >= 0 ? crumbPress_
-                                       : (headerPress_ >= 0 ? -1 : renderer_.browserCrumbHovered());
+                                       : ((headerPress_ >= 0 || !laserActs) ? -1 : renderer_.browserCrumbHovered());
                 if ((in.togglePlay || in.select) && crumbHover >= 0 && sbHover < 0) {
                     browser_.openCrumb(crumbHover);  // jump to that level of the folder path
                     xr_.triggerHaptic(1, 0.025f, 0.0f, 0.5f);
@@ -7989,12 +8031,14 @@ int App::run() {
 #endif
 
             if (settings_.isOpen() && !actionMenu_.visible) updateColorPicker(in);  // (also with the laser on the rail: a drag goes on)
-            if (settings_.isOpen() && sbHover < 0 && !actionMenu_.visible) {  // (a dialog over it takes the input)
+            // (A dialog over it takes the input. A laser on the rail: the rail took its press above, the
+            // stick still works the page.)
+            if (settings_.isOpen() && !actionMenu_.visible) {
                 // Stick / D-pad: rows, values, the section list (the Buttons pages: left / right turns the page).
                 SettingsMenu::Action stepAct = SettingsMenu::Action::None;
                 const bool stepped = settingsButtons(in, nowT, stepAct);
                 // Header pager (< n / m >) on the Buttons pages.
-                if (const int pg = renderer_.settingsPagerHovered(); pg >= 0 && (in.select || in.togglePlay)) {
+                if (const int pg = renderer_.settingsPagerHovered(); pg >= 0 && (in.select || in.togglePlay) && laserActs) {
                     if (settings_.turnButtonsPage(pg == 0 ? -1 : 1, true)) {
                         xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.025f, 0.0f, 0.5f);
                     }
@@ -8002,12 +8046,15 @@ int App::run() {
                 }
 
                 // The header path: a click on a parent page goes there.
-                if (const int crumbTo = renderer_.settingsCrumbHovered(); crumbTo >= 0 && (in.select || in.togglePlay)) {
+                if (const int crumbTo = renderer_.settingsCrumbHovered(); crumbTo >= 0 && (in.select || in.togglePlay) && laserActs) {
                     if (settings_.navigateUpTo(crumbTo)) xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.025f, 0.0f, 0.5f);
                     in.select = in.togglePlay = false;
                 }
                 const int hovered = renderer_.settingsHovered();
                 settings_.notePointer(hovered);
+                // A click on a row, or the laser owning the focus on one: the focus is there, not on the
+                // section list (read live: a stick step this frame gave the focus to the buttons).
+                if (hovered >= 0 && (in.select || laserFocus_.laserOwns())) settings_.leaveRail();
                 if (hovered >= 0 && laserFocus_.laserOwns()) {  // (a resting beam does not undo a D-pad step)
                     renderer_.setSettingsSelected(hovered);
                     settings_.setSelected(hovered);
@@ -8068,11 +8115,14 @@ int App::run() {
                 // Play / OK activates the selected row, pointed at or not; Left / Right changed a value
                 // (stepped): applied the same way.
                 const bool listPage = settings_.compactPage();
+                // The row under the laser counts for this press only while the laser owns the focus (then
+                // it is also the selected row); else A acts on the row the buttons selected.
+                const int laserRow = laserActs ? hovered : -1;
                 // List pages draw the button selection too: A acts on it. A shortcut or plugin line opens
                 // its page, like a click on its name. (A dialog page starts on its Back button, so a
                 // quick second press never starts "Move vault" or "Install".)
                 bool listA = false;
-                if (listPage && in.togglePlay && hovered < 0 && !settings_.railFocus()) {
+                if (listPage && in.togglePlay && laserRow < 0 && !settings_.railFocus()) {
                     const int s = settings_.selected();
                     const bool pluginLine = s >= 0 && s < static_cast<int>(setRows.size()) &&
                                             setRows[static_cast<size_t>(s)].kind == SettingsMenu::Kind::PluginLine;
@@ -8087,8 +8137,8 @@ int App::run() {
                     }
                 }
                 if (stepped || (((in.select && (hovered >= 0 || std::fabs(in.thumbstickY) > 0.25f)) || in.togglePlay) &&
-                                (!listPage || hovered >= 0 || listA))) {
-                    const int seg = (!stepped && hovered >= 0) ? renderer_.settingsSegmentHovered() : -1;
+                                (!listPage || laserRow >= 0 || listA))) {
+                    const int seg = (!stepped && laserRow >= 0) ? renderer_.settingsSegmentHovered() : -1;
                     auto act = stepped ? stepAct : (seg >= 0) ? settings_.activateSegment(seg) : settings_.press();
                         if (act == SettingsMenu::Action::PickDownloadFolder) {
                             startDownloadDirPick();
@@ -8182,6 +8232,7 @@ int App::run() {
             }
 
             navFeedbackEnd();  // a tick for each focus step the menu input above made (or the end tick)
+            renderer_.setLaserOwnsFocus(laserFocus_.laserOwns());  // (which focus the menus draw)
 
             // Cinema Transport Dock is only active when the Unified Spatial Hub is closed.
             const bool barOk = !browserOpen && !settingsOpen && !downloadsWindow_ &&
