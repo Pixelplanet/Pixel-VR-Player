@@ -1491,6 +1491,9 @@ private:
     std::string hudTipFormat_, hudTipAudio_, hudTipScreen_;
     // The dock tooltip text for a button ("" = none).
     std::string dockTooltip(int button) const;
+    // A dock tooltip shows in the row above the dock (flank pills, the time readout), not inside it.
+    // Shared by the drawing and the UI layer's window, so the window reaches up to it.
+    bool dockTipAbove() const;
     // The title pill at the top of a screen: wrapped at words to two lines at full size.
     void drawScreenTitlePill(int slot, float ax, float alpha, const math::Mat4& ortho, uint32_t& glyphCursor);
     int screenSkipSlot_ = -1;  // the screen whose skip pill the laser is on
@@ -1698,6 +1701,10 @@ private:
     std::string settingsTitle_;
     std::string settingsStatus_;
     std::vector<SettingsRowVis> settingsRows_;
+    // Per settings row: where a stepped slider's track starts (metres from the well's left edge). The
+    // value text takes the room its longest step name needs at the Text Size in use; written where
+    // the slider is drawn, read by the laser hit test (the same track as drawn).
+    std::vector<float> settingsSliderLeft_;
     bool settingsCompact_ = false;
     int settingsDragFrom_ = -1;
     int settingsDragTo_ = -1;

@@ -600,12 +600,19 @@ constexpr float kPluginNameX = 0.112f;
 constexpr float kPluginStatusX = 0.520f;  // plugin lines: the status, after a 0.40 wide name
 constexpr float kShortcutUrlX = 0.480f;
 // Stepped slider (a choice card): step `s` of `n`. The track takes the right part of the control well,
-// the value text the left 0.24; each step's hit area is its share of the track at the well's full height.
-constexpr float kSliderLeftX = 0.240f;  // from the well's left edge
+// the value text the left part (at least 0.24, more when its longest step name needs it at a large Text
+// Size, never leaving the track less than kSliderMinTrack); each step's hit area is its share of the
+// track at the well's full height.
+constexpr float kSliderLeftX = 0.240f;      // from the well's left edge (the least room for the value)
+constexpr float kSliderRightPad = 0.022f;   // track end to the well's right edge
+constexpr float kSliderMinTrack = 0.180f;   // the track never gets shorter than this
+constexpr float kSliderValueInset = 0.020f; // value text from the well's left edge
+constexpr float kSliderValueGap = 0.014f;   // value text end to the track
 constexpr float kSliderGap = 0.006f;
-inline UiRect settingsSliderStep(const SettingsCard& L, int s, int n) {
-    const float left = L.cx - L.ctrlHalfW + kSliderLeftX;
-    const float right = L.cx + L.ctrlHalfW - 0.022f;
+inline float settingsSliderMaxLeft(const SettingsCard& L) { return 2.0f * L.ctrlHalfW - kSliderRightPad - kSliderMinTrack; }
+inline UiRect settingsSliderStep(const SettingsCard& L, int s, int n, float leftX = kSliderLeftX) {
+    const float left = L.cx - L.ctrlHalfW + std::clamp(leftX, kSliderLeftX, std::max(kSliderLeftX, settingsSliderMaxLeft(L)));
+    const float right = L.cx + L.ctrlHalfW - kSliderRightPad;
     const float w = (right - left - kSliderGap * static_cast<float>(n - 1)) / static_cast<float>(n);
     return {left + w * 0.5f + static_cast<float>(s) * (w + kSliderGap), L.ctrlY, w * 0.5f, L.ctrlHalfH};
 }
@@ -3795,8 +3802,12 @@ void VulkanRenderer::updatePointer() {
                                 if (UiRect{dotX, L.ctrlY, pitch * 0.5f, L.ctrlHalfH}.contains(hx, hyy)) settingsSegmentHovered_ = p;
                             }
                         } else if (row.enabled && !settingsCompact_ && row.kind == 0 /* Choice */ && row.steps > 1 && row.steps <= 8) {
+                            // (The track starts where the drawing put it: the value text's room.)
+                            const float leftX = i < static_cast<int>(settingsSliderLeft_.size())
+                                                    ? settingsSliderLeft_[static_cast<std::size_t>(i)]
+                                                    : hub::kSliderLeftX;
                             for (int s = 0; s < row.steps; ++s) {
-                                UiRect st = hub::settingsSliderStep(L, s, row.steps);
+                                UiRect st = hub::settingsSliderStep(L, s, row.steps, leftX);
                                 st.hw += hub::kSliderGap * 0.5f;  // (the gaps belong to their neighbours)
                                 if (st.contains(hx, hyy)) settingsSegmentHovered_ = s;
                             }
@@ -4464,8 +4475,14 @@ void VulkanRenderer::renderLayersBefore(XrContext& xr, const XrView* views, uint
         const bool hintOn = !dockHintText_.empty() && (dockHintLeft_ > 0.0f || dockHintAlpha_ > 0.0f);
         // A plugin gauge pill sits in the same row (or one row higher while the hint shows).
         const bool gaugeOn = pluginGaugeValue_ >= 0.0f || pluginGaugeAlpha_ > 0.0f;
-        const float above = (hintOn ? 0.070f : 0.0f) + (gaugeOn ? (hintOn ? 0.062f : 0.070f) : 0.0f);
-        const float top = kBarY + (pointerOnTimeline_ ? 0.40f : kDockHalfH + above) + kMargin;
+        float above = (hintOn ? 0.070f : 0.0f) + (gaugeOn ? (hintOn ? 0.062f : 0.070f) : 0.0f);
+        // A flank pill's / the time readout's tooltip: one row above the dock (over the hint and the
+        // gauge). The window ended at the dock's top edge, so it showed as a cut-off sliver there.
+        if (dockTipAbove()) {
+            const float rows = (hintOn ? 1.0f : 0.0f) + (gaugeOn ? 1.0f : 0.0f);
+            above = std::max(above, 0.040f + 0.026f + 0.062f * rows);
+        }
+        const float top = kBarY + (pointerOnTimeline_ ? std::max(0.40f, kDockHalfH + above) : kDockHalfH + above) + kMargin;
         pass.cx = 0.0f;
         pass.cy = 0.5f * (bottom + top);
         pass.hw = kDockHalfW + kMargin;
@@ -7831,10 +7848,14 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 if (textReady_) {
                     dockTipHw = std::max(0.052f, 0.5f * measureString(scSecondary, dockTip) + 0.022f);
                 }
-                const bool above = timeTip || rT.hw > rT.hh * 1.5f;
+                const bool above = dockTipAbove();
+                // Above the dock it takes the next free row: over the return hint and the plugin gauge
+                // when they show (it covered the gauge before). The UI layer's window reaches up to it.
                 const bool hintUp = dockHintAlpha_ > 0.005f && !dockHintText_.empty();
+                const bool gaugeUp = pluginGaugeAlpha_ > 0.005f;
+                const float rowsBelow = (hintUp ? 1.0f : 0.0f) + (gaugeUp ? 1.0f : 0.0f);
                 dockTipX = std::clamp(rT.cx, -kDockHalfW + dockTipHw + 0.01f, kDockHalfW - dockTipHw - 0.01f);
-                dockTipY = above ? kBarY + kDockHalfH + 0.040f + (hintUp ? 0.062f : 0.0f) : rT.cy + 0.075f;
+                dockTipY = above ? kBarY + kDockHalfH + 0.040f + 0.062f * rowsBelow : rT.cy + 0.075f;
             }
             // The time readout is clickable: it lights up like a button under the laser.
             if (pointerOnTimeToggle_ && transportDuration_ > 0.0) {
@@ -9056,6 +9077,25 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             auto isListening = [](const std::string& v) {
                 return v.rfind("Press a button", 0) == 0 || v.rfind("Recording", 0) == 0;
             };
+            // A stepped slider's track start: the value text gets the room its longest step name needs
+            // (at the row's text size, or one step down at Caption when that is too wide), and the
+            // track shrinks for it, down to hub::kSliderMinTrack. Remembered for the laser hit test.
+            if (settingsSliderLeft_.size() != static_cast<std::size_t>(total)) {
+                settingsSliderLeft_.assign(static_cast<std::size_t>(total), hub::kSliderLeftX);
+            }
+            auto sliderLeft = [&](int i, const SettingsRowVis& row, float valSc) {
+                const hub::SettingsCard hc = hub::settingsCard(i, layoutN, settingsCompact_);
+                float w = measureString(valSc, row.value);
+                for (const std::string& o : row.options) w = std::max(w, measureString(valSc, o));
+                const float maxLeft = std::max(hub::kSliderLeftX, hub::settingsSliderMaxLeft(hc));
+                const float pad = hub::kSliderValueInset + hub::kSliderValueGap;
+                if (pad + w > maxLeft && valSc > scCaption) w *= scCaption / valSc;  // Caption: the floor
+                const float left = std::clamp(pad + w, hub::kSliderLeftX, maxLeft);
+                if (i >= 0 && i < static_cast<int>(settingsSliderLeft_.size())) {
+                    settingsSliderLeft_[static_cast<std::size_t>(i)] = left;
+                }
+                return left;
+            };
             // A row with no value that is not a toggle/option is a plain navigation
             // row ("Back to ..."), drawn as a single-line card with a back chevron.
             // Destructive rows and buttons (Delete): the same red on every page (drawSemantic, tok::kDanger).
@@ -9345,15 +9385,17 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     const hub::SettingsCard hc = hub::settingsCard(i, layoutN, settingsCompact_);
                     constexpr float segHalfH = 0.006f;  // the same on every card size: visible at 2 m
                     constexpr float knobR = 0.012f;
+                    const float leftX = sliderLeft(i, row, L.textSc);  // (the value text's room)
                     for (int s = 0; s < row.steps; ++s) {
-                        const UiRect st = hub::settingsSliderStep(hc, s, row.steps);
+                        const UiRect st = hub::settingsSliderStep(hc, s, row.steps, leftX);
                         const bool filled = (s <= row.stepIdx);
                         const bool aimed = en && i == settingsHovered_ && s == settingsSegmentHovered_;  // click picks it
                         drawUiElement(vpPanel, st.cx, L.ctrlY, st.hw, aimed ? segHalfH * 1.6f : segHalfH, UiShape::RoundedBox,
                                       (filled && en) ? themeAccentCol : (aimed ? knobOn : stepOff), 1.0f);
                     }
                     if (en) {
-                        const float kx = hub::settingsSliderStep(hc, std::clamp(row.stepIdx, 0, row.steps - 1), row.steps).cx;
+                        const float kx =
+                            hub::settingsSliderStep(hc, std::clamp(row.stepIdx, 0, row.steps - 1), row.steps, leftX).cx;
                         drawGlow(vpPanel, kx, L.ctrlY, knobR, knobR, 0.008f, hovGlow);
                         drawUiElement(vpPanel, kx, L.ctrlY, knobR, knobR, UiShape::RoundedBox, knobOn, 1.0f);
                     }
@@ -9667,11 +9709,12 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     }
                 } else if (row.kind == kChoice && row.steps > 1 && row.steps <= 8) {
                     // A slider: its value left of the track; while the laser aims at a step, that step's
-                    // name (what a click sets). A long name shrinks a little before it is cut.
+                    // name (what a click sets). The value has the room its longest step name needs (the
+                    // track gives it up, sliderLeft); only past that a name shrinks to Caption, then is cut.
                     const bool aiming = en && i == settingsHovered_ && settingsSegmentHovered_ >= 0 &&
                                         settingsSegmentHovered_ < static_cast<int>(row.options.size());
                     const std::string& shown = aiming ? row.options[static_cast<std::size_t>(settingsSegmentHovered_)] : row.value;
-                    const float maxW = hub::kSliderLeftX - 0.032f;
+                    const float maxW = sliderLeft(i, row, valSc) - hub::kSliderValueInset - hub::kSliderValueGap;
                     const float w = measureString(valSc, shown);
                     // (A long name is cut, not shrunk below the scale: Caption is the floor.)
                     const float sc = w > maxW ? std::max(scCaption, valSc * maxW / w) : valSc;
@@ -14529,6 +14572,14 @@ std::string VulkanRenderer::dockTooltip(int button) const {
         }
         default: return std::string();
     }
+}
+
+bool VulkanRenderer::dockTipAbove() const {
+    if (is_screen_row_button(pointerButton_) && screenControlsVisible_) return false;  // a row tip: in the dock
+    if (pointerOnTimeToggle_ && transportLive_ == 0 && transportDuration_ > 0.0) return true;
+    if (pointerButton_ < 0 || dockTooltip(pointerButton_).empty()) return false;
+    const CtrlButtonRect r = get_ctrl_button_rect(pointerButton_);
+    return r.hw > r.hh * 1.5f;  // pills; round buttons have theirs right above themselves, inside the dock
 }
 
 float VulkanRenderer::volumeLevelAtPointer(bool drag) const {

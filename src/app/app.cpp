@@ -8340,9 +8340,26 @@ int App::run() {
                             settings_.setCurvatureIdx(settings_.curvatureIdx() + 1);
                             renderer_.setScreenCurvature(settings_.screenCurvature());
                         } else {
+                            // 360 / 180 "Reset Horizon": tilt, pan and zoom back to none AND the view
+                            // re-aimed level in front of where you look (the dock comes along). It only
+                            // undid tilt / pan / zoom before, so with none set a click changed nothing
+                            // visible (user report: "doesn't do anything").
                             renderer_.setSpherePitch(0.0f);
                             renderer_.setSphereYawOffset(0.0f);
                             renderer_.setSphereZoom(1.0f);
+                            if (in.headValid) {
+                                XrInputState level = in;
+                                level.headForward[1] = 0.0f;  // level: the horizon straight ahead, not the gaze pitch
+                                if (std::fabs(level.headForward[0]) + std::fabs(level.headForward[2]) < 1e-3f) {
+                                    // Looking straight up / down: keep the current direction, just level it.
+                                    const float yaw = renderer_.screenYaw();
+                                    level.headForward[0] = -std::sin(yaw);
+                                    level.headForward[2] = -std::cos(yaw);
+                                }
+                                recenterView(level);
+                            }
+                            // Said above the dock as well, for when nothing needed to move.
+                            renderer_.setDockHint("View reset: level, in front of you", 2.5f);
                         }
                     } else if (cb == VulkanRenderer::CtrlButton::HideHud) {
                         dismissHud(in, nowT);
@@ -8779,7 +8796,7 @@ int App::run() {
                 }
                 // What a click on each right-hand pill does (their hover tooltips).
                 std::string fTip = "3D Format...", aTip = aEnabled ? "Audio & Subtitles..." : "Only one track",
-                            sTip = "Reset the view";
+                            sTip = "Level the view in front of you";
                 if (settings_.projectionMode() == 0) {
                     const bool wall = groupedScreen(selectedScreen_) && !arrangement_.flat && arrangement_.order.size() > 1;
                     sTip = wall ? "Curve on / off" : "More curve (then flat again)";
