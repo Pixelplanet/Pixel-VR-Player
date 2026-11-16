@@ -8053,7 +8053,7 @@ int App::run() {
                     in.select = in.togglePlay = false;
                 }
                 const int hovered = renderer_.settingsHovered();
-                settings_.notePointer(laserActs ? hovered : -1);  // a resting beam does not take the section list's focus away
+                settings_.notePointer((in.select || laserFocus_.laserOwns()) ? hovered : -1);  // a resting beam does not take the section list's focus away
                 // A click on a row, or the laser owning the focus on one: the focus is there, not on the
                 // section list (read live: a stick step this frame gave the focus to the buttons).
                 if (hovered >= 0 && (in.select || laserFocus_.laserOwns())) settings_.leaveRail();
