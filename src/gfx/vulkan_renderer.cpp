@@ -7846,7 +7846,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const CtrlButtonRect rT = timeTip ? CtrlButtonRect{0.70f, kBarY + 0.150f, 0.115f, 0.040f}
                                                   : get_ctrl_button_rect(pointerButton_);
                 if (textReady_) {
-                    dockTipHw = std::max(0.052f, 0.5f * measureString(scSecondary, dockTip) + 0.022f);
+                    dockTipHw = std::max(0.052f, 0.5f * measureString(scSecondary, dockTip) + 0.034f);
                 }
                 const bool above = dockTipAbove();
                 // Above the dock it takes the next free row: over the return hint and the plugin gauge
@@ -7995,7 +7995,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 drawFitCentered(tipCx, rT.cy + 0.080f, 2.0f * rowTipHw - 0.02f, scSecondary, themeTextCol,
                                 rowTipText);
             } else if (!dockTip.empty()) {
-                drawFitCentered(dockTipX, dockTipY, 2.0f * dockTipHw - 0.02f, scSecondary, themeTextCol, dockTip);
+                drawFitCentered(dockTipX, dockTipY, 2.0f * dockTipHw - 0.012f, scSecondary, themeTextCol, dockTip);
             }
             // The seek buttons' step, under their icon.
             withHeadingFont([&] {
@@ -14561,9 +14561,7 @@ std::string VulkanRenderer::dockTooltip(int button) const {
         case CtrlButton::SeekFwd: return "Forward 10 s";
         case CtrlButton::Stop: return "Stop";
         case CtrlButton::HideHud: return "Hide UI";
-        case CtrlButton::FormatToggle: return hudTipFormat_;
-        case CtrlButton::AudioToggle: return hudTipAudio_;
-        case CtrlButton::ScreenToggle: return hudTipScreen_;
+        // (The flank pills say what they do on themselves: no tooltip that only repeats it.)
         case CtrlButton::Volume: {
             if (volumeMuted_) return "Muted: click the speaker to unmute";
             char vol[32];
