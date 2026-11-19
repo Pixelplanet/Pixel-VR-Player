@@ -164,37 +164,52 @@ int main() {
               "a real change (0.4 -> 0.3 m): re-targets");
     }
 
-    {  // Invalid measurements: hold for 1 s, then release. Missing ones change nothing.
+    {  // Invalid measurements: hold for 4 s, then release. Missing ones change nothing.
         StereoFocus f = focusedAt04();
         run(f, 3.0f, nullptr);
         check(f.focused() && approx(f.targetDeg(), target04, 1e-5f), "no measurements for 3 s: holds");
         const auto bad = invalid();
-        run(f, 0.9f, &bad);
-        check(f.focused() && approx(f.targetDeg(), target04, 1e-5f), "invalid for 0.9 s: holds the target");
+        run(f, 3.9f, &bad);
+        check(f.focused() && approx(f.targetDeg(), target04, 1e-5f), "invalid for 3.9 s: holds the target");
         run(f, 0.2f, &bad);
-        check(!f.focused() && f.targetDeg() == 0.0f, "invalid for 1.1 s: releases");
+        check(!f.focused() && f.targetDeg() == 0.0f, "invalid for 4.1 s: releases");
 
         StereoFocus g = focusedAt04();
         const auto good = at(0.4f);
-        for (int k = 0; k < 5; ++k) {  // 0.6 s invalid, then one valid one: the timer starts over
-            run(g, 0.6f, &bad);
+        for (int k = 0; k < 5; ++k) {  // 3 s invalid, then one valid one: the timer starts over
+            run(g, 3.0f, &bad);
             run(g, kDt, &good);
         }
         check(g.focused(), "invalid runs broken by valid ones: stays focused");
     }
 
-    {  // Gaze lost: up to 0.5 s holds, longer releases.
+    {  // Gaze lost or off the picture: holds, and its measurements are not used.
         StereoFocus f = focusedAt04();
-        const auto m = at(0.4f);
-        run(f, 0.4f, &m, false);
-        check(f.focused() && approx(f.offsetDeg(), target04, 1e-3f), "gaze off the picture 0.4 s: holds");
-        run(f, 0.3f, &m, true);
-        run(f, 0.6f, &m, false);
-        check(!f.focused() && f.targetDeg() == 0.0f, "gaze off the picture 0.6 s: releases");
-        run(f, 2.0f, &m, false);
-        check(!f.focused(), "gaze still off: measurements are not used");
-        run(f, 0.1f, &m, true);
-        check(f.focused(), "gaze back: engages again");
+        const auto far = at(2.0f);
+        run(f, 3.0f, &far, false);
+        check(f.focused() && approx(f.offsetDeg(), target04, 1e-3f), "gaze off the picture 3 s: holds");
+        run(f, 0.1f, &far, true);
+        check(!f.focused() && f.targetDeg() == 0.0f, "gaze back on a far subject: releases (Near Only)");
+    }
+
+    {  // Activation "Always": follows every valid reading, no far release (the target is 0 there).
+        StereoFocusParams p;
+        p.nearOnly = false;
+        StereoFocus f;
+        f.setParams(p);
+        const auto m08 = at(0.8f);
+        run(f, 5.0f, &m08);
+        check(f.focused() && approx(f.targetDeg(), expectedTarget(0.8f), 1e-4f) && f.targetDeg() > 0.0f,
+              "Always, 0.8 m: engages with a small target");
+        const auto far = at(2.0f);
+        run(f, 5.0f, &far);
+        check(f.focused() && f.targetDeg() == 0.0f && approx(f.offsetDeg(), 0.0f, 1e-3f),
+              "Always, 2 m: stays engaged, target and offset 0");
+        const auto m04 = at(0.4f);
+        run(f, 5.0f, &m04);
+        check(approx(f.targetDeg(), target04, 1e-4f) && approx(f.offsetDeg(), target04, 1e-3f),
+              "Always, back to 0.4 m: re-targets");
+        check(f.lastEvent() == StereoFocus::Event::None, "settled: no event");
     }
 
     {  // Transition 0 snaps.

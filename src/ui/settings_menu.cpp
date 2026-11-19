@@ -118,9 +118,12 @@ const char* kScreenSizeNames[] = {"Standard", "Large", "Cinema", "Original Pixel
 constexpr int kScreenSizeCount = 4;
 
 // 3D Autofocus: how long the eye images take to slide (saved in ms).
-const int kAutofocusTransitionMs[] = {500, 750, 1000, 1500, 2000, 3000};
-const char* kAutofocusTransitionNames[] = {"0.5 s", "0.75 s", "1 s", "1.5 s", "2 s", "3 s"};
-constexpr int kAutofocusTransitionCount = 6;
+const int kAutofocusTransitionMs[] = {0, 500, 750, 1000, 1500, 2000, 3000};
+const char* kAutofocusTransitionNames[] = {"Instant", "0.5 s", "0.75 s", "1 s", "1.5 s", "2 s", "3 s"};
+constexpr int kAutofocusTransitionCount = 7;
+// Debug test shift (degrees): Off, then both directions.
+const float kAutofocusTestShiftDeg[] = {0.0f, 3.0f, 6.0f, -3.0f, -6.0f};
+constexpr int kAutofocusTestShiftCount = 5;
 const char* const kAutofocusNote = "Experimental. 3D 180 / 360 videos, needs eye tracking";
 
 std::string getConfigPath() {
@@ -1046,11 +1049,15 @@ void SettingsMenu::refresh() {
         choice("Strength", pctNames[static_cast<std::size_t>(pctIdx)], 10, pctIdx, Action::CycleAutofocusStrength, on);
         rows_.back().options = pctNames;
         offBecause(kTurnOn);
-        const int cmIdx = std::clamp(autofocusCloserCm_ / 10 - 3, 0, 7);
-        choice("Closer Than", cmNames[static_cast<std::size_t>(cmIdx)], 8, cmIdx, Action::CycleAutofocusCloser, on);
-        rows_.back().options = cmNames;
-        rows_.back().note = "Autofocus acts only on what you look at closer than this.";
+        segmented("Activation", {"Always", "Near Only"}, autofocusNearOnly_ ? 1 : 0, Action::CycleAutofocusActivation, on);
+        rows_.back().note = "Always: whatever you look at nearer than about 1 m. Near Only: only closer than Closer Than.";
         offBecause(kTurnOn);
+        const int cmIdx = std::clamp(autofocusCloserCm_ / 10 - 3, 0, 7);
+        choice("Closer Than", cmNames[static_cast<std::size_t>(cmIdx)], 8, cmIdx, Action::CycleAutofocusCloser,
+               on && autofocusNearOnly_);
+        rows_.back().options = cmNames;
+        rows_.back().note = "Near Only acts only on what you look at closer than this.";
+        offBecause(!on ? kTurnOn : "Only with Activation: Near Only");
         const int trIdx = autofocusTransitionIdx_ % kAutofocusTransitionCount;
         choice("Transition", kAutofocusTransitionNames[trIdx], kAutofocusTransitionCount, trIdx,
                Action::CycleAutofocusTransition, on, kAutofocusTransitionNames);
@@ -1059,7 +1066,8 @@ void SettingsMenu::refresh() {
         rows_.back().note = "A dot where you look and a status line.";
         offBecause(kTurnOn);
         // (Not saved: a fixed shift so the direction can be checked without eye tracking.)
-        segmented("Test Shift", {"Off", "+3\xC2\xB0", "-3\xC2\xB0"}, autofocusTestShiftIdx_ % 3,
+        segmented("Test Shift", {"Off", "+3\xC2\xB0", "+6\xC2\xB0", "-3\xC2\xB0", "-6\xC2\xB0"},
+                  autofocusTestShiftIdx_ % kAutofocusTestShiftCount,
                   Action::CycleAutofocusTestShift, on && autofocusInfo_);
         rows_.back().note = "Shifts the eye images by a fixed amount (not saved).";
         offBecause(!on ? kTurnOn : "Turn on Show Autofocus Info");
@@ -1352,6 +1360,11 @@ SettingsMenu::Action SettingsMenu::activate() {
             saveConfig();
             refresh();
             break;
+        case Action::CycleAutofocusActivation:
+            autofocusNearOnly_ = !autofocusNearOnly_;
+            saveConfig();
+            refresh();
+            break;
         case Action::CycleAutofocusCloser:
             autofocusCloserCm_ = autofocusCloserCm_ >= 100 ? 30 : autofocusCloserCm_ + 10;
             saveConfig();
@@ -1369,7 +1382,7 @@ SettingsMenu::Action SettingsMenu::activate() {
             refresh();
             break;
         case Action::CycleAutofocusTestShift:
-            autofocusTestShiftIdx_ = (autofocusTestShiftIdx_ + 1) % 3;  // (not saved)
+            autofocusTestShiftIdx_ = (autofocusTestShiftIdx_ + 1) % kAutofocusTestShiftCount;  // (not saved)
             refresh();
             break;
         case Action::ToggleAutofocusLog:
@@ -2136,7 +2149,7 @@ const char* SettingsMenu::autofocusNote() const {
 
 float SettingsMenu::autofocusTestShiftDeg() const {
     if (!autofocusInfo()) return 0.0f;
-    return autofocusTestShiftIdx_ == 1 ? 3.0f : (autofocusTestShiftIdx_ == 2 ? -3.0f : 0.0f);
+    return kAutofocusTestShiftDeg[autofocusTestShiftIdx_ % kAutofocusTestShiftCount];
 }
 
 float SettingsMenu::glowReach() const { return kGlowReachValues[glowReachIdx_ % kGlowReachCount]; }
@@ -2196,6 +2209,8 @@ void SettingsMenu::loadConfig() {
                 autofocusStrengthPct_ = std::clamp(static_cast<int>(std::lround(std::stoi(val) / 10.0)) * 10, 10, 100);
             } else if (key == "autofocus_closer_cm") {
                 autofocusCloserCm_ = std::clamp(static_cast<int>(std::lround(std::stoi(val) / 10.0)) * 10, 30, 100);
+            } else if (key == "autofocus_near_only") {
+                autofocusNearOnly_ = (val == "1");
             } else if (key == "autofocus_transition_ms") {
                 const int ms = std::stoi(val);
                 int best = 0;
@@ -2310,6 +2325,7 @@ void SettingsMenu::saveConfig() const {
             file << "swap_eyes=" << (swapEyes_ ? 1 : 0) << "\n";
             file << "autofocus=" << (stereoAutofocus_ ? 1 : 0) << "\n";
             file << "autofocus_strength=" << autofocusStrengthPct_ << "\n";
+            file << "autofocus_near_only=" << (autofocusNearOnly_ ? 1 : 0) << "\n";
             file << "autofocus_closer_cm=" << autofocusCloserCm_ << "\n";
             file << "autofocus_transition_ms=" << kAutofocusTransitionMs[autofocusTransitionIdx_ % kAutofocusTransitionCount] << "\n";
             file << "autofocus_info=" << (autofocusInfo_ ? 1 : 0) << "\n";

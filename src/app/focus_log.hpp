@@ -43,6 +43,11 @@ public:
         int best = -1;
         bool focused = false;
         float distM = 0, targetDeg = 0, offsetDeg = 0, testDeg = 0;
+        int event = 0;                 // StereoFocus::Event: 1 engage, 2 retarget, 3 release far,
+                                       // 4 release invalid, 5 release strength 0
+        float velocity = 0, invalidS = 0, gazeLostS = 0;
+        bool onPicture = false;
+        float zoom = 1;
     };
 
     ~FocusLog() { close(); }
@@ -51,7 +56,7 @@ public:
     const std::string& name() const { return name_; }
 
     // Opens a new pair of files in the player's logs folder; false if that fails.
-    bool open() {
+    bool open(const std::string& settingsLine) {
         close();
         std::error_code ec;
         const std::filesystem::path dir = exeDir() / "logs";
@@ -71,9 +76,11 @@ public:
         bytes_ = 0;
         start_ = std::chrono::steady_clock::now();
         lastFlush_ = start_;
+        bytes_ += std::fprintf(frames_, "# %s\n", settingsLine.c_str());
         bytes_ += std::fprintf(frames_,
             "t,dt,pos,paused,menu,proj,stereo,swap,raw_ok,rx,ry,rz,filt_ok,fx,fy,fz,head_ok,hx,hy,hz,"
-            "src_ok,lon,lat,meas,m_ok,disp,score,var,best,focused,dist,target,offset,test\n");
+            "src_ok,lon,lat,meas,m_ok,disp,score,var,best,focused,dist,target,offset,test,"
+            "event,vel,invalid_s,gaze_lost_s,on_pic,zoom\n");
         bytes_ += std::fprintf(scores_, "t,var,best,scores (candidate 0..127; candidate 16 = no shift, "
                                         "step 0.1667 deg; nan = reads past the picture)\n");
         return true;
@@ -90,11 +97,12 @@ public:
         const double t = seconds();
         bytes_ += std::fprintf(frames_,
             "%.4f,%.4f,%.3f,%d,%d,%d,%d,%d,%d,%.5f,%.5f,%.5f,%d,%.5f,%.5f,%.5f,%d,%.5f,%.5f,%.5f,"
-            "%d,%.3f,%.3f,%d,%d,%.3f,%.4f,%.6f,%d,%d,%.3f,%.3f,%.3f,%.2f\n",
+            "%d,%.3f,%.3f,%d,%d,%.3f,%.4f,%.6f,%d,%d,%.3f,%.3f,%.3f,%.2f,%d,%.3f,%.3f,%.3f,%d,%.3f\n",
             t, r.dt, r.pos, r.paused, r.menu, r.projection, r.stereo, r.swap, r.rawOk, r.raw[0], r.raw[1],
             r.raw[2], r.filtOk, r.filt[0], r.filt[1], r.filt[2], r.headOk, r.head[0], r.head[1], r.head[2],
             r.srcOk, r.lonDeg, r.latDeg, r.measured, r.mOk, r.dispDeg, r.score, r.variance, r.best,
-            r.focused, r.distM, r.targetDeg, r.offsetDeg, r.testDeg);
+            r.focused, r.distM, r.targetDeg, r.offsetDeg, r.testDeg, r.event, r.velocity, r.invalidS,
+            r.gazeLostS, r.onPicture, r.zoom);
         maybeFlush();
     }
 

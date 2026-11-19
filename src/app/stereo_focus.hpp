@@ -18,6 +18,10 @@ struct StereoFocusParams {
     float capDeg = 6.0f;        // most offset ever applied
     float comfortDeg = 3.6f;    // the disparity a focused subject is brought to (about 1 m)
     float baselineM = 0.063f;   // assumed camera baseline
+    // true = "Near Only": engage only nearer than closerThanM, release beyond it (+ hysteresis).
+    // false = "Always" (the setting's default): follow every valid reading; the target is 0
+    // beyond about 1 m anyway (comfortDeg), so far subjects simply get no shift.
+    bool nearOnly = true;
 };
 
 class StereoFocus {
@@ -27,9 +31,9 @@ public:
 
     // Once per rendered frame. `measurement` = a new search result this frame, else nullptr.
     // `gazeOnPicture` = the gaze is tracked and lands on the picture (GazeSource::valid).
-    // A gaze lost or off the picture for longer than 0.5 s releases the focus (target 0); a
-    // run of invalid measurements (low texture, no clear peak) holds the target for 1 s, then
-    // releases it.
+    // A gaze lost or off the picture holds the focus (its measurements are not used); a run of
+    // invalid measurements (low texture, no clear peak: faces, blur) holds the target for 4 s,
+    // then releases it.
     void update(float dtS, const stereo::DisparityResult* measurement, bool gazeOnPicture);
 
     // A new clip, a seek, a format change or the feature turned off: start from 0 at once.
@@ -42,6 +46,12 @@ public:
     bool focused() const { return focused_; }
     float focusDistanceM() const { return focusDistanceM_; }  // last accepted distance, 0 = none
     float lastDisparityDeg() const { return lastDisparity_; }
+    // What the latest update decided (for the autofocus log).
+    enum class Event { None, Engage, Retarget, ReleaseFar, ReleaseInvalid, ReleaseStrength };
+    Event lastEvent() const { return event_; }
+    float velocityDegS() const { return velocity_; }
+    float invalidS() const { return invalidRun_ ? invalidS_ : 0.0f; }
+    float gazeLostS() const { return gazeLostS_; }
 
 private:
     float targetFor(float distanceM) const;  // the offset for a subject at distanceM
@@ -57,6 +67,7 @@ private:
     float gazeLostS_ = 0.0f;
     float invalidS_ = 0.0f;
     bool invalidRun_ = false;      // the latest measurement was invalid (invalidS_ is running)
+    Event event_ = Event::None;
 };
 
 }  // namespace pixelvr

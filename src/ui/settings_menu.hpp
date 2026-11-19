@@ -111,6 +111,7 @@ public:
         EnterAutofocus,
         ToggleStereoAutofocus,
         CycleAutofocusStrength,
+        CycleAutofocusActivation,
         CycleAutofocusCloser,
         CycleAutofocusTransition,
         ToggleAutofocusInfo,
@@ -233,6 +234,7 @@ public:
     bool stereoAutofocus() const { return stereoAutofocus_; }
     int autofocusStrengthPct() const { return autofocusStrengthPct_; }   // 10..100, step 10
     int autofocusCloserThanCm() const { return autofocusCloserCm_; }     // 30..100, step 10
+    bool autofocusNearOnly() const { return autofocusNearOnly_; }  // Activation: false = Always (default)
     float autofocusTransitionS() const;                                  // 0.5 .. 3 s
     // Debug: gaze dot and status line (false while 3D Autofocus is off).
     bool autofocusInfo() const { return stereoAutofocus_ && autofocusInfo_; }
@@ -525,9 +527,10 @@ private:
     bool stereoAutofocus_ = false;
     int autofocusStrengthPct_ = 70;
     int autofocusCloserCm_ = 60;
-    int autofocusTransitionIdx_ = 2;  // into kAutofocusTransitionMs (1 s)
+    int autofocusTransitionIdx_ = 3;  // into kAutofocusTransitionMs (1 s)
+    bool autofocusNearOnly_ = false;  // Activation: Always / Near Only
     bool autofocusInfo_ = false;
-    int autofocusTestShiftIdx_ = 0;   // 0 Off, 1 +3 degrees, 2 -3 degrees (not saved)
+    int autofocusTestShiftIdx_ = 0;   // into kAutofocusTestShiftDeg (not saved)
     bool autofocusLog_ = false;       // Record Autofocus Log (not saved)
     bool autofocusRequested_ = false; // eye tracking asked for at the start (setAutofocusAvailability)
     bool autofocusSupported_ = false; // ... and there

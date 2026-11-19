@@ -1445,6 +1445,7 @@ void App::updateStereoFocus(float dtS) {
     p.strength = static_cast<float>(settings_.autofocusStrengthPct()) / 100.0f;
     p.closerThanM = static_cast<float>(settings_.autofocusCloserThanCm()) / 100.0f;
     p.transitionS = settings_.autofocusTransitionS();
+    p.nearOnly = settings_.autofocusNearOnly();
     focus_.setParams(p);
 
     // A panel up (the user reads it, the gaze only passes through it onto the video): hold too.
@@ -1453,9 +1454,11 @@ void App::updateStereoFocus(float dtS) {
 #ifdef PIXELVR_HAVE_FREETYPE
     uiShown = uiShown || browser_.isOpen();
 #endif
+    // (Paused or with a panel up it keeps working, as in Stereonaut: a paused close-up is a fine
+    // picture to measure, and the autofocus is tried out with its own settings page open.)
     if (!active || !stereo3dSphere) {
         resetStereoFocus();
-    } else if (!paused && !uiShown) {  // paused / a panel up: the offset stays as it is
+    } else {
         focus_.update(dtS, got ? &r : nullptr, onPicture);
     }
     if (got && active && stereo3dSphere) {
@@ -1493,7 +1496,13 @@ void App::updateStereoFocus(float dtS) {
             PIXELVR_LOG_INFO("Autofocus log closed: %s", focusLog_.name().c_str());
         }
         if (want && !focusLog_.isOpen()) {
-            if (focusLog_.open()) {
+            char cfg[200];
+            std::snprintf(cfg, sizeof(cfg),
+                          "strength=%.2f near_only=%d closer_than_m=%.2f hysteresis=%.2f transition_s=%.2f "
+                          "cap_deg=%.1f comfort_deg=%.1f baseline_m=%.3f",
+                          p.strength, p.nearOnly ? 1 : 0, p.closerThanM, p.hysteresis, p.transitionS, p.capDeg,
+                          p.comfortDeg, p.baselineM);
+            if (focusLog_.open(cfg)) {
                 focusLogPath_ = *path;
                 PIXELVR_LOG_INFO("Autofocus log started: logs/%s.csv", focusLog_.name().c_str());
                 showNotice("Recording the autofocus log");
@@ -1541,6 +1550,12 @@ void App::updateStereoFocus(float dtS) {
             row.targetDeg = focus_.targetDeg();
             row.offsetDeg = focus_.offsetDeg();
             row.testDeg = testDeg;
+            row.event = static_cast<int>(focus_.lastEvent());
+            row.velocity = focus_.velocityDegS();
+            row.invalidS = focus_.invalidS();
+            row.gazeLostS = focus_.gazeLostS();
+            row.onPicture = onPicture;
+            row.zoom = renderer_.sphereZoom();
             focusLog_.frame(row);
         }
     }
@@ -1571,7 +1586,8 @@ void App::updateStereoFocus(float dtS) {
     } else if (!focusHaveResult_) {
         focusInfoLines_.emplace_back("Autofocus: measuring");
     } else {
-        focusInfoLines_.emplace_back(focus_.focused() ? "Autofocus: FOCUSED" : "Autofocus: watching");
+        focusInfoLines_.emplace_back(focus_.focused() && focus_.targetDeg() > 0.0f ? "Autofocus: FOCUSED"
+                                                                                   : "Autofocus: watching");
         if (focusLastResult_.valid) {
             std::snprintf(buf, sizeof(buf), "Subject %.2f m (%.1f\xC2\xB0)",
                           stereo::disparityToMetres(focusLastResult_.disparityDeg, p.baselineM),
