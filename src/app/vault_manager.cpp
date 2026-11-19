@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <ctime>
 #include <filesystem>
 #include <unistd.h>
 #include <fstream>
@@ -210,6 +211,11 @@ void VaultManager::lock() {
     headsetLostTime_ = {};
     isRecordingCombo_ = false;
     recordingBuffer_.clear();
+    {
+        // Downloads waiting to be encrypted are not (no key): their plain copies go with .incoming.
+        std::lock_guard<std::mutex> g(migMu_);
+        settle_.clear();
+    }
     SmbCredentialsManager::instance().closeVaultShares();  // vault shares and their logins: gone
     vaultcrypto::clearKey();  // encrypted files can't be read until the next unlock
     PIXELVR_LOG_INFO("Vault locked");
@@ -303,6 +309,18 @@ void VaultManager::startEncryption() {
         }
         ec.clear();
     }
+    if (!fs::exists(keyFile, ec) && fs::exists(sharesFilePath(), ec)) {
+        // The network share list of the lost key can't be read with a new one, and it would stay
+        // unreadable for good (the list is then never written again: no vault share could be
+        // saved). It is set aside under another name (still encrypted with the old key, so it can
+        // be put back together with a vault.key restored from a backup); the new list starts empty.
+        const std::string aside = sharesFilePath() + ".unreadable-" + std::to_string(static_cast<long long>(std::time(nullptr)));
+        fs::rename(sharesFilePath(), aside, ec);
+        PIXELVR_LOG_WARN("Vault key: vault.key is missing; the vault's network share list was set aside (%s)",
+                         ec ? ec.message().c_str() : "it needs the old key");
+        if (ec) return;  // (not creating a new key over it)
+    }
+    ec.clear();
     const bool ok = fs::exists(keyFile, ec) ? vaultcrypto::unlockKeyFile(keyFile, comboString(), err)
                                             : vaultcrypto::createKeyFile(keyFile, comboString(), err);
     if (!ok) {
@@ -323,10 +341,12 @@ void VaultManager::encryptLeftovers() {
     // vault share): encrypt them in the background; each original is deleted only after its encrypted
     // copy reads back at full size. The folder walk runs there too (slow on an SD card).
     if (!unlocked_.load() || !vaultcrypto::hasKey() || !available()) return;
+    std::lock_guard<std::mutex> g(migMu_);
     if (migrating_.load()) {
         migAgain_ = true;  // a pass is running: it walks the vault once more when done
         return;
     }
+    // (A pass that ended has left its last migMu_ section: it finishes without the lock.)
     if (migThread_.joinable()) migThread_.join();
     migTotal_ = 0;
     migDone_ = 0;
@@ -334,9 +354,22 @@ void VaultManager::encryptLeftovers() {
     migrating_ = true;
     const std::string root = vaultDir();
     migThread_ = std::thread([this, root] {
-        auto stop = [this] { return migStop_.load() || !vaultcrypto::hasKey(); };
+        const std::function<bool()> stop = [this] { return migStop_.load() || !vaultcrypto::hasKey(); };
         int passFiles = 0;
-        do {
+        for (;;) {
+            // Finished downloads from vault shares first (the user waits for them).
+            std::vector<std::string> settle;
+            {
+                std::lock_guard<std::mutex> sg(migMu_);
+                settle.swap(settle_);
+            }
+            migDone_ = 0;
+            migTotal_ = static_cast<int>(settle.size());
+            for (const std::string& src : settle) {
+                if (stop()) break;  // locked meanwhile: the plain copies are removed with .incoming
+                passFiles += settleOne(src, root, stop);
+                ++migDone_;
+            }
             std::vector<fs::path> plain;
             std::error_code ec;
             for (auto it = fs::recursive_directory_iterator(root, ec); !ec && it != fs::recursive_directory_iterator();
@@ -351,8 +384,7 @@ void VaultManager::encryptLeftovers() {
                 if (vaultcrypto::isEncrypted(it->path().string())) continue;
                 plain.push_back(it->path());
             }
-            migDone_ = 0;
-            migTotal_ = static_cast<int>(plain.size());
+            migTotal_ += static_cast<int>(plain.size());
             if (!plain.empty()) PIXELVR_LOG_INFO("Vault: encrypting %zu files", plain.size());
             for (const fs::path& p : plain) {
                 if (stop()) break;  // locked meanwhile: continue next time
@@ -373,10 +405,107 @@ void VaultManager::encryptLeftovers() {
                 ++migDone_;
             }
             passFiles += static_cast<int>(plain.size());
-        } while (migAgain_.exchange(false) && !stop());
-        migrating_ = false;
+            // Asked again meanwhile (or a download finished): once more. Checked and ended under the
+            // same lock encryptLeftovers takes, so no request falls in between.
+            std::lock_guard<std::mutex> eg(migMu_);
+            if ((migAgain_ || !settle_.empty()) && !stop()) {
+                migAgain_ = false;
+                continue;
+            }
+            migAgain_ = false;
+            migrating_ = false;
+            break;
+        }
         if (passFiles > 0) PIXELVR_LOG_INFO("Vault: encryption pass finished (%d files)", passFiles);
     });
+}
+
+void VaultManager::settleDownload(const std::string& path) {
+    // Only an item of a download folder: nothing else is ever encrypted away and deleted here.
+    const fs::path p(path);
+    if (path.empty() || p.parent_path().filename() != ".incoming") return;
+    {
+        std::lock_guard<std::mutex> g(migMu_);
+        settle_.push_back(path);
+    }
+    encryptLeftovers();  // (locked or the card is out: it waits; locking removes it with .incoming)
+}
+
+int VaultManager::settleOne(const std::string& src, const std::string& root, const std::function<bool()>& stop) {
+    // One plain file encrypted into `dir` under its real name; the plain one is deleted once the
+    // encrypted copy reads back at full size.
+    auto one = [&](const fs::path& p, const std::string& dir) -> bool {
+        std::error_code e;
+        const uint64_t size = fs::file_size(p, e);
+        if (e) return false;
+        std::string out, err;
+        if (!vaultcrypto::encryptFile(p.string(), dir, out, err, {}, p.filename().string(), stop)) {
+            // (Not the error text: it may name the file.)
+            if (!stop()) PIXELVR_LOG_WARN("Vault: a download could not be encrypted");
+            return false;
+        }
+        vaultcrypto::Reader r;
+        if (r.open(out) && r.size() == size) {
+            fs::remove(p, e);
+            return true;
+        }
+        if (!vaultcrypto::hasKey()) {
+            // Locked right after it was written (complete and synced, but no key to read it back):
+            // the encrypted copy stays, the plain one goes (it would be removed with .incoming).
+            fs::remove(p, e);
+            return true;
+        }
+        fs::remove(out, e);
+        PIXELVR_LOG_WARN("Vault: a download's encrypted copy did not read back; the download stays unencrypted");
+        return false;
+    };
+    std::error_code ec;
+    const fs::path from(src);
+    const fs::file_status st = fs::symlink_status(from, ec);
+    if (ec || !fs::exists(st)) return 0;  // gone (removed with .incoming)
+    if (fs::is_regular_file(st)) return one(from, root) ? 1 : 0;
+    if (!fs::is_directory(st)) return 0;
+    // A folder: the same folders in the vault (under a free name), every file encrypted into its own.
+    const std::string top = root + "/" + filecopy::freeName(root, from.filename().string(), true);
+    std::vector<std::pair<fs::path, std::string>> files;  // plain file, the vault folder it goes into
+    fs::create_directories(top, ec);
+    fs::permissions(top, fs::perms::owner_all, fs::perm_options::replace, ec);
+    bool all = !ec;
+    for (auto it = fs::recursive_directory_iterator(from, ec); all && !ec && it != fs::recursive_directory_iterator();
+         it.increment(ec)) {
+        std::error_code e;
+        const fs::file_status s = it->symlink_status(e);
+        const fs::path rel = it->path().lexically_relative(from);
+        if (fs::is_directory(s)) {
+            const std::string d = top + "/" + rel.string();
+            fs::create_directories(d, e);
+            fs::permissions(d, fs::perms::owner_all, fs::perm_options::replace, e);
+            if (e) all = false;
+        } else if (fs::is_regular_file(s)) {
+            files.emplace_back(it->path(), rel.parent_path().empty() ? top : top + "/" + rel.parent_path().string());
+        }
+    }
+    if (ec) all = false;
+    int done = 0;
+    for (const auto& f : files) {
+        if (stop()) {
+            all = false;
+            break;
+        }
+        if (one(f.first, f.second)) {
+            ++done;
+        } else {
+            all = false;
+        }
+    }
+    filecopy::syncDir(root);
+    if (all) {
+        fs::remove_all(from, ec);
+    } else if (!stop()) {
+        PIXELVR_LOG_WARN("Vault: %d of %zu files of a downloaded folder encrypted (the rest is removed when the vault locks)",
+                         done, files.size());
+    }
+    return done;
 }
 
 void VaultManager::recordActivity(std::chrono::steady_clock::time_point now) {

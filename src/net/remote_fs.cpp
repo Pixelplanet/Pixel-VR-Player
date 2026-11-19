@@ -17,9 +17,11 @@
 #include <strings.h>
 #include <thread>
 
-#ifdef PIXELVR_HAVE_LIBSSH
+#include <cerrno>
 #include <fcntl.h>
 #include <unistd.h>
+
+#ifdef PIXELVR_HAVE_LIBSSH
 #include <libssh/libssh.h>
 #include <libssh/sftp.h>
 #endif
@@ -164,7 +166,7 @@ bool checkSessionHostKey(ssh_session s, const std::string& host, int port, std::
     static std::map<std::string, std::string> pinned;  // "host:port" -> SHA-256 of the key
     ssh_key key = nullptr;
     if (ssh_get_server_publickey(s, &key) != SSH_OK || key == nullptr) {
-        err = std::string("host key check failed: ") + ssh_get_error(s);
+        err = "host key check failed";  // (libssh's text may name the server)
         return false;
     }
     unsigned char* hash = nullptr;
@@ -187,7 +189,7 @@ bool checkSessionHostKey(ssh_session s, const std::string& host, int port, std::
         return true;
     }
     if (it->second != fp) {
-        err = "host key changed for " + host;
+        err = "the server's host key changed";  // (a vault server: never named)
         return false;
     }
     return true;
@@ -212,6 +214,9 @@ std::shared_ptr<SshConn> sshConnect(const RemoteUri& u, const SmbShare& cred, st
     // outside the vault): it is checked against the one seen first this session instead.
     const bool vaultServer = SmbCredentialsManager::isVaultShareUri("sftp://" + u.host + ":" + std::to_string(port));
     const std::string kh = vaultServer ? std::string("/dev/null") : knownHostsPath();
+    // How errors name the server: never by its name for a vault server (they end up in the log and
+    // in messages on screen).
+    const std::string who = vaultServer ? std::string("the server") : u.host;
     ssh_options_set(s, SSH_OPTIONS_KNOWNHOSTS, kh.c_str());
     if (const char* home = std::getenv("HOME")) {
         for (const char* name : {"id_rsa", "id_ecdsa", "id_ed25519"}) {
@@ -220,7 +225,9 @@ std::shared_ptr<SshConn> sshConnect(const RemoteUri& u, const SmbShare& cred, st
         }
     }
     if (ssh_connect(s) != SSH_OK) {
-        err = std::string("cannot connect to ") + u.host + ": " + ssh_get_error(s);
+        // (libssh's own text repeats the name, e.g. "Timeout connecting to nas.home": left out.)
+        err = vaultServer ? std::string("cannot connect to the server")
+                          : std::string("cannot connect to ") + who + ": " + ssh_get_error(s);
         return nullptr;
     }
     if (vaultServer) {
@@ -263,7 +270,8 @@ std::shared_ptr<SshConn> sshConnect(const RemoteUri& u, const SmbShare& cred, st
     }
     conn->sftp = sftp_new(s);
     if (!conn->sftp || sftp_init(conn->sftp) != SSH_OK) {
-        err = std::string("SFTP is not available on ") + u.host + ": " + ssh_get_error(s);
+        err = vaultServer ? std::string("SFTP is not available on the server")
+                          : std::string("SFTP is not available on ") + who + ": " + ssh_get_error(s);
         return nullptr;
     }
     return conn;
@@ -879,15 +887,34 @@ void remoteForgetHostKey(const std::string& host, int port) {
             kept += line + "\n";
         }
     }
+    const bool readAll = !in.bad();  // (a read error: `kept` would be cut short)
     in.close();
-    if (!changed) return;
+    if (!changed || !readAll) return;
+    // Replaced only by a complete copy: a cut-off or empty known_hosts would trust any key the next
+    // server shows ("first contact"). Private like the original (0600).
     const std::string tmp = file + ".tmp";
-    {
-        std::ofstream out(tmp, std::ios::trunc);
-        out << kept;
-    }
     std::error_code ec;
-    std::filesystem::rename(tmp, file, ec);
+    const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    bool ok = fd >= 0;
+    if (ok) {
+        std::size_t done = 0;
+        while (ok && done < kept.size()) {
+            const ssize_t w = ::write(fd, kept.data() + done, kept.size() - done);
+            if (w < 0 && errno == EINTR) continue;
+            ok = w > 0;
+            if (ok) done += static_cast<std::size_t>(w);
+        }
+        ok = ::fsync(fd) == 0 && ok;
+        ok = ::close(fd) == 0 && ok;
+    }
+    if (ok) {
+        std::filesystem::rename(tmp, file, ec);
+        ok = !ec;
+    }
+    if (!ok) {
+        std::filesystem::remove(tmp, ec);
+        PIXELVR_LOG_WARN("SFTP: a host key could not be removed from known_hosts (left as it was)");
+    }
 }
 
 bool remoteList(const std::string& uri, std::vector<RemoteEntry>& out, std::string& err) {

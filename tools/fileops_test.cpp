@@ -257,6 +257,42 @@ int main(int argc, char** argv) {
     vm.unlock();
     for (int i = 0; i < 100 && vm.migrating(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(20));
 
+    // --- finished downloads from a vault share: encrypted out of .incoming, never plain in the vault
+    {
+        const fs::path incoming = vm.incomingDir();
+        writeFile(incoming / "Share Film.mkv", "share film");
+        writeFile(incoming / "Share Season" / "E01.mkv", "episode one");
+        writeFile(incoming / "Share Season" / "Extras" / "Making of.mkv", "making of");
+        vm.settleDownload((incoming / "Share Film.mkv").string());
+        vm.settleDownload((incoming / "Share Season").string());  // (asked while the first is encrypted)
+        for (int i = 0; i < 300 && vm.migrating(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        const auto top = vaultFiles(vault);
+        check(top.count("Share Film.mkv") && plainOf(top.at("Share Film.mkv")) == "share film" &&
+                  !fs::exists(fs::path(vault) / "Share Film.mkv") && !fs::exists(incoming / "Share Film.mkv"),
+              "a finished download is encrypted into the vault, its plain copy gone");
+        const auto season = vaultFiles(vault + "/Share Season");
+        const auto extras = vaultFiles(vault + "/Share Season/Extras");
+        check(season.count("E01.mkv") && plainOf(season.at("E01.mkv")) == "episode one" && extras.count("Making of.mkv") &&
+                  !fs::exists(incoming / "Share Season"),
+              "a downloaded folder: every file encrypted into the same folders, the plain folder gone");
+        bool plainInVault = false;
+        std::error_code ec;
+        for (auto it = fs::recursive_directory_iterator(vault, ec); !ec && it != fs::recursive_directory_iterator();
+             it.increment(ec)) {
+            const std::string n = it->path().filename().string();
+            if (!n.empty() && n[0] == '.') {
+                if (it->is_directory()) it.disable_recursion_pending();
+                continue;
+            }
+            if (it->is_regular_file() && !vc::hasExtension(n)) plainInVault = true;
+        }
+        check(!plainInVault, "no plain file anywhere in the vault");
+        writeFile(videos / "Not A Download.mkv", "kept");
+        vm.settleDownload((videos / "Not A Download.mkv").string());
+        for (int i = 0; i < 100 && vm.migrating(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(20));
+        check(readFile(videos / "Not A Download.mkv") == "kept", "a file outside a download folder is never taken");
+    }
+
     // --- the vault on the SD card and back (optional, real card) -------------------------------
     if (withCard) {
         const std::string card = pixelvr::sdCardMount();

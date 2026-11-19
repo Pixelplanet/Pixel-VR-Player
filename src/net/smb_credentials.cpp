@@ -402,13 +402,19 @@ void SmbCredentialsManager::save() {
     saveLocked();
 }
 
-void SmbCredentialsManager::saveLocked() { saveLocked(false); }
+bool SmbCredentialsManager::saveLocked() { return saveLocked(false); }
 
-void SmbCredentialsManager::saveLocked(bool publicFirst) {
-    // The vault's list first, so a share moved into the vault is never in neither file; a share
-    // leaving the vault goes into the normal file first.
-    if (vaultOpen_ && !publicFirst) writeVaultLocked();
+bool SmbCredentialsManager::saveLocked(bool publicFirst) {
+    // The vault's list first, so a share moved into the vault is never in neither file (when it
+    // can't be written, the normal file keeps the share too); a share leaving the vault goes into
+    // the normal file first.
+    if (vaultOpen_ && !publicFirst && !writeVaultLocked()) return false;
+    writePublicLocked();
+    if (vaultOpen_ && publicFirst) return writeVaultLocked();
+    return true;
+}
 
+bool SmbCredentialsManager::writePublicLocked() {
     const std::string path = getStoragePath();
 
     std::error_code ec;
@@ -438,10 +444,10 @@ void SmbCredentialsManager::saveLocked(bool publicFirst) {
 #endif
         PIXELVR_LOG_INFO("SmbCredentialsManager: Saved %zu shares to %s (mode 0600)",
                          plainList.size(), path.c_str());
-    } else {
-        PIXELVR_LOG_WARN("SmbCredentialsManager: Failed to write %s", path.c_str());
+        return true;
     }
-    if (vaultOpen_ && publicFirst) writeVaultLocked();
+    PIXELVR_LOG_WARN("SmbCredentialsManager: Failed to write %s", path.c_str());
+    return false;
 }
 
 bool SmbCredentialsManager::writeVaultLocked() {
@@ -654,6 +660,20 @@ void dropPrivateScope(const VaultScope& v) {
     p.any = !p.list.empty();
 }
 
+// The private scopes as they are, and put back (a change of shares that could not be saved).
+std::vector<VaultScope> privateScopesNow() {
+    PrivateScopes& p = privateScopes();
+    std::lock_guard<std::mutex> g(p.mu);
+    return p.list;
+}
+
+void restorePrivateScopes(std::vector<VaultScope> list) {
+    PrivateScopes& p = privateScopes();
+    std::lock_guard<std::mutex> g(p.mu);
+    p.list = std::move(list);
+    p.any = !p.list.empty();
+}
+
 }  // namespace
 
 bool SmbCredentialsManager::isVaultShareUri(const std::string& uri) {
@@ -691,6 +711,37 @@ std::string SmbCredentialsManager::redactForLog(std::string_view text) {
                 p += 9;
             } else {
                 p += schemeLen;
+            }
+        }
+    }
+    // A vault server's bare name too (an SFTP or WebDAV error, libssh's or curl's own text: "cannot
+    // connect to nas.home", "Could not resolve host: nas.home"): in any case, wherever it stands as
+    // a whole name (not inside a longer one such as "nas.home.example" or "mynas.home").
+    std::vector<std::string> hosts;
+    {
+        PrivateScopes& ps = privateScopes();
+        std::lock_guard<std::mutex> g(ps.mu);
+        for (const VaultScope& v : ps.list) {
+            if (!v.host.empty() && std::find(hosts.begin(), hosts.end(), v.host) == hosts.end()) hosts.push_back(v.host);
+        }
+    }
+    auto nameChar = [](char c) {
+        return std::isalnum(static_cast<unsigned char>(c)) || c == '.' || c == '-' || c == '_';
+    };
+    std::string low = lowered(s);
+    for (const std::string& h : hosts) {
+        for (std::size_t p = 0; (p = low.find(h, p)) != std::string::npos;) {
+            const std::size_t e = p + h.size();
+            const bool startOk = p == 0 || !nameChar(low[p - 1]);
+            // A dot right after it ends the name when no name character follows (end of a sentence).
+            const bool endOk = e == low.size() || !nameChar(low[e]) ||
+                               (low[e] == '.' && (e + 1 == low.size() || !nameChar(low[e + 1])));
+            if (startOk && endOk) {
+                s.replace(p, h.size(), "(private)");
+                low.replace(p, h.size(), "(private)");
+                p += 9;
+            } else {
+                ++p;
             }
         }
     }
@@ -752,7 +803,7 @@ bool SmbCredentialsManager::openVaultShares(const std::string& file) {
     vaultOpen_ = true;
     vaultFile_ = file;
     refreshPrivateLocked();
-    if (dropped) saveLocked();
+    if (dropped) writePublicLocked();  // (the vault's list is as it was read)
     return true;
 }
 
@@ -879,6 +930,14 @@ bool SmbCredentialsManager::addOrUpdateShare(const SmbShare& share) {
             }
         }
     }
+    // The list as it was: put back when the vault's list can't be written, so the share is never
+    // in neither file (and the form says it was not saved).
+    std::vector<SmbShare> before = shares_;
+    std::vector<VaultScope> scopesBefore = privateScopesNow();
+    auto wipe = [](std::vector<SmbShare>& list) {
+        for (SmbShare& s : list) std::fill(s.password.begin(), s.password.end(), '\0');
+        list.clear();
+    };
     bool found = false;
     bool wasVault = false;
     for (auto& s : shares_) {
@@ -894,7 +953,18 @@ bool SmbCredentialsManager::addOrUpdateShare(const SmbShare& share) {
     if (!found) {
         shares_.push_back(stored);
     }
+    bool movedIn = false;
     if (stored.vault) {
+        // Shares saved before inside its scope (nas/public when the whole server nas becomes a
+        // vault share) are private now as well: they move into the vault's list, out of the
+        // normal file.
+        const VaultScope mine = scopeOf(stored);
+        for (SmbShare& s : shares_) {
+            if (!s.vault && entryIn(s, mine)) {
+                s.vault = true;
+                movedIn = true;
+            }
+        }
         refreshPrivateLocked();
     } else if (vaultOpen_) {
         // A normal share (again): its addresses are no longer private, unless a vault share still
@@ -905,6 +975,27 @@ bool SmbCredentialsManager::addOrUpdateShare(const SmbShare& share) {
         });
         if (!stillCovered) dropPrivateScope(mine);
     }
+    // A normal share that stays normal: only the normal file changes (the vault's list need not be
+    // written, so a vault on a card that can't be written now does not stop it).
+    const bool touchesVault = stored.vault || wasVault || movedIn;
+    const bool leaving = wasVault && !stored.vault;
+    bool saved = true;
+    if (touchesVault) {
+        saved = saveLocked(leaving);
+    } else {
+        writePublicLocked();
+    }
+    if (!saved) {
+        // Nothing changed after all: the list as before (a share leaving the vault was written to
+        // the normal file already: that is undone too, its password must not stay there).
+        wipe(shares_);
+        shares_ = std::move(before);
+        restorePrivateScopes(std::move(scopesBefore));
+        if (leaving) writePublicLocked();
+        PIXELVR_LOG_WARN("SmbCredentialsManager: a share was not saved (the vault's share list could not be written)");
+        return false;
+    }
+    wipe(before);
     // Edited: a password typed for this session only is forgotten, unless the form carries one.
     session_.erase(std::remove_if(session_.begin(), session_.end(),
                                   [&](const SmbShare& s) {
@@ -914,7 +1005,6 @@ bool SmbCredentialsManager::addOrUpdateShare(const SmbShare& share) {
     if (!share.savePassword && !share.password.empty() && !share.anonymous) session_.push_back(share);
     // The share was saved by hand: its login gets one try again (only on this server).
     forgetRefusedLocked(scopeKey(share.protocol, share.host, "", share.port), nullptr);
-    saveLocked(wasVault && !stored.vault);  // (leaving the vault: into the normal file first)
     return true;
 }
 
@@ -946,7 +1036,12 @@ bool SmbCredentialsManager::deleteShare(const std::string& host, const std::stri
         }
         session_.erase(std::remove_if(session_.begin(), session_.end(), gone), session_.end());
         forgetRefusedLocked(scopeKey(protocol, host, "", port), nullptr);
-        if (removed) saveLocked();
+        // (A vault share's list that can't be written keeps it on disk; the normal file is written
+        // anyway, it never holds a vault share.)
+        if (removed) {
+            const bool bothWritten = removedVault && saveLocked();
+            if (!bothWritten) writePublicLocked();
+        }
     }
     if (removed && removedVault) {
         PIXELVR_LOG_INFO("SmbCredentialsManager: Deleted a share");  // (a vault share is never named)
@@ -1092,25 +1187,32 @@ void SmbCredentialsManager::setSessionLogin(const LoginTarget& t, const std::str
     forgetRefusedLocked(scopeKey(t.protocol, t.host, t.share, t.port), &stamp);
 }
 
-void SmbCredentialsManager::keepSessionLogin(const LoginTarget& t, bool savePassword) {
+bool SmbCredentialsManager::keepSessionLogin(const LoginTarget& t, bool savePassword) {
     std::lock_guard<std::mutex> lk(mutex_);
     auto sit = std::find_if(session_.begin(), session_.end(),
                             [&](const SmbShare& s) { return sameLogin(s, t.protocol, t.host, t.share, t.port); });
-    if (sit == session_.end()) return;
-    SmbShare* saved = nullptr;
-    for (auto& s : shares_) {
+    if (sit == session_.end()) return true;
+    std::size_t savedAt = shares_.size();
+    for (std::size_t i = 0; i < shares_.size(); ++i) {
+        const SmbShare& s = shares_[i];
         if (s.protocol == t.protocol && lowered(s.host) == lowered(t.host) && lowered(s.share) == lowered(t.share) &&
             (t.protocol == "smb" || sameServer(s, t.protocol, lowered(t.host), t.port))) {
-            saved = &s;
+            savedAt = i;
             break;
         }
     }
+    const bool wasSaved = savedAt < shares_.size();
+    if (!savePassword && !wasSaved) return true;  // (a share that was not saved stays unsaved: nothing is written)
+    // The saved entry as it was: put back when the vault's list can't be written (the login then
+    // stays in memory only, as with saving off).
+    SmbShare old = wasSaved ? shares_[savedAt] : SmbShare{};
     if (savePassword) {
-        if (saved != nullptr) {
-            saved->username = sit->username;
-            saved->password = sit->password;
-            saved->anonymous = false;
-            saved->savePassword = true;
+        if (wasSaved) {
+            SmbShare& saved = shares_[savedAt];
+            saved.username = sit->username;
+            saved.password = sit->password;
+            saved.anonymous = false;
+            saved.savePassword = true;
         } else {
             SmbShare s = *sit;
             s.savePassword = true;
@@ -1119,24 +1221,41 @@ void SmbCredentialsManager::keepSessionLogin(const LoginTarget& t, bool savePass
             // Inside a vault share (another share of a vault server): saved in the vault's list. A
             // private address while that list is closed is never saved (it stays in memory).
             s.vault = coveredByVaultLocked(s);
-            if (!s.vault && isVaultShareUri(scopeKey(s.protocol, s.host, s.share, s.port))) return;
+            if (!s.vault && isVaultShareUri(scopeKey(s.protocol, s.host, s.share, s.port))) return true;
             shares_.push_back(s);
             refreshPrivateLocked();
         }
-        // The saved share holds it now. An empty password that worked stays in memory too, so it is
-        // not asked for again until the player quits (a share saved without a password asks first).
-        if (!sit->password.empty()) session_.erase(sit);
-        saveLocked();
-        return;
+    } else {  // the user name is saved, the password stays in memory (session_)
+        SmbShare& saved = shares_[savedAt];
+        saved.username = sit->username;
+        saved.password.clear();
+        saved.anonymous = false;
+        saved.savePassword = false;
     }
-    if (saved != nullptr) {  // the user name is saved, the password stays in memory (session_)
-        saved->username = sit->username;
-        saved->password.clear();
-        saved->anonymous = false;
-        saved->savePassword = false;
-        saveLocked();
+    const bool inVault = wasSaved ? shares_[savedAt].vault : shares_.back().vault;
+    bool written = true;
+    if (inVault) {
+        written = saveLocked();
+    } else {
+        writePublicLocked();
     }
-    // (A share that was not saved stays unsaved: nothing is written.)
+    if (!written) {
+        if (wasSaved) {
+            std::fill(shares_[savedAt].password.begin(), shares_[savedAt].password.end(), '\0');
+            shares_[savedAt] = old;
+        } else {
+            std::fill(shares_.back().password.begin(), shares_.back().password.end(), '\0');
+            shares_.pop_back();
+        }
+        std::fill(old.password.begin(), old.password.end(), '\0');
+        PIXELVR_LOG_WARN("SmbCredentialsManager: a login was not saved (the vault's share list could not be written)");
+        return false;
+    }
+    std::fill(old.password.begin(), old.password.end(), '\0');
+    // The saved share holds it now. An empty password that worked stays in memory too, so it is
+    // not asked for again until the player quits (a share saved without a password asks first).
+    if (savePassword && !sit->password.empty()) session_.erase(sit);
+    return true;
 }
 
 void SmbCredentialsManager::dropSessionLogin(const LoginTarget& t) {

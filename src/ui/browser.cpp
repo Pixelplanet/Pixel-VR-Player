@@ -2,6 +2,7 @@
 
 #include "util/file_copy.hpp"
 #include "util/sdcard.hpp"
+#include "app/file_ops.hpp"
 #include "app/vault_manager.hpp"
 #include "app/vault_crypto.hpp"
 #include "net/remote_fs.hpp"
@@ -904,12 +905,20 @@ void Browser::forgetPrivate() {
     if (priv(loginNeed_.uri)) loginNeed_ = {};
     status_.clear();  // (it may name a file of a vault share: "Downloaded ...", "Can't play ...")
     // Downloads from vault shares: the running one stops (its partial file is removed), queued ones
-    // go, and none of them stays in the list.
-    if (dlActive_.load() && dlActiveJob_ >= 0 && dlActiveJob_ < static_cast<int>(dlJobs_.size()) &&
-        priv(dlJobs_[static_cast<std::size_t>(dlActiveJob_)].uri)) {
-        stopDownload();
+    // go, and none of them stays in the list. One that finished in this very frame (its thread is
+    // done, poll() has not seen it yet) counts as running: it is not reported or settled either.
+    const bool privateRunning = (dlActive_.load() || dlDone_.load()) && dlActiveJob_ >= 0 &&
+                                dlActiveJob_ < static_cast<int>(dlJobs_.size()) &&
+                                priv(dlJobs_[static_cast<std::size_t>(dlActiveJob_)].uri);
+    if (privateRunning) {
+        if (dlActive_.load()) stopDownload();
         dlPrivateDropped_ = true;
+        dlDroppedPath_ = dlJobs_[static_cast<std::size_t>(dlActiveJob_)].localPath;
         dlName_.clear();
+    } else {
+        // Nothing writes into the vault's download folder: what is left there (a finished download
+        // not encrypted yet) goes now.
+        wipeVaultIncoming({});
     }
     dlQueue_.erase(std::remove_if(dlQueue_.begin(), dlQueue_.end(), [&](const DownloadQueueItem& q) { return priv(q.uri); }),
                    dlQueue_.end());
@@ -919,6 +928,26 @@ void Browser::forgetPrivate() {
     for (std::size_t i = 0; i < dlJobs_.size(); ++i) {
         if (dlJobs_[i].state == 0) dlActiveJob_ = static_cast<int>(i);
     }
+}
+
+void Browser::wipeVaultIncoming(const std::string& droppedPath) {
+    VaultManager& vm = VaultManager::instance();
+    std::error_code ec;
+    if (!vm.isUnlocked()) {
+        // Locked: nothing in it may stay (finished downloads not encrypted yet, partial files).
+        const std::string incoming = vm.incomingDir();
+        if (!incoming.empty()) fs::remove_all(incoming, ec);
+    } else if (!droppedPath.empty() && fs::path(droppedPath).parent_path().filename() == ".incoming") {
+        // Unlocked again before the stopped download's thread ended: only its own file goes.
+        fs::remove_all(droppedPath, ec);
+        fs::remove(droppedPath + ".part", ec);
+    }
+}
+
+bool Browser::downloadingIntoVault() const {
+    return std::any_of(dlJobs_.begin(), dlJobs_.end(), [](const DownloadJob& j) {
+        return (j.state == 0 || j.state == 4) && isRemotePath(j.uri) && SmbCredentialsManager::isVaultShareUri(j.uri);
+    });
 }
 
 bool Browser::isFileActionTarget(const Entry& e) const {
@@ -1282,6 +1311,12 @@ void Browser::startDownload(const std::string& uri, const std::string& nameIn,
         std::error_code ec;
         if (!vm.isUnlocked() || !vm.ensureDirectories() || vm.incomingDir().empty()) {
             status_ = "Download failed: the vault can't be used now";
+            return;
+        }
+        // The vault is moving (to / from the SD card): its download folder would be left behind
+        // at the old place, outside the vault.
+        if (FileOps::instance().relocationPending()) {
+            status_ = "Download not started: wait until the vault has moved";
             return;
         }
         destDir = vm.incomingDir();
@@ -1955,23 +1990,17 @@ void Browser::stopDownload() {
 
 void Browser::settleIntoVault(DownloadJob& j) {
     VaultManager& vm = VaultManager::instance();
-    const std::string incoming = vm.incomingDir();
-    if (incoming.empty() || !pathUnder(j.localPath, incoming) || j.localPath == incoming) return;
-    // Out of the hidden folder into the vault itself (the same drive: a rename), where the
-    // encryption pass turns it into an encrypted file under its real name.
-    const std::string vault = vm.vaultDir();
-    const fs::path from(j.localPath);
-    std::error_code ec;
-    const std::string target = vault + "/" + filecopy::freeName(vault, from.filename().string(), j.isDir);
-    fs::rename(from, target, ec);
-    if (ec) {
-        PIXELVR_LOG_WARN("Download: could not move a finished download into the vault (%s)", ec.message().c_str());
+    // Only a download from a vault share is written into a vault download folder (".incoming"). It
+    // is encrypted straight from there into the vault (the background pass), so no plain copy is
+    // ever in the vault itself. (Also from an older place of the download folder: into the vault
+    // where it is now.)
+    if (!isRemotePath(j.uri) || !SmbCredentialsManager::isVaultShareUri(j.uri) ||
+        fs::path(j.localPath).parent_path().filename() != ".incoming") {
         return;
     }
-    filecopy::syncDir(vault);
-    vm.encryptLeftovers();
-    // The list's "open" goes to the vault folder (the plain file is replaced by an encrypted one).
-    j.localPath = vault + "/";
+    vm.settleDownload(j.localPath);
+    // The list's "open" goes to the vault folder (the encrypted file is there under its real name).
+    j.localPath = vm.vaultDir() + "/";
     j.isDir = true;
 }
 
@@ -2084,6 +2113,28 @@ bool Browser::retryJob(int index) {
             status_ = "Already downloading or in queue: " + j.name;
             return false;
         }
+    }
+    if (isRemotePath(j.uri) && SmbCredentialsManager::isVaultShareUri(j.uri)) {
+        // From a vault share: into the vault's download folder where the vault is now (it may have
+        // moved since), never while it is moving.
+        VaultManager& vm = VaultManager::instance();
+        if (FileOps::instance().relocationPending()) {
+            status_ = "Download not started: wait until the vault has moved";
+            return false;
+        }
+        std::error_code ec;
+        const std::string incoming = vm.incomingDir();
+        bool usable = vm.isUnlocked() && vm.ensureDirectories() && !incoming.empty();
+        if (usable) {
+            fs::create_directories(incoming, ec);
+            fs::permissions(incoming, fs::perms::owner_all, fs::perm_options::replace, ec);
+            usable = fs::is_directory(incoming, ec);
+        }
+        if (!usable) {
+            status_ = "Download failed: the vault can't be used now";
+            return false;
+        }
+        j.localPath = incoming + "/" + fs::path(j.localPath).filename().string();
     }
     if (removableMissing(j.localPath, true)) {
         status_ = "Insert the SD card again to retry";
@@ -2358,6 +2409,9 @@ Browser::Result Browser::poll(std::string& playPath) {
         dlActiveJob_ = -1;
         if (dlPrivateDropped_) {
             dlPrivateDropped_ = false;  // stopped by locking the vault: nothing is said about it
+            // Its thread has ended: nothing writes into the vault's download folder any more.
+            wipeVaultIncoming(dlDroppedPath_);
+            dlDroppedPath_.clear();
         } else if (dlCardGone_.load()) {
             status_ = "Download failed: SD card removed";
             // Queued downloads to that drive fail the same way (never sent elsewhere).

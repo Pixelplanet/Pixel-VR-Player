@@ -18,6 +18,7 @@
 #include <string>
 
 #include <sys/stat.h>
+#include <unistd.h>
 
 namespace fs = std::filesystem;
 using pixelvr::SmbCredentialsManager;
@@ -322,6 +323,53 @@ int main(int argc, char** argv) {
             check(c == "Loaded smb://old.test/media/x.mkv on screen 1", "log: other addresses stay");
             const std::string d = SmbCredentialsManager::redactForLog("Download: cannot open smb://vault.test/sec%72et/x: denied");
             check(d.find("vault.test") == std::string::npos, "log: an escaped vault address is cut out too");
+            const std::string e = SmbCredentialsManager::redactForLog(
+                "Subtitles: not listed (cannot connect to VSFTP.test: Timeout connecting to vsftp.test.)");
+            check(e.find("vsftp") == std::string::npos && e.find("VSFTP") == std::string::npos &&
+                      e.find("(private)") != std::string::npos,
+                  "log: a vault server's bare name is replaced, in any case (" + e + ")");
+            const std::string f = SmbCredentialsManager::redactForLog("old.test, myvault.test and vault.test.example stay");
+            check(f == "old.test, myvault.test and vault.test.example stay",
+                  "log: longer names that contain a vault server's name stay (" + f + ")");
+        }
+        // A normal share of a server that then becomes a vault share as a whole: into the vault too.
+        m.addOrUpdateShare(makeShare("nas.test", "public", "pu", kSavedPw, true));
+        check(fileText(file).find("nas.test") != std::string::npos, "a normal share of nas.test is in smb_shares.json");
+        {
+            SmbShare nas = makeShare("nas.test", "", "admin", kVaultPw, true);
+            nas.vault = true;
+            check(m.addOrUpdateShare(nas) && fileText(file).find("nas.test") == std::string::npos,
+                  "the whole server made a vault share: its saved shares leave smb_shares.json");
+            check(passOf("nas.test", "public") == kSavedPw, "the moved share keeps its login (in the vault)");
+        }
+        // The vault's list can't be written (its folder read-only): nothing changes, nothing is lost.
+        if (geteuid() != 0) {
+            const fs::path cfg = home / ".config/pixelvr";
+            m.addOrUpdateShare(makeShare("full.test", "media", "fu", kSavedPw, true));
+            SmbShare fv = makeShare("full.test", "media", "fu", kSavedPw, true);
+            fv.vault = true;
+            SmbShare renamed = vs;
+            renamed.name = "Renamed NAS";
+            SmbCredentialsManager::LoginTarget lt;
+            m.loginTargetFor("smb://nas.test/other", lt);
+            m.setSessionLogin(lt, "other", kTypedPw);
+            chmod(cfg.c_str(), 0500);
+            const bool movedIn = m.addOrUpdateShare(fv);
+            const bool edited = m.addOrUpdateShare(renamed);
+            const bool kept = m.keepSessionLogin(lt, true);
+            chmod(cfg.c_str(), 0700);
+            check(!movedIn && fileText(file).find("full.test") != std::string::npos && listed("full.test") &&
+                      !privateUri("smb://full.test/media/x"),
+                  "list not writable: a share is not moved into the vault, it stays a normal share");
+            bool sameName = false;
+            for (const SmbShare& s : m.shares()) {
+                if (s.host == kVaultHost) sameName = s.name == kVaultLabel;
+            }
+            check(!edited && sameName, "list not writable: a vault share's edit is refused, the share is as it was");
+            check(!kept && passOf("nas.test", "other") == kTypedPw && fileText(file).find("nas.test") == std::string::npos,
+                  "list not writable: a login into the vault is not saved, it works until the player quits");
+            m.dropSessionLogin(lt);
+            m.deleteShare("full.test", "media");
         }
         // A login typed for it and a refused one: both forgotten when the vault locks.
         SmbCredentialsManager::LoginTarget vt;
@@ -331,7 +379,8 @@ int main(int argc, char** argv) {
         m.noteLoginRefused("smb://vault.test/secret/x");
         check(m.loginRefused("smb://vault.test/secret/y"), "a refused login is recorded in the vault share");
         vm.lock();
-        check(!listed(kVaultHost) && !listed("vsrv.test") && !listed("vsftp.test"), "locked: no vault share is listed");
+        check(!listed(kVaultHost) && !listed("vsrv.test") && !listed("vsftp.test") && !listed("nas.test"),
+              "locked: no vault share is listed");
         check(passOf(kVaultHost, "secret").empty() && passOf("vsrv.test", "movies").empty(),
               "locked: their logins (saved and typed this session) are forgotten");
         check(!m.loginRefused("smb://vault.test/secret/x"), "locked: the refused-login record is forgotten");
@@ -378,11 +427,13 @@ int main(int argc, char** argv) {
 
         // Vault shares after a restart: nothing of them until the vault is unlocked.
         pixelvr::VaultManager& vm = pixelvr::VaultManager::instance();
-        check(!listed(kVaultHost) && !listed("vsrv.test") && passOf(kVaultHost, "secret").empty(),
+        check(!listed(kVaultHost) && !listed("vsrv.test") && !listed("nas.test") && passOf(kVaultHost, "secret").empty(),
               "restart, locked: no vault share is known");
-        check(fileText(file).find(kVaultHost) == std::string::npos, "restart: not in smb_shares.json");
+        check(fileText(file).find(kVaultHost) == std::string::npos && fileText(file).find("nas.test") == std::string::npos,
+              "restart: not in smb_shares.json (nor a share moved in with its server)");
         vm.unlock();
-        check(listed(kVaultHost) && passOf(kVaultHost, "secret") == kVaultPw && listed("vsftp.test"),
+        check(listed(kVaultHost) && passOf(kVaultHost, "secret") == kVaultPw && listed("vsftp.test") &&
+                  passOf("nas.test", "public") == kSavedPw,
               "restart, unlocked: the vault shares come back from the encrypted list");
         check(privateUri("smb://vault.test/secret/x.mkv"), "restart, unlocked: their addresses are private");
         vm.lock();
@@ -393,6 +444,23 @@ int main(int argc, char** argv) {
                   !fs::exists(vm.sharesFilePath()),
               "vault export: the vault shares move to smb_shares.json, the encrypted list is gone");
         check(json.find(kVaultPw) == std::string::npos, "vault export: no password in plain text");
+
+        // vault.key lost while a share list is there: the list (unreadable with a new key) is set
+        // aside, so vault shares can be saved again.
+        std::error_code ec;
+        fs::remove(vm.keyFilePath(), ec);
+        std::ofstream(vm.sharesFilePath(), std::ios::binary) << "a list encrypted with another key";
+        vm.unlock();
+        bool aside = false;
+        for (const auto& e : fs::directory_iterator(fs::path(vm.sharesFilePath()).parent_path(), ec)) {
+            if (e.path().filename().string().rfind("vault.shares.unreadable-", 0) == 0) aside = true;
+        }
+        check(aside && !fs::exists(vm.sharesFilePath()) && m.vaultSharesOpen(),
+              "new key: the old share list is set aside, the vault's list opens empty");
+        SmbShare again = makeShare("again.test", "", "a", kVaultPw, true);
+        again.vault = true;
+        check(m.addOrUpdateShare(again), "new key: a vault share can be saved again");
+        vm.lock();
     }
     std::printf("%s: %d failure(s)\n", failures ? "FAILED" : "PASSED", failures);
     return failures ? 1 : 0;

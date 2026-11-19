@@ -3,6 +3,7 @@
 #include "app/vault_crypto.hpp"
 #include "media/media_engine.hpp"
 #include "net/remote_fs.hpp"
+#include "net/smb_credentials.hpp"
 #include "plugins/plugin_files.hpp"
 #include "util/logging.hpp"
 
@@ -104,6 +105,9 @@ std::vector<SubtitleSource> findNextTo(const std::string& videoPath) {
     // A vault video's files carry random names: its real name, and its neighbours' real names, are
     // stored inside them. Nothing about those is logged.
     const bool vault = !isRemotePath(videoPath);
+    // A video on a vault network share: its errors may name the server (an SFTP host in a
+    // connection error), so nothing about it is logged either.
+    const bool quiet = vault || SmbCredentialsManager::isVaultShareUri(videoPath);
     std::string realName = vault ? vaultcrypto::storedName(videoPath) : videoPath;
     const std::string base = pluginfiles::baseNameOf(realName);
     const std::string dir = pluginfiles::parentOf(videoPath);
@@ -111,7 +115,7 @@ std::vector<SubtitleSource> findNextTo(const std::string& videoPath) {
     std::vector<std::string> names;
     std::string err;
     if (!pluginfiles::listFiles(dir, names, err, vault)) {
-        if (!vault) PIXELVR_LOG_INFO("Subtitles: the video's folder on the share could not be listed (%s)", err.c_str());
+        if (!quiet) PIXELVR_LOG_INFO("Subtitles: the video's folder on the share could not be listed (%s)", err.c_str());
         return found;
     }
     std::sort(names.begin(), names.end());
@@ -129,13 +133,13 @@ std::vector<SubtitleSource> findNextTo(const std::string& videoPath) {
         std::string data;
         if (!pluginfiles::readFile(pluginfiles::join(dir, name), maxBytesFor(extensionOf(name)), data, err, vault) ||
             data.empty()) {
-            if (!vault) PIXELVR_LOG_INFO("Subtitles: a subtitle file on the share could not be read (%s)", err.c_str());
+            if (!quiet) PIXELVR_LOG_INFO("Subtitles: a subtitle file on the share could not be read (%s)", err.c_str());
             continue;
         }
         s.data = std::make_shared<const std::string>(std::move(data));
         found.push_back(std::move(s));
     }
-    if (!vault) {
+    if (!quiet) {
         PIXELVR_LOG_INFO("Subtitles: %d file(s) next to the video on the share", static_cast<int>(found.size()));
         if (skippedPairs > 0) {
             PIXELVR_LOG_INFO("Subtitles: %d .idx / .sub pair(s) on the share left out (they are only read from local files)",

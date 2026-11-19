@@ -840,7 +840,8 @@ void App::finishLoadMedia(int slot) {
                 sc.skippedNote.clear();
 #ifdef PIXELVR_HAVE_FREETYPE
                 if (why != "cancelled") {  // none of them plays: say so in the file browser
-                    showNotice("None of the tracks here can be played: " + why, true);
+                    // (The reason may name the server: hidden once the vault locks for a private track.)
+                    showNotice("None of the tracks here can be played: " + why, true, VaultManager::isPrivatePath(path));
                     if (openScreenCount() == 0) browser_.open();
                 }
 #endif
@@ -2743,8 +2744,14 @@ void App::saveSmbModal(bool confirmed) {
                    "Make Normal", [this] { saveSmbModal(true); }, "Keep in Vault");
         return;
     }
+    // A changed address: the old entry goes first. Kept here so it comes back when the new one
+    // can't be saved (the edit is then not lost along with the share).
+    SmbShare previous;
+    bool hadPrevious = false;
     if (!smbModal_.isNew && (smbModal_.host != smbModal_.origHost || smbModal_.share != smbModal_.origShare ||
                              smbModal_.protocol != smbModal_.origProtocol || port != smbModal_.origPort)) {
+        hadPrevious = SmbCredentialsManager::instance().findShare(smbModal_.origHost, smbModal_.origShare, previous,
+                                                                  smbModal_.origProtocol, smbModal_.origPort);
         SmbCredentialsManager::instance().deleteShare(smbModal_.origHost, smbModal_.origShare, smbModal_.origProtocol,
                                                       smbModal_.origPort);
     }
@@ -2764,7 +2771,10 @@ void App::saveSmbModal(bool confirmed) {
     s.vault = toVault;
 
     if (!SmbCredentialsManager::instance().addOrUpdateShare(s)) {
-        // (Only a vault share can fail here: the vault locked or its list could not be read.)
+        // (Only a vault share can fail here: the vault locked, or its list could not be read or
+        // written. Nothing changed in the list, apart from an old address deleted above.)
+        if (hadPrevious) SmbCredentialsManager::instance().addOrUpdateShare(previous);
+        std::fill(previous.password.begin(), previous.password.end(), '\0');
         actionMenu_.error = "Not saved: the vault's share list can't be written";
         actionMenu_.errorField = 12;
         actionMenu_.selectedOption = 12;
@@ -2773,7 +2783,10 @@ void App::saveSmbModal(bool confirmed) {
         updateSmbModalMenu();
         return;
     }
-    scrubShareTraces(s);  // (when it is a vault share now: also one covered by another vault share)
+    std::fill(previous.password.begin(), previous.password.end(), '\0');
+    // (When it is a vault share now: also one covered by another vault share, and the saved shares
+    // inside its scope that moved into the vault with it.)
+    scrubShareTraces(s);
 
     smbModal_.active = false;
     smbModal_.editingField = SmbModalState::Field::None;
@@ -3015,13 +3028,16 @@ void App::pollShareLogin() {
         const bool asked = browser_.takeLoginNeed(need);
         if (!asked && browser_.currentLocation() == shareLogin_.uri && browser_.lastScanOk()) {
             // The folder opened with it: kept as the switch says (saved, or in memory until quit).
-            creds.keepSessionLogin(shareLogin_.target, shareLogin_.savePass);
+            // (False: it belongs in the vault's share list, which could not be written; the login
+            // works until the player quits.)
+            const bool kept = creds.keepSessionLogin(shareLogin_.target, shareLogin_.savePass);
             PIXELVR_LOG_INFO("Share sign-in accepted (password %s)",
-                             shareLogin_.savePass ? "saved" : "kept until the player quits");
+                             shareLogin_.savePass && kept ? "saved" : "kept until the player quits");
             const std::string label = shareLogin_.target.label;
             const bool priv = VaultManager::isPrivatePath(shareLogin_.uri);
             closeShareLogin(false);
-            showNotice("Signed in to " + label, false, priv);
+            showNotice(kept ? "Signed in to " + label : "Signed in to " + label + ", but the password could not be saved",
+                       !kept, priv);
             return;
         }
         creds.dropSessionLogin(shareLogin_.target);
@@ -5059,6 +5075,12 @@ void App::startVaultMove(bool lockWhenDone) {
     }
     if (vm.migrating()) {
         settings_.setVaultMoveNotice("Wait until the vault files are encrypted, then move the vault.");
+        return;
+    }
+    // A download from a vault share writes into the vault's download folder, which would stay
+    // behind at the old place (outside the vault once it has moved).
+    if (browser_.downloadingIntoVault()) {
+        settings_.setVaultMoveNotice("Wait until downloads into the vault are done, then move the vault.");
         return;
     }
     // Vault films keep their readers open: close them, the files move.

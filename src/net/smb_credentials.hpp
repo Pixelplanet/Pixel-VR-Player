@@ -47,7 +47,9 @@ public:
     // `vault` moves the entry into (or, when false, out of) the vault's share list; false = a vault
     // share was asked for while that list is not open (vault locked, or unreadable): nothing changed.
     // A share inside a vault share's scope (e.g. a share of a server that is a vault share) is
-    // always kept in the vault's list.
+    // always kept in the vault's list, and so are saved shares inside the scope of a share that
+    // becomes a vault share (they leave smb_shares.json). Also false when the vault's list could
+    // not be written: then nothing changed, in memory or in either file.
     bool addOrUpdateShare(const SmbShare& share);
 
     // Deletes a configured share and wipes its stored credentials (and a session password)
@@ -94,7 +96,9 @@ public:
     void setSessionLogin(const LoginTarget& t, const std::string& user, const std::string& pass);
     // That login worked: keep it as the switch says. On: saved with the share (a share that was not
     // saved is added). Off: the password stays in memory only; a saved share keeps the user name.
-    void keepSessionLogin(const LoginTarget& t, bool savePassword);
+    // False when it belongs in the vault's list and that could not be written: the login then
+    // stays in memory only (as with saving off) and nothing saved changed.
+    bool keepSessionLogin(const LoginTarget& t, bool savePassword);
     // That login was refused: forget it (the saved login, if any, applies again).
     void dropSessionLogin(const LoginTarget& t);
 
@@ -153,8 +157,12 @@ private:
 
     std::string getStoragePath() const;
     std::string getDeviceKey() const;
-    void saveLocked();
-    void saveLocked(bool publicFirst);  // publicFirst: a share leaves the vault (never in neither file)
+    // Both files. The vault's list first, so a share moving into the vault is never in neither
+    // file; publicFirst: the normal file first (a share leaves the vault). False = the vault's list
+    // could not be written; when it came first, the normal file was left as it was too.
+    bool saveLocked();
+    bool saveLocked(bool publicFirst);
+    bool writePublicLocked();         // smb_shares.json only (the normal shares)
     bool writeVaultLocked();          // the vault's share list, encrypted (only while it is open)
     // The share objects of a shares file, and the file text for a list (the vault's list keeps its
     // passwords as hex inside the encrypted file).

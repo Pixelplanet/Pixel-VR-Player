@@ -5,6 +5,7 @@
 #include <atomic>
 #include <condition_variable>
 #include <deque>
+#include <functional>
 #include <mutex>
 #include <chrono>
 #include <thread>
@@ -74,10 +75,16 @@ public:
     // The vault's network shares, encrypted with the vault key (internal, next to vault.key).
     std::string sharesFilePath() const;
     // Where downloads from vault shares are written until complete: a hidden folder inside the
-    // vault (the encryption pass and the file list skip it). Then they move into the vault itself.
+    // vault (the encryption pass and the file list skip it). Then they are encrypted from there into
+    // the vault itself (settleDownload). Emptied when the vault locks and when it unlocks.
     std::string incomingDir() const;
-    // Encrypts the plain files in the vault now (in the background; e.g. a finished download).
+    // Encrypts the plain files in the vault now (in the background).
     void encryptLeftovers();
+    // A finished download from a vault share (a file or a folder in a ".incoming" folder): encrypted
+    // into the vault in the background, under its real name; the plain copy is deleted once the
+    // encrypted one reads back at full size. No plain copy is ever put into the vault itself. When
+    // the vault locks first, it is not encrypted (the plain copy is removed with the folder).
+    void settleDownload(const std::string& path);
     // Creates the vault folder (0700) when available(); false if it can't be used (card missing).
     bool ensureDirectories();
     std::string keyFilePath() const;
@@ -164,7 +171,13 @@ private:
     std::atomic<int> migDone_{0}, migTotal_{0};
     std::thread migThread_;
     std::atomic<bool> migStop_{false};  // exit: the encryption pass stops inside the current file
-    std::atomic<bool> migAgain_{false}; // asked again while a pass ran: walk the vault once more
+    // Guards migAgain_ and settle_, and every change of migrating_: a request made while a pass is
+    // ending is either seen by that pass or starts a new one (never lost in between).
+    std::mutex migMu_;
+    bool migAgain_ = false;             // asked again while a pass ran: walk the vault once more
+    std::vector<std::string> settle_;   // finished vault-share downloads waiting to be encrypted
+    // One finished download (file or folder) encrypted into `root`; returns the files it held.
+    int settleOne(const std::string& src, const std::string& root, const std::function<bool()>& stop);
     mutable std::mutex cfgMu_;          // vault.conf writes (frame thread and the FileOps worker)
 };
 

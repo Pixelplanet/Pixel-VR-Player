@@ -265,7 +265,11 @@ void PluginHost::deliverFileResults() {
                 });
                 if (wanted) t.sidecars.push_back(name);
             }
-            if (!r.ok) PIXELVR_LOG_INFO("Plugins: no sidecars for screen %d (%s)", j.screen + 1, r.err.c_str());
+            // (A private screen's error is not logged: on a vault share it may name the server.)
+            if (!r.ok) {
+                PIXELVR_LOG_INFO("Plugins: no sidecars for screen %d (%s)", j.screen + 1,
+                                 j.vault ? "the folder could not be listed" : r.err.c_str());
+            }
             for (Plugin& p : plugins_) sendSidecars(p, j.screen);
             continue;
         }
