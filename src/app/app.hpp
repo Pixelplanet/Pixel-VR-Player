@@ -18,6 +18,7 @@
 #include "ui/settings_menu.hpp"
 #include "ui/laser_focus.hpp"
 #include "app/playback_memory.hpp"
+#include "app/gaze_filter.hpp"
 #include "app/stereo_focus.hpp"
 #include "app/browser_host.hpp"
 #include "app/chromium_installer.hpp"
@@ -135,6 +136,7 @@ private:
     // 3D Autofocus (docs/concepts/AUTOFOCUS_PLAN_2026-11-19.md). Everything here is in memory
     // only: gaze values and offsets are never logged, stored or given to plugins.
     StereoFocus focus_;
+    GazeFilter focusGaze_;           // the steadied gaze the renderer measures at
     bool focusSettingPrev_ = false;  // the setting last frame (notice and log on a change)
     bool focusActivePrev_ = false;   // eye gaze was in use last frame (log on a change)
     bool focusOnPicture_ = false;    // the latest measured gaze point landed on the picture

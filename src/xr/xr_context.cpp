@@ -1508,9 +1508,18 @@ bool XrContext::renderFrame(const RenderViewFn& renderView, const RenderLayersFn
         XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO};
         gi.action = eyeGazeAction_;
         XrActionStatePose ps{XR_TYPE_ACTION_STATE_POSE};
+        // Located at the time the eyes were last sampled (XrEyeGazeSampleTimeEXT), not at the
+        // display time: extrapolating an eye movement 30-50 ms ahead overshoots every saccade.
+        XrEyeGazeSampleTimeEXT sampleTime{XR_TYPE_EYE_GAZE_SAMPLE_TIME_EXT};
         XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
-        if (XR_SUCCEEDED(xrGetActionStatePose(session_, &gi, &ps)) && ps.isActive == XR_TRUE &&
-            XR_SUCCEEDED(xrLocateSpace(eyeGazeSpace_, appSpace_, frameState.predictedDisplayTime, &loc))) {
+        loc.next = &sampleTime;
+        bool located = XR_SUCCEEDED(xrGetActionStatePose(session_, &gi, &ps)) && ps.isActive == XR_TRUE &&
+                       XR_SUCCEEDED(xrLocateSpace(eyeGazeSpace_, appSpace_, frameState.predictedDisplayTime, &loc));
+        if (located && sampleTime.time > 0 && sampleTime.time < frameState.predictedDisplayTime) {
+            XrSpaceLocation atSample{XR_TYPE_SPACE_LOCATION};
+            if (XR_SUCCEEDED(xrLocateSpace(eyeGazeSpace_, appSpace_, sampleTime.time, &atSample))) loc = atSample;
+        }
+        if (located) {
             constexpr XrSpaceLocationFlags need =
                 XR_SPACE_LOCATION_ORIENTATION_VALID_BIT |
                 XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;

@@ -1353,7 +1353,14 @@ void App::updateStereoFocus(float dtS) {
     xr_.setEyeGazeActive(active);
     settings_.setAutofocusAvailability(xr_.eyeGazeRequested(), xr_.eyeGazeSupported());
     const XrInputState& in = xr_.input();
-    renderer_.setFocusGaze(active && in.gazeValid, in.gazeDir);
+    // The raw gaze trembles by a degree or more: the dot and the measurement use it steadied.
+    if (active) {
+        focusGaze_.update(in.gazeValid, in.gazeDir, dtS);
+    } else {
+        focusGaze_.reset();
+    }
+    const bool gazeValid = active && focusGaze_.valid();
+    renderer_.setFocusGaze(gazeValid, focusGaze_.dir());
 
     // A stereo 180 / 360 video playing on the main screen (slot 0 is the only sphere).
     bool stereo3dSphere = false;
@@ -1417,12 +1424,12 @@ void App::updateStereoFocus(float dtS) {
     const bool got = renderer_.takeFocusMeasurement(r);
     // The gaze point of this frame's measurement attempt; between attempts the last one holds.
     stereo::GazeSource gs;
-    if (!(active && in.gazeValid)) {
+    if (!gazeValid) {
         focusOnPicture_ = false;
     } else if (renderer_.focusGazeSource(gs)) {
         focusOnPicture_ = gs.valid;
     }
-    const bool onPicture = active && in.gazeValid && focusOnPicture_;
+    const bool onPicture = gazeValid && focusOnPicture_;
 
     StereoFocusParams p;
     p.strength = static_cast<float>(settings_.autofocusStrengthPct()) / 100.0f;
@@ -1465,41 +1472,51 @@ void App::updateStereoFocus(float dtS) {
     if (!focusInfoLines_.empty() && now - focusInfoAt_ < std::chrono::milliseconds(200)) return;
     focusInfoAt_ = now;
     focusInfoLines_.clear();
-    char buf[200];
+    // Short rows: the overlay has room for about 24 characters before the edge of the view.
+    char buf[96];
     if (!setting) {
         focusInfoLines_.emplace_back("Autofocus: off");
     } else if (!xr_.eyeGazeRequested()) {
-        focusInfoLines_.emplace_back("Autofocus: eye tracking starts after a restart");
+        focusInfoLines_.emplace_back("Autofocus: restart needed");
     } else if (!xr_.eyeGazeSupported()) {
-        focusInfoLines_.emplace_back("Autofocus: no eye tracking available");
+        focusInfoLines_.emplace_back("Autofocus: no eye tracking");
     } else if (!stereo3dSphere) {
-        focusInfoLines_.emplace_back("Autofocus: not a 3D 180/360 video");
-    } else if (!in.gazeValid) {
-        focusInfoLines_.emplace_back("Autofocus: eyes not tracked");
+        focusInfoLines_.emplace_back("Autofocus: not 3D 180/360");
+    } else if (!gazeValid) {
+        focusInfoLines_.emplace_back("Autofocus: eyes not seen");
     } else if (!onPicture) {
-        focusInfoLines_.emplace_back("Autofocus: gaze off the picture");
+        focusInfoLines_.emplace_back("Autofocus: off the picture");
     } else if (!focusHaveResult_) {
         focusInfoLines_.emplace_back("Autofocus: measuring");
     } else {
-        char dist[96];
+        focusInfoLines_.emplace_back(focus_.focused() ? "Autofocus: FOCUSED" : "Autofocus: watching");
         if (focusLastResult_.valid) {
-            std::snprintf(dist, sizeof(dist), "%.2f m  disp %.1f\xC2\xB0",
+            std::snprintf(buf, sizeof(buf), "Subject %.2f m (%.1f\xC2\xB0)",
                           stereo::disparityToMetres(focusLastResult_.disparityDeg, p.baselineM),
                           focusLastResult_.disparityDeg);
         } else if (focusHaveValid_) {
-            std::snprintf(dist, sizeof(dist), "no match (last %.2f m)",
+            std::snprintf(buf, sizeof(buf), "No match (was %.2f m)",
                           stereo::disparityToMetres(focusLastValidDisp_, p.baselineM));
         } else {
-            std::snprintf(dist, sizeof(dist), "no match");
+            std::snprintf(buf, sizeof(buf), "No match");
         }
-        std::snprintf(buf, sizeof(buf), "Autofocus %s  score %.2f  tex %.4f  offset %.1f\xC2\xB0 -> %.1f\xC2\xB0%s%s",
-                      dist, focusLastResult_.score, focusLastResult_.variance, focus_.offsetDeg(),
-                      focus_.targetDeg(), focus_.focused() ? "  FOCUSED" : "",
-                      paused ? "  (paused)" : (uiShown ? "  (menu open)" : ""));
+        focusInfoLines_.emplace_back(buf);
+        std::snprintf(buf, sizeof(buf), "Match %.2f  Texture %.0f", focusLastResult_.score,
+                      focusLastResult_.variance * 10000.0f);
+        focusInfoLines_.emplace_back(buf);
+        std::snprintf(buf, sizeof(buf), "Shift %.1f\xC2\xB0 > %.1f\xC2\xB0", focus_.offsetDeg(), focus_.targetDeg());
+        focusInfoLines_.emplace_back(buf);
+        if (paused || uiShown) focusInfoLines_.emplace_back(paused ? "(paused)" : "(menu open)");
+    }
+    if (active) {
+        // How the tracker behaves: new samples per second, how much the raw gaze trembles, and
+        // how often the eyes were seen.
+        std::snprintf(buf, sizeof(buf), "Eyes %.0f Hz  %.1f\xC2\xB0  %.0f%%", focusGaze_.sampleRateHz(),
+                      focusGaze_.noiseDeg(), focusGaze_.validShare() * 100.0f);
         focusInfoLines_.emplace_back(buf);
     }
     if (testDeg != 0.0f) {
-        std::snprintf(buf, sizeof(buf), "Autofocus test shift %+.1f\xC2\xB0", testDeg);
+        std::snprintf(buf, sizeof(buf), "Test shift %+.1f\xC2\xB0", testDeg);
         focusInfoLines_.emplace_back(buf);
     }
 }
