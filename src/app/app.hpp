@@ -380,6 +380,7 @@ private:
         bool busy = false;          // Sign In pressed: waiting for the folder to be read again
         unsigned waitSerial = 0;    // the browser's scan count when it was pressed
         std::string message;        // the header line (which share, and why it asks)
+        std::string playAfter;      // asked by a video that could not open: played once signed in
         enum class Field { None, User, Pass } editingField = Field::None;
     } shareLogin_{};
     void openShareLogin(const std::string& uri, bool refused);

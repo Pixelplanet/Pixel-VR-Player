@@ -871,6 +871,15 @@ void App::finishLoadMedia(int slot) {
             // Say so in the file browser instead of silently doing nothing.
             browser_.setStatus("Can't play " + std::filesystem::path(path).filename().string() + ": " + why);
             if (!fromQueue) browser_.setOpen(true);
+            // The share's login is missing or was refused (a password changed on the server, say):
+            // ask for it right here, and play the video once it works.
+            const bool loginWhy = why.find("(open the share in Files to sign in)") != std::string::npos;
+            const std::size_t cut = path.find_last_of('/');
+            if (loginWhy && isRemotePath(path) && cut != std::string::npos && !shareLogin_.active &&
+                !actionMenu_.visible && !textEntry_.active) {
+                openShareLogin(path.substr(0, cut), why.find("not accepted") != std::string::npos);
+                if (shareLogin_.active) shareLogin_.playAfter = path;
+            }
         }
 #endif
         return;
@@ -3341,9 +3350,11 @@ void App::pollShareLogin() {
                              shareLogin_.savePass && kept ? "saved" : "kept until the player quits");
             const std::string label = shareLogin_.target.label;
             const bool priv = VaultManager::isPrivatePath(shareLogin_.uri);
+            const std::string playAfter = shareLogin_.playAfter;
             closeShareLogin(false);
             showNotice(kept ? "Signed in to " + label : "Signed in to " + label + ", but the password could not be saved",
                        !kept, priv);
+            if (!playAfter.empty()) playFromBrowser(playAfter);  // the video that asked for it
             return;
         }
         creds.dropSessionLogin(shareLogin_.target);
