@@ -33,6 +33,7 @@
 #include <atomic>
 #include <chrono>
 #include <memory>
+#include <optional>
 #include <functional>
 #include <string>
 #include <thread>
@@ -137,6 +138,20 @@ private:
     // only: gaze values and offsets are never logged, stored or given to plugins.
     StereoFocus focus_;
     GazeFilter focusGaze_;           // the steadied gaze the renderer measures at
+
+    // "Free Decoder": Steam's web helper held the hardware decoder, the user agreed to end it.
+    // The helper is ended on a background thread (it can take a second); then the video reopens
+    // where it was, now with the hardware decoder.
+    struct DecoderFree {
+        std::shared_ptr<std::atomic<int>> state;  // 0 running, 1 freed, 2 failed
+        int slot = 0;
+        std::string path;
+    };
+    std::optional<DecoderFree> decoderFree_;
+    std::string decoderFreeAskedPath_;   // asked / freed for this file: not again right after
+    std::chrono::steady_clock::time_point decoderFreeAskedAt_{};
+    void askFreeDecoder(int slot);
+    void pollDecoderFree();
     bool focusSettingPrev_ = false;  // the setting last frame (notice and log on a change)
     bool focusActivePrev_ = false;   // eye gaze was in use last frame (log on a change)
     bool focusOnPicture_ = false;    // the latest measured gaze point landed on the picture

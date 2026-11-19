@@ -1074,11 +1074,21 @@ void App::finishLoadMedia(int slot) {
     // since at 4K+ that means stutter the viewer would otherwise blame on us.
     const std::string blockedBy = sc.engine.hardwareBlockedBy();
     if (!blockedBy.empty() && static_cast<long long>(w) * h >= 3840LL * 2000LL) {
-        // (Short enough for the two lines of the title pill.)
-        const std::string msg = "Software decoding: hardware decoder busy (" + blockedBy +
-                                "). Close that video or restart Steam";
-        renderer_.setScreenTitle(slot, msg, 12.0f, true);
-        PIXELVR_LOG_WARN("%s", msg.c_str());
+        bool steamHolds = false;
+        for (const MediaEngine::DecoderHolder& hd : MediaEngine::decoderHolderList()) steamHolds |= hd.steamHelper;
+        const bool askedJustNow = decoderFreeAskedPath_ == path &&
+                                  std::chrono::steady_clock::now() - decoderFreeAskedAt_ < std::chrono::seconds(60);
+        if (steamHolds && !askedJustNow && !actionMenu_.visible && !decoderFree_) {
+            // Steam's web helper keeps a session for a video in its menus (even a paused or
+            // hidden one): offer to end that helper process, Steam starts it again.
+            askFreeDecoder(slot);
+        } else {
+            // (Short enough for the two lines of the title pill.)
+            const std::string msg = "Software decoding: hardware decoder busy (" + blockedBy +
+                                    (steamHolds ? "). Restart SteamVR to free it" : "). Close that video or restart Steam");
+            renderer_.setScreenTitle(slot, msg, 12.0f, true);
+        }
+        PIXELVR_LOG_WARN("Software decoding: hardware decoder busy (%s)", blockedBy.c_str());
     }
     if (isPlex && sc.webSuspended) {
         if (plexPlay.offset > 0.5 && (sc.engine.duration() <= 0.0 || plexPlay.offset < sc.engine.duration() - 5.0)) {
@@ -4296,6 +4306,54 @@ void App::computeArrangement(const Arrangement& a,
     }
 }
 
+void App::askFreeDecoder(int slot) {
+#ifdef PIXELVR_HAVE_MEDIA
+    const std::string path = screens_[slot].path;
+    decoderFreeAskedPath_ = path;
+    decoderFreeAskedAt_ = std::chrono::steady_clock::now();
+    askConfirm("Free the Video Decoder?",
+               "A video in Steam's menu holds the headset's video decoder, so this one would stutter. "
+               "Freeing it restarts Steam's web helper (Steam redraws its window).",
+               "Free Decoder",
+               [this, slot, path] {
+                   auto state = std::make_shared<std::atomic<int>>(0);
+                   decoderFree_ = DecoderFree{state, slot, path};
+                   std::thread([state] { state->store(MediaEngine::freeDecoderFromSteam() ? 1 : 2); }).detach();
+                   showNotice("Freeing the video decoder...");
+               },
+               "Play Anyway");
+#else
+    (void)slot;
+#endif
+}
+
+// The background "Free Decoder" finished: reopen the video where it was (now on the hardware).
+void App::pollDecoderFree() {
+#ifdef PIXELVR_HAVE_MEDIA
+    if (!decoderFree_) return;
+    const int st = decoderFree_->state->load();
+    if (st == 0) return;
+    const DecoderFree job = *decoderFree_;
+    decoderFree_.reset();
+    if (st != 1) {
+        showNotice("The video decoder couldn't be freed. Restart SteamVR to free it", true);
+        return;
+    }
+    ScreenState& sc = screens_[job.slot];
+    if (!sc.open || sc.web || sc.path != job.path) {
+        showNotice("Video decoder freed");  // that video was closed meanwhile: the next one gets it
+        return;
+    }
+    const double pos = sc.engine.position();
+    const bool paused = sc.engine.paused();
+    decoderFreeAskedAt_ = std::chrono::steady_clock::now();  // a refusal again right away: no second dialog
+    loadMedia(job.path, job.slot);
+    screens_[job.slot].openSeekPos = pos;
+    screens_[job.slot].openStartPaused = paused;
+    showNotice("Video decoder freed: playing with the hardware decoder");
+#endif
+}
+
 void App::askConfirm(const std::string& title, const std::string& text, const std::string& yesLabel,
                      std::function<void()> onYes, const std::string& noLabel) {
     if (actionMenu_.visible) pushMenuParent(menupage::Confirm);  // Cancel / B go back to that dialog
@@ -6686,6 +6744,7 @@ int App::run() {
             // Live settings + place the screen in front on first head tracking.
             renderer_.setSwapEyes(settings_.swapEyes());
             updateStereoFocus(dt);
+            pollDecoderFree();
             renderer_.setDrawModels(settings_.drawModels());
             renderer_.setUiAppearance(settings_.uiTextScale(),
                                       settings_.uiTextRgb(),

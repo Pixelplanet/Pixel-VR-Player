@@ -89,6 +89,18 @@ public:
     // Non-empty when the hardware decoder was refused while another process
     // held it ("steamwebhelper (3079)"): playback is in software because of it.
     std::string hardwareBlockedBy() const;
+    // Who else has the hardware decoder open. steamHelper: a child process of Steam's web helper
+    // (its GPU process decodes the videos in Steam's menus), ours to end and restarted by Steam.
+    struct DecoderHolder {
+        int pid = 0;
+        std::string comm;
+        bool steamHelper = false;
+    };
+    static std::vector<DecoderHolder> decoderHolderList();
+    // Ends the Steam web helper processes holding the decoder (SIGTERM, SIGKILL after 1 s) and
+    // waits up to timeoutMs until none of them has it open. Only on the user's request; blocks:
+    // never call it on the render thread. True when no Steam helper holds the decoder any more.
+    static bool freeDecoderFromSteam(int timeoutMs = 3000);
     uint64_t decodedFrames() const;  // total frames decoded since open
     uint64_t lateFrames() const;     // decoded but skipped: too late to show
     uint64_t clockWaits() const;     // times the clock waited for lagging video

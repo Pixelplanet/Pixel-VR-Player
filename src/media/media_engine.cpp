@@ -27,6 +27,7 @@
 #include <sstream>
 #include <unordered_map>
 #include <thread>
+#include <csignal>
 #include <unistd.h>
 
 extern "C" {
@@ -70,25 +71,9 @@ namespace {
 // fail to open; this names the culprit for the log and the status line.
 std::string decoderHolders() {
     std::string out;
-    std::error_code ec;
-    const std::filesystem::path node = std::filesystem::canonical("/dev/video-dec0", ec);
-    if (ec) return out;
-    const pid_t self = getpid();
-    for (const auto& proc : std::filesystem::directory_iterator("/proc", ec)) {
-        const std::string name = proc.path().filename().string();
-        if (name.empty() || !std::isdigit(static_cast<unsigned char>(name[0]))) continue;
-        const pid_t pid = static_cast<pid_t>(std::atoi(name.c_str()));
-        if (pid == self) continue;
-        std::error_code fdEc;
-        for (const auto& fd : std::filesystem::directory_iterator(proc.path() / "fd", fdEc)) {
-            std::error_code linkEc;
-            if (std::filesystem::read_symlink(fd.path(), linkEc) != node) continue;
-            std::string comm;
-            if (std::ifstream in(proc.path() / "comm"); in) std::getline(in, comm);
-            if (!out.empty()) out += ", ";
-            out += (comm.empty() ? std::string("pid") : comm) + " (" + name + ")";
-            break;
-        }
+    for (const MediaEngine::DecoderHolder& h : MediaEngine::decoderHolderList()) {
+        if (!out.empty()) out += ", ";
+        out += (h.comm.empty() ? std::string("pid") : h.comm) + " (" + std::to_string(h.pid) + ")";
     }
     return out;
 }
@@ -2845,6 +2830,77 @@ int MediaEngine::height() const { return impl_->height; }
 float MediaEngine::pixelAspect() const { return impl_->pixelAspect; }
 std::string MediaEngine::codecName() const { return impl_->codecName; }
 std::string MediaEngine::hardwareBlockedBy() const { return impl_->hwBlockedBy; }
+
+std::vector<MediaEngine::DecoderHolder> MediaEngine::decoderHolderList() {
+    std::vector<DecoderHolder> out;
+    std::error_code ec;
+    const std::filesystem::path node = std::filesystem::canonical("/dev/video-dec0", ec);
+    if (ec) return out;
+    const pid_t self = getpid();
+    for (const auto& proc : std::filesystem::directory_iterator("/proc", ec)) {
+        const std::string name = proc.path().filename().string();
+        if (name.empty() || !std::isdigit(static_cast<unsigned char>(name[0]))) continue;
+        const pid_t pid = static_cast<pid_t>(std::atoi(name.c_str()));
+        if (pid == self) continue;
+        std::error_code fdEc;
+        for (const auto& fd : std::filesystem::directory_iterator(proc.path() / "fd", fdEc)) {
+            std::error_code linkEc;
+            if (std::filesystem::read_symlink(fd.path(), linkEc) != node) continue;
+            DecoderHolder h;
+            h.pid = static_cast<int>(pid);
+            if (std::ifstream in(proc.path() / "comm"); in) std::getline(in, h.comm);
+            // A child of Steam's web helper (--type=gpu-process / zygote / utility), never the
+            // main helper process itself (that one is Steam's whole window).
+            if (h.comm == "steamwebhelper") {
+                std::string cmd;
+                if (std::ifstream in(proc.path() / "cmdline", std::ios::binary); in) {
+                    std::getline(in, cmd, '\0');  // the program
+                    std::string arg;
+                    while (std::getline(in, arg, '\0')) {
+                        if (arg.rfind("--type=", 0) == 0) {
+                            h.steamHelper = true;
+                            break;
+                        }
+                    }
+                }
+            }
+            out.push_back(h);
+            break;
+        }
+    }
+    return out;
+}
+
+bool MediaEngine::freeDecoderFromSteam(int timeoutMs) {
+    auto steamHolders = [] {
+        std::vector<int> pids;
+        for (const DecoderHolder& h : decoderHolderList()) {
+            if (h.steamHelper) pids.push_back(h.pid);
+        }
+        return pids;
+    };
+    std::vector<int> pids = steamHolders();
+    if (pids.empty()) return true;
+    for (int pid : pids) {
+        PIXELVR_LOG_INFO("Freeing the video decoder: ending Steam web helper process %d", pid);
+        ::kill(static_cast<pid_t>(pid), SIGTERM);
+    }
+    const auto start = std::chrono::steady_clock::now();
+    bool killed = false;
+    for (;;) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+        pids = steamHolders();
+        if (pids.empty()) return true;
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - start).count();
+        if (!killed && ms >= 1000) {
+            for (int pid : pids) ::kill(static_cast<pid_t>(pid), SIGKILL);
+            killed = true;
+        }
+        if (ms >= timeoutMs) break;
+    }
+    PIXELVR_LOG_WARN("Freeing the video decoder: a Steam web helper still holds it");
+    return false;
+}
 uint64_t MediaEngine::decodedFrames() const {
     return impl_->decodedCount.load(std::memory_order_relaxed);
 }
