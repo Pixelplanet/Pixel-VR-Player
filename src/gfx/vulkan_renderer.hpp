@@ -695,7 +695,7 @@ public:
         std::string error;    // share editor / sign-in: why Save / Sign In did not work (footer line), "" = none
         int errorField = -1;  // the field it is about (red rim), -1 = none
     };
-    void setActionMenu(const ActionMenuData& data) { actionMenu_ = data; }
+    void setActionMenu(const ActionMenuData& data);
     const ActionMenuData& actionMenu() const { return actionMenu_; }
     int actionMenuBtnHovered() const { return actionMenuBtnHovered_; }
     // The laser is on the dialog's panel (a click there, off its rows / buttons, does nothing).

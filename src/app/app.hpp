@@ -313,6 +313,10 @@ private:
         std::string workgroup = "WORKGROUP";
         std::string label;
         bool savePass = true;          // off: the password is not written to the file (asked when opened)
+        // A vault share (the switch is shown only while the vault is unlocked); origVault: it was one
+        // when the form opened.
+        bool vault = false;
+        bool origVault = false;
         enum class Field { None, Host, Share, User, Pass, Workgroup, Port, Label } editingField = Field::None;
     } smbModal_{};
 
@@ -340,7 +344,10 @@ private:
     void pollShareLogin();  // each frame: a folder that asks for a login, the result of Sign In
     void openSmbModal(bool isNew, const std::string& smbPath = "");
     void updateSmbModalMenu();
-    void saveSmbModal();
+    void saveSmbModal(bool confirmed = false);  // confirmed: a saved password may go into the normal list
+    // A share became a vault share: what was remembered about it in the open goes (resume points,
+    // letterbox results, bookmarks on disk, an SFTP host key).
+    void scrubShareTraces(const SmbShare& s);
     void deleteSmbModal();
 
     std::function<void(const std::string&)> kbOnDone_;

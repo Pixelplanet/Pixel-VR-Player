@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 #include <mutex>
@@ -22,6 +23,10 @@ struct SmbShare {
     // Off: the password is never written to the file; one typed in is kept in memory until the
     // player quits, and the share asks again after that.
     bool savePassword = true;
+    // A vault share: kept in the vault's encrypted share list, never in smb_shares.json. It exists
+    // (in shares(), lookups, logins) only while the vault is unlocked, and every address in it
+    // counts as private (isVaultShareUri).
+    bool vault = false;
 };
 
 class SmbCredentialsManager {
@@ -39,7 +44,11 @@ public:
 
     // Adds a new share or updates an existing one (matched by host + share). With savePassword off
     // its password is kept in memory for this session only (none: the share asks when opened).
-    void addOrUpdateShare(const SmbShare& share);
+    // `vault` moves the entry into (or, when false, out of) the vault's share list; false = a vault
+    // share was asked for while that list is not open (vault locked, or unreadable): nothing changed.
+    // A share inside a vault share's scope (e.g. a share of a server that is a vault share) is
+    // always kept in the vault's list.
+    bool addOrUpdateShare(const SmbShare& share);
 
     // Deletes a configured share and wipes its stored credentials (and a session password)
     bool deleteShare(const std::string& host, const std::string& share = "",
@@ -113,6 +122,31 @@ public:
     // libsmbclient's errno for a refused or missing login (logon failure, access denied).
     static bool isLoginErrno(int e);
 
+    // --- Vault shares ---
+    // Reads the vault's encrypted share list from `file` (encrypted with the vault key, which must be
+    // set: right after unlocking). A missing file is an empty list. False when the file is there but
+    // could not be read: the list stays closed this session (vault shares can't be added, and the
+    // file is never overwritten).
+    bool openVaultShares(const std::string& file);
+    // The vault locked: its shares leave the list, their session logins and the refused / worked
+    // login records in them are forgotten, passwords wiped. Their addresses stay private
+    // (isVaultShareUri) until the player quits, so work still running on them is never remembered
+    // or logged in the open.
+    void closeVaultShares();
+    bool vaultSharesOpen() const;
+    // pixelvr --vault-export: the vault's shares become normal shares (smb_shares.json; saved
+    // passwords as for any share) and the encrypted list is deleted. Returns how many moved, or -1
+    // when the list could not be read (it is kept).
+    int exportVaultShares(const std::string& file);
+    // `uri` (smb:// sftp:// dav:// davs://) lies in a vault share: SMB by server and share (a vault
+    // share for a whole server covers all its shares), SFTP / WebDAV by server and port (a login
+    // there opens the whole server). Holds for the vault shares known since the player started,
+    // also after locking. Thread-safe, no file access, cheap for local paths.
+    static bool isVaultShareUri(const std::string& uri);
+    // `text` with every address in a vault share replaced by "(private)" (to the closing quote when
+    // the address is quoted, else to the end of the text). Used as the log filter.
+    static std::string redactForLog(std::string_view text);
+
 private:
     SmbCredentialsManager();
     ~SmbCredentialsManager() = default;
@@ -120,6 +154,14 @@ private:
     std::string getStoragePath() const;
     std::string getDeviceKey() const;
     void saveLocked();
+    void saveLocked(bool publicFirst);  // publicFirst: a share leaves the vault (never in neither file)
+    bool writeVaultLocked();          // the vault's share list, encrypted (only while it is open)
+    // The share objects of a shares file, and the file text for a list (the vault's list keeps its
+    // passwords as hex inside the encrypted file).
+    std::vector<SmbShare> parseList(const std::string& content) const;
+    std::string listJson(const std::vector<SmbShare>& list, bool vaultFile) const;
+    void refreshPrivateLocked();      // the private scopes after a change of vault shares
+    bool coveredByVaultLocked(const SmbShare& s) const;  // inside another vault share's scope
 
     std::string encryptPassword(const std::string& plain, const std::string& key, std::string& outIv) const;
     std::string decryptPassword(const std::string& cipherHex, const std::string& key, const std::string& ivHex) const;
@@ -138,6 +180,9 @@ private:
     // Scope key (share or server), login stamp: logins refused there / that worked there.
     std::vector<std::pair<std::string, std::size_t>> refused_;
     std::vector<std::pair<std::string, std::size_t>> worked_;
+    // The vault's share list: read (or found missing) since the last unlock, and where it lives.
+    bool vaultOpen_ = false;
+    std::string vaultFile_;
 };
 
 } // namespace pixelvr

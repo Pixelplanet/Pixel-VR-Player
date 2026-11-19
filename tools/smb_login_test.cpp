@@ -7,6 +7,7 @@
 //
 // Only made-up hosts and passwords; nothing here talks to a server. Passwords are never printed.
 
+#include "app/vault_manager.hpp"
 #include "net/smb_credentials.hpp"
 
 #include <cstdio>
@@ -34,6 +35,19 @@ const char* const kSavedPw = "Saved-Pw-1234";
 const char* const kSessionPw = "Session-Pw-5678";
 const char* const kTypedPw = "Typed-Pw-9012";
 const char* const kNewSharePw = "Found-Pw-3456";
+const char* const kVaultPw = "Vault-Pw-7788";
+const char* const kVaultUser = "vaultuser";
+const char* const kVaultHost = "vault.test";
+const char* const kVaultLabel = "Hidden NAS";
+
+bool listed(const std::string& host) {
+    for (const SmbShare& s : SmbCredentialsManager::instance().shares()) {
+        if (s.host == host) return true;
+    }
+    return false;
+}
+
+bool privateUri(const std::string& uri) { return pixelvr::VaultManager::isPrivatePath(uri); }
 
 std::string fileText(const std::string& path) {
     std::ifstream f(path);
@@ -98,6 +112,7 @@ int main(int argc, char** argv) {
     if (phase == "write") {
         std::error_code ec;
         fs::remove_all(home / ".config", ec);
+        fs::remove_all(home / ".pixelvr_vault", ec);
         // A shares file as older versions wrote it: no "save_password" field.
         {
             SmbCredentialsManager& m = SmbCredentialsManager::instance();
@@ -240,11 +255,110 @@ int main(int argc, char** argv) {
         // For the next phase: an auth file as older versions left it.
         std::ofstream(staleAuth.string()) << "username = x\n";
 
+        // --- Vault shares (the vault of this scratch HOME, a fresh key) ---
+        pixelvr::VaultManager& vm = pixelvr::VaultManager::instance();
+        {
+            SmbShare early = makeShare(kVaultHost, "secret", kVaultUser, kVaultPw, true);
+            early.vault = true;
+            check(!m.addOrUpdateShare(early) && !listed(kVaultHost), "vault locked: a vault share can't be added");
+        }
+        vm.unlock();
+        check(vm.isUnlocked() && m.vaultSharesOpen(), "vault unlocked: its share list is open");
+        SmbShare vs = makeShare(kVaultHost, "secret", kVaultUser, kVaultPw, true);
+        vs.name = kVaultLabel;
+        vs.vault = true;
+        check(m.addOrUpdateShare(vs), "vault share saved");
+        {
+            const std::string json = fileText(file);
+            check(json.find(kVaultHost) == std::string::npos && json.find(kVaultUser) == std::string::npos &&
+                      json.find(kVaultLabel) == std::string::npos,
+                  "vault share: not in smb_shares.json");
+            const std::string raw = fileText(vm.sharesFilePath());
+            check(!raw.empty(), "vault share: the encrypted list exists");
+            check(raw.find(kVaultHost) == std::string::npos && raw.find(kVaultUser) == std::string::npos &&
+                      raw.find(kVaultPw) == std::string::npos && raw.find(kVaultLabel) == std::string::npos &&
+                      raw.find("PVRSHARES") == std::string::npos,
+                  "vault share: host, user, password and name not in plain text in the encrypted list");
+            struct stat vst{};
+            check(stat(vm.sharesFilePath().c_str(), &vst) == 0 && (vst.st_mode & 0777) == 0600, "the encrypted list is 0600");
+        }
+        check(listed(kVaultHost) && passOf(kVaultHost, "secret") == kVaultPw, "unlocked: listed, its login works");
+        check(privateUri("smb://vault.test/secret/Film.mkv") && privateUri("smb://VAULT.test/Secret/a/b") &&
+                  privateUri("smb://vault.test/secret"),
+              "addresses in the vault share are private");
+        check(!privateUri("smb://vault.test/other/x.mkv") && !privateUri("smb://vault.test") &&
+                  !privateUri("smb://old.test/media/x.mkv"),
+              "other shares of that server, the share list and other servers are not");
+        // SFTP / WebDAV: the whole server (with its port) is private.
+        SmbShare sv = makeShare("vsftp.test", "/srv", "sv", kVaultPw, true);
+        sv.protocol = "sftp";
+        sv.port = 2222;
+        sv.vault = true;
+        m.addOrUpdateShare(sv);
+        check(privateUri("sftp://vsftp.test:2222/home/x/a.mkv") && !privateUri("sftp://vsftp.test/home/x/a.mkv"),
+              "SFTP vault share: that server and port only");
+        // A whole SMB server in the vault: a share found on it and signed into is saved in the vault too.
+        SmbShare whole = makeShare("vsrv.test", "", "w", kVaultPw, true);
+        whole.vault = true;
+        m.addOrUpdateShare(whole);
+        SmbCredentialsManager::LoginTarget ft;
+        m.loginTargetFor("smb://vsrv.test/movies/x", ft);
+        m.setSessionLogin(ft, "found", kTypedPw);
+        m.keepSessionLogin(ft, true);
+        check(fileText(file).find("vsrv.test") == std::string::npos && listed("vsrv.test") &&
+                  passOf("vsrv.test", "movies") == kTypedPw,
+              "signed into a share of a vault server with saving on: saved in the vault, not smb_shares.json");
+        m.addOrUpdateShare(makeShare("vsrv.test", "music", "w2", kSavedPw, true));  // (asked for as a normal share)
+        check(fileText(file).find("vsrv.test") == std::string::npos, "a share added on a vault server stays in the vault");
+        // The log filter.
+        {
+            const std::string a = SmbCredentialsManager::redactForLog("Loaded smb://vault.test/secret/My Film.mkv on screen 1");
+            check(a.find("vault.test") == std::string::npos && a.find("My Film") == std::string::npos &&
+                      a.find("(private)") != std::string::npos,
+                  "log: an unquoted vault address is cut out to the end of the line (" + a + ")");
+            const std::string b = SmbCredentialsManager::redactForLog("beginScan 'smb://vault.test/secret/A B' smb=1");
+            check(b == "beginScan '(private)' smb=1", "log: a quoted vault address is replaced (" + b + ")");
+            const std::string c = SmbCredentialsManager::redactForLog("Loaded smb://old.test/media/x.mkv on screen 1");
+            check(c == "Loaded smb://old.test/media/x.mkv on screen 1", "log: other addresses stay");
+            const std::string d = SmbCredentialsManager::redactForLog("Download: cannot open smb://vault.test/sec%72et/x: denied");
+            check(d.find("vault.test") == std::string::npos, "log: an escaped vault address is cut out too");
+        }
+        // A login typed for it and a refused one: both forgotten when the vault locks.
+        SmbCredentialsManager::LoginTarget vt;
+        check(m.loginTargetFor("smb://vault.test/secret/x", vt) && vt.saved && vt.label == kVaultLabel,
+              "the sign-in dialog finds the vault share while unlocked");
+        m.setSessionLogin(vt, kVaultUser, kTypedPw);
+        m.noteLoginRefused("smb://vault.test/secret/x");
+        check(m.loginRefused("smb://vault.test/secret/y"), "a refused login is recorded in the vault share");
+        vm.lock();
+        check(!listed(kVaultHost) && !listed("vsrv.test") && !listed("vsftp.test"), "locked: no vault share is listed");
+        check(passOf(kVaultHost, "secret").empty() && passOf("vsrv.test", "movies").empty(),
+              "locked: their logins (saved and typed this session) are forgotten");
+        check(!m.loginRefused("smb://vault.test/secret/x"), "locked: the refused-login record is forgotten");
+        check(!m.loginTargetFor("smb://vault.test/secret/x", vt) || (!vt.saved && vt.label != kVaultLabel),
+              "locked: the sign-in dialog knows nothing about it");
+        check(privateUri("smb://vault.test/secret/Film.mkv"), "locked: its addresses stay private until the player quits");
+        check(!m.addOrUpdateShare(vs), "locked: a vault share can't be saved");
+        check(fileText(file).find(kVaultHost) == std::string::npos, "locked: still not in smb_shares.json");
+        vm.unlock();
+        check(listed(kVaultHost) && passOf(kVaultHost, "secret") == kVaultPw, "unlocked again: back with its password");
+        // Out of the vault and back in.
+        SmbShare normal = vs;
+        normal.vault = false;
+        m.addOrUpdateShare(normal);
+        check(fileText(file).find(kVaultHost) != std::string::npos && !privateUri("smb://vault.test/secret/x"),
+              "made normal: in smb_shares.json, no longer private");
+        m.addOrUpdateShare(vs);
+        check(fileText(file).find(kVaultHost) == std::string::npos && privateUri("smb://vault.test/secret/x"),
+              "made a vault share again: out of smb_shares.json, private");
+        vm.lock();  // (the next phase starts locked, like a restart)
+
         struct stat st{};
         check(stat(file.c_str(), &st) == 0 && (st.st_mode & 0777) == 0600, "the shares file is 0600");
         const std::string all = fileText(file);
         check(all.find(kSessionPw) == std::string::npos && all.find(kTypedPw) == std::string::npos &&
-                  all.find(kSavedPw) == std::string::npos && all.find(kNewSharePw) == std::string::npos,
+                  all.find(kSavedPw) == std::string::npos && all.find(kNewSharePw) == std::string::npos &&
+                  all.find(kVaultPw) == std::string::npos,
               "no password in plain text in the file");
     } else {
         // "After a restart": a new process loads the file.
@@ -261,6 +375,24 @@ int main(int argc, char** argv) {
         check(!m.loginMissing("sftp://nosave.test/x"), "SFTP is never asked before trying (keys)");
         check(m.loginMissing("smb://empty.test/media"), "restart: an empty saved password asks again");
         check(passOf("turnon.test", "music") == kTypedPw, "restart: the password saved by switching on works");
+
+        // Vault shares after a restart: nothing of them until the vault is unlocked.
+        pixelvr::VaultManager& vm = pixelvr::VaultManager::instance();
+        check(!listed(kVaultHost) && !listed("vsrv.test") && passOf(kVaultHost, "secret").empty(),
+              "restart, locked: no vault share is known");
+        check(fileText(file).find(kVaultHost) == std::string::npos, "restart: not in smb_shares.json");
+        vm.unlock();
+        check(listed(kVaultHost) && passOf(kVaultHost, "secret") == kVaultPw && listed("vsftp.test"),
+              "restart, unlocked: the vault shares come back from the encrypted list");
+        check(privateUri("smb://vault.test/secret/x.mkv"), "restart, unlocked: their addresses are private");
+        vm.lock();
+        // pixelvr --vault-export: the vault's shares become normal shares.
+        const int rc = pixelvr::VaultManager::runCli("export", (home / "export").string());
+        const std::string json = fileText(file);
+        check(rc == 0 && json.find(kVaultHost) != std::string::npos && json.find("vsftp.test") != std::string::npos &&
+                  !fs::exists(vm.sharesFilePath()),
+              "vault export: the vault shares move to smb_shares.json, the encrypted list is gone");
+        check(json.find(kVaultPw) == std::string::npos, "vault export: no password in plain text");
     }
     std::printf("%s: %d failure(s)\n", failures ? "FAILED" : "PASSED", failures);
     return failures ? 1 : 0;

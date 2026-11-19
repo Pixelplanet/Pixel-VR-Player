@@ -672,13 +672,18 @@ constexpr float kSmbColCx = 0.2775f;    // half-width columns at -/+ this
 constexpr float kSmbColHalfW = 0.2625f;
 constexpr float kSmbWellHalfH = 0.028f;
 constexpr float kSmbLabelLift = 0.050f; // label baseline above the well centre
+// The form has option 12, the "Vault share" switch (only while the vault is unlocked): Sign in then
+// takes the left half of its row and the switch the right half. Set with the menu data.
+inline bool smbVaultRow = false;
 inline UiRect smbFieldWell(int i) {
     switch (i) {
         case 10: return {0.0f, 0.262f, 0.54f, kSmbWellHalfH};
         case 0: return {0.0f, 0.146f, 0.54f, kSmbWellHalfH};
         case 1: return {-kSmbColCx, 0.031f, kSmbColHalfW, kSmbWellHalfH};
         case 6: return {kSmbColCx, 0.031f, kSmbColHalfW, kSmbWellHalfH};
-        case 2: return {0.0f, -0.084f, 0.54f, kSmbWellHalfH};
+        case 2: return smbVaultRow ? UiRect{-kSmbColCx, -0.084f, kSmbColHalfW, kSmbWellHalfH}
+                                   : UiRect{0.0f, -0.084f, 0.54f, kSmbWellHalfH};
+        case 12: return {kSmbColCx, -0.084f, kSmbColHalfW, kSmbWellHalfH};  // "Vault share" switch
         case 3: return {-kSmbColCx, -0.199f, kSmbColHalfW, kSmbWellHalfH};
         case 4: return {kSmbColCx, -0.199f, kSmbColHalfW, kSmbWellHalfH};
         case 11: return {kSmbColCx, -0.314f, kSmbColHalfW, kSmbWellHalfH};  // "Save password" switch
@@ -1069,6 +1074,12 @@ std::vector<char> read_file(const std::string& path) {
 }
 
 } // namespace
+
+void VulkanRenderer::setActionMenu(const ActionMenuData& data) {
+    actionMenu_ = data;
+    // The share form's layout: with the "Vault share" row (option 12 not empty) or without.
+    hub::smbVaultRow = data.page == menupage::ShareEditor && data.options.size() > 12 && !data.options[12].empty();
+}
 
 VulkanRenderer::~VulkanRenderer() {
     if (device_ != VK_NULL_HANDLE) {
@@ -3232,7 +3243,7 @@ bool VulkanRenderer::focusedElementCentre(float& x, float& y) const {
         if (page == menupage::Confirm) return sel < 2 && at(hub::deleteConfirmButton(sel));
         if (page == menupage::ShareEditor) {
             if (sel == 7 || sel == 8 || sel == 9) return at(hub::smbButton(sel));
-            return (sel <= 6 || sel == 10 || sel == 11) && at(hub::smbFieldWell(sel));
+            return (sel <= 6 || sel == 10 || sel == 11 || sel == 12) && at(hub::smbFieldWell(sel));
         }
         if (page == menupage::ShareLogin) {
             if (sel == 3 || sel == 4) return at(hub::loginButton(sel));
@@ -3613,8 +3624,9 @@ void VulkanRenderer::updatePointer() {
                     }
                 } else if (actionMenu_.page == menupage::ShareEditor) {
                     // SMB share editor form (fixed option ids, see hub::smbFieldWell)
-                    for (int i : {0, 1, 2, 3, 4, 5, 6, 10, 11}) {
+                    for (int i : {0, 1, 2, 3, 4, 5, 6, 10, 11, 12}) {
                         if (i == 11 && (optCount < 12 || actionMenu_.options[11].empty())) continue;  // (guest: no password)
+                        if (i == 12 && (optCount < 13 || actionMenu_.options[12].empty())) continue;  // (vault locked: no such row)
                         if (i < optCount && hub::smbFieldHit(i).contains(hx, hyy)) {
                             actionMenuBtnHovered_ = i;
                             break;
@@ -10420,9 +10432,10 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 drawUiElement(vpPanel, 0.0f, hub::kSmbFooterDivY, hub::kSmbHalfW - 0.04f, 0.0012f,
                               UiShape::RoundedBox, kGlassDivider, 1.0f);
             }
-            for (int i : {0, 1, 2, 3, 4, 5, 6, 10, 11}) {
+            for (int i : {0, 1, 2, 3, 4, 5, 6, 10, 11, 12}) {
                 if (i >= optCount) continue;
                 if (i == 11 && actionMenu_.options[11].empty()) continue;  // (guest access: no password to save)
+                if (i == 12 && actionMenu_.options[12].empty()) continue;  // (no vault row while it is locked)
                 const UiRect w = hub::smbFieldWell(i);
                 const bool hov = (actionMenuBtnHovered_ == i) || (actionMenu_.selectedOption == i);
                 const bool editing = (actionMenu_.editingRow == i);
@@ -10440,6 +10453,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         : faulty             ? redBorder
                                              : ((hov && !disabled) ? kGlassRim : kGlassRimFaint));
                 if (i == 11) drawFormSwitch(hub::formSwitch(w), actionMenu_.options[11] == "on");
+                if (i == 12) drawFormSwitch(hub::formSwitch(w), actionMenu_.options[12] == "on");
                 if (i == 2) {
                     for (int seg = 0; seg < 2; ++seg) {
                         const UiRect r = hub::smbAuthSegment(seg);
@@ -10815,7 +10829,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         const bool active = (seg == 0) == anon;
                         drawFitCentered(r.cx, r.cy, r.hw * 2.0f - 0.02f, valSc,
                                         active ? themeTextCol : slateCol,
-                                        seg == 0 ? "Guest" : "Username & Password");
+                                        seg == 0 ? "Guest" : (hub::smbVaultRow ? "Account" : "Username & Password"));
                     }
                     continue;
                 }
@@ -10855,6 +10869,18 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 const float left = w.cx - w.hw + 0.022f;
                 drawFit(left, w.cy, sw.cx - sw.hw - 0.015f - left, valSc, savePass ? themeTextCol : slateCol,
                         savePass ? "Saved on this headset" : "Asked each time");
+            }
+            if (optCount > 12 && !actionMenu_.options[12].empty()) {
+                // "Vault share" (only while the vault is unlocked): what the switch means, left of it.
+                const UiRect w = hub::smbFieldWell(12);
+                const UiRect sw = hub::formSwitch(w);
+                const bool on = actionMenu_.options[12] == "on";
+                const bool hov = (actionMenuBtnHovered_ == 12) || (actionMenu_.selectedOption == 12);
+                drawFit(w.cx - w.hw + 0.010f, w.cy + hub::kSmbLabelLift, w.hw * 2.0f, labelSc,
+                        hov ? themeTextCol : slateCol, "Vault share");
+                const float left = w.cx - w.hw + 0.022f;
+                drawFit(left, w.cy, sw.cx - sw.hw - 0.015f - left, valSc, on ? tok::kVault.text.data() : slateCol,
+                        on ? "Only while unlocked" : "Always listed");
             }
             // Footer
             const tok::Rgba saveText = tok::labelOnAccent(themeAccentCol);

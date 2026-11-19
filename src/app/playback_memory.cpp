@@ -168,6 +168,17 @@ void PlaybackMemory::forgetUnder(const std::string& path) {
     }
 }
 
+void PlaybackMemory::forgetIf(const std::function<bool(const std::string&)>& match) {
+    for (auto it = entries_.begin(); it != entries_.end();) {
+        if (match(it->first)) {
+            it = entries_.erase(it);
+            dirty_ = true;
+        } else {
+            ++it;
+        }
+    }
+}
+
 void PlaybackMemory::setFormat(const std::string& path, int projection, int stereo, const std::string& fingerprint) {
     if (path.empty()) return;
     Entry& e = touch(path);

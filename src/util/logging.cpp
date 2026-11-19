@@ -50,6 +50,7 @@ Level resolve_initial_level() {
 }
 
 std::once_flag g_env_once;
+std::atomic<Redactor> g_redactor{nullptr};
 
 // Plex media URLs carry the account token; never write it out.
 std::string redact_token(std::string_view in) {
@@ -69,6 +70,8 @@ std::string redact_token(std::string_view in) {
 }
 
 } // namespace
+
+void set_redactor(Redactor fn) { g_redactor.store(fn, std::memory_order_release); }
 
 void set_level(Level level) {
     g_level.store(level, std::memory_order_relaxed);
@@ -96,7 +99,8 @@ void write(Level msg_level, std::string_view message) {
     std::snprintf(stamp, sizeof(stamp), "%02d:%02d:%02d.%03ld", tm.tm_hour,
                   tm.tm_min, tm.tm_sec, ts.tv_nsec / 1'000'000);
 
-    const std::string clean = redact_token(message);
+    std::string clean = redact_token(message);
+    if (const Redactor r = g_redactor.load(std::memory_order_acquire)) clean = r(clean);
     std::lock_guard<std::mutex> lock(g_mutex);
     std::fprintf(stderr, "[%s] %s  %.*s\n", stamp, level_tag(msg_level),
                  static_cast<int>(clean.size()), clean.data());

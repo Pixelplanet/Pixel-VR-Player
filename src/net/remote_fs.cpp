@@ -10,6 +10,7 @@
 #include <ctime>
 #include <deque>
 #include <filesystem>
+#include <fstream>
 #include <map>
 #include <chrono>
 #include <mutex>
@@ -156,6 +157,42 @@ std::string knownHostsPath() {
     return dir + "/known_hosts";
 }
 
+// Host keys of vault servers, in memory only: the first one seen this session is trusted, a
+// different one later is refused (as a changed key in known_hosts is).
+bool checkSessionHostKey(ssh_session s, const std::string& host, int port, std::string& err) {
+    static std::mutex mu;
+    static std::map<std::string, std::string> pinned;  // "host:port" -> SHA-256 of the key
+    ssh_key key = nullptr;
+    if (ssh_get_server_publickey(s, &key) != SSH_OK || key == nullptr) {
+        err = std::string("host key check failed: ") + ssh_get_error(s);
+        return false;
+    }
+    unsigned char* hash = nullptr;
+    size_t hlen = 0;
+    const int rc = ssh_get_publickey_hash(key, SSH_PUBLICKEY_HASH_SHA256, &hash, &hlen);
+    ssh_key_free(key);
+    if (rc != 0 || hash == nullptr) {
+        err = "host key check failed";
+        return false;
+    }
+    const std::string fp(reinterpret_cast<const char*>(hash), hlen);
+    ssh_clean_pubkey_hash(&hash);
+    std::string id = host;
+    std::transform(id.begin(), id.end(), id.begin(), ::tolower);
+    id += ":" + std::to_string(port);
+    std::lock_guard<std::mutex> l(mu);
+    const auto it = pinned.find(id);
+    if (it == pinned.end()) {
+        pinned.emplace(id, fp);
+        return true;
+    }
+    if (it->second != fp) {
+        err = "host key changed for " + host;
+        return false;
+    }
+    return true;
+}
+
 std::shared_ptr<SshConn> sshConnect(const RemoteUri& u, const SmbShare& cred, std::string& err) {
     sshInitOnce();
     auto conn = std::make_shared<SshConn>();
@@ -171,7 +208,10 @@ std::shared_ptr<SshConn> sshConnect(const RemoteUri& u, const SmbShare& cred, st
     ssh_options_set(s, SSH_OPTIONS_PORT, &port);
     ssh_options_set(s, SSH_OPTIONS_TIMEOUT, &timeout);
     if (!cred.username.empty()) ssh_options_set(s, SSH_OPTIONS_USER, cred.username.c_str());
-    const std::string kh = knownHostsPath();
+    // A vault server's host key never goes into the known_hosts file (that would name the server
+    // outside the vault): it is checked against the one seen first this session instead.
+    const bool vaultServer = SmbCredentialsManager::isVaultShareUri("sftp://" + u.host + ":" + std::to_string(port));
+    const std::string kh = vaultServer ? std::string("/dev/null") : knownHostsPath();
     ssh_options_set(s, SSH_OPTIONS_KNOWNHOSTS, kh.c_str());
     if (const char* home = std::getenv("HOME")) {
         for (const char* name : {"id_rsa", "id_ecdsa", "id_ed25519"}) {
@@ -183,7 +223,9 @@ std::shared_ptr<SshConn> sshConnect(const RemoteUri& u, const SmbShare& cred, st
         err = std::string("cannot connect to ") + u.host + ": " + ssh_get_error(s);
         return nullptr;
     }
-    switch (ssh_session_is_known_server(s)) {
+    if (vaultServer) {
+        if (!checkSessionHostKey(s, u.host, port, err)) return nullptr;
+    } else switch (ssh_session_is_known_server(s)) {
         case SSH_KNOWN_HOSTS_OK:
             break;
         case SSH_KNOWN_HOSTS_CHANGED:
@@ -808,6 +850,45 @@ void noteAccess(const std::string& uri, bool ok, std::string& err) {
     }
 }
 }  // namespace
+
+void remoteForgetHostKey(const std::string& host, int port) {
+    const char* home = std::getenv("HOME");
+    const std::string file = std::string(home ? home : ".") + "/.config/pixelvr/known_hosts";
+    std::ifstream in(file);
+    if (!in.is_open() || host.empty()) return;
+    auto lower = [](std::string s) {
+        std::transform(s.begin(), s.end(), s.begin(), ::tolower);
+        return s;
+    };
+    // The names a known_hosts line uses for it: "host" on port 22, else "[host]:port".
+    const std::string name = lower(port == 0 || port == 22 ? host : "[" + host + "]:" + std::to_string(port));
+    std::string kept, line;
+    bool changed = false;
+    while (std::getline(in, line)) {
+        const std::string hosts = lower(line.substr(0, line.find_first_of(" \t")));
+        bool match = false;
+        std::size_t b = 0;
+        while (b <= hosts.size()) {  // a comma-separated list of names
+            const std::size_t e = std::min(hosts.find(',', b), hosts.size());
+            if (hosts.compare(b, e - b, name) == 0 && e - b == name.size()) match = true;
+            b = e + 1;
+        }
+        if (match) {
+            changed = true;
+        } else {
+            kept += line + "\n";
+        }
+    }
+    in.close();
+    if (!changed) return;
+    const std::string tmp = file + ".tmp";
+    {
+        std::ofstream out(tmp, std::ios::trunc);
+        out << kept;
+    }
+    std::error_code ec;
+    std::filesystem::rename(tmp, file, ec);
+}
 
 bool remoteList(const std::string& uri, std::vector<RemoteEntry>& out, std::string& err) {
     // No try with a login known to be missing or refused there (a wrong password is not sent again).

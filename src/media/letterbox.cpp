@@ -296,6 +296,21 @@ void LetterboxDetector::forgetUnder(const std::string& path) {
     if (changed) save();
 }
 
+void LetterboxDetector::forgetIf(const std::function<bool(const std::string&)>& match) {
+    std::lock_guard<std::mutex> lk(mu_);
+    bool changed = false;
+    for (auto it = results_.begin(); it != results_.end();) {
+        const std::string& k = it->first;  // "<path>|size|mtime" (local), the address (network)
+        if (match(k.substr(0, k.find('|')))) {
+            it = results_.erase(it);
+            changed = true;
+        } else {
+            ++it;
+        }
+    }
+    if (changed) save();
+}
+
 void LetterboxDetector::save() {
     std::error_code ec;
     fs::create_directories(fs::path(file_).parent_path(), ec);

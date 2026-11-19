@@ -2024,14 +2024,40 @@ void App::performVaultLock() {
 #ifdef PIXELVR_HAVE_FREETYPE
     if (picking() && (VaultManager::isPrivatePath(pick_.srcPath) || browser_.inVault())) cancelPick(false);
     if (hubNoticePrivate_) hubNotice_.clear();  // e.g. "Moved 8 Mile.mkv to the vault"
+    // Vault shares: no dialog, form or question about one stays (the menu is hidden above; nothing of
+    // it may come back through a parent menu or the keyboard either).
+    menuStack_.clear();
+    const bool shareForm = smbModal_.active && (smbModal_.vault || smbModal_.origVault ||
+                                                SmbCredentialsManager::isVaultShareUri(smbModal_.protocol + "://" + smbModal_.host +
+                                                                                       (smbModal_.protocol == "smb" ? "/" + smbModal_.share : std::string())));
+    const bool loginForm = shareLogin_.active && VaultManager::isPrivatePath(shareLogin_.uri);
+    if ((shareForm || loginForm) && textEntry_.active) cancelKeyboard();
+    if (shareForm) {
+        std::fill(smbModal_.pass.begin(), smbModal_.pass.end(), '\0');
+        std::fill(smbModalOpened_.pass.begin(), smbModalOpened_.pass.end(), '\0');
+        smbModal_ = SmbModalState{};
+        smbModalOpened_ = SmbModalState{};
+    } else if (smbModal_.active) {
+        smbModal_.vault = false;  // (a normal share's form: only the switch goes)
+        smbModalOpened_.vault = false;
+    }
+    if (loginForm) closeShareLogin(false);
+    if (confirmFolderDl_ && VaultManager::isPrivatePath(folderDlPath_)) confirmFolderDl_ = false;
+    if (VaultManager::isPrivatePath(folderDlPath_)) {
+        folderDlPath_.clear();
+        pendingDlName_.clear();
+    }
     {
         // Leave the vault without popping the browser open over a video.
         const bool wasOpen = browser_.isOpen();
         if (browser_.inVault()) {
             browser_.openHome();
+        } else if (browser_.inPrivateShare()) {
+            browser_.openNetwork();  // out of the vault share (to the list without it)
         } else if (browser_.currentLocation() == "bookmarks://") {
             browser_.openBookmarks();  // drop the vault bookmarks from the list
         }
+        browser_.forgetPrivate();  // its rows, history, bookmarks and downloads
         if (!wasOpen) browser_.setOpen(false);
     }
     browser_.clearFinished();
@@ -2561,6 +2587,8 @@ void App::openSmbModal(bool isNew, const std::string& smbPath) {
         smbModal_.workgroup = "WORKGROUP";
         smbModal_.label.clear();
         smbModal_.savePass = true;
+        smbModal_.vault = false;
+        smbModal_.origVault = false;
     } else {
         std::string protocol = "smb";
         int port = 0;
@@ -2596,6 +2624,7 @@ void App::openSmbModal(bool isNew, const std::string& smbPath) {
         smbModal_.workgroup = "WORKGROUP";
         smbModal_.label.clear();
         smbModal_.savePass = true;
+        smbModal_.vault = false;
 
         SmbShare existing;
         if (SmbCredentialsManager::instance().findShare(host, share, existing, protocol, port)) {
@@ -2606,7 +2635,9 @@ void App::openSmbModal(bool isNew, const std::string& smbPath) {
             smbModal_.label = existing.name;
             // (Saving off: no password here; one typed this session is forgotten when the form saves.)
             smbModal_.savePass = existing.savePassword;
+            smbModal_.vault = existing.vault;  // (a vault share is only found while the vault is unlocked)
         }
+        smbModal_.origVault = smbModal_.vault;
     }
 
     actionMenu_.visible = true;
@@ -2637,7 +2668,7 @@ void App::updateSmbModalMenu() {
     // ids are fixed: 0 host, 1 share / folder, 2 auth ("guest"/"account"), 3 user,
     // 4 password, 5 workgroup (SMB) or port, 6 nickname, 7 save, 8 cancel,
     // 9 delete (empty for a new share), 10 type (SMB / SFTP / WebDAV / WebDAV (https)), 11 the
-    // "Save password" switch ("on" / "off"; empty for guest access).
+    // "Save password" switch ("on" / "off"; empty for guest access), 12 the "Vault share" switch.
     auto fieldVal = [&](SmbModalState::Field f, int rowIdx, const std::string& saved, bool mask) {
         if (kbActive && smbModal_.editingField == f) {
             actionMenu_.editingRow = rowIdx;
@@ -2666,10 +2697,12 @@ void App::updateSmbModalMenu() {
                                   : smbModal_.protocol == "davs" ? "WebDAV (https)"
                                                                  : "SMB");
     actionMenu_.options.push_back(smbModal_.anon ? "" : (smbModal_.savePass ? "on" : "off"));
+    // 12: the "Vault share" switch, only while the vault is unlocked (empty: the form has no such row).
+    actionMenu_.options.push_back(VaultManager::instance().isUnlocked() ? (smbModal_.vault ? "on" : "off") : "");
 #endif
 }
 
-void App::saveSmbModal() {
+void App::saveSmbModal(bool confirmed) {
 #ifdef PIXELVR_HAVE_FREETYPE
     while (!smbModal_.host.empty() &&
            (std::isspace(static_cast<unsigned char>(smbModal_.host.front())) ||
@@ -2694,6 +2727,22 @@ void App::saveSmbModal() {
         actionMenu_.selectedOption = 5;
         return;
     }
+    const bool unlocked = VaultManager::instance().isUnlocked();
+    const bool toVault = smbModal_.vault && unlocked;
+    if (toVault && !SmbCredentialsManager::instance().vaultSharesOpen()) {
+        actionMenu_.error = "The vault's share list can't be read: not saved";
+        actionMenu_.errorField = 12;
+        actionMenu_.selectedOption = 12;
+        return;
+    }
+    if (smbModal_.origVault && !toVault && !confirmed && !smbModal_.anon && smbModal_.savePass &&
+        !smbModal_.pass.empty()) {
+        // Out of the vault with a saved password: it would then be in the normal share list.
+        askConfirm("Make This a Normal Share?",
+                   "It is listed while the vault is locked too, and its saved password moves to the normal share list.",
+                   "Make Normal", [this] { saveSmbModal(true); }, "Keep in Vault");
+        return;
+    }
     if (!smbModal_.isNew && (smbModal_.host != smbModal_.origHost || smbModal_.share != smbModal_.origShare ||
                              smbModal_.protocol != smbModal_.origProtocol || port != smbModal_.origPort)) {
         SmbCredentialsManager::instance().deleteShare(smbModal_.origHost, smbModal_.origShare, smbModal_.origProtocol,
@@ -2711,8 +2760,20 @@ void App::saveSmbModal() {
     s.id = s.host + (s.share.empty() ? "" : ("/" + s.share));
     s.anonymous = smbModal_.anon;
     s.savePassword = smbModal_.savePass;  // off: never written to the file (kept until the player quits)
+    // Into the vault's encrypted share list (only while unlocked); off: back into the normal one.
+    s.vault = toVault;
 
-    SmbCredentialsManager::instance().addOrUpdateShare(s);
+    if (!SmbCredentialsManager::instance().addOrUpdateShare(s)) {
+        // (Only a vault share can fail here: the vault locked or its list could not be read.)
+        actionMenu_.error = "Not saved: the vault's share list can't be written";
+        actionMenu_.errorField = 12;
+        actionMenu_.selectedOption = 12;
+        actionMenu_.visible = true;
+        actionMenu_.page = menupage::ShareEditor;
+        updateSmbModalMenu();
+        return;
+    }
+    scrubShareTraces(s);  // (when it is a vault share now: also one covered by another vault share)
 
     smbModal_.active = false;
     smbModal_.editingField = SmbModalState::Field::None;
@@ -2720,6 +2781,24 @@ void App::saveSmbModal() {
     actionMenu_.visible = false;
     browser_.openNetwork();
 #endif
+}
+
+void App::scrubShareTraces(const SmbShare& s) {
+    // The share's own address (an SFTP / WebDAV server with its port).
+    std::string uri = s.protocol + "://" + s.host;
+    if (s.protocol != "smb" && s.port > 0) uri += ":" + std::to_string(s.port);
+    if (s.protocol == "smb" && !s.share.empty()) uri += "/" + s.share;
+    if (!SmbCredentialsManager::isVaultShareUri(uri)) return;  // a normal share: nothing to hide
+    // Remembered before it became a vault share: resume points and letterbox results (on disk),
+    // bookmarks (kept now, but in memory only), the SFTP host key in known_hosts.
+    auto priv = [](const std::string& p) { return isRemotePath(p) && SmbCredentialsManager::isVaultShareUri(p); };
+    playbackMemory_.forgetIf(priv);
+    playbackMemory_.save();
+    letterboxDetector_.forgetIf(priv);
+#ifdef PIXELVR_HAVE_FREETYPE
+    browser_.saveBookmarks();  // (rewritten without them)
+#endif
+    if (s.protocol == "sftp") remoteForgetHostKey(s.host, s.port);
 }
 
 void App::deleteShareEntry(const std::string& path) {
@@ -2907,12 +2986,13 @@ void App::closeShareLogin(bool cancelled) {
     // A login still being tried is not known to work: it is not kept.
     if (shareLogin_.busy) SmbCredentialsManager::instance().dropSessionLogin(shareLogin_.target);
     const std::string label = shareLogin_.target.label;
+    const bool priv = VaultManager::isPrivatePath(shareLogin_.uri);  // (a vault share: the notice goes when it locks)
     std::fill(shareLogin_.pass.begin(), shareLogin_.pass.end(), '\0');
     shareLogin_ = ShareLoginState{};
     if (actionMenu_.visible && actionMenu_.page == menupage::ShareLogin) actionMenu_.visible = false;
     if (cancelled) {
         browser_.leaveLoginFolder();  // one step back: where the browser was before
-        showNotice("Not signed in: " + label + " was not opened");
+        showNotice("Not signed in: " + label + " was not opened", false, priv);
     }
 #else
     (void)cancelled;
@@ -2939,8 +3019,9 @@ void App::pollShareLogin() {
             PIXELVR_LOG_INFO("Share sign-in accepted (password %s)",
                              shareLogin_.savePass ? "saved" : "kept until the player quits");
             const std::string label = shareLogin_.target.label;
+            const bool priv = VaultManager::isPrivatePath(shareLogin_.uri);
             closeShareLogin(false);
-            showNotice("Signed in to " + label);
+            showNotice("Signed in to " + label, false, priv);
             return;
         }
         creds.dropSessionLogin(shareLogin_.target);
@@ -4107,7 +4188,7 @@ bool App::smbModalChanged() const {
     const SmbModalState& b = smbModalOpened_;
     return a.protocol != b.protocol || a.port != b.port || a.host != b.host || a.share != b.share ||
            a.anon != b.anon || a.user != b.user || a.pass != b.pass || a.workgroup != b.workgroup ||
-           a.label != b.label || a.savePass != b.savePass;
+           a.label != b.label || a.savePass != b.savePass || a.vault != b.vault;
 }
 
 void App::closeShareEditor(bool ask) {
@@ -4260,7 +4341,11 @@ void App::navigateShareEditor(int dx, int dy, bool fresh) {
         int id;
         float x;
     };
-    std::vector<std::vector<Item>> rows = {{{10, 0.0f}}, {{0, 0.0f}}, {{1, -0.28f}, {6, 0.28f}}, {{2, 0.0f}}};
+    // While the vault is unlocked Sign in shares its row with the "Vault share" switch (12).
+    const bool vaultRow = VaultManager::instance().isUnlocked();
+    std::vector<std::vector<Item>> rows = {{{10, 0.0f}}, {{0, 0.0f}}, {{1, -0.28f}, {6, 0.28f}}};
+    if (vaultRow) rows.push_back({{2, -0.28f}, {12, 0.28f}});
+    else rows.push_back({{2, 0.0f}});
     if (!smbModal_.anon) rows.push_back({{3, -0.28f}, {4, 0.28f}});
     if (smbModal_.anon) {
         rows.push_back({{5, -0.28f}});
@@ -4299,7 +4384,8 @@ void App::navigateShareEditor(int dx, int dy, bool fresh) {
                 smbModal_.port.clear();
                 updateSmbModalMenu();  // (its focus tick comes from navFeedbackEnd, like every step)
             }
-        } else if (id == 2) {  // Sign in: Left = guest, Right = username & password
+        } else if (id == 2 && !vaultRow) {  // Sign in: Left = guest, Right = username & password
+            // (With the vault switch beside it, Left / Right move between the two; A changes it.)
             const bool anon = dx < 0;
             if (anon != smbModal_.anon) {
                 smbModal_.anon = anon;
@@ -8153,6 +8239,14 @@ int App::run() {
                                 } else if (chosen == 11 && !smbModal_.anon) {
                                     // Save password: on / off (off = asked when the share opens)
                                     smbModal_.savePass = !smbModal_.savePass;
+                                    updateSmbModalMenu();
+                                } else if (chosen == 12 && VaultManager::instance().isUnlocked()) {
+                                    // Vault share: on / off (on = only listed while the vault is unlocked)
+                                    smbModal_.vault = !smbModal_.vault;
+                                    if (actionMenu_.errorField == 12) {
+                                        actionMenu_.error.clear();
+                                        actionMenu_.errorField = -1;
+                                    }
                                     updateSmbModalMenu();
                                 } else if (chosen == 7) {
                                     // Save SMB Share

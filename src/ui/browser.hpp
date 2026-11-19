@@ -68,6 +68,12 @@ public:
     const std::string& quickPath() const { return quickPath_; }
     bool isCurrentQuickPath() const { return isCurrentBookmarked(); }
     bool inVault() const;
+    // Browsing inside a vault network share (a private address).
+    bool inPrivateShare() const;
+    // The vault locked: every trace of vault shares goes (rows, bookmarks kept in memory, folder
+    // history, the status line; their downloads are stopped and leave the list). The browser itself
+    // stays where it is: the caller leaves a vault share first.
+    void forgetPrivate();
     // Shown instead of the vault while it lives on an SD card that is not inserted.
     static constexpr const char* kVaultMissing = "vault://missing";
     // A row that Move / Copy / Rename / Delete may act on (not "..", Network, placeholders, the SD card
@@ -249,6 +255,9 @@ private:
     bool backSmb_ = false;
     bool quietLogin_ = false;  // the next landed scan does not ask for a login (it left a login folder)
     std::atomic<bool> dlLoginFailed_{false};  // the download stopped: the share wants a login
+    bool dlPrivateDropped_ = false;  // the running download (from a vault share) was stopped by locking
+    // A finished download from a vault share: out of the hidden download folder into the vault.
+    void settleIntoVault(DownloadJob& j);
     void beginScan(const std::string& location, bool isSmb,
                    bool restoreView = false,
                    const std::string& childPath = "");        // async navigate

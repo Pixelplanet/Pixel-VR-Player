@@ -1,7 +1,10 @@
 #include "smb_credentials.hpp"
+#include "app/vault_crypto.hpp"
 #include "util/logging.hpp"
 
 #include <algorithm>
+#include <atomic>
+#include <cctype>
 #include <cerrno>
 #include <chrono>
 #include <cstdlib>
@@ -14,6 +17,7 @@
 #include <sstream>
 
 #if defined(__linux__) || defined(__APPLE__)
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
@@ -147,12 +151,23 @@ static bool sameServer(const SmbShare& s, const std::string& protocol, const std
     return (s.port ? s.port : def) == (port ? port : def);
 }
 
+// The same saved entry: protocol, host and share (folder); for SFTP / WebDAV the port too.
+static bool sameEntry(const SmbShare& a, const SmbShare& b) {
+    return a.protocol == b.protocol && lowered(a.host) == lowered(b.host) && lowered(a.share) == lowered(b.share) &&
+           (a.protocol == "smb" || sameServer(a, b.protocol, lowered(b.host), b.port));
+}
+
+// First line of the vault's share list (inside the encryption): tells a wrong key from a right one.
+static constexpr const char* kVaultListMagic = "PVRSHARES1\n";
+
 SmbCredentialsManager& SmbCredentialsManager::instance() {
     static SmbCredentialsManager sInstance;
     return sInstance;
 }
 
 SmbCredentialsManager::SmbCredentialsManager() {
+    // Every log line passes this filter: addresses in vault shares never reach the log.
+    log::set_redactor(&SmbCredentialsManager::redactForLog);
     load();
     // Older versions left smbclient auth files (with the password) next to the shares file; the
     // login now goes to smbclient through a pipe, so remove them.
@@ -245,20 +260,8 @@ std::string SmbCredentialsManager::decryptPassword(const std::string& cipherHex,
     return plain;
 }
 
-void SmbCredentialsManager::load() {
-    std::lock_guard<std::mutex> lk(mutex_);
-    shares_.clear();  // (logins typed this session stay: they are not in the file)
-
-    const std::string path = getStoragePath();
-    std::ifstream f(path);
-    if (!f.is_open()) {
-        return;
-    }
-
-    std::string content((std::istreambuf_iterator<char>(f)),
-                        std::istreambuf_iterator<char>());
-    f.close();
-
+std::vector<SmbShare> SmbCredentialsManager::parseList(const std::string& content) const {
+    std::vector<SmbShare> out;
     const std::string key = getDeviceKey();
 
     // Lightweight robust JSON parser for share objects
@@ -305,11 +308,17 @@ void SmbCredentialsManager::load() {
         // Files from before the switch have no such field: their passwords were saved.
         s.savePassword = (extractField("save_password") != "false");
 
-        std::string passCipher = extractField("password_enc");
-        std::string passIv = extractField("iv");
         // (With saving off a stored password is ignored; the next save leaves it out.)
-        if (s.savePassword && !passCipher.empty() && !passIv.empty()) {
-            s.password = decryptPassword(passCipher, key, passIv);
+        if (s.savePassword) {
+            const std::string passHex = extractField("password_hex");  // the vault's list (encrypted as a whole)
+            if (!passHex.empty()) {
+                const std::vector<uint8_t> b = fromHex(passHex);
+                s.password.assign(b.begin(), b.end());
+            } else {
+                std::string passCipher = extractField("password_enc");
+                std::string passIv = extractField("iv");
+                if (!passCipher.empty() && !passIv.empty()) s.password = decryptPassword(passCipher, key, passIv);
+            }
         }
 
         if (!s.host.empty()) {
@@ -319,13 +328,73 @@ void SmbCredentialsManager::load() {
             if (s.id.empty()) {
                 s.id = s.host + (!s.share.empty() ? ("/" + s.share) : "");
             }
-
-            shares_.push_back(s);
+            out.push_back(s);
         }
     }
+    return out;
+}
 
-    PIXELVR_LOG_INFO("SmbCredentialsManager: Loaded %zu configured shares from %s",
-                     shares_.size(), path.c_str());
+std::string SmbCredentialsManager::listJson(const std::vector<SmbShare>& list, bool vaultFile) const {
+    const std::string key = getDeviceKey();
+    std::ostringstream json;
+    json << "[\n";
+    for (std::size_t i = 0; i < list.size(); ++i) {
+        const auto& s = list[i];
+        json << "  {\n";
+        json << "    \"id\": \"" << s.id << "\",\n";
+        json << "    \"name\": \"" << s.name << "\",\n";
+        json << "    \"host\": \"" << s.host << "\",\n";
+        json << "    \"share\": \"" << s.share << "\",\n";
+        json << "    \"workgroup\": \"" << s.workgroup << "\",\n";
+        json << "    \"username\": \"" << s.username << "\",\n";
+        if (vaultFile) {
+            // Inside the vault's encrypted file: the password as hex (any character survives).
+            const std::string pw = s.savePassword ? s.password : std::string();
+            json << "    \"password_hex\": \"" << toHex(reinterpret_cast<const uint8_t*>(pw.data()), pw.size()) << "\",\n";
+        } else {
+            std::string ivHex;
+            // Saving off: no password in the file at all (not even an encrypted one).
+            std::string encPass = s.savePassword ? encryptPassword(s.password, key, ivHex) : std::string();
+            json << "    \"password_enc\": \"" << encPass << "\",\n";
+            json << "    \"iv\": \"" << ivHex << "\",\n";
+        }
+        json << "    \"save_password\": " << (s.savePassword ? "true" : "false") << ",\n";
+        json << "    \"protocol\": \"" << s.protocol << "\",\n";
+        json << "    \"port\": " << s.port << ",\n";
+        json << "    \"anonymous\": " << (s.anonymous ? "true" : "false") << "\n";
+        json << "  }" << (i + 1 < list.size() ? ",\n" : "\n");
+    }
+    json << "]\n";
+    return json.str();
+}
+
+void SmbCredentialsManager::load() {
+    std::lock_guard<std::mutex> lk(mutex_);
+    // (Logins typed this session stay: they are not in the file. So do the vault's shares, which
+    // are in a file of their own.)
+    shares_.erase(std::remove_if(shares_.begin(), shares_.end(), [](const SmbShare& s) { return !s.vault; }),
+                  shares_.end());
+
+    const std::string path = getStoragePath();
+    std::ifstream f(path);
+    if (!f.is_open()) {
+        return;
+    }
+
+    std::string content((std::istreambuf_iterator<char>(f)),
+                        std::istreambuf_iterator<char>());
+    f.close();
+
+    std::size_t n = 0;
+    for (SmbShare& s : parseList(content)) {
+        if (std::any_of(shares_.begin(), shares_.end(), [&](const SmbShare& v) { return sameEntry(v, s); })) {
+            continue;  // (a vault share is never listed twice)
+        }
+        shares_.push_back(std::move(s));
+        ++n;
+    }
+
+    PIXELVR_LOG_INFO("SmbCredentialsManager: Loaded %zu configured shares from %s", n, path.c_str());
 }
 
 void SmbCredentialsManager::save() {
@@ -333,7 +402,13 @@ void SmbCredentialsManager::save() {
     saveLocked();
 }
 
-void SmbCredentialsManager::saveLocked() {
+void SmbCredentialsManager::saveLocked() { saveLocked(false); }
+
+void SmbCredentialsManager::saveLocked(bool publicFirst) {
+    // The vault's list first, so a share moved into the vault is never in neither file; a share
+    // leaving the vault goes into the normal file first.
+    if (vaultOpen_ && !publicFirst) writeVaultLocked();
+
     const std::string path = getStoragePath();
 
     std::error_code ec;
@@ -345,36 +420,16 @@ void SmbCredentialsManager::saveLocked() {
     chmod(p.parent_path().string().c_str(), 0700);
 #endif
 
-    const std::string key = getDeviceKey();
-
-    std::ostringstream json;
-    json << "[\n";
-    for (std::size_t i = 0; i < shares_.size(); ++i) {
-        const auto& s = shares_[i];
-        std::string ivHex;
-        // Saving off: no password in the file at all (not even an encrypted one).
-        std::string encPass = s.savePassword ? encryptPassword(s.password, key, ivHex) : std::string();
-
-        json << "  {\n";
-        json << "    \"id\": \"" << s.id << "\",\n";
-        json << "    \"name\": \"" << s.name << "\",\n";
-        json << "    \"host\": \"" << s.host << "\",\n";
-        json << "    \"share\": \"" << s.share << "\",\n";
-        json << "    \"workgroup\": \"" << s.workgroup << "\",\n";
-        json << "    \"username\": \"" << s.username << "\",\n";
-        json << "    \"password_enc\": \"" << encPass << "\",\n";
-        json << "    \"iv\": \"" << ivHex << "\",\n";
-        json << "    \"save_password\": " << (s.savePassword ? "true" : "false") << ",\n";
-        json << "    \"protocol\": \"" << s.protocol << "\",\n";
-        json << "    \"port\": " << s.port << ",\n";
-        json << "    \"anonymous\": " << (s.anonymous ? "true" : "false") << "\n";
-        json << "  }" << (i + 1 < shares_.size() ? ",\n" : "\n");
+    // Vault shares never go into this file.
+    std::vector<SmbShare> plainList;
+    for (const SmbShare& s : shares_) {
+        if (!s.vault) plainList.push_back(s);
     }
-    json << "]\n";
+    const std::string json = listJson(plainList, false);
 
     std::ofstream f(path, std::ios::trunc);
     if (f.is_open()) {
-        f << json.str();
+        f << json;
         f.close();
 
 #if defined(__linux__) || defined(__APPLE__)
@@ -382,10 +437,63 @@ void SmbCredentialsManager::saveLocked() {
         chmod(path.c_str(), 0600);
 #endif
         PIXELVR_LOG_INFO("SmbCredentialsManager: Saved %zu shares to %s (mode 0600)",
-                         shares_.size(), path.c_str());
+                         plainList.size(), path.c_str());
     } else {
         PIXELVR_LOG_WARN("SmbCredentialsManager: Failed to write %s", path.c_str());
     }
+    if (vaultOpen_ && publicFirst) writeVaultLocked();
+}
+
+bool SmbCredentialsManager::writeVaultLocked() {
+    if (!vaultOpen_ || vaultFile_.empty()) return false;
+    std::vector<SmbShare> list;
+    for (const SmbShare& s : shares_) {
+        if (s.vault) list.push_back(s);
+    }
+    std::error_code ec;
+    if (list.empty()) {  // no vault shares: no file at all
+        fs::remove(vaultFile_, ec);
+        return true;
+    }
+    std::string plain = std::string(kVaultListMagic) + listJson(list, true);
+    std::string blob;
+    const bool enc = vaultcrypto::encryptBlob(plain, blob);
+    std::fill(plain.begin(), plain.end(), '\0');
+    for (SmbShare& s : list) std::fill(s.password.begin(), s.password.end(), '\0');
+    if (!enc) {
+        PIXELVR_LOG_WARN("Vault: the network share list could not be saved (no key)");
+        return false;
+    }
+#if defined(__linux__) || defined(__APPLE__)
+    const fs::path dir = fs::path(vaultFile_).parent_path();
+    fs::create_directories(dir, ec);
+    const std::string tmp = vaultFile_ + ".tmp";
+    const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    bool ok = fd >= 0;
+    if (ok) {
+        std::size_t done = 0;
+        while (ok && done < blob.size()) {
+            const ssize_t w = ::write(fd, blob.data() + done, blob.size() - done);
+            if (w < 0 && errno == EINTR) continue;
+            ok = w > 0;
+            if (ok) done += static_cast<std::size_t>(w);
+        }
+        ok = ::fsync(fd) == 0 && ok;
+        ok = ::close(fd) == 0 && ok;
+    }
+    if (ok) {
+        fs::rename(tmp, vaultFile_, ec);
+        ok = !ec;
+        if (ok) vaultcrypto::fsyncDir(dir.string());
+    }
+    if (!ok) {
+        fs::remove(tmp, ec);
+        PIXELVR_LOG_WARN("Vault: the network share list could not be saved");
+    }
+    return ok;
+#else
+    return false;
+#endif
 }
 
 std::vector<SmbShare> SmbCredentialsManager::shares() const {
@@ -463,7 +571,237 @@ bool parseAddress(const std::string& uri, Address& a) {
     return true;
 }
 
+// "%20" and the like in an address part (addresses may come escaped, e.g. from a download).
+std::string pctDecoded(const std::string& s) {
+    if (s.find('%') == std::string::npos) return s;
+    std::string out;
+    for (std::size_t i = 0; i < s.size(); ++i) {
+        if (s[i] == '%' && i + 2 < s.size() && std::isxdigit(static_cast<unsigned char>(s[i + 1])) &&
+            std::isxdigit(static_cast<unsigned char>(s[i + 2]))) {
+            out += static_cast<char>(std::strtol(s.substr(i + 1, 2).c_str(), nullptr, 16));
+            i += 2;
+        } else {
+            out += s[i];
+        }
+    }
+    return out;
+}
+
+// Where a vault share's privacy reaches: SMB by server and share (no share = the whole server),
+// SFTP / WebDAV by server and port (their login opens the whole server). Lower case.
+struct VaultScope {
+    std::string protocol;
+    std::string host;
+    std::string share;  // SMB only
+    int port = 0;       // SFTP / WebDAV, filled in; 0 for SMB
+    bool operator==(const VaultScope& o) const {
+        return protocol == o.protocol && host == o.host && share == o.share && port == o.port;
+    }
+};
+
+VaultScope scopeOf(const SmbShare& s) {
+    VaultScope v;
+    v.protocol = s.protocol;
+    v.host = lowered(s.host);
+    if (s.protocol == "smb") {
+        v.share = lowered(s.share);
+    } else {
+        v.port = s.port ? s.port : defaultPortOf(s.protocol);
+    }
+    return v;
+}
+
+// The scope key (as refused / worked logins are recorded) that covers everything in `v`.
+std::string keyOf(const VaultScope& v) { return scopeKey(v.protocol, v.host, v.share, v.port); }
+
+bool addressIn(const Address& a, const VaultScope& v) {
+    if (a.protocol != v.protocol || lowered(pctDecoded(a.host)) != v.host) return false;
+    if (v.protocol == "smb") return v.share.empty() || lowered(pctDecoded(a.share)) == v.share;
+    return (a.port ? a.port : defaultPortOf(a.protocol)) == v.port;
+}
+
+// `inner` (a saved entry) lies inside `outer`'s scope.
+bool entryIn(const SmbShare& inner, const VaultScope& outer) {
+    const VaultScope i = scopeOf(inner);
+    if (i.protocol != outer.protocol || i.host != outer.host) return false;
+    if (outer.protocol == "smb") return outer.share.empty() || i.share == outer.share;
+    return i.port == outer.port;
+}
+
+// The vault shares' scopes known since start: read by every isPrivatePath() and log line, so kept
+// apart from the manager's own lock (which is held while logging).
+struct PrivateScopes {
+    std::mutex mu;
+    std::vector<VaultScope> list;
+    std::atomic<bool> any{false};
+};
+PrivateScopes& privateScopes() {
+    static PrivateScopes p;
+    return p;
+}
+
+void addPrivateScope(const VaultScope& v) {
+    PrivateScopes& p = privateScopes();
+    std::lock_guard<std::mutex> g(p.mu);
+    if (std::find(p.list.begin(), p.list.end(), v) == p.list.end()) p.list.push_back(v);
+    p.any = !p.list.empty();
+}
+
+void dropPrivateScope(const VaultScope& v) {
+    PrivateScopes& p = privateScopes();
+    std::lock_guard<std::mutex> g(p.mu);
+    p.list.erase(std::remove(p.list.begin(), p.list.end(), v), p.list.end());
+    p.any = !p.list.empty();
+}
+
 }  // namespace
+
+bool SmbCredentialsManager::isVaultShareUri(const std::string& uri) {
+    PrivateScopes& p = privateScopes();
+    if (!p.any.load() || uri.find("://") == std::string::npos) return false;
+    Address a;
+    if (!parseAddress(uri, a)) return false;
+    std::lock_guard<std::mutex> g(p.mu);
+    return std::any_of(p.list.begin(), p.list.end(), [&](const VaultScope& v) { return addressIn(a, v); });
+}
+
+std::string SmbCredentialsManager::redactForLog(std::string_view text) {
+    std::string s(text);
+    if (!privateScopes().any.load()) return s;
+    static const char* const kSchemes[] = {"smb://", "sftp://", "dav://", "davs://"};
+    for (const char* scheme : kSchemes) {
+        const std::size_t schemeLen = std::strlen(scheme);
+        for (std::size_t p = 0; (p = s.find(scheme, p)) != std::string::npos;) {
+            // Quoted ('...' or "..."): up to the closing quote. Else to the end of the line, since a
+            // path may hold spaces and the text after it may name the file again.
+            std::size_t end = s.size();
+            if (p > 0 && (s[p - 1] == '\'' || s[p - 1] == '"')) {
+                const std::size_t q = s.find(s[p - 1], p);
+                if (q != std::string::npos) end = q;
+            }
+            // The address may end at any space before `end` (a share name may hold spaces too).
+            bool hit = false;
+            for (std::size_t e = p + schemeLen; e <= end && !hit; ++e) {
+                if (e == end || s[e] == ' ' || s[e] == '\t' || s[e] == '\n') {
+                    hit = isVaultShareUri(s.substr(p, e - p));
+                }
+            }
+            if (hit) {
+                s.replace(p, end - p, "(private)");
+                p += 9;
+            } else {
+                p += schemeLen;
+            }
+        }
+    }
+    return s;
+}
+
+bool SmbCredentialsManager::coveredByVaultLocked(const SmbShare& s) const {
+    if (!vaultOpen_) return false;
+    for (const SmbShare& v : shares_) {
+        if (v.vault && !sameEntry(v, s) && entryIn(s, scopeOf(v))) return true;
+    }
+    return false;
+}
+
+void SmbCredentialsManager::refreshPrivateLocked() {
+    for (const SmbShare& s : shares_) {
+        if (s.vault) addPrivateScope(scopeOf(s));
+    }
+}
+
+bool SmbCredentialsManager::vaultSharesOpen() const {
+    std::lock_guard<std::mutex> lk(mutex_);
+    return vaultOpen_;
+}
+
+bool SmbCredentialsManager::openVaultShares(const std::string& file) {
+    std::string raw;
+    std::error_code ec;
+    const bool exists = fs::exists(file, ec);
+    if (exists) {
+        std::ifstream in(file, std::ios::binary);
+        raw.assign((std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+    }
+    std::string plain;
+    const std::size_t magicLen = std::strlen(kVaultListMagic);
+    if (exists && (!vaultcrypto::decryptBlob(raw, plain) || plain.compare(0, magicLen, kVaultListMagic) != 0)) {
+        std::fill(plain.begin(), plain.end(), '\0');
+        std::lock_guard<std::mutex> lk(mutex_);
+        vaultOpen_ = false;  // never overwritten this session (another key, or damaged)
+        PIXELVR_LOG_WARN("Vault: the network share list could not be read");
+        return false;
+    }
+    std::vector<SmbShare> list = exists ? parseList(plain.substr(magicLen)) : std::vector<SmbShare>{};
+    std::fill(plain.begin(), plain.end(), '\0');
+    std::lock_guard<std::mutex> lk(mutex_);
+    shares_.erase(std::remove_if(shares_.begin(), shares_.end(), [](const SmbShare& s) { return s.vault; }),
+                  shares_.end());
+    bool dropped = false;
+    for (SmbShare& v : list) {
+        v.vault = true;
+        // The same share in the normal list too (the player stopped while moving it into the
+        // vault): the vault's copy wins, the normal one goes.
+        const auto before = shares_.size();
+        shares_.erase(std::remove_if(shares_.begin(), shares_.end(), [&](const SmbShare& s) { return sameEntry(s, v); }),
+                      shares_.end());
+        dropped = dropped || shares_.size() != before;
+        shares_.push_back(std::move(v));
+    }
+    vaultOpen_ = true;
+    vaultFile_ = file;
+    refreshPrivateLocked();
+    if (dropped) saveLocked();
+    return true;
+}
+
+void SmbCredentialsManager::closeVaultShares() {
+    std::lock_guard<std::mutex> lk(mutex_);
+    std::vector<VaultScope> scopes;
+    for (SmbShare& s : shares_) {
+        if (!s.vault) continue;
+        scopes.push_back(scopeOf(s));
+        std::fill(s.password.begin(), s.password.end(), '\0');
+    }
+    shares_.erase(std::remove_if(shares_.begin(), shares_.end(), [](const SmbShare& s) { return s.vault; }),
+                  shares_.end());
+    auto inVault = [&](const SmbShare& s) {
+        return std::any_of(scopes.begin(), scopes.end(), [&](const VaultScope& v) { return entryIn(s, v); });
+    };
+    for (SmbShare& s : session_) {
+        if (inVault(s)) std::fill(s.password.begin(), s.password.end(), '\0');
+    }
+    session_.erase(std::remove_if(session_.begin(), session_.end(), inVault), session_.end());
+    auto recordIn = [&](const std::pair<std::string, std::size_t>& r) {
+        return std::any_of(scopes.begin(), scopes.end(), [&](const VaultScope& v) { return inScope(r.first, keyOf(v)); });
+    };
+    refused_.erase(std::remove_if(refused_.begin(), refused_.end(), recordIn), refused_.end());
+    worked_.erase(std::remove_if(worked_.begin(), worked_.end(), recordIn), worked_.end());
+    vaultOpen_ = false;
+    vaultFile_.clear();
+}
+
+int SmbCredentialsManager::exportVaultShares(const std::string& file) {
+    bool open = false;
+    {
+        std::lock_guard<std::mutex> lk(mutex_);
+        open = vaultOpen_ && vaultFile_ == file;
+    }
+    if (!open && !openVaultShares(file)) return -1;
+    std::lock_guard<std::mutex> lk(mutex_);
+    int moved = 0;
+    for (SmbShare& s : shares_) {
+        if (!s.vault) continue;
+        dropPrivateScope(scopeOf(s));
+        s.vault = false;
+        ++moved;
+    }
+    saveLocked(true);  // (the normal file first; the vault's list is then empty: removed)
+    std::error_code ec;
+    fs::remove(file, ec);
+    return moved;
+}
 
 const SmbShare* SmbCredentialsManager::loginFor(const std::string& protocol, const std::string& host,
                                                 const std::string& share, int port) const {
@@ -521,11 +859,15 @@ void SmbCredentialsManager::forgetRefusedLocked(const std::string& scope, const 
                    refused_.end());
 }
 
-void SmbCredentialsManager::addOrUpdateShare(const SmbShare& share) {
-    if (share.host.empty()) return;
+bool SmbCredentialsManager::addOrUpdateShare(const SmbShare& share) {
+    if (share.host.empty()) return false;
 
     std::lock_guard<std::mutex> lk(mutex_);
     SmbShare stored = share;
+    // A share inside a vault share's scope (another share of a vault server, say) stays in the
+    // vault too: its address is private either way, so it must not be in the normal file.
+    stored.vault = share.vault || coveredByVaultLocked(share);
+    if (stored.vault && !vaultOpen_) return false;
     if (!share.savePassword) stored.password.clear();  // (in memory below, never in the file)
     if (share.savePassword && share.password.empty() && !share.anonymous) {
         // Saving switched on for a share signed into this session: the form shows no password
@@ -538,9 +880,12 @@ void SmbCredentialsManager::addOrUpdateShare(const SmbShare& share) {
         }
     }
     bool found = false;
+    bool wasVault = false;
     for (auto& s : shares_) {
         if (s.protocol == share.protocol && s.host == share.host && s.share == share.share &&
             (share.protocol == "smb" || s.port == share.port)) {
+            wasVault = s.vault;
+            std::fill(s.password.begin(), s.password.end(), '\0');
             s = stored;
             found = true;
             break;
@@ -548,6 +893,17 @@ void SmbCredentialsManager::addOrUpdateShare(const SmbShare& share) {
     }
     if (!found) {
         shares_.push_back(stored);
+    }
+    if (stored.vault) {
+        refreshPrivateLocked();
+    } else if (vaultOpen_) {
+        // A normal share (again): its addresses are no longer private, unless a vault share still
+        // covers them.
+        const VaultScope mine = scopeOf(stored);
+        const bool stillCovered = std::any_of(shares_.begin(), shares_.end(), [&](const SmbShare& v) {
+            return v.vault && entryIn(stored, scopeOf(v));
+        });
+        if (!stillCovered) dropPrivateScope(mine);
     }
     // Edited: a password typed for this session only is forgotten, unless the form carries one.
     session_.erase(std::remove_if(session_.begin(), session_.end(),
@@ -558,12 +914,14 @@ void SmbCredentialsManager::addOrUpdateShare(const SmbShare& share) {
     if (!share.savePassword && !share.password.empty() && !share.anonymous) session_.push_back(share);
     // The share was saved by hand: its login gets one try again (only on this server).
     forgetRefusedLocked(scopeKey(share.protocol, share.host, "", share.port), nullptr);
-    saveLocked();
+    saveLocked(wasVault && !stored.vault);  // (leaving the vault: into the normal file first)
+    return true;
 }
 
 bool SmbCredentialsManager::deleteShare(const std::string& host, const std::string& share,
                                         const std::string& protocol, int port) {
     bool removed = false;
+    bool removedVault = false;
     {
         std::lock_guard<std::mutex> lk(mutex_);
         auto gone = [&](const SmbShare& s) {
@@ -574,6 +932,13 @@ bool SmbCredentialsManager::deleteShare(const std::string& host, const std::stri
             }
             return false;
         };
+        for (SmbShare& s : shares_) {
+            if (!gone(s)) continue;
+            removedVault = removedVault || s.vault;
+            std::fill(s.password.begin(), s.password.end(), '\0');
+        }
+        // (A deleted vault share's addresses stay private until the player quits: something may
+        // still be playing from it.)
         auto it = std::remove_if(shares_.begin(), shares_.end(), gone);
         if (it != shares_.end()) {
             shares_.erase(it, shares_.end());
@@ -583,7 +948,9 @@ bool SmbCredentialsManager::deleteShare(const std::string& host, const std::stri
         forgetRefusedLocked(scopeKey(protocol, host, "", port), nullptr);
         if (removed) saveLocked();
     }
-    if (removed) {
+    if (removed && removedVault) {
+        PIXELVR_LOG_INFO("SmbCredentialsManager: Deleted a share");  // (a vault share is never named)
+    } else if (removed) {
         PIXELVR_LOG_INFO("SmbCredentialsManager: Deleted share for host '%s'", host.c_str());
     }
     return removed;
@@ -749,7 +1116,12 @@ void SmbCredentialsManager::keepSessionLogin(const LoginTarget& t, bool savePass
             s.savePassword = true;
             s.anonymous = false;
             if (s.name.empty()) s.name = s.id;
+            // Inside a vault share (another share of a vault server): saved in the vault's list. A
+            // private address while that list is closed is never saved (it stays in memory).
+            s.vault = coveredByVaultLocked(s);
+            if (!s.vault && isVaultShareUri(scopeKey(s.protocol, s.host, s.share, s.port))) return;
             shares_.push_back(s);
+            refreshPrivateLocked();
         }
         // The saved share holds it now. An empty password that worked stays in memory too, so it is
         // not asked for again until the player quits (a share saved without a password asks first).

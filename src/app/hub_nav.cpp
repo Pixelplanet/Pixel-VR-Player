@@ -58,6 +58,7 @@ std::vector<int> App::navFocusSnapshot() const {
     }
     s.push_back(smbModal_.anon ? 1 : 0);
     s.push_back(smbModal_.savePass ? 1 : 0);
+    s.push_back(smbModal_.vault ? 1 : 0);  // (the share form's "Vault share" switch)
     s.push_back(shareLogin_.savePass ? 1 : 0);  // (the sign-in dialog's switch)
     {
         static const char* const kProtocols[4] = {"smb", "sftp", "dav", "davs"};

@@ -9,6 +9,7 @@
 #include <condition_variable>
 #include <deque>
 #include <mutex>
+#include <functional>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -28,6 +29,8 @@ public:
     bool result(const std::string& path, float& frac);
     // Drops results for `path` and everything under it (e.g. moved into the vault).
     void forgetUnder(const std::string& path);
+    // Drops what is known about every path `match` says yes to (e.g. a share that became a vault share).
+    void forgetIf(const std::function<bool(const std::string&)>& match);
 
     // The measurement itself (also used by tools/letterbox_test).
     static float measure(const std::string& path, int* framesJudged = nullptr);

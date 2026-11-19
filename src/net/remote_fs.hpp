@@ -69,6 +69,10 @@ inline bool isRemoteLoginError(const std::string& err) { return err == kRemoteLo
 extern const char* const kRemotePermissionError;
 inline bool isRemotePermissionError(const std::string& err) { return err == kRemotePermissionError; }
 
+// Takes an SFTP server out of the player's known_hosts file (it became a vault share: its host key
+// is then only kept in memory, see sshConnect).
+void remoteForgetHostKey(const std::string& host, int port);
+
 bool remoteList(const std::string& uri, std::vector<RemoteEntry>& out, std::string& err);
 std::unique_ptr<RemoteFile> remoteOpen(const std::string& uri, std::string& err);
 

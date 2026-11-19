@@ -482,8 +482,11 @@ void Browser::scanSmbInto(const std::string& uri, ScanResult& out) {
             if (!seen.insert(child).second) continue;
             std::string label = s.name.empty() ? s.host : s.name;
             std::string detail = s.anonymous ? "Configured (Guest)" : "Configured (Protected)";
+            if (s.protocol != "smb") detail = std::string(remoteProtocolLabel(child)) + (s.anonymous ? " (Guest)" : "");
+            // (Vault shares are only in the list while the vault is unlocked.) Marked as the vault's
+            // own folder is: "Vault (Private)".
+            if (s.vault) detail = std::string(remoteProtocolLabel(child)) + " \xB7 Vault (Private)";
             if (s.protocol != "smb") {
-                detail = std::string(remoteProtocolLabel(child)) + (s.anonymous ? " (Guest)" : "");
                 dirs.push_back({label + "  (" + s.host + ")", child, true, false, false, false, detail});
             } else if (!s.share.empty()) {
                 dirs.push_back({label + "  (" + s.host + "/" + s.share + ")", child, true, false, false, false, detail});
@@ -803,12 +806,17 @@ void Browser::saveBookmarks() const {
     std::ofstream f(path, std::ios::trunc);
     if (!f.is_open()) return;
 
+    // Bookmarks into vault shares are never written: they last until the vault locks.
+    std::vector<const Bookmark*> kept;
+    for (const Bookmark& b : bookmarks_) {
+        if (!SmbCredentialsManager::isVaultShareUri(b.path)) kept.push_back(&b);
+    }
     f << "[\n";
-    for (std::size_t i = 0; i < bookmarks_.size(); ++i) {
+    for (std::size_t i = 0; i < kept.size(); ++i) {
         f << "  {\n";
-        f << "    \"path\": \"" << bookmarks_[i].path << "\",\n";
-        f << "    \"label\": \"" << bookmarks_[i].label << "\"\n";
-        f << "  }" << (i + 1 < bookmarks_.size() ? ",\n" : "\n");
+        f << "    \"path\": \"" << kept[i]->path << "\",\n";
+        f << "    \"label\": \"" << kept[i]->label << "\"\n";
+        f << "  }" << (i + 1 < kept.size() ? ",\n" : "\n");
     }
     f << "]\n";
     f.close();
@@ -856,6 +864,61 @@ void Browser::scanBookmarksInto(ScanResult& out) {
 
 bool Browser::inVault() const {
     return location_ == kVaultMissing || VaultManager::instance().isVaultPath(location_);
+}
+
+bool Browser::inPrivateShare() const {
+    return isRemotePath(location_) && SmbCredentialsManager::isVaultShareUri(location_);
+}
+
+void Browser::forgetPrivate() {
+    auto priv = [](const std::string& p) { return isRemotePath(p) && SmbCredentialsManager::isVaultShareUri(p); };
+    // Rows shown now (the network list, bookmarks): the vault shares' ones go at once.
+    if (!priv(location_)) {
+        const std::string selPath = focused() != nullptr ? focused()->path : std::string();
+        entries_.erase(std::remove_if(entries_.begin(), entries_.end(), [&](const Entry& e) { return priv(e.path); }),
+                       entries_.end());
+        if (priv(selPath) || selected_ >= static_cast<int>(entries_.size())) selected_ = 0;
+        first_ = std::min(first_, std::max(0, static_cast<int>(entries_.size()) - 1));
+    }
+    // Bookmarks into vault shares (never saved: in memory only).
+    bookmarks_.erase(std::remove_if(bookmarks_.begin(), bookmarks_.end(), [&](const Bookmark& b) { return priv(b.path); }),
+                     bookmarks_.end());
+    // Folder history: where the browser was, and the rows focused there.
+    for (auto it = folderHistory_.begin(); it != folderHistory_.end();) {
+        it = (priv(it->first) || priv(it->second.selectedPath)) ? folderHistory_.erase(it) : std::next(it);
+    }
+    if (priv(lastLocation_)) {
+        lastLocation_.clear();
+        lastInSmb_ = false;
+    }
+    if (priv(backLoc_)) {
+        backLoc_.clear();
+        backSmb_ = false;
+    }
+    if (priv(restoreChildPath_)) restoreChildPath_.clear();
+    if (hasPendingScan_ && priv(pendingScanLoc_)) {
+        pendingScanLoc_ = "smb://";
+        pendingScanChildPath_.clear();
+    }
+    if (priv(pendingScanChildPath_)) pendingScanChildPath_.clear();
+    if (priv(loginNeed_.uri)) loginNeed_ = {};
+    status_.clear();  // (it may name a file of a vault share: "Downloaded ...", "Can't play ...")
+    // Downloads from vault shares: the running one stops (its partial file is removed), queued ones
+    // go, and none of them stays in the list.
+    if (dlActive_.load() && dlActiveJob_ >= 0 && dlActiveJob_ < static_cast<int>(dlJobs_.size()) &&
+        priv(dlJobs_[static_cast<std::size_t>(dlActiveJob_)].uri)) {
+        stopDownload();
+        dlPrivateDropped_ = true;
+        dlName_.clear();
+    }
+    dlQueue_.erase(std::remove_if(dlQueue_.begin(), dlQueue_.end(), [&](const DownloadQueueItem& q) { return priv(q.uri); }),
+                   dlQueue_.end());
+    dlJobs_.erase(std::remove_if(dlJobs_.begin(), dlJobs_.end(), [&](const DownloadJob& j) { return priv(j.uri); }),
+                  dlJobs_.end());
+    dlActiveJob_ = -1;  // (indexes moved)
+    for (std::size_t i = 0; i < dlJobs_.size(); ++i) {
+        if (dlJobs_[i].state == 0) dlActiveJob_ = static_cast<int>(i);
+    }
 }
 
 bool Browser::isFileActionTarget(const Entry& e) const {
@@ -1086,8 +1149,9 @@ void Browser::runScan(std::string location, bool isSmb) {
     } else {
         scanLocalInto(location, r);
     }
-    PIXELVR_LOG_INFO("scan done '%s': %zu entries (status=%s)", location.c_str(),
-                     r.entries.size(), r.status.c_str());
+    // (The status of a vault share's folder may name the share: not logged.)
+    PIXELVR_LOG_INFO("scan done '%s': %zu entries (status=%s)", location.c_str(), r.entries.size(),
+                     SmbCredentialsManager::isVaultShareUri(location) ? "(private)" : r.status.c_str());
     {
         std::lock_guard<std::mutex> lk(scanMutex_);
         scanResult_ = std::move(r);
@@ -1209,8 +1273,25 @@ void Browser::startDownload(const std::string& uri, const std::string& nameIn,
         }
     }
 
-    const std::string destDir =
+    std::string destDir =
         downloadDir_.empty() ? homeDir_ + "/Downloads" : downloadDir_;
+    if (isRemotePath(uri) && SmbCredentialsManager::isVaultShareUri(uri)) {
+        // From a vault share: into the vault (never the download folder). Written into a hidden
+        // folder inside it until complete, then moved into the vault and encrypted there.
+        VaultManager& vm = VaultManager::instance();
+        std::error_code ec;
+        if (!vm.isUnlocked() || !vm.ensureDirectories() || vm.incomingDir().empty()) {
+            status_ = "Download failed: the vault can't be used now";
+            return;
+        }
+        destDir = vm.incomingDir();
+        fs::create_directories(destDir, ec);
+        fs::permissions(destDir, fs::perms::owner_all, fs::perm_options::replace, ec);
+        if (!fs::is_directory(destDir, ec)) {
+            status_ = "Download failed: the vault can't be used now";
+            return;
+        }
+    }
     const std::string targetPath = destDir + "/" + name;
 
     if (removableMissing(destDir, true)) {  // the chosen folder is on a drive that is not inserted
@@ -1225,7 +1306,7 @@ void Browser::startDownload(const std::string& uri, const std::string& nameIn,
         dlQueue_.push_back({uri, name, targetPath, isDir});
         dlJobs_.push_back({name, targetPath, uri, 4, 0, 0, isDir});
         status_ = "Added to download queue: " + name;
-        PIXELVR_LOG_INFO("Added to download queue: %s (%s)", name.c_str(), uri.c_str());
+        PIXELVR_LOG_INFO("Added to download queue: %s", VaultManager::forLog(uri, name + " (" + uri + ")").c_str());
         return;
     }
 
@@ -1262,7 +1343,7 @@ void Browser::startDownloadFile(const std::string& uri, const std::string& local
     dlAbort_.store(false);
     dlActive_.store(true);
     status_ = "Downloading " + dlName_ + " ...";
-    PIXELVR_LOG_INFO("Download file: %s -> %s", uri.c_str(), local.c_str());
+    PIXELVR_LOG_INFO("Download file: %s", VaultManager::forLog(uri, uri + " -> " + local).c_str());
 
     int existingIdx = -1;
     for (std::size_t i = 0; i < dlJobs_.size(); ++i) {
@@ -1326,14 +1407,14 @@ void Browser::startDownloadFile(const std::string& uri, const std::string& local
             }
         }
         if (loginFailed) {
-            PIXELVR_LOG_WARN("Download: %s needs a login", name.c_str());
+            PIXELVR_LOG_WARN("Download: %s needs a login", VaultManager::forLog(uri, name).c_str());
             dlLoginFailed_.store(true);
             dlDone_.store(true);
             dlActive_.store(false);
             return;
         }
         dlTotal_.store(total);
-        PIXELVR_LOG_INFO("Download: %s size=%lld bytes", name.c_str(), total);
+        PIXELVR_LOG_INFO("Download: %s size=%lld bytes", VaultManager::forLog(uri, name).c_str(), total);
 
         // Reuse a previous complete download instead of fetching again.
         std::error_code lec;
@@ -1369,8 +1450,7 @@ void Browser::startDownloadFile(const std::string& uri, const std::string& local
         dlOk_.store(ok);
         dlDone_.store(true);
         dlActive_.store(false);
-        PIXELVR_LOG_INFO("Download %s: ok=%d -> %s", name.c_str(), ok ? 1 : 0,
-                         local.c_str());
+        PIXELVR_LOG_INFO("Download %s: ok=%d", VaultManager::forLog(uri, name + " -> " + local).c_str(), ok ? 1 : 0);
     });
 #else
     (void)uri;
@@ -1416,8 +1496,15 @@ int Browser::spawnCurl(const std::string& uri, const std::string& local) {
         }
     }
     const std::string authFile = authPipe[0] >= 0 ? "/dev/fd/3" : "";
-    PIXELVR_LOG_INFO("DL spawn: smbclient %s %s -c '%s'", service.c_str(),
-                     authFile.empty() ? "-N" : ("-A " + authFile).c_str(), cmd.c_str());
+    // From a vault share: nothing about it in the log, and smbclient's own output (it names the
+    // file) goes nowhere instead of into the player's output.
+    const bool quiet = SmbCredentialsManager::isVaultShareUri(uri);
+    if (quiet) {
+        PIXELVR_LOG_INFO("DL spawn: smbclient (private)");
+    } else {
+        PIXELVR_LOG_INFO("DL spawn: smbclient %s %s -c '%s'", service.c_str(),
+                         authFile.empty() ? "-N" : ("-A " + authFile).c_str(), cmd.c_str());
+    }
 
     char* argv[8] = {nullptr};
     argv[0] = const_cast<char*>("smbclient");
@@ -1438,6 +1525,10 @@ int Browser::spawnCurl(const std::string& uri, const std::string& local) {
     posix_spawn_file_actions_init(&fa);
     // Take stdin from /dev/null so smbclient can never block on an auth prompt.
     posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
+    if (quiet) {
+        posix_spawn_file_actions_addopen(&fa, 1, "/dev/null", O_WRONLY, 0);
+        posix_spawn_file_actions_addopen(&fa, 2, "/dev/null", O_WRONLY, 0);
+    }
     if (authPipe[0] >= 0) posix_spawn_file_actions_adddup2(&fa, authPipe[0], 3);  // (dup2 clears close-on-exec)
     pid_t pid = -1;
     const int rc = posix_spawn(&pid, "/usr/bin/smbclient", &fa, nullptr, argv,
@@ -1470,7 +1561,7 @@ void Browser::startDownloadFolder(const std::string& uri,
     speedTime_ = {};
     dlActive_.store(true);
     status_ = "Downloading folder " + dlName_ + " ...";
-    PIXELVR_LOG_INFO("Download folder: %s -> %s", uri.c_str(), destDir.c_str());
+    PIXELVR_LOG_INFO("Download folder: %s", VaultManager::forLog(uri, uri + " -> " + destDir).c_str());
     {
         std::error_code xec;
         dlDestExisted_.store(std::filesystem::exists(destDir, xec));
@@ -1681,7 +1772,7 @@ void Browser::startDownloadFolder(const std::string& uri,
             dlOk_.store(false);
             dlDone_.store(true);
             dlActive_.store(false);
-            PIXELVR_LOG_INFO("Download folder stopped: %s", destDir.c_str());
+            PIXELVR_LOG_INFO("Download folder stopped: %s", VaultManager::forLog(uri, destDir).c_str());
             return;
         }
         dlOk_.store(ok);
@@ -1731,7 +1822,7 @@ bool Browser::copyRemoteFile(const std::string& uri, const std::string& localIn,
     const std::string part = local + ".part";
     FILE* out = std::fopen(part.c_str(), "wb");
     if (out == nullptr) {
-        PIXELVR_LOG_WARN("Download: cannot write %s", part.c_str());
+        PIXELVR_LOG_WARN("Download: cannot write %s", VaultManager::forLog(uri, part).c_str());
         return false;
     }
     std::vector<uint8_t> buf(1u << 20);
@@ -1778,7 +1869,7 @@ void Browser::downloadRemoteFile(const std::string& uri, const std::string& loca
     dlOk_.store(ok);
     dlDone_.store(true);
     dlActive_.store(false);
-    PIXELVR_LOG_INFO("Download %s: ok=%d -> %s", name.c_str(), ok ? 1 : 0, used.c_str());
+    PIXELVR_LOG_INFO("Download %s: ok=%d", VaultManager::forLog(uri, name + " -> " + used).c_str(), ok ? 1 : 0);
 }
 
 void Browser::downloadRemoteFolder(const std::string& uri, const std::string& destDir) {
@@ -1862,6 +1953,28 @@ void Browser::stopDownload() {
     if (pid > 0) kill(pid, SIGKILL);
 }
 
+void Browser::settleIntoVault(DownloadJob& j) {
+    VaultManager& vm = VaultManager::instance();
+    const std::string incoming = vm.incomingDir();
+    if (incoming.empty() || !pathUnder(j.localPath, incoming) || j.localPath == incoming) return;
+    // Out of the hidden folder into the vault itself (the same drive: a rename), where the
+    // encryption pass turns it into an encrypted file under its real name.
+    const std::string vault = vm.vaultDir();
+    const fs::path from(j.localPath);
+    std::error_code ec;
+    const std::string target = vault + "/" + filecopy::freeName(vault, from.filename().string(), j.isDir);
+    fs::rename(from, target, ec);
+    if (ec) {
+        PIXELVR_LOG_WARN("Download: could not move a finished download into the vault (%s)", ec.message().c_str());
+        return;
+    }
+    filecopy::syncDir(vault);
+    vm.encryptLeftovers();
+    // The list's "open" goes to the vault folder (the plain file is replaced by an encrypted one).
+    j.localPath = vault + "/";
+    j.isDir = true;
+}
+
 void Browser::clearFinished() {
     std::vector<DownloadJob> keep;
     keep.reserve(dlJobs_.size());
@@ -1942,7 +2055,8 @@ void Browser::startNextQueued() {
     }
 
     dlName_ = item.name;
-    PIXELVR_LOG_INFO("Starting next queued download: %s (%s)", item.name.c_str(), item.uri.c_str());
+    PIXELVR_LOG_INFO("Starting next queued download: %s",
+                     VaultManager::forLog(item.uri, item.name + " (" + item.uri + ")").c_str());
     if (item.isDir) {
         startDownloadFolder(item.uri, item.destDir);
     } else {
@@ -2087,8 +2201,26 @@ Browser::Result Browser::poll(std::string& playPath) {
             beginScan(pendingScanLoc_, pendingScanSmb_,
                       pendingScanRestore_, pendingScanChildPath_);
             activeFilter_ = savedFilter;
+        } else if (!VaultManager::instance().isUnlocked() && isRemotePath(scanResult_.location) &&
+                   SmbCredentialsManager::isVaultShareUri(scanResult_.location)) {
+            // A folder of a vault share that was still being read when the vault locked: never shown.
+            {
+                std::lock_guard<std::mutex> lk(scanMutex_);
+                scanResult_ = ScanResult{};
+            }
+            beginScan("smb://", true);
+            return Result::None;
         } else {
             std::lock_guard<std::mutex> lk(scanMutex_);
+            if (!VaultManager::instance().isUnlocked()) {
+                // (A list read while the vault was unlocked, e.g. the network list with its vault shares.)
+                auto& es = scanResult_.entries;
+                es.erase(std::remove_if(es.begin(), es.end(),
+                                        [](const Entry& e) {
+                                            return isRemotePath(e.path) && SmbCredentialsManager::isVaultShareUri(e.path);
+                                        }),
+                         es.end());
+            }
             entries_ = std::move(scanResult_.entries);
             title_ = std::move(scanResult_.title);
             status_ = std::move(scanResult_.status);
@@ -2199,7 +2331,7 @@ Browser::Result Browser::poll(std::string& playPath) {
         if (now >= dlNextDriveCheck_) {
             dlNextDriveCheck_ = now + std::chrono::milliseconds(500);
             if (!dlCardGone_.load() && !dlLocalPath_.empty() && removableMissing(dlLocalPath_)) {
-                PIXELVR_LOG_WARN("Download: the drive under %s was removed", dlLocalPath_.c_str());
+                PIXELVR_LOG_WARN("Download: the drive under %s was removed", VaultManager::forLog(dlLocalPath_).c_str());
                 dlCardGone_.store(true);
                 dlAbort_.store(true);
                 const int pid = dlPid_.load();
@@ -2221,9 +2353,12 @@ Browser::Result Browser::poll(std::string& playPath) {
             if (!gone && !dlOk_.load() && !dlStopped_.load() && dlLoginFailed_.load()) {
                 j.error = "Needs a login: open the share in Files to sign in";
             }
+            if (j.state == 1) settleIntoVault(j);  // (only a download from a vault share)
         }
         dlActiveJob_ = -1;
-        if (dlCardGone_.load()) {
+        if (dlPrivateDropped_) {
+            dlPrivateDropped_ = false;  // stopped by locking the vault: nothing is said about it
+        } else if (dlCardGone_.load()) {
             status_ = "Download failed: SD card removed";
             // Queued downloads to that drive fail the same way (never sent elsewhere).
             for (DownloadJob& q : dlJobs_) {

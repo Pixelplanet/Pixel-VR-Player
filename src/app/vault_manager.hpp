@@ -48,7 +48,8 @@ public:
     bool tick(std::chrono::steady_clock::time_point now, bool headsetFocused);
 
     // Where the vault lives: the internal ~/.pixelvr_vault, or <SD card>/.pixelvr_vault (SD2). The key
-    // (vault.key), the written-down combination and the thumbnails always stay internal.
+    // (vault.key), the written-down combination, the thumbnails and the network share list
+    // (sharesFilePath) always stay internal, so moving the vault carries them along unchanged.
     enum class Location { Internal, SdCard };
     Location location() const;
     // The vault folder (thread-safe copy). On the SD card: the card's folder, or where it was last seen
@@ -66,7 +67,17 @@ public:
     bool isVaultPath(const std::string& path) const;
     // A vault item: inside the vault folder, or ANY encrypted (.pvrv) file wherever it is (e.g. in a
     // folder moved out of the vault). Nothing about such paths may be remembered or shown while locked.
+    // Addresses in a vault network share count too (SmbCredentialsManager::isVaultShareUri).
     static bool isPrivatePath(const std::string& path);
+    // For log lines that name an item: "(private)" for a private path, else `text` (or the path).
+    static std::string forLog(const std::string& path, const std::string& text = {});
+    // The vault's network shares, encrypted with the vault key (internal, next to vault.key).
+    std::string sharesFilePath() const;
+    // Where downloads from vault shares are written until complete: a hidden folder inside the
+    // vault (the encryption pass and the file list skip it). Then they move into the vault itself.
+    std::string incomingDir() const;
+    // Encrypts the plain files in the vault now (in the background; e.g. a finished download).
+    void encryptLeftovers();
     // Creates the vault folder (0700) when available(); false if it can't be used (card missing).
     bool ensureDirectories();
     std::string keyFilePath() const;
@@ -153,6 +164,7 @@ private:
     std::atomic<int> migDone_{0}, migTotal_{0};
     std::thread migThread_;
     std::atomic<bool> migStop_{false};  // exit: the encryption pass stops inside the current file
+    std::atomic<bool> migAgain_{false}; // asked again while a pass ran: walk the vault once more
     mutable std::mutex cfgMu_;          // vault.conf writes (frame thread and the FileOps worker)
 };
 

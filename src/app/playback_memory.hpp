@@ -1,5 +1,6 @@
 #pragma once
 
+#include <functional>
 #include <string>
 #include <unordered_map>
 
@@ -39,6 +40,8 @@ public:
     void setSubtitle(const std::string& path, int track, const std::string& fingerprint = {});
     // Drops what is known about `path` and everything under it (e.g. moved into the vault).
     void forgetUnder(const std::string& path);
+    // Drops what is known about every path `match` says yes to (e.g. a share that became a vault share).
+    void forgetIf(const std::function<bool(const std::string&)>& match);
 
 private:
     Entry& touch(const std::string& path);

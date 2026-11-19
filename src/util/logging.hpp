@@ -24,6 +24,11 @@ Level level();
 // Thread-safe; writes one timestamped line to stderr.
 void write(Level level, std::string_view message);
 
+// A filter every line passes before it is written (e.g. addresses of vault shares replaced): set
+// once at start-up. It must not log itself.
+using Redactor = std::string (*)(std::string_view);
+void set_redactor(Redactor fn);
+
 // printf-style convenience. Kept out of the header hot path via a single vararg
 // sink in the .cpp.
 [[gnu::format(printf, 2, 3)]] void writef(Level level, const char* fmt, ...);
