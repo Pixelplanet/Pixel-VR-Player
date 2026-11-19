@@ -1836,6 +1836,7 @@ void Browser::startDownloadFolder(const std::string& uri,
                 if (d < 0) return;
                 if (src == uri) creds.noteLoginWorked(uri);
                 for (;;) {
+                    if (dlAbort_.load()) break;  // stopped / quitting: no more stats (closedir still runs)
                     std::string nm;
                     int typ = 0;
                     {

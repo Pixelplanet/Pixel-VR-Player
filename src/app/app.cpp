@@ -1093,7 +1093,18 @@ void App::finishLoadMedia(int slot) {
     // Software decoding forced by someone else's decoder session: say so,
     // since at 4K+ that means stutter the viewer would otherwise blame on us.
     const std::string blockedBy = sc.engine.hardwareBlockedBy();
-    if (!blockedBy.empty() && static_cast<long long>(w) * h >= 3840LL * 2000LL) {
+    if (sc.engine.decoderFailed()) {
+        // Gave up already, before this point (the decode thread starts inside open()): say so here,
+        // updateStalls only reports changes after the count taken above.
+        bool steamHolds = false;
+        for (const MediaEngine::DecoderHolder& hd : MediaEngine::decoderHolderList()) steamHolds |= hd.steamHelper;
+        PIXELVR_LOG_WARN("Playback: screen %d stopped: %s", slot + 1, sc.engine.lastError().c_str());
+        if (steamHolds && !actionMenu_.visible && !decoderFree_) {
+            askFreeDecoder(slot);
+        } else {
+            renderer_.setScreenTitle(slot, "Cannot play: " + sc.engine.lastError(), 15.0f, true);
+        }
+    } else if (!blockedBy.empty() && static_cast<long long>(w) * h >= 3840LL * 2000LL) {
         bool steamHolds = false;
         for (const MediaEngine::DecoderHolder& hd : MediaEngine::decoderHolderList()) steamHolds |= hd.steamHelper;
         const bool askedJustNow = decoderFreeAskedPath_ == path &&
@@ -2013,6 +2024,16 @@ void App::updateStalls(std::chrono::steady_clock::time_point now) {
                     renderer_.setScreenTitle(slot, "Software decoding: hardware decoder busy (" + by + ")", 12.0f, true);
                 }
             }
+            if (sc.engine.eof() && !sc.earlyEndShown) {
+                // Ended well before its length (a short or still-downloading file): say why instead of silence.
+                const double duration = sc.engine.duration();
+                const std::string why = duration > 0.0 && sc.engine.position() < duration - 5.0 ? sc.engine.lastError()
+                                                                                              : std::string();
+                if (!why.empty()) {
+                    sc.earlyEndShown = true;
+                    renderer_.setScreenTitle(slot, "Playback ended: " + why, 10.0f, true);
+                }
+            }
             if (sc.engine.decoderFailed()) {
                 // Nothing will come: no "Buffering..." over the reason.
                 sc.stalled = false;
@@ -2327,14 +2348,6 @@ bool App::updatePlexPlayback(int slot) {
         if (none || now - sc.plexNextSince > std::chrono::seconds(20)) {
             sc.plexAwaitingNext = sc.plexNavManual = false;
             renderer_.setScreenTitle(slot, none ? "There is no such episode" : "The server did not answer", 3.0f);
-        }
-    }
-    if (sc.engine.eof() && duration > 0.0 && sc.engine.position() < duration - 5.0 && !sc.earlyEndShown) {
-        // Ended well before its length (a short or still-downloading file): say why instead of silence.
-        const std::string why = sc.engine.lastError();
-        if (!why.empty()) {
-            sc.earlyEndShown = true;
-            renderer_.setScreenTitle(slot, "Playback ended: " + why, 10.0f, true);
         }
     }
     if (sc.engine.eof() && (duration <= 0.0 || sc.engine.position() >= duration - 5.0)) {

@@ -59,7 +59,11 @@ std::atomic<Redactor> g_redactor{nullptr};
 // it while it works; `g_have_roots` keeps the common case (no vault) to one atomic load.
 std::mutex g_roots_mutex;
 std::mutex g_roots_change_mutex;  // (one change at a time: two add_private_root calls never lose one)
-std::shared_ptr<const std::vector<std::string>> g_roots;
+// Never destroyed: detached threads (FFmpeg, web-play wake-up, subtitle catch-up) may still log during exit.
+std::shared_ptr<const std::vector<std::string>>& roots_ref() {
+    static auto* p = new std::shared_ptr<const std::vector<std::string>>();
+    return *p;
+}
 std::atomic<bool> g_have_roots{false};
 
 // The whole log's budget: a burst of startup lines passes, a flood does not (a broken hardware
@@ -127,7 +131,7 @@ void redact_private_paths(std::string& s, const std::vector<std::string>& roots)
 std::shared_ptr<const std::vector<std::string>> roots_snapshot() {
     if (!g_have_roots.load(std::memory_order_acquire)) return nullptr;
     std::lock_guard<std::mutex> lock(g_roots_mutex);
-    return g_roots;
+    return roots_ref();
 }
 
 // The list with each root once, and also as a file:// URL spells it (spaces as %20).
@@ -159,7 +163,7 @@ void store_roots(std::vector<std::string> list) {
     std::shared_ptr<const std::vector<std::string>> fresh = std::make_shared<std::vector<std::string>>(std::move(out));
     const bool any = !fresh->empty();
     std::lock_guard<std::mutex> lock(g_roots_mutex);
-    g_roots = std::move(fresh);
+    roots_ref() = std::move(fresh);
     g_have_roots.store(any, std::memory_order_release);
 }
 
@@ -182,7 +186,7 @@ void add_private_root(const std::string& root) {
     std::vector<std::string> list;
     {
         std::lock_guard<std::mutex> lock(g_roots_mutex);
-        if (g_roots) list = *g_roots;
+        if (roots_ref()) list = *roots_ref();
     }
     list.push_back(root);
     store_roots(std::move(list));

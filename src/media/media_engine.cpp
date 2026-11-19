@@ -1806,18 +1806,21 @@ void MediaEngine::Impl::decodeLoop() {
     // last picture came out, failed sends in a row, and when the last picture came (or the feeding
     // restarted: open, seek, resume).
     int pktsSinceFrame = 0;
+    int keysSinceFrame = 0;  // key frames among them (a stream entered mid-GOP shows nothing before one)
     int hardErrors = 0;
     [[maybe_unused]] int audioErrors = 0;  // (Pulse builds)
     uint32_t pollErrsAtFrame = pollErrs.load(std::memory_order_relaxed);
     clock::time_point lastVideoOut = clock::now();
     auto progressReset = [&] {
         pktsSinceFrame = 0;
+        keysSinceFrame = 0;
         hardErrors = 0;
         lastVideoOut = clock::now();
         pollErrsAtFrame = pollErrs.load(std::memory_order_relaxed);
     };
     // Read errors before the real end (a file still growing, a dropped share): retried, see below.
     int midReadErrors = 0;
+    int64_t endProbeSize = -1;  // the size at the first clean end at the last byte (did it grow since?)
     double lastPacketPts = -1.0;  // the newest packet time read, in seconds from the file's start
     const double formatStart = (format != nullptr && format->start_time != AV_NOPTS_VALUE)
                                    ? static_cast<double>(format->start_time) / AV_TIME_BASE
@@ -2217,7 +2220,9 @@ void MediaEngine::Impl::decodeLoop() {
             return true;
         }
         // (A working decoder holds about 4 + 16 packets before its first picture.)
-        if (pktsSinceFrame >= 48 && quiet >= 3.0) {
+        // Only once a key frame went in (a long-GOP stream entered mid-GOP gives nothing before its
+        // next one), or after 15 s for a stream without key flags.
+        if ((keysSinceFrame >= 1 || quiet >= 15.0) && pktsSinceFrame >= 48 && quiet >= 3.0) {
             why = "no picture";
             return true;
         }
@@ -2259,7 +2264,8 @@ void MediaEngine::Impl::decodeLoop() {
         }
         if (codec != nullptr) avcodec_free_context(&codec);
         ++hwTrips;
-        decoderSwitches.fetch_add(1, std::memory_order_relaxed);
+        // (decoderSwitches goes up last on every path below, with release order: whoever sees the
+        // change also sees decoderFailed, lastError and hwBlockedBy as they are now.)
         AVStream* vs = format->streams[videoStream];
         const double at = resumePoint();
         if (hw && !reducedBuffers && captureBuffers > 0 &&
@@ -2269,6 +2275,7 @@ void MediaEngine::Impl::decodeLoop() {
             PIXELVR_LOG_INFO("MediaEngine: trying the hardware decoder again with %d capture buffers", captureBuffers);
             internalSeek(at);
             progressReset();
+            decoderSwitches.fetch_add(1, std::memory_order_release);
             return;
         }
         if (hw && swFallbackAllowed && !usingDrm.load()) {
@@ -2286,6 +2293,7 @@ void MediaEngine::Impl::decodeLoop() {
                 PIXELVR_LOG_WARN("MediaEngine: playing on in software (%s)", sw->name);
                 internalSeek(at);
                 progressReset();
+                decoderSwitches.fetch_add(1, std::memory_order_release);
                 return;
             }
         }
@@ -2300,6 +2308,7 @@ void MediaEngine::Impl::decodeLoop() {
                                           : "the hardware video decoder would not start (also in use by " + holders + ")";
         }
         decoderFailed.store(true);
+        decoderSwitches.fetch_add(1, std::memory_order_release);
         PIXELVR_LOG_WARN("MediaEngine: no picture: the %s video decoder gave up (retry %s)", hw ? "hardware" : "software",
                          hwTrips < kMaxDecoderTrips ? "on the next seek" : "when the file is opened again");
     };
@@ -2319,8 +2328,9 @@ void MediaEngine::Impl::decodeLoop() {
                     {
                         std::lock_guard<std::mutex> lock(statusMutex);
                         lastError.clear();
+                        if (hwDecoder()) hwBlockedBy.clear();  // (set again if it fails again)
                     }
-                    decoderSwitches.fetch_add(1, std::memory_order_relaxed);
+                    decoderSwitches.fetch_add(1, std::memory_order_release);
                     PIXELVR_LOG_INFO("MediaEngine: trying the video decoder again");
                 } else if (hwTrips >= kMaxDecoderTrips) {
                     std::lock_guard<std::mutex> lock(mutex);
@@ -2393,6 +2403,7 @@ void MediaEngine::Impl::decodeLoop() {
             eofFlushed = false;
             readRetries = 0;
             midReadErrors = 0;
+            endProbeSize = -1;
             lastPacketPts = seekTo;
             ptsSeen = false;
             audioErrors = 0;
@@ -2475,6 +2486,7 @@ void MediaEngine::Impl::decodeLoop() {
         if (readResult >= 0) {
             readRetries = 0;
             midReadErrors = 0;
+            endProbeSize = -1;
             const int64_t pts = packet->pts != AV_NOPTS_VALUE ? packet->pts : packet->dts;
             if (pts != AV_NOPTS_VALUE && packet->stream_index >= 0 &&
                 packet->stream_index < static_cast<int>(format->nb_streams)) {
@@ -2501,8 +2513,16 @@ void MediaEngine::Impl::decodeLoop() {
             // as ending early, with a reason.
             const bool nearEnd = duration <= 0.0 || !ptsSeen ||
                                  lastPacketPts >= duration - std::max(2.0, 0.01 * duration);
-            // (Near the end, at the file's last byte, any error is the end: a damaged tail.)
-            const bool realEnd = nearEnd && (readResult == AVERROR_EOF || atFileEnd);
+            // (Near the end, at the file's last byte, any error is the end: a damaged tail.) An end the
+            // demuxer decided while the I/O is fine and not at its end is final as well; so is a clean
+            // end at the last byte once the file stopped growing (a length estimated too long).
+            const bool demuxerEnd = readResult == AVERROR_EOF && format->pb != nullptr && format->pb->error == 0 &&
+                                    !avio_feof(format->pb) && !atFileEnd;
+            bool realEnd = demuxerEnd || (nearEnd && (readResult == AVERROR_EOF || atFileEnd));
+            if (!realEnd && atFileEnd && readResult == AVERROR_EOF) {
+                if (endProbeSize >= 0 && ioSize == endProbeSize) realEnd = true;
+                else endProbeSize = ioSize;
+            }
             // At the last byte of a file whose length promises more (a download still being written,
             // or a length estimated too long): a short wait for it to grow, not 11 s at every such end.
             // A share's read-ahead already retried each failing read for about 6 s: twice more is enough.
@@ -2527,7 +2547,8 @@ void MediaEngine::Impl::decodeLoop() {
                 lastVideoOut = clock::now();
                 continue;
             }
-            if (!realEnd) {
+            if (!realEnd || (endProbeSize >= 0 && duration > 0.0 && lastPacketPts < 0.9 * duration)) {
+                // (A clean end that stopped growing well short of the length is still reported.)
                 PIXELVR_LOG_WARN("MediaEngine: the file ends early at %.1f s of %.1f s (it may be incomplete)",
                                  lastPacketPts, duration);
                 std::lock_guard<std::mutex> lock(statusMutex);
@@ -2576,6 +2597,7 @@ void MediaEngine::Impl::decodeLoop() {
             if (!dead) {
                 if (rc == 0) {
                     ++pktsSinceFrame;
+                    if ((packet->flags & AV_PKT_FLAG_KEY) != 0) ++keysSinceFrame;
                     hardErrors = 0;
                     drain(codec, true);
                 } else if (rc != AVERROR(EAGAIN)) {
@@ -2735,7 +2757,7 @@ std::string MediaEngine::lastError() const {
 bool MediaEngine::decoderFailed() const { return impl_ && impl_->decoderFailed.load(); }
 
 uint32_t MediaEngine::decoderChanges() const {
-    return impl_ ? impl_->decoderSwitches.load(std::memory_order_relaxed) : 0u;
+    return impl_ ? impl_->decoderSwitches.load(std::memory_order_acquire) : 0u;
 }
 
 void MediaEngine::resetAbort() {
