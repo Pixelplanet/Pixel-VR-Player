@@ -402,13 +402,28 @@ bool sameLogin(const SmbShare& s, const std::string& protocol, const std::string
     return s.protocol == "smb" && lowered(s.host) == lowered(host) && lowered(s.share) == lowered(share);
 }
 
-// A network address, split: protocol, server, SMB share and a key for "this folder and below".
+// Where a server checks a login: an SMB share ("smb://host:0/share"; the server itself for its
+// share list), an SFTP / WebDAV server ("sftp://host:22"). Lower case, port filled in.
+std::string scopeKey(const std::string& protocol, const std::string& host, const std::string& share, int port) {
+    const int effPort = port ? port : defaultPortOf(protocol);
+    std::string k = protocol + "://" + lowered(host) + ":" + std::to_string(protocol == "smb" ? 0 : effPort);
+    if (protocol == "smb" && !share.empty()) k += "/" + lowered(share);
+    return k;
+}
+
+// `key` is `scope` or lies below it.
+bool inScope(const std::string& key, const std::string& scope) {
+    return key == scope || (key.size() > scope.size() && key.compare(0, scope.size(), scope) == 0 &&
+                            key[scope.size()] == '/');
+}
+
+// A network address, split: protocol, server, SMB share and the scope its login is checked in.
 struct Address {
     std::string protocol;
     std::string host;
     std::string share;  // SMB only: the first path part ("" = the server's share list)
     int port = 0;
-    std::string key;    // lower case, port filled in, no trailing '/'
+    std::string scope;  // scopeKey() of the address
 };
 
 bool parseAddress(const std::string& uri, Address& a) {
@@ -444,9 +459,7 @@ bool parseAddress(const std::string& uri, Address& a) {
         if (b != std::string::npos) a.share = path.substr(b, path.find('/', b) == std::string::npos ? std::string::npos
                                                                                                   : path.find('/', b) - b);
     }
-    while (!path.empty() && path.back() == '/') path.pop_back();
-    const int effPort = a.port ? a.port : defaultPortOf(a.protocol);
-    a.key = a.protocol + "://" + lowered(a.host) + ":" + std::to_string(effPort) + lowered(path);
+    a.scope = scopeKey(a.protocol, a.host, a.share, a.port);
     return true;
 }
 
@@ -491,10 +504,21 @@ const SmbShare* SmbCredentialsManager::loginForUri(const std::string& uri) const
     return loginFor(a.protocol, a.host, a.share, a.port);
 }
 
-std::size_t SmbCredentialsManager::loginStamp(const std::string& uri) const {
-    const SmbShare* m = loginForUri(uri);
+namespace {
+std::size_t stampOf(const SmbShare* m) {
     if (m == nullptr || m->anonymous) return std::hash<std::string>{}("guest");
     return std::hash<std::string>{}(m->username + '\x1f' + m->password + '\x1f' + m->workgroup);
+}
+}  // namespace
+
+std::size_t SmbCredentialsManager::loginStamp(const std::string& uri) const { return stampOf(loginForUri(uri)); }
+
+void SmbCredentialsManager::forgetRefusedLocked(const std::string& scope, const std::size_t* stamp) {
+    refused_.erase(std::remove_if(refused_.begin(), refused_.end(),
+                                  [&](const std::pair<std::string, std::size_t>& r) {
+                                      return inScope(r.first, scope) && (stamp == nullptr || r.second == *stamp);
+                                  }),
+                   refused_.end());
 }
 
 void SmbCredentialsManager::addOrUpdateShare(const SmbShare& share) {
@@ -503,6 +527,16 @@ void SmbCredentialsManager::addOrUpdateShare(const SmbShare& share) {
     std::lock_guard<std::mutex> lk(mutex_);
     SmbShare stored = share;
     if (!share.savePassword) stored.password.clear();  // (in memory below, never in the file)
+    if (share.savePassword && share.password.empty() && !share.anonymous) {
+        // Saving switched on for a share signed into this session: the form shows no password
+        // (none is saved), so the one that works is saved instead of an empty one.
+        for (const auto& s : session_) {
+            if (sameLogin(s, share.protocol, share.host, share.share, share.port) && s.username == share.username) {
+                stored.password = s.password;
+                break;
+            }
+        }
+    }
     bool found = false;
     for (auto& s : shares_) {
         if (s.protocol == share.protocol && s.host == share.host && s.share == share.share &&
@@ -522,7 +556,8 @@ void SmbCredentialsManager::addOrUpdateShare(const SmbShare& share) {
                                   }),
                    session_.end());
     if (!share.savePassword && !share.password.empty() && !share.anonymous) session_.push_back(share);
-    refused_.clear();  // a changed login gets its try
+    // The share was saved by hand: its login gets one try again (only on this server).
+    forgetRefusedLocked(scopeKey(share.protocol, share.host, "", share.port), nullptr);
     saveLocked();
 }
 
@@ -545,7 +580,7 @@ bool SmbCredentialsManager::deleteShare(const std::string& host, const std::stri
             removed = true;
         }
         session_.erase(std::remove_if(session_.begin(), session_.end(), gone), session_.end());
-        refused_.clear();
+        forgetRefusedLocked(scopeKey(protocol, host, "", port), nullptr);
         if (removed) saveLocked();
     }
     if (removed) {
@@ -684,7 +719,10 @@ void SmbCredentialsManager::setSessionLogin(const LoginTarget& t, const std::str
     s.id = t.host + (t.share.empty() ? "" : "/" + t.share);
     s.savePassword = false;
     session_.push_back(s);
-    refused_.clear();  // the user typed a login: it gets its try
+    // The user typed this login, so it gets its try even where it was refused before. Other
+    // refusals stay: when this one fails and is dropped, the login it replaced is still not sent.
+    const std::size_t stamp = stampOf(&s);
+    forgetRefusedLocked(scopeKey(t.protocol, t.host, t.share, t.port), &stamp);
 }
 
 void SmbCredentialsManager::keepSessionLogin(const LoginTarget& t, bool savePassword) {
@@ -713,7 +751,9 @@ void SmbCredentialsManager::keepSessionLogin(const LoginTarget& t, bool savePass
             if (s.name.empty()) s.name = s.id;
             shares_.push_back(s);
         }
-        session_.erase(sit);  // (the saved share holds it now)
+        // The saved share holds it now. An empty password that worked stays in memory too, so it is
+        // not asked for again until the player quits (a share saved without a password asks first).
+        if (!sit->password.empty()) session_.erase(sit);
         saveLocked();
         return;
     }
@@ -739,9 +779,13 @@ bool SmbCredentialsManager::loginMissing(const std::string& uri) const {
     if (!parseAddress(uri, a) || a.protocol == "sftp") return false;
     std::lock_guard<std::mutex> lk(mutex_);
     const SmbShare* m = loginFor(a.protocol, a.host, a.share, a.port);
-    if (m == nullptr || m->anonymous || m->savePassword || !m->password.empty()) return false;
+    if (m == nullptr || m->anonymous || !m->password.empty()) return false;
+    // No password: one typed in this session (an empty one confirmed in the sign-in dialog) is
+    // used; else a share whose password is not saved, or that has a user name but an empty saved
+    // password, asks first.
     const bool typedThisSession = !session_.empty() && m >= session_.data() && m < session_.data() + session_.size();
-    return !typedThisSession;
+    if (typedThisSession) return false;
+    return !m->savePassword || !m->username.empty();
 }
 
 bool SmbCredentialsManager::loginGiven(const std::string& uri) const {
@@ -750,22 +794,39 @@ bool SmbCredentialsManager::loginGiven(const std::string& uri) const {
     return m != nullptr && !m->anonymous && (!m->username.empty() || !m->password.empty());
 }
 
-void SmbCredentialsManager::noteLoginRefused(const std::string& uri, bool file) {
-    std::string where = uri;
-    if (file) {
-        const std::size_t sch = where.find("://");
-        const std::size_t cut = where.find_last_of('/');
-        if (sch != std::string::npos && cut != std::string::npos && cut > sch + 2) where = where.substr(0, cut);
-    }
-    Address a;
-    if (!parseAddress(where, a)) return;
+bool SmbCredentialsManager::loginHasPassword(const std::string& uri) const {
     std::lock_guard<std::mutex> lk(mutex_);
-    const std::size_t stamp = loginStamp(where);
+    const SmbShare* m = loginForUri(uri);
+    return m != nullptr && !m->anonymous && !m->password.empty();
+}
+
+bool SmbCredentialsManager::noteLoginRefused(const std::string& uri) {
+    Address a;
+    if (!parseAddress(uri, a)) return true;
+    std::lock_guard<std::mutex> lk(mutex_);
+    const std::size_t stamp = loginStamp(uri);
+    for (const auto& w : worked_) {
+        if (w.first == a.scope && w.second == stamp) return false;  // the login is fine: no permission there
+    }
     for (const auto& r : refused_) {
-        if (r.first == a.key && r.second == stamp) return;
+        if (r.first == a.scope && r.second == stamp) return true;
     }
     if (refused_.size() >= 64) refused_.erase(refused_.begin());
-    refused_.emplace_back(a.key, stamp);
+    refused_.emplace_back(a.scope, stamp);
+    return true;
+}
+
+void SmbCredentialsManager::noteLoginWorked(const std::string& uri) {
+    Address a;
+    if (!parseAddress(uri, a)) return;
+    std::lock_guard<std::mutex> lk(mutex_);
+    const std::size_t stamp = loginStamp(uri);
+    refused_.erase(std::remove(refused_.begin(), refused_.end(), std::make_pair(a.scope, stamp)), refused_.end());
+    for (const auto& w : worked_) {
+        if (w.first == a.scope && w.second == stamp) return;
+    }
+    if (worked_.size() >= 64) worked_.erase(worked_.begin());
+    worked_.emplace_back(a.scope, stamp);
 }
 
 bool SmbCredentialsManager::loginRefused(const std::string& uri) const {
@@ -775,11 +836,8 @@ bool SmbCredentialsManager::loginRefused(const std::string& uri) const {
     if (refused_.empty()) return false;
     const std::size_t stamp = loginStamp(uri);
     for (const auto& r : refused_) {
-        if (r.second != stamp) continue;  // the login changed since
-        const std::string& k = r.first;
-        if (a.key == k || (a.key.size() > k.size() && a.key.compare(0, k.size(), k) == 0 && a.key[k.size()] == '/')) {
-            return true;
-        }
+        // The same share / server with the same login (a changed login gets its try).
+        if (r.first == a.scope && r.second == stamp) return true;
     }
     return false;
 }

@@ -159,16 +159,19 @@ namespace {
 // What a playback (or letterbox / subtitle open) failure says when the share wants a login: the
 // sign-in dialog is in the file browser, where the share is opened.
 std::string loginErrorText(const std::string& path) {
-    return SmbCredentialsManager::instance().loginGiven(path)
+    return SmbCredentialsManager::instance().loginHasPassword(path)
                ? "the user name or password for this share was not accepted (open the share in Files to sign in)"
                : "this share needs a user name and password (open the share in Files to sign in)";
 }
+// Access denied although the login works in that share (a file or folder permission).
+const char* const kNoPermissionText = "no permission to open this file on the share";
 }  // namespace
 
 std::unique_ptr<RemoteFile> openRemoteMedia(const std::string& path, std::string& err) {
     if (path.rfind("smb://", 0) != 0) {
         std::unique_ptr<RemoteFile> f = remoteOpen(path, err);
         if (!f && isRemoteLoginError(err)) err = loginErrorText(path);
+        if (!f && isRemotePermissionError(err)) err = kNoPermissionText;
         return f;
     }
 #ifdef PIXELVR_HAVE_SMB
@@ -195,13 +198,16 @@ std::unique_ptr<RemoteFile> openRemoteMedia(const std::string& path, std::string
         const int e = errno;
         if (ctx != nullptr) smbc_free_context(ctx, 1);
         if (openFn != nullptr && SmbCredentialsManager::isLoginErrno(e)) {
-            SmbCredentialsManager::instance().noteLoginRefused(path, true);
-            err = loginErrorText(path);
+            // A refused login, unless this login already worked in the share (then the file's own
+            // permission is missing and the share is not blocked).
+            err = SmbCredentialsManager::instance().noteLoginRefused(path) ? loginErrorText(path)
+                                                                           : std::string(kNoPermissionText);
         } else {
             err = "the file on the share could not be opened";
         }
         return nullptr;
     }
+    SmbCredentialsManager::instance().noteLoginWorked(path);
     return std::make_unique<SmbFile>(ctx, file);
 #else
     err = "SMB support not built";

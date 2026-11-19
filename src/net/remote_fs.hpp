@@ -64,6 +64,10 @@ std::string remoteParent(const std::string& uri);
 // login was refused, further tries fail at once until it changes (no wrong password sent again).
 extern const char* const kRemoteLoginError;
 inline bool isRemoteLoginError(const std::string& err) { return err == kRemoteLoginError; }
+// Access denied where the same login already worked on that server: a folder or file the login
+// may not open (not a login problem: no sign-in is asked for, nothing is blocked).
+extern const char* const kRemotePermissionError;
+inline bool isRemotePermissionError(const std::string& err) { return err == kRemotePermissionError; }
 
 bool remoteList(const std::string& uri, std::vector<RemoteEntry>& out, std::string& err);
 std::unique_ptr<RemoteFile> remoteOpen(const std::string& uri, std::string& err);

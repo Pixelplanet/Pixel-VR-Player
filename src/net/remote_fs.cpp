@@ -29,8 +29,12 @@
 namespace pixelvr {
 
 const char* const kRemoteLoginError = "authentication failed (check the user name and password)";
+const char* const kRemotePermissionError = "access denied (no permission)";
 
 namespace {
+
+// HTTP 403: a refused login, or a folder / file the login may not open (the facade tells which).
+const char* const kRemoteForbidden = "forbidden";
 
 [[maybe_unused]] int defaultPort(const std::string& protocol) {
     if (protocol == "sftp") return 22;
@@ -533,7 +537,8 @@ void davPrepare(CURL* c, const RemoteUri& u, const SmbShare& cred, const std::st
 std::string httpError(long code, CURLcode rc, CURL* c) {
     if (rc != CURLE_OK && rc != CURLE_WRITE_ERROR) return curl_easy_strerror(rc);
     (void)c;
-    if (code == 401 || code == 403) return kRemoteLoginError;
+    if (code == 401) return kRemoteLoginError;
+    if (code == 403) return kRemoteForbidden;
     if (code == 404) return "not found";
     return "HTTP " + std::to_string(code);
 }
@@ -790,6 +795,18 @@ private:
 namespace {
 bool listServer(const std::string& uri, std::vector<RemoteEntry>& out, std::string& err);
 std::unique_ptr<RemoteFile> openServer(const std::string& uri, std::string& err);
+
+// After an access: a success marks the login as working on that server; a refusal is a refused
+// login (remembered, so it is not sent again), unless that login already worked on the server:
+// then it is a folder or file the login may not open.
+void noteAccess(const std::string& uri, bool ok, std::string& err) {
+    SmbCredentialsManager& creds = SmbCredentialsManager::instance();
+    if (ok) {
+        creds.noteLoginWorked(uri);
+    } else if (err == kRemoteForbidden || isRemoteLoginError(err)) {
+        err = creds.noteLoginRefused(uri) ? kRemoteLoginError : kRemotePermissionError;
+    }
+}
 }  // namespace
 
 bool remoteList(const std::string& uri, std::vector<RemoteEntry>& out, std::string& err) {
@@ -800,7 +817,7 @@ bool remoteList(const std::string& uri, std::vector<RemoteEntry>& out, std::stri
         return false;
     }
     const bool ok = listServer(uri, out, err);
-    if (!ok && isRemoteLoginError(err)) creds.noteLoginRefused(uri);
+    noteAccess(uri, ok, err);
     return ok;
 }
 
@@ -811,7 +828,7 @@ std::unique_ptr<RemoteFile> remoteOpen(const std::string& uri, std::string& err)
         return nullptr;
     }
     std::unique_ptr<RemoteFile> f = openServer(uri, err);
-    if (!f && isRemoteLoginError(err)) creds.noteLoginRefused(uri, true);
+    noteAccess(uri, f != nullptr, err);
     return f;
 }
 

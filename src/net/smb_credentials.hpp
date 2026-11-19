@@ -89,15 +89,25 @@ public:
     // That login was refused: forget it (the saved login, if any, applies again).
     void dropSessionLogin(const LoginTarget& t);
 
-    // The share's password is not saved and none was typed in this session: ask before trying
-    // (no attempt with an empty password). Not for SFTP, which may sign in with a key.
+    // No password is in use for a share with a user name (not saved, or saved empty) and none was
+    // typed in this session: ask before trying, so no logon with an empty password is sent. Not for
+    // SFTP, which may sign in with a key.
     bool loginMissing(const std::string& uri) const;
     // A user name or password is in use for the address (else guest access).
     bool loginGiven(const std::string& uri) const;
-    // A login was refused at `uri` (for a file: pass file = true, its folder is remembered). Further
-    // automatic tries there wait until the login changes, so a wrong password is not sent again
-    // and again (account lockout).
-    void noteLoginRefused(const std::string& uri, bool file = false);
+    // A password is in use for the address (so a refusal means "not accepted", not "needs one").
+    bool loginHasPassword(const std::string& uri) const;
+    // Logins are remembered per SMB share (per server for an SMB share list, SFTP and WebDAV), the
+    // scope a server checks a login in, together with which login it was.
+    //
+    // An access at `uri` was refused (EACCES / EPERM, HTTP 401 / 403). If this same login already
+    // worked there this session, it is a missing permission (a folder or file ACL), not the login:
+    // nothing is recorded and false is returned. Otherwise the refusal is recorded and true is
+    // returned: further automatic tries anywhere in that share / on that server wait until the
+    // login changes, so a wrong password is not sent again and again (account lockout).
+    bool noteLoginRefused(const std::string& uri);
+    // An access at `uri` worked with the login in use (a folder listed, a file opened).
+    void noteLoginWorked(const std::string& uri);
     bool loginRefused(const std::string& uri) const;
     bool loginBlocked(const std::string& uri) const { return loginMissing(uri) || loginRefused(uri); }
     // libsmbclient's errno for a refused or missing login (logon failure, access denied).
@@ -119,11 +129,15 @@ private:
                              int port) const;
     const SmbShare* loginForUri(const std::string& uri) const;
     std::size_t loginStamp(const std::string& uri) const;  // tells logins apart (memory only)
+    // Forgets the refusals recorded in this scope key and below (all logins, or only `stamp`).
+    void forgetRefusedLocked(const std::string& scope, const std::size_t* stamp);
 
     mutable std::mutex mutex_;
     std::vector<SmbShare> shares_;   // saved (a share with savePassword off holds no password here)
     std::vector<SmbShare> session_;  // logins typed this session: never written anywhere
-    std::vector<std::pair<std::string, std::size_t>> refused_;  // address, login stamp
+    // Scope key (share or server), login stamp: logins refused there / that worked there.
+    std::vector<std::pair<std::string, std::size_t>> refused_;
+    std::vector<std::pair<std::string, std::size_t>> worked_;
 };
 
 } // namespace pixelvr

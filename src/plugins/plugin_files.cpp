@@ -119,13 +119,15 @@ bool listFiles(const std::string& dir, std::vector<std::string>& names, std::str
         }
         if (!d) {
             if (c.ctx && SmbCredentialsManager::isLoginErrno(e)) {
-                SmbCredentialsManager::instance().noteLoginRefused(dir);
-                err = "the share refused the login";
+                // (Not a login problem when this login already worked in the share: a permission.)
+                err = SmbCredentialsManager::instance().noteLoginRefused(dir) ? "the share refused the login"
+                                                                               : "no permission to list the folder";
             } else {
                 err = "cannot list the folder";
             }
             return false;
         }
+        SmbCredentialsManager::instance().noteLoginWorked(dir);
         for (;;) {
             std::lock_guard<std::mutex> lk(smbGlobalLock());
             struct smbc_dirent* de = smbc_getFunctionReaddir(c.ctx)(c.ctx, d);
@@ -186,13 +188,14 @@ bool readFile(const std::string& uri, std::size_t maxBytes, std::string& out, st
         }
         if (!fd) {
             if (c.ctx && SmbCredentialsManager::isLoginErrno(e)) {
-                SmbCredentialsManager::instance().noteLoginRefused(uri, true);
-                err = "the share refused the login";
+                err = SmbCredentialsManager::instance().noteLoginRefused(uri) ? "the share refused the login"
+                                                                               : "no permission to open the file";
             } else {
                 err = "cannot open the file";
             }
             return false;
         }
+        SmbCredentialsManager::instance().noteLoginWorked(uri);
         char buf[65536];
         bool ok = true;
         for (;;) {

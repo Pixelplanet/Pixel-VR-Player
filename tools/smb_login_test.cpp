@@ -175,17 +175,57 @@ int main(int argc, char** argv) {
         m.dropSessionLogin(t);
         check(passOf("old.test", "media") == kSavedPw, "dropped sign-in: the saved login applies again");
 
-        // Refused logins: remembered per folder and login, cleared by a new login.
-        m.noteLoginRefused("smb://old.test/media/private");
-        check(m.loginRefused("smb://old.test/media/private/sub"), "refused: the folder below is blocked too");
-        check(!m.loginRefused("smb://old.test/media"), "refused: the share's other folders are not");
-        m.noteLoginRefused("smb://old.test/media/private/film.mkv", true);
-        check(m.loginRefused("smb://old.test/media/private/other.mkv"), "refused file: its folder is remembered");
+        // Refused logins: remembered per share and login (the scope the server checks a login in).
+        check(m.noteLoginRefused("smb://old.test/media/private/film.mkv"), "refused: recorded as a login problem");
+        check(m.loginRefused("smb://old.test/media/private/sub") && m.loginRefused("smb://old.test/media") &&
+                  m.loginRefused("smb://old.test/media/other/song.flac"),
+              "refused: every folder and file of the share is blocked");
+        check(!m.loginRefused("smb://old.test/tv") && !m.loginRefused("smb://old.test"),
+              "refused: other shares and the share list are not");
         m.loginTargetFor("smb://old.test/media", t);
         m.setSessionLogin(t, "olduser", kTypedPw);
         check(!m.loginRefused("smb://old.test/media/private"), "a newly typed login gets its try");
         m.dropSessionLogin(t);
+        check(m.loginRefused("smb://old.test/media"), "that login refused and dropped: the saved one is still blocked");
+        m.setSessionLogin(t, "olduser", kSavedPw);
+        check(!m.loginRefused("smb://old.test/media"), "the refused login typed again by hand gets one try");
+        m.noteLoginRefused("smb://old.test/media");
+        m.dropSessionLogin(t);
+        check(m.loginRefused("smb://old.test/media"), "refused again: blocked again");
         check(!m.loginRefused("sftp://x.test/home"), "other servers are not affected");
+        // SFTP / WebDAV: one login per server.
+        m.noteLoginRefused("dav://dav.test:8080/a/b/file.mkv");
+        check(m.loginRefused("dav://dav.test:8080/other") && !m.loginRefused("dav://dav.test:8081/a"),
+              "WebDAV: blocked on that server (and port) only");
+
+        // A login that worked in the share: access denied is a permission, not the login.
+        m.noteLoginWorked("smb://old.test/tv/films");
+        check(!m.noteLoginRefused("smb://old.test/tv/System Volume Information"),
+              "worked in the share: an access-denied folder is no login problem");
+        check(!m.loginRefused("smb://old.test/tv/films"), "worked in the share: nothing is blocked");
+        check(m.noteLoginRefused("smb://old.test/docs"), "another share: the login has not worked there");
+
+        // A user name with an empty saved password: asked first (no empty-password logon sent).
+        m.addOrUpdateShare(makeShare("empty.test", "media", "erin", "", true));
+        check(m.loginMissing("smb://empty.test/media/x") && m.loginGiven("smb://empty.test/media") &&
+                  !m.loginHasPassword("smb://empty.test/media"),
+              "user name, empty saved password: asks, says it needs a password");
+        check(m.loginHasPassword("smb://old.test/media"), "a saved password is in use");
+        m.loginTargetFor("smb://empty.test/media", t);
+        m.setSessionLogin(t, "erin", "");
+        check(!m.loginMissing("smb://empty.test/media"), "an empty password confirmed in the dialog is tried");
+        m.keepSessionLogin(t, true);
+        check(!m.loginMissing("smb://empty.test/media"), "kept: not asked again this session");
+
+        // Saving switched on in the form (whose password field is empty) keeps the session password.
+        m.addOrUpdateShare(makeShare("turnon.test", "music", "frank", "", false));
+        m.loginTargetFor("smb://turnon.test/music", t);
+        m.setSessionLogin(t, "frank", kTypedPw);
+        m.keepSessionLogin(t, false);
+        m.addOrUpdateShare(makeShare("turnon.test", "music", "frank", "", true));
+        check(passOf("turnon.test", "music") == kTypedPw &&
+                  !fieldOf(objectOf(fileText(file), "turnon.test"), "password_enc").empty(),
+              "saving switched on: the session password is saved, not an empty one");
 
         // smbclient gets the login as text (through a pipe), never as a file.
         check(!m.authFileText("old.test", "media").empty(), "auth text for a saved login");
@@ -219,6 +259,8 @@ int main(int argc, char** argv) {
         check(passOf("found2.test", "docs") == kNewSharePw, "restart: a share added with saving on works");
         check(passOf("found.test", "photos").empty(), "restart: a share signed into without saving is gone");
         check(!m.loginMissing("sftp://nosave.test/x"), "SFTP is never asked before trying (keys)");
+        check(m.loginMissing("smb://empty.test/media"), "restart: an empty saved password asks again");
+        check(passOf("turnon.test", "music") == kTypedPw, "restart: the password saved by switching on works");
     }
     std::printf("%s: %d failure(s)\n", failures ? "FAILED" : "PASSED", failures);
     return failures ? 1 : 0;

@@ -111,6 +111,15 @@ std::string login_message(const std::string& uri, bool refused) {
                    : label + " needs a user name and password";
 }
 
+// What a folder says that the login works for but may not be opened with it (a folder ACL).
+std::string no_permission_message(const std::string& uri) {
+    std::string name = without_scheme(uri);
+    while (name.size() > 1 && name.back() == '/') name.pop_back();
+    const std::size_t cut = name.find_last_of('/');
+    if (cut != std::string::npos && cut + 1 < name.size()) name = name.substr(cut + 1);
+    return "No permission to open " + name;
+}
+
 // Where a configured server starts: smb://host[/share], sftp://host[:port]/folder, ...
 std::string share_uri(const SmbShare& s) {
     if (s.protocol == "smb") {
@@ -361,8 +370,13 @@ void Browser::scanSmbInto(const std::string& uri, ScanResult& out) {
         if (!remoteList(uri, list, err)) {
             if (isRemoteLoginError(err)) {  // (remoteList sends no login known to be missing or refused)
                 const SmbCredentialsManager& creds = SmbCredentialsManager::instance();
-                out.login = (creds.loginGiven(uri) && !creds.loginMissing(uri)) ? 2 : 1;
+                // "Not accepted" only when a password was sent; else it "needs" one.
+                out.login = (creds.loginHasPassword(uri) && !creds.loginMissing(uri)) ? 2 : 1;
                 out.status = login_message(uri, out.login == 2);
+                return;
+            }
+            if (isRemotePermissionError(err)) {  // the login works on the server, not for this folder
+                out.status = no_permission_message(uri);
                 return;
             }
             out.status = "Cannot browse " + without_scheme(uri) + ": " + err;
@@ -416,6 +430,7 @@ void Browser::scanSmbInto(const std::string& uri, ScanResult& out) {
         openErr = dh < 0 ? errno : 0;
         if (dh >= 0) {
             browsed = true;
+            if (uri != "smb://") creds.noteLoginWorked(uri);
             struct smbc_dirent* de = nullptr;
             while ((de = smbc_readdir(dh)) != nullptr) {
                 const std::string name = de->name;
@@ -507,9 +522,14 @@ void Browser::scanSmbInto(const std::string& uri, ScanResult& out) {
 
     if (!browsed) {
         if (uri != "smb://" && SmbCredentialsManager::isLoginErrno(openErr)) {
-            // Logon failure / access denied: remembered, so this login is not sent here again.
-            creds.noteLoginRefused(uri);
-            out.login = creds.loginGiven(uri) ? 2 : 1;
+            // Logon failure / access denied: remembered, so this login is not sent to the share
+            // again. Not when this login already listed a folder of the share: then only this
+            // folder may not be opened with it.
+            if (!creds.noteLoginRefused(uri)) {
+                out.status = no_permission_message(uri);
+                return;
+            }
+            out.login = creds.loginHasPassword(uri) ? 2 : 1;
             out.status = login_message(uri, out.login == 2);
             return;
         }
@@ -1298,9 +1318,11 @@ void Browser::startDownloadFile(const std::string& uri, const std::string& local
             errno = 0;
             if (smbc_stat(uri.c_str(), &st) == 0) {
                 total = static_cast<long long>(st.st_size);
+                creds.noteLoginWorked(uri);
             } else if (SmbCredentialsManager::isLoginErrno(errno)) {
-                creds.noteLoginRefused(uri, true);
-                loginFailed = true;
+                // (False: the login works in the share, this file may not be read; smbclient below
+                // then fails on it like on any other unreadable file.)
+                loginFailed = creds.noteLoginRefused(uri);
             }
         }
         if (loginFailed) {
@@ -1504,14 +1526,18 @@ void Browser::startDownloadFolder(const std::string& uri,
         }
         // Pre-walk the tree to total the size, so % progress and ETA can be shown.
         long long total = 0;
+        int rootErr = 0;  // errno when the folder itself could not be listed (0 = it could)
         std::function<void(const std::string&)> sumSizes =
             [&](const std::string& src) {
                 int d = -1;
                 {
                     std::lock_guard<std::mutex> smb(smbGlobalLock());
+                    errno = 0;
                     d = smbc_opendir(src.c_str());
+                    if (d < 0 && src == uri) rootErr = errno ? errno : EIO;
                 }
                 if (d < 0) return;
+                if (src == uri) creds.noteLoginWorked(uri);
                 for (;;) {
                     std::string nm;
                     int typ = 0;
@@ -1543,6 +1569,17 @@ void Browser::startDownloadFolder(const std::string& uri,
                 }
             };
         sumSizes(uri);
+        if (rootErr != 0 && SmbCredentialsManager::isLoginErrno(rootErr)) {
+            // The folder refused access: no second try below. A refused login is remembered (and
+            // shown as "needs a login"); else this login may not open the folder.
+            const bool login = creds.noteLoginRefused(uri);
+            PIXELVR_LOG_WARN("Download folder: %s", login ? "the share refused the login" : "no permission");
+            dlLoginFailed_.store(login);
+            dlOk_.store(false);
+            dlDone_.store(true);
+            dlActive_.store(false);
+            return;
+        }
         dlTotal_.store(total);
         // Depth-first copy of an SMB folder. Recomputes a running byte total so
         // the overlay can show progress as files complete.
@@ -1601,8 +1638,9 @@ void Browser::startDownloadFolder(const std::string& uri,
                 openErr = d < 0 ? errno : 0;
             }
             if (d < 0) {
-                if (SmbCredentialsManager::isLoginErrno(openErr)) {
-                    creds.noteLoginRefused(src);
+                // (A subfolder the login may not open is a plain failure: the login listed the
+                // folder above, so noteLoginRefused records nothing then.)
+                if (SmbCredentialsManager::isLoginErrno(openErr) && creds.noteLoginRefused(src)) {
                     dlLoginFailed_.store(true);
                 }
                 ok = false;
@@ -1950,16 +1988,35 @@ void Browser::measureFolder(const std::string& uri) {
     if (measuring_.load()) return;
     if (measureThread_.joinable()) measureThread_.join();
     measuredSize_.store(0);
+    // A login known to be missing (not saved) or refused: nothing is sent to measure the folder
+    // (the download itself then says that it needs a login). Only SMB folders are measured here:
+    // libsmbclient cannot read the others.
+    if (uri.rfind("smb://", 0) != 0 || SmbCredentialsManager::instance().loginBlocked(uri)) {
+        measuring_.store(false);
+        return;
+    }
     measuring_.store(true);
     measureThread_ = std::thread([this, uri]() {
         long long total = 0;
+        SmbCredentialsManager& creds = SmbCredentialsManager::instance();
+        bool stop = false;  // the folder refused the login: no further folders are tried
         std::function<void(const std::string&)> sum = [&](const std::string& src) {
+            if (stop) return;
             int d = -1;
+            int e = 0;
             {
                 std::lock_guard<std::mutex> smb(smbGlobalLock());
+                errno = 0;
                 d = smbc_opendir(src.c_str());
+                e = d < 0 ? errno : 0;
             }
-            if (d < 0) return;
+            if (d < 0) {
+                // Remembered as refused unless this login already listed a folder of the share
+                // (then only this folder may not be opened, and the others are still summed).
+                if (SmbCredentialsManager::isLoginErrno(e) && creds.noteLoginRefused(src)) stop = true;
+                return;
+            }
+            creds.noteLoginWorked(src);
             for (;;) {
                 std::string nm;
                 int typ = 0;
