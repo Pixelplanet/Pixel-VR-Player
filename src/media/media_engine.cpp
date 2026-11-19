@@ -189,6 +189,8 @@ std::unique_ptr<RemoteFile> openRemoteMedia(const std::string& path, std::string
                                                                            : std::string(kNoPermissionText);
         } else {
             err = "the file on the share could not be opened";
+            // (No address here: a vault share's would be hidden with the rest of the line.)
+            PIXELVR_LOG_WARN("MediaEngine: SMB open failed: %s (errno %d)", std::strerror(e), e);
         }
         return nullptr;
     }
@@ -2173,7 +2175,8 @@ bool MediaEngine::open(const std::string& path) {
         std::unique_ptr<RemoteFile> remote = openRemoteMedia(path, err);
         if (!remote) {
             impl_->lastError = err;
-            PIXELVR_LOG_ERROR("MediaEngine: cannot open %s: %s", path.c_str(), err.c_str());
+            // (The reason first: for a vault share the rest of the line after the address is hidden.)
+            PIXELVR_LOG_ERROR("MediaEngine: cannot open (%s): %s", err.c_str(), path.c_str());
             return false;
         }
         if (impl_->openAborted.load(std::memory_order_acquire)) {
@@ -2246,7 +2249,9 @@ bool MediaEngine::open(const std::string& path) {
     av_dict_free(&httpOpts);
     if (openRc < 0) {
         if (impl_->openAborted.load(std::memory_order_acquire)) impl_->lastError = "cancelled";
-        PIXELVR_LOG_ERROR("MediaEngine: cannot open %s", path.c_str());
+        char why[128] = "";
+        av_strerror(openRc, why, sizeof(why));
+        PIXELVR_LOG_ERROR("MediaEngine: cannot open (%s): %s", why, path.c_str());
         return false;
     }
     }

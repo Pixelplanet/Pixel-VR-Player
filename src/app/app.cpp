@@ -865,7 +865,7 @@ void App::finishLoadMedia(int slot) {
             return;
         }
         closeMedia(slot);
-        PIXELVR_LOG_WARN("Failed to open %s: %s", path.c_str(), why.c_str());
+        PIXELVR_LOG_WARN("Failed to open (%s): %s", why.c_str(), path.c_str());
 #ifdef PIXELVR_HAVE_FREETYPE
         if (why != "cancelled") {
             // Say so in the file browser instead of silently doing nothing.
