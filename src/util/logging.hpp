@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <string>
 #include <string_view>
+#include <vector>
 
 namespace pixelvr::log {
 
@@ -21,13 +22,25 @@ enum class Level : int {
 void set_level(Level level);
 Level level();
 
-// Thread-safe; writes one timestamped line to stderr.
+// Thread-safe; writes one timestamped line to stderr. Every line passes the filters below first,
+// and the whole log is held to a few hundred lines (64 KiB) a second, so no flood from any source
+// can grow it by megabytes a second (what was held back is counted in one line afterwards).
 void write(Level level, std::string_view message);
 
 // A filter every line passes before it is written (e.g. addresses of vault shares replaced): set
 // once at start-up. It must not log itself.
 using Redactor = std::string (*)(std::string_view);
 void set_redactor(Redactor fn);
+
+// Local folders whose contents are private (the vault folder, its .incoming downloads, the vault on
+// the SD card). In every line, a path that starts with one of them is replaced with "(private)" up to
+// its closing quote, or else to the end of the line: one rule for every place that logs a path.
+// set_private_roots replaces the list; add_private_root adds one. Call them at start-up and whenever
+// the vault moves (any thread; never from inside a filter).
+void set_private_roots(const std::vector<std::string>& roots);
+void add_private_root(const std::string& root);
+// True when `path` lies in (or is) one of those folders.
+bool is_private_path(std::string_view path);
 
 // printf-style convenience. Kept out of the header hot path via a single vararg
 // sink in the .cpp.

@@ -3,6 +3,7 @@
 #include "../../browser/browser_protocol.hpp"
 #include "../../browser/mini_json.hpp"
 #include "util/logging.hpp"
+#include "util/spawn.hpp"
 
 #include <algorithm>
 #include <cerrno>
@@ -84,6 +85,7 @@ pid_t spawnHelper(const std::vector<std::string>& args, int& toFd, int& fromFd) 
     posix_spawn_file_actions_adddup2(&fa, outPipe[1], STDOUT_FILENO);
     posix_spawn_file_actions_addclose(&fa, inPipe[1]);
     posix_spawn_file_actions_addclose(&fa, outPipe[0]);
+    spawnutil::closeFrom(&fa, 3);  // (nothing of ours, e.g. a playing video's decoder, goes along)
     pid_t pid = -1;
     const int rc = posix_spawn(&pid, helper.c_str(), &fa, nullptr, argv.data(), envp.data());
     posix_spawn_file_actions_destroy(&fa);

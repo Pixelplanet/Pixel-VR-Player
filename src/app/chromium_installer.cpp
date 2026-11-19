@@ -1,6 +1,7 @@
 #include "app/chromium_installer.hpp"
 
 #include "util/logging.hpp"
+#include "util/spawn.hpp"
 
 #include <csignal>
 #include <algorithm>
@@ -58,6 +59,7 @@ bool ChromiumInstaller::start() {
     posix_spawn_file_actions_adddup2(&fa, slave, STDOUT_FILENO);
     posix_spawn_file_actions_adddup2(&fa, slave, STDERR_FILENO);
     posix_spawn_file_actions_addclose(&fa, master);
+    spawnutil::closeFrom(&fa, 3);  // (nothing of ours, e.g. a playing video's decoder, goes along)
     const int rc = posix_spawnp(&pid_, "flatpak", &fa, nullptr, argv.data(), envp.data());
     posix_spawn_file_actions_destroy(&fa);
     close(slave);

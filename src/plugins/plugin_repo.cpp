@@ -2,6 +2,7 @@
 
 #include "../../browser/mini_json.hpp"
 #include "../util/logging.hpp"
+#include "../util/spawn.hpp"
 
 #include <spawn.h>
 #include <sys/wait.h>
@@ -69,6 +70,7 @@ std::string sha256Of(const std::string& file) {
     posix_spawn_file_actions_init(&fa);
     posix_spawn_file_actions_adddup2(&fa, pipeFd[1], 1);
     posix_spawn_file_actions_addclose(&fa, pipeFd[0]);
+    spawnutil::closeFrom(&fa, 3);  // (nothing of ours, e.g. a playing video's decoder, goes along)
     std::string a0 = "sha256sum", a1 = file;
     char* argv[] = {a0.data(), a1.data(), nullptr};
     pid_t pid = 0;

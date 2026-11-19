@@ -20,6 +20,7 @@
 #include <sys/wait.h>
 #include <unistd.h>
 extern char** environ;
+#include "util/spawn.hpp"
 #endif
 
 #include "openvr.h"
@@ -271,7 +272,12 @@ void steamVrPrelaunch() {
     std::string arg = kArg;
     char* argv[] = {exe.data(), arg.data(), nullptr};
     pid_t pid = 0;
-    if (posix_spawn(&pid, exe.c_str(), nullptr, nullptr, argv, envp.data()) != 0) {
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    spawnutil::closeFrom(&fa, 3);  // (it gets nothing of ours but stdin / stdout / stderr)
+    const int rc = posix_spawn(&pid, exe.c_str(), &fa, nullptr, argv, envp.data());
+    posix_spawn_file_actions_destroy(&fa);
+    if (rc != 0) {
         PIXELVR_LOG_WARN("SteamVR prelaunch: could not start the helper");
         return;
     }

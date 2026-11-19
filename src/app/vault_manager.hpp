@@ -147,6 +147,7 @@ private:
     std::string cardId_;           // id written into the card vault's marker file
     std::string thumbsDir_;        // ~/.cache/pixelvr/vault-thumbs
     void writeInternalMarker() const;
+    void registerLogRoots() const;  // the vault folders -> log::add_private_root
 
     // Combo state machine
     std::vector<int> comboSequence_;

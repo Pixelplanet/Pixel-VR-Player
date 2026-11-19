@@ -500,6 +500,12 @@ void App::cancelPendingOpen(int slot, bool wait) {
 
 void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
     lastLoadFailed_ = false;
+    // Every play comes through here: a file a download still writes, or a plain copy in the vault's
+    // download folder, is never opened (a partial file, or vault content outside its encryption).
+    if (refuseUnfinishedDownload(path)) {
+        lastLoadFailed_ = true;
+        return;
+    }
     if (slot < 0 || !multiScreenEnabled()) slot = multiScreenEnabled() ? selectedScreen_ : 0;
     {
         // 360/180 is immersive: it always plays on the main screen.
@@ -828,7 +834,9 @@ void App::finishLoadMedia(int slot) {
         const std::string why = sc.engine.lastError();
         lastLoadFailed_ = true;
         if (fromQueue) {  // the queue moves on to the next track
-            PIXELVR_LOG_WARN("Failed to open %s: %s", path.c_str(), why.c_str());
+            // (The reason first: a vault share's address hides the rest of the line; a file in the
+            // vault is not named at all.)
+            PIXELVR_LOG_WARN("Failed to open (%s): %s", why.c_str(), VaultManager::forLog(path).c_str());
             // Said on the music screen once the next track plays (never silently skipped).
             ++sc.skippedTracks;
             sc.skippedNote = sc.skippedTracks == 1
@@ -855,7 +863,7 @@ void App::finishLoadMedia(int slot) {
         // (The title the page sent, before the hand-off is undone.)
         const std::string webTitle = !plexTitles_[slot].empty() ? plexTitles_[slot] : plexPlay.title;
         if (returnFromPlex(slot)) {
-            PIXELVR_LOG_WARN("Failed to open %s: %s", path.c_str(), why.c_str());
+            PIXELVR_LOG_WARN("Failed to open (%s): %s", why.c_str(), VaultManager::forLog(path).c_str());
             // Back on the page: say why nothing plays.
             if (why != "cancelled") {
                 renderer_.setScreenTitle(slot, "Can't play " + (webTitle.empty() ? std::string("this") : webTitle) +
@@ -865,7 +873,7 @@ void App::finishLoadMedia(int slot) {
             return;
         }
         closeMedia(slot);
-        PIXELVR_LOG_WARN("Failed to open (%s): %s", why.c_str(), path.c_str());
+        PIXELVR_LOG_WARN("Failed to open (%s): %s", why.c_str(), VaultManager::forLog(path).c_str());
 #ifdef PIXELVR_HAVE_FREETYPE
         if (why != "cancelled") {
             // Say so in the file browser instead of silently doing nothing.
@@ -1058,7 +1066,7 @@ void App::finishLoadMedia(int slot) {
     } else if (!sameFile && !fromQueue && remembered != nullptr && remembered->position > 0.0 &&
                (sc.engine.duration() <= 0.0 || remembered->position < sc.engine.duration())) {
         sc.engine.seek(remembered->position);
-        PIXELVR_LOG_INFO("Resuming %s at %.1fs", path.c_str(), remembered->position);
+        PIXELVR_LOG_INFO("Resuming %s at %.1fs", VaultManager::forLog(path).c_str(), remembered->position);
     }
     // Audio files play through the folder they came from.
     if (sc.engine.audioOnly()) {
@@ -1074,9 +1082,11 @@ void App::finishLoadMedia(int slot) {
     // The loaded screen becomes the selected one (publishes its track lists and
     // format to the settings / HUD). The queue moving on keeps the selection.
     if (!fromQueue || slot == selectedScreen_) selectScreen(slot);
+    sc.seenDecoderChanges = sc.engine.decoderChanges();  // (open() itself is reported below)
+    sc.earlyEndShown = false;
     static const char* const kProj[] = {"flat", "360", "180"};
     static const char* const kStereo[] = {"mono", "SBS", "TB"};
-    PIXELVR_LOG_INFO("Loaded %s on screen %d (%dx%d, %s/%s)", path.c_str(), slot + 1, w, h,
+    PIXELVR_LOG_INFO("Loaded %s on screen %d (%dx%d, %s/%s)", VaultManager::forLog(path).c_str(), slot + 1, w, h,
                      kProj[static_cast<int>(proj)],
                      kStereo[static_cast<int>(stereo)]);
     // Software decoding forced by someone else's decoder session: say so,
@@ -1980,6 +1990,33 @@ void App::updateStalls(std::chrono::steady_clock::time_point now) {
 #ifdef PIXELVR_HAVE_MEDIA
     for (int slot = 0; slot < VulkanRenderer::kMaxVideoSlots; ++slot) {
         ScreenState& sc = screens_[slot];
+        // The decoder changed while playing (MediaEngine's breaker): it gave up, or moved to software.
+        if (sc.open && !sc.web && !sc.opening) {
+            const uint32_t changes = sc.engine.decoderChanges();
+            if (changes != sc.seenDecoderChanges) {
+                sc.seenDecoderChanges = changes;
+                bool steamHolds = false;
+                for (const MediaEngine::DecoderHolder& hd : MediaEngine::decoderHolderList()) steamHolds |= hd.steamHelper;
+                const bool askedJustNow = decoderFreeAskedPath_ == sc.path &&
+                                          now - decoderFreeAskedAt_ < std::chrono::seconds(60);
+                if (sc.engine.decoderFailed()) {
+                    PIXELVR_LOG_WARN("Playback: screen %d stopped: %s", slot + 1, sc.engine.lastError().c_str());
+                    if (steamHolds && !askedJustNow && !actionMenu_.visible && !decoderFree_) {
+                        askFreeDecoder(slot);
+                    } else {
+                        renderer_.setScreenTitle(slot, "Cannot play: " + sc.engine.lastError(), 15.0f, true);
+                    }
+                } else if (const std::string by = sc.engine.hardwareBlockedBy(); !by.empty()) {
+                    renderer_.setScreenTitle(slot, "Software decoding: hardware decoder busy (" + by + ")", 12.0f, true);
+                }
+            }
+            if (sc.engine.decoderFailed()) {
+                // Nothing will come: no "Buffering..." over the reason.
+                sc.stalled = false;
+                sc.stallSince = now;
+                continue;
+            }
+        }
         const bool playing = sc.open && !sc.web && !sc.opening && !sc.openAbandoned && !sc.engine.paused() &&
                              !sc.engine.eof() && !sc.plexAwaitingNext;
         const uint64_t frames = playing ? sc.engine.decodedFrames() : 0;
@@ -2287,6 +2324,14 @@ bool App::updatePlexPlayback(int slot) {
         if (none || now - sc.plexNextSince > std::chrono::seconds(20)) {
             sc.plexAwaitingNext = sc.plexNavManual = false;
             renderer_.setScreenTitle(slot, none ? "There is no such episode" : "The server did not answer", 3.0f);
+        }
+    }
+    if (sc.engine.eof() && duration > 0.0 && sc.engine.position() < duration - 5.0 && !sc.earlyEndShown) {
+        // Ended well before its length (a short or still-downloading file): say why instead of silence.
+        const std::string why = sc.engine.lastError();
+        if (!why.empty()) {
+            sc.earlyEndShown = true;
+            renderer_.setScreenTitle(slot, "Playback ended: " + why, 10.0f, true);
         }
     }
     if (sc.engine.eof() && (duration <= 0.0 || sc.engine.position() >= duration - 5.0)) {
@@ -3102,6 +3147,12 @@ void App::saveSmbModal(bool confirmed) {
     // (When it is a vault share now: also one covered by another vault share, and the saved shares
     // inside its scope that moved into the vault with it.)
     scrubShareTraces(s);
+    // Its downloads (and those of shares that moved with it): one writing where its share no longer
+    // belongs stops (what it wrote goes), queued ones go to the new place. Said once, naming no file
+    // (cleared when the vault locks).
+    if (browser_.reconcileVaultDownloads() > 0) {
+        showNotice("Download stopped: the share's vault setting changed", true, true);
+    }
 
     smbModal_.active = false;
     smbModal_.editingField = SmbModalState::Field::None;
@@ -4085,6 +4136,7 @@ bool App::looksImmersive(const std::string& path) {
 }
 
 void App::playFromBrowser(const std::string& path) {
+    if (refuseUnfinishedDownload(path)) return;  // (before a screen picker or VR question)
     // With several screens available and something already playing, ask where.
     // While a 180/360 video plays it is alone, so a new file replaces it.
     const bool immersiveMain = screens_[0].open && screens_[0].projection != 0;
@@ -6934,7 +6986,8 @@ int App::run() {
                     // The picture check finished after the file opened.
                     sc.formatPending = false;
                     if (tm.stereoHint > 0 && sc.stereo == 0 && sc.projection == 0 && !sc.formatByHand) {
-                        PIXELVR_LOG_INFO("Format from the picture: stereo %d for %s", tm.stereoHint, sc.path.c_str());
+                        PIXELVR_LOG_INFO("Format from the picture: stereo %d for %s", tm.stereoHint,
+                                         VaultManager::forLog(sc.path).c_str());
                         sc.stereo = tm.stereoHint;
                         const auto st = static_cast<VulkanRenderer::StereoMode>(tm.stereoHint);
                         if (slot == 0) {
@@ -7379,7 +7432,12 @@ int App::run() {
                         std::snprintf(buf, sizeof(buf), "%s  %s", nm.c_str(), det);
                     } else if (j.state == 1) {
                         std::snprintf(buf, sizeof(buf), "%s  done", nm.c_str());
-                        if (j.total > 0) {
+                        if (j.intoVault) {
+                            // (Never a path in the vault. Such rows leave the list when the vault locks.)
+                            char mb[32];
+                            std::snprintf(mb, sizeof(mb), "%.1f MB \xB7 ", j.total / 1048576.0);
+                            di.detail = std::string("Completed \xB7 ") + (j.total > 0 ? mb : "") + "Stored in the vault";
+                        } else if (j.total > 0) {
                             // Where this job went (not the current setting), shortened like a path in the UI.
                             std::string where = std::filesystem::path(j.localPath).parent_path().string();
                             if (const char* home = std::getenv("HOME"); home && *home && where.rfind(home, 0) == 0) {
@@ -8030,19 +8088,9 @@ int App::run() {
                     } else if (hov >= 0 && hov < static_cast<int>(jobs.size())) {
                         const auto& j = jobs[static_cast<std::size_t>(hov)];
                         if (j.state == 1 && !j.localPath.empty()) {
-                            if (j.isDir) {
-                                browser_.openPath(j.localPath);
-                                downloadsWindow_ = false;
-                            } else {
-                                // Like a file from the file browser: the screen
-                                // picker / VR question appear in the Files hub.
-                                downloadsWindow_ = false;
-                                browser_.setOpen(true);
-                                playFromBrowser(j.localPath);
-                                // The picker it may open must not take this click too.
-                                in.select = false;
-                                in.togglePlay = false;
-                            }
+                            // Play / open it like the card's A button (never a plain copy in the
+                            // vault's download folder, nor a file a download still writes).
+                            openFinishedDownload(hov, in);
                             interacted = true;
                         }
                     }
@@ -9707,6 +9755,11 @@ int App::run() {
         rememberPlaybackPosition(slot);
     }
     playbackMemory_.save();
+#ifdef PIXELVR_HAVE_FREETYPE
+    // A running download stops now (its partial file goes), before the XR / Vulkan teardown: the
+    // player must not live on after quitting, waiting for smbclient (forever for a paused one).
+    browser_.shutdownDownloads();
+#endif
     if (renderer_.device() != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(renderer_.device());
     }

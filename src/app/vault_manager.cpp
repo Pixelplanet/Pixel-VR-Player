@@ -80,6 +80,22 @@ VaultManager::VaultManager() {
     };
 
     loadConfig();
+    registerLogRoots();
+}
+
+void VaultManager::registerLogRoots() const {
+    // Every log line hides paths under these folders (plain names in .incoming, plain-named vault
+    // folders). Only added, never removed: an old location stays hidden too. Locked or not.
+    std::string internal, card;
+    {
+        std::lock_guard<std::mutex> l(dirMu_);
+        internal = internalDir_;
+        card = cardDir_;
+    }
+    if (!internal.empty()) log::add_private_root(internal);
+    if (!card.empty()) log::add_private_root(card);
+    const std::string now = vaultDir();
+    if (!now.empty() && now != internal && now != card) log::add_private_root(now);
 }
 
 VaultManager::Location VaultManager::location() const {
@@ -199,6 +215,7 @@ void VaultManager::switchLocation(Location loc, const std::string& newDir, const
             cardId_ = cardId;
         }
     }
+    registerLogRoots();
     saveConfig();
     writeInternalMarker();
     PIXELVR_LOG_INFO("Vault location: %s", loc == Location::SdCard ? "SD card" : "internal");
@@ -399,8 +416,9 @@ void VaultManager::encryptLeftovers() {
                     } else {
                         fs::remove(out, e);
                     }
-                } else {
-                    PIXELVR_LOG_WARN("Vault: could not encrypt a file: %s", err2.c_str());
+                } else if (!stop()) {
+                    // (Not the error text: it may name the plain file.)
+                    PIXELVR_LOG_WARN("Vault: could not encrypt a file");
                 }
                 ++migDone_;
             }

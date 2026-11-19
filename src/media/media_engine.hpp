@@ -67,8 +67,21 @@ public:
     MediaEngine& operator=(const MediaEngine&) = delete;
 
     bool open(const std::string& path);
-    // Why the last open() failed, for the user (e.g. "no decoder for av1").
-    const std::string& lastError() const;
+    // Why the last open() failed, for the user (e.g. "no decoder for av1"); also why playback stopped
+    // (decoderFailed) or ended early (eof() with this set: "the file ends early ..."). Empty otherwise.
+    std::string lastError() const;
+    // The video decoder gave up while playing: a hardware session the firmware would not start (or
+    // that stopped), after one retry with fewer buffers and, at sizes software keeps up with, software.
+    // Nothing is read or shown meanwhile (no CPU, no log flood); lastError() says why, and
+    // hardwareBlockedBy() who else holds the decoder. A seek retries it, at most every few seconds.
+    bool decoderFailed() const;
+    // Counts decoder changes while playing (a stopped hardware session retried, replaced by software,
+    // given up or retried after a seek): when it changes, codecName(), hardwareBlockedBy() and
+    // decoderFailed() are worth reading again.
+    uint32_t decoderChanges() const;
+    // Routes FFmpeg's own messages through the log (filtered, repeats counted, at most 50 lines a
+    // second). Done by the first MediaEngine; call it earlier when FFmpeg is used before that.
+    static void installFfmpegLog();
     // Clear or trigger an open() abort flag so a background open() can be cancelled.
     void resetAbort();
     void abortOpen();
@@ -87,7 +100,8 @@ public:
     bool frameSequential() const;
     std::string codecName() const;   // decoder name + (hw)/(sw)
     // Non-empty when the hardware decoder was refused while another process
-    // held it ("steamwebhelper (3079)"): playback is in software because of it.
+    // held it ("steamwebhelper (3079)"): playback is in software because of it
+    // (or, with decoderFailed(), there is no picture because of it).
     std::string hardwareBlockedBy() const;
     // Who else has the hardware decoder open. steamHelper: a child process of Steam's web helper
     // (its GPU process decodes the videos in Steam's menus), ours to end and restarted by Steam.

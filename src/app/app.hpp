@@ -249,6 +249,9 @@ private:
     void updateDownloadsNav(XrInputState& in, std::chrono::steady_clock::time_point now, int sbHover);
     void downloadPrimaryAction(int job, XrInputState& in);  // Play / Pause / Retry
     void openFinishedDownload(int job, XrInputState& in);
+    // `path` is still being downloaded (or is a plain copy in the vault's download folder): not
+    // played or opened; a short notice says why (naming no file). True when refused.
+    bool refuseUnfinishedDownload(const std::string& path);
     void openDownloadMenu();
     void chooseDownloadMenu(const std::string& opt, XrInputState& in);
     void askStopDownload();       // the running transfer: asks, then stops it (its part is deleted)
@@ -600,6 +603,10 @@ private:
         double stallPos = -1.0;
         std::chrono::steady_clock::time_point stallSince{};
         bool stalled = false;
+        // MediaEngine::decoderChanges() last seen (a retry, a switch to software or giving up),
+        // and whether an early end ("the file ends early") was already reported.
+        uint32_t seenDecoderChanges = 0;
+        bool earlyEndShown = false;
         // Music queue: tracks skipped because they can't be played, said once the next one plays.
         int skippedTracks = 0;
         std::string skippedNote;

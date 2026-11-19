@@ -3,6 +3,7 @@
 #include "../../browser/mini_json.hpp"
 #include "plugins/plugin_files.hpp"
 #include "util/logging.hpp"
+#include "util/spawn.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -542,6 +543,7 @@ void PluginHost::start(Plugin& p) {
     posix_spawn_file_actions_adddup2(&fa, outPipe[1], STDOUT_FILENO);
     posix_spawn_file_actions_addopen(&fa, STDERR_FILENO, log.c_str(), O_WRONLY | O_CREAT | O_APPEND, 0600);
     posix_spawn_file_actions_addchdir_np(&fa, p.dir.c_str());
+    spawnutil::closeFrom(&fa, 3);  // (nothing of ours, e.g. a playing video's decoder, goes along)
     posix_spawnattr_t attr;
     posix_spawnattr_init(&attr);
     sigset_t none;
@@ -1100,7 +1102,12 @@ bool PluginHost::installPackage(const std::string& file, std::string& message) {
     for (std::string& a : argStore) argv.push_back(a.data());
     argv.push_back(nullptr);
     pid_t pid = -1;
-    if (posix_spawnp(&pid, "tar", nullptr, nullptr, argv.data(), environ) != 0) return fail("tar is missing");
+    posix_spawn_file_actions_t fa;
+    posix_spawn_file_actions_init(&fa);
+    spawnutil::closeFrom(&fa, 3);  // (nothing of ours, e.g. a playing video's decoder, goes along)
+    const int rc = posix_spawnp(&pid, "tar", &fa, nullptr, argv.data(), environ);
+    posix_spawn_file_actions_destroy(&fa);
+    if (rc != 0) return fail("tar is missing");
     int st = 0;
     while (waitpid(pid, &st, 0) < 0 && errno == EINTR) {
     }
@@ -1191,7 +1198,12 @@ bool PluginHost::probePackage(const std::string& file, PackageInfo& out) {
         for (auto& a : argStore) argv.push_back(a.data());
         argv.push_back(nullptr);
         pid_t pid = 0;
-        if (posix_spawnp(&pid, "tar", nullptr, nullptr, argv.data(), environ) == 0) {
+        posix_spawn_file_actions_t fa;
+        posix_spawn_file_actions_init(&fa);
+        spawnutil::closeFrom(&fa, 3);  // (nothing of ours goes along)
+        const int rc = posix_spawnp(&pid, "tar", &fa, nullptr, argv.data(), environ);
+        posix_spawn_file_actions_destroy(&fa);
+        if (rc == 0) {
             int st = 0;
             waitpid(pid, &st, 0);
             for (const auto& e : fs::directory_iterator(staging, ec)) {

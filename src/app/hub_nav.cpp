@@ -458,6 +458,9 @@ void App::openFinishedDownload(int job, XrInputState& in) {
     if (job < 0 || job >= static_cast<int>(jobs.size())) return;
     const Browser::DownloadJob j = jobs[static_cast<std::size_t>(job)];  // (a copy: the list may change)
     if (j.state != 1 || j.localPath.empty()) return;
+    // Never a plain copy in the vault's download folder (a vault download opens the vault folder
+    // that holds its encrypted copy once it is settled), nor a file a download still writes.
+    if (refuseUnfinishedDownload(j.localPath)) return;
     if (j.isDir) {
         browser_.openPath(j.localPath);
         downloadsWindow_ = false;
@@ -473,6 +476,18 @@ void App::openFinishedDownload(int job, XrInputState& in) {
 #else
     (void)job;
     (void)in;
+#endif
+}
+
+bool App::refuseUnfinishedDownload(const std::string& path) {
+#ifdef PIXELVR_HAVE_FREETYPE
+    if (!browser_.isUnfinishedDownload(path)) return false;
+    // (Private: the file may be one of a vault share; the notice goes when the vault locks.)
+    showNotice("This file isn't finished yet: it can be played once its download is complete", true, true);
+    return true;
+#else
+    (void)path;
+    return false;
 #endif
 }
 

@@ -28,7 +28,14 @@
 #include <unordered_map>
 #include <thread>
 #include <csignal>
+#include <cstdarg>
 #include <unistd.h>
+#ifdef __linux__
+#include <fcntl.h>
+#include <sched.h>
+#include <sys/resource.h>
+#include <sys/syscall.h>
+#endif
 
 extern "C" {
 #include <libavutil/stereo3d.h>
@@ -76,6 +83,212 @@ std::string decoderHolders() {
         out += (h.comm.empty() ? std::string("pid") : h.comm) + " (" + std::to_string(h.pid) + ")";
     }
     return out;
+}
+
+// ---- FFmpeg's own messages ------------------------------------------------------------------------
+// Without a callback FFmpeg writes every warning straight to stderr (run.log): no filter, no limit. A
+// hardware decoder session the firmware refused once logged "output POLLERR" for every packet, 35,000
+// lines a second. Here every line goes through our logger (and so through its filters, which hide
+// vault paths and addresses), identical lines in a row are counted instead of written, and at most
+// kFfLinesPerSec lines a second get through at all.
+namespace fflog {
+
+constexpr int kFfLinesPerSec = 50;
+constexpr std::size_t kFfBytesPerSec = 16u << 10;
+
+// The decode thread points this at its engine's counter: v4l2m2m runs on the thread that feeds it, so
+// a refused session's POLLERR lines are counted for that engine alone (the failure breaker uses it).
+thread_local std::atomic<uint32_t>* t_pollErrs = nullptr;
+
+struct State {
+    std::mutex mutex;
+    int64_t windowStartMs = 0;
+    int lines = 0;
+    std::size_t bytes = 0;
+    uint64_t dropped = 0;
+    std::string lastKey;
+    log::Level lastLevel = log::Level::Warn;
+    uint64_t repeats = 0;
+    int64_t repeatsSinceMs = 0;
+};
+
+State& state() {
+    static State* s = new State;  // (never destroyed: FFmpeg threads may still log at exit)
+    return *s;
+}
+
+int64_t steadyMs() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+log::Level levelFor(int level) {
+    if (level <= AV_LOG_ERROR) return log::Level::Error;
+    if (level <= AV_LOG_WARNING) return log::Level::Warn;
+    if (level <= AV_LOG_INFO) return log::Level::Info;
+    return log::Level::Debug;
+}
+
+// What makes two lines "the same message": numbers and addresses left out, so "partial file" at every
+// offset, or the same warning from another decoder instance, counts as one.
+void keyOf(const char* line, std::string& key) {
+    key.clear();
+    for (const char* p = line; *p != '\0' && key.size() < 200;) {
+        if (p[0] == '0' && (p[1] == 'x' || p[1] == 'X') && std::isxdigit(static_cast<unsigned char>(p[2]))) {
+            p += 2;
+            while (std::isxdigit(static_cast<unsigned char>(*p))) ++p;
+            key += '#';
+        } else if (std::isdigit(static_cast<unsigned char>(*p))) {
+            while (std::isdigit(static_cast<unsigned char>(*p))) ++p;
+            key += '#';
+        } else {
+            key += *p++;
+        }
+    }
+}
+
+void callback(void* avcl, int levelAndTint, const char* fmt, va_list vl) {
+    if (fmt == nullptr) return;
+    const int level = levelAndTint & 0xff;  // (the upper bits can carry a colour)
+    if (t_pollErrs != nullptr && level <= AV_LOG_WARNING && std::strstr(fmt, "POLLERR") != nullptr) {
+        t_pollErrs->fetch_add(1, std::memory_order_relaxed);
+    }
+    if (level > av_log_get_level()) return;
+    thread_local int printPrefix = 1;
+    char line[1024];
+    va_list copy;
+    va_copy(copy, vl);
+    av_log_format_line2(avcl, level, fmt, copy, line, static_cast<int>(sizeof(line)), &printPrefix);
+    va_end(copy);
+    std::size_t n = std::strlen(line);
+    while (n > 0 && (line[n - 1] == '\n' || line[n - 1] == '\r' || line[n - 1] == ' ')) line[--n] = '\0';
+    if (n == 0) return;
+    std::string key;
+    keyOf(line, key);
+
+    // Collected under the lock, written after it (the logger has a lock of its own).
+    std::vector<std::pair<log::Level, std::string>> out;
+    State& s = state();
+    {
+        std::lock_guard<std::mutex> lock(s.mutex);
+        const int64_t now = steadyMs();
+        if (now - s.windowStartMs >= 1000) {
+            if (s.dropped > 0) {
+                out.emplace_back(log::Level::Warn, "FFmpeg: " + std::to_string(s.dropped) +
+                                                       " more FFmpeg lines not logged (too many a second)");
+                s.dropped = 0;
+            }
+            s.windowStartMs = now;
+            s.lines = 0;
+            s.bytes = 0;
+        }
+        auto emit = [&](log::Level lv, std::string text) {
+            if (s.lines >= kFfLinesPerSec || s.bytes >= kFfBytesPerSec) {
+                ++s.dropped;
+                return;
+            }
+            ++s.lines;
+            s.bytes += text.size();
+            out.emplace_back(lv, std::move(text));
+        };
+        auto flushRepeats = [&] {
+            if (s.repeats == 0) return;
+            emit(s.lastLevel, "FFmpeg: last message repeated " + std::to_string(s.repeats) + " times");
+            s.repeats = 0;
+            s.repeatsSinceMs = 0;
+        };
+        if (key == s.lastKey) {
+            ++s.repeats;
+            if (s.repeatsSinceMs == 0) s.repeatsSinceMs = now;
+            if (now - s.repeatsSinceMs >= 1000) flushRepeats();  // at most one count a second
+        } else {
+            flushRepeats();
+            s.lastKey = key;
+            s.lastLevel = levelFor(level);
+            emit(s.lastLevel, std::string("FFmpeg: ") + line);
+        }
+    }
+    for (auto& [lv, text] : out) log::write(lv, text);
+}
+
+void install() {
+    static std::once_flag once;
+    std::call_once(once, [] {
+        // Warnings and errors; FFmpeg's info lines too when our own log is at debug or finer.
+        const int lv = static_cast<int>(log::level()) <= static_cast<int>(log::Level::Debug) ? AV_LOG_INFO : AV_LOG_WARNING;
+        av_log_set_level(lv);
+        av_log_set_callback(&callback);
+    });
+}
+
+}  // namespace fflog
+
+// Capture (decoded picture) buffers to ask the Iris decoder for. Measured on SteamOS 0.5.10 (the
+// in-tree qcom_iris driver) with stock hevc_v4l2m2m and MMAP capture: 7200x3600 8-bit starts with at
+// most 18 buffers in all and is refused with 19 or more (at capture STREAMON; every packet then ends in
+// POLLERR and no picture comes), 8192x4096 with at most 16, 10-bit 7200x3600 with 16 (refused at 20),
+// 3840x2160 with 32. With drm_prime the dmabuf patch adds the driver's own minimum (4 or 5 now, 7 on
+// the old driver) to the number asked for; without drm_prime the number is the whole count (FFmpeg's
+// default 20 is then too many for 8K). `reduced`: the retry after a session that would not start.
+int captureBufferRequest(int width, int height, bool highBitDepth, bool drm, bool reduced) {
+    const int64_t px = static_cast<int64_t>(width) * height;
+    // The size the decoder lays a frame out in (NV12, 128 x 32 aligned) sets the class.
+    const int64_t aligned = ((static_cast<int64_t>(width) + 127) / 128 * 128) *
+                            ((static_cast<int64_t>(height) + 31) / 32 * 32) * 3 / 2;
+    const bool huge = aligned > (45ll << 20);  // 8192x4096 (48 MiB)
+    const bool big = aligned > (32ll << 20);   // 7200x3600 (37.7 MiB)
+    if (!drm) {
+        // (10-bit: 16 is the measured limit at 7200x3600, so two fewer for a margin.)
+        int n = huge ? (highBitDepth ? 12 : 14) : big ? (highBitDepth ? 14 : 16) : 20;
+        if (reduced) n = std::min(n, 12);
+        return n;
+    }
+    // Bound the decoded-buffer memory too: at 8K a frame is 40-80 MiB.
+    const int64_t frameBytes = highBitDepth ? px * 3 : px * 3 / 2;  // P010 / NV12
+    constexpr int64_t kBudget = 640ll << 20;
+    int n = static_cast<int>(std::clamp<int64_t>(kBudget / std::max<int64_t>(frameBytes, 1), 4, 20));
+    // Plus the minimum of 4-5: 8192x4096 14-15 of 16, 7200x3600 16-17 of 18, 10-bit 7200x3600 14-15
+    // of 16 (with the old driver's 7: 17 / 19 of its 20).
+    if (huge) n = std::min(n, highBitDepth ? 8 : 10);
+    else if (big) n = std::min(n, highBitDepth ? 10 : 12);
+    if (reduced) n = std::min(n, 8);
+    return n;
+}
+
+// How many threads a software decoder may use: all cores but two, so a software 4K / 8K decode
+// never takes the CPU the compositor and SteamVR need (FFmpeg's "auto" takes every core).
+int softwareDecodeThreads() {
+    const unsigned cores = std::thread::hardware_concurrency();
+    return cores == 0 ? 0 : static_cast<int>(std::max(1u, cores > 2 ? cores - 2 : 1u));
+}
+
+// FFmpeg opens the V4L2 decoder without O_CLOEXEC, so every program the player starts (smbclient for
+// a download, helpers) inherited the open session and kept it alive in the driver until it exited; the
+// next 8K session was then refused. Marks our decoder file descriptors close-on-exec after each open.
+void keepDecoderFdsFromChildren() {
+#ifdef __linux__
+    std::error_code ec;
+    for (const auto& e : std::filesystem::directory_iterator("/proc/self/fd", ec)) {
+        std::error_code linkEc;
+        const std::string target = std::filesystem::read_symlink(e.path(), linkEc).string();
+        if (linkEc || target.rfind("/dev/video", 0) != 0) continue;
+        const int fd = std::atoi(e.path().filename().string().c_str());
+        const int flags = fcntl(fd, F_GETFD);
+        if (flags >= 0 && (flags & FD_CLOEXEC) == 0) fcntl(fd, F_SETFD, flags | FD_CLOEXEC);
+    }
+#endif
+}
+
+// Background work that must never compete with the headset's own threads: lowest CFS weight and
+// SCHED_BATCH for the calling thread. A raised nice value cannot be lowered again without
+// privileges, so only threads that do nothing else call this, once at their start.
+void makeThreadBackground() {
+#ifdef __linux__
+    setpriority(PRIO_PROCESS, static_cast<id_t>(syscall(SYS_gettid)), 10);
+    sched_param sp{};
+    sp.sched_priority = 0;
+    sched_setscheduler(0, SCHED_BATCH, &sp);
+#endif
 }
 
 #ifdef PIXELVR_HAVE_SMB
@@ -243,6 +456,7 @@ struct ReadAhead {
 
     void run() {
         int64_t pos = 0;
+        int readErrors = 0;  // failed reads in a row at `pos`
         std::vector<uint8_t> chunk(kChunk);
         for (;;) {
             std::size_t want;
@@ -265,16 +479,33 @@ struct ReadAhead {
                 if (eof) continue;
                 want = std::min(ring.size() - fill, chunk.size());
             }
-            if (doSeek) source->seek(seekPos);
+            if (doSeek) {
+                source->seek(seekPos);
+                readErrors = 0;
+            }
             if (want == 0) continue;
             const int n = source->read(chunk.data(), static_cast<int>(want));
-            std::lock_guard<std::mutex> lk(mutex);
+            std::unique_lock<std::mutex> lk(mutex);
             if (stop || pendingSeek) continue;  // a seek/stop superseded this read
             if (n <= 0) {
+                // A failed or short read before the file's known end (a dropped connection, a busy
+                // server) is not its end: wait and read the same place again a few times (about 6 s
+                // in all) before the reader is told the file ends here.
+                const bool midFile = fileSize < 0 ? n < 0 : pos < fileSize;
+                if (midFile && readErrors < 5) {
+                    ++readErrors;
+                    spaceCv.wait_for(lk, std::chrono::milliseconds(100 << readErrors),
+                                     [this] { return stop || pendingSeek; });
+                    if (stop || pendingSeek) continue;
+                    lk.unlock();
+                    source->seek(pos);  // (the failed read left the file's position unknown)
+                    continue;
+                }
                 eof = true;
                 dataCv.notify_all();
                 continue;
             }
+            readErrors = 0;
             const std::size_t w = (head + fill) % ring.size();
             const std::size_t first = std::min(static_cast<std::size_t>(n), ring.size() - w);
             std::memcpy(ring.data() + w, chunk.data(), first);
@@ -323,6 +554,17 @@ struct ReadAhead {
         spaceCv.notify_all();
         dataCv.notify_all();
         return target;
+    }
+
+    // After the read-ahead gave up on a failing read (its end is sticky until a seek): reads again
+    // from where the consumer stands.
+    void retry() {
+        std::lock_guard<std::mutex> lk(mutex);
+        if (!eof || fill > 0 || stop || source == nullptr) return;
+        prefetchPos = consumePos;
+        eof = false;
+        pendingSeek = true;
+        spaceCv.notify_all();
     }
 
     // Unblocks a consumer stalled in read() so the decode thread can exit; the
@@ -533,10 +775,23 @@ struct MediaEngine::Impl {
     int readRetries = 0;
     AVRational timeBase{1, 1};
     int drmDiag = 0;
+    // codecName, hwBlockedBy and lastError change on the decode thread too (a hardware session that
+    // stops): written and read under statusMutex once the decode thread runs.
+    mutable std::mutex statusMutex;
     std::string codecName;
     std::string hwBlockedBy;  // who else held the hardware decoder when it was refused
     const AVCodec* videoDecoder = nullptr;  // retained for reopen-on-seek
     bool decoderDrm = false;                // apply drm_prime opts on reopen
+    bool highBitDepth = false;              // 10-bit source (capture buffer limits)
+    // The hardware decoder failure breaker (decode thread). A V4L2 session the firmware refuses
+    // fails only at its first packets, after avcodec_open2 succeeded: it then takes packets and gives
+    // no picture, or logs POLLERR for each one.
+    std::atomic<uint32_t> pollErrs{0};           // FFmpeg "POLLERR" lines on this engine's decode thread
+    std::atomic<bool> decoderFailed{false};      // given up: no picture, lastError says why
+    std::atomic<uint32_t> decoderSwitches{0};    // decoder changed or given up while playing
+    bool reducedBuffers = false;                 // the retry with fewer capture buffers was made
+    int hwTrips = 0;                             // sessions that stopped in this file
+    bool swFallbackAllowed = false;              // software can take over at this size
     // Frame-sequential 3D (FS3D): left and right views alternate frame by frame (e.g. 48 fps = 24 per
     // eye). The decode thread pairs them into one full side-by-side frame, so the rest of the player
     // sees a 2x-wide SBS video at half the frame rate.
@@ -716,7 +971,11 @@ struct MediaEngine::Impl {
     std::atomic<uint64_t> clockWaitCount{0};
     FormatHint formatHint;
     ChapterList chapters;
-    std::string lastError;  // set when open() fails
+    std::string lastError;  // set when open() fails, or the decoder gives up while playing (statusMutex)
+    void setLastError(std::string text) {
+        std::lock_guard<std::mutex> lock(statusMutex);
+        lastError = std::move(text);
+    }
     AudioTags tags;
     std::atomic<float> volume{1.0f};
     VideoFrame card;
@@ -849,20 +1108,37 @@ struct MediaEngine::Impl {
         codec = avcodec_alloc_context3(videoDecoder);
         if (codec == nullptr ||
             avcodec_parameters_to_context(codec, s->codecpar) < 0) {
+            if (codec != nullptr) avcodec_free_context(&codec);
             return false;
         }
         codec->pkt_timebase = s->time_base;
-        codec->thread_count = 0;  // Multi-threaded SW decode across all CPU cores
+        codec->thread_count = softwareDecodeThreads();  // software: all cores but two
         codec->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
         if (std::strstr(videoDecoder->name, "v4l2m2m") != nullptr) {
             av_opt_set_int(codec->priv_data, "num_output_buffers", 4, 0);
+            if (captureBuffers > 0) av_opt_set_int(codec->priv_data, "num_capture_buffers", captureBuffers, 0);
         }
         if (decoderDrm) {
-            av_opt_set_int(codec->priv_data, "num_capture_buffers", captureBuffers, 0);
             av_opt_set_int(codec->priv_data, "drm_prime", 1, 0);
             codec->apply_cropping = 0;
         }
-        return avcodec_open2(codec, videoDecoder, nullptr) >= 0;
+        if (avcodec_open2(codec, videoDecoder, nullptr) < 0) {
+            avcodec_free_context(&codec);  // (null, not allocated but unopened: nothing is fed to it)
+            return false;
+        }
+        if (std::strstr(videoDecoder->name, "v4l2m2m") != nullptr) keepDecoderFdsFromChildren();
+        return true;
+    }
+
+    // Capture buffers for the chosen decoder at this file's size (see captureBufferRequest), and the
+    // frame queue that leaves the decoder enough of them: the queue's dma-bufs are capture buffers.
+    void chooseCaptureBuffers(const AVCodecParameters* par) {
+        const bool hw = videoDecoder != nullptr && std::strstr(videoDecoder->name, "v4l2m2m") != nullptr;
+        captureBuffers = hw ? captureBufferRequest(par->width, par->height, highBitDepth, decoderDrm, reducedBuffers) : 0;
+        // A deeper queue absorbs bursty decode output (B-frame reorder, SMB jitter) so low-framerate
+        // playback doesn't underrun and judder; 5 stay with the decoder beyond its own minimum.
+        std::lock_guard<std::mutex> lock(mutex);  // (pushDrm reads it)
+        maxQueue = decoderDrm ? static_cast<std::size_t>(std::clamp(captureBuffers - 5, 1, 14)) : kMaxQueue;
     }
 
     void decodeLoop();
@@ -1177,6 +1453,7 @@ void MediaEngine::Impl::stopSubtitleCatchUp() {
 }
 
 void MediaEngine::Impl::subtitleCatchUpLoop(std::shared_ptr<SubCatchUp> st) {
+    makeThreadBackground();     // (its own thread: it only reads ahead for subtitles)
     SubtitleCatchUpSource src;  // opened at the first request, kept for the next seeks
     int failures = 0;
     std::map<int, bool> indexed;  // per subtitle stream: the file lists where its entries are
@@ -1524,6 +1801,36 @@ void MediaEngine::Impl::decodeLoop() {
     bool haveClock = false;
     bool eofFlushed = false;
     bool wasPaused = false;
+    fflog::t_pollErrs = &pollErrs;  // (cleared before the thread ends)
+    // Decoder progress, for the in-flight cap and the failure breaker: video packets taken since the
+    // last picture came out, failed sends in a row, and when the last picture came (or the feeding
+    // restarted: open, seek, resume).
+    int pktsSinceFrame = 0;
+    int hardErrors = 0;
+    [[maybe_unused]] int audioErrors = 0;  // (Pulse builds)
+    uint32_t pollErrsAtFrame = pollErrs.load(std::memory_order_relaxed);
+    clock::time_point lastVideoOut = clock::now();
+    auto progressReset = [&] {
+        pktsSinceFrame = 0;
+        hardErrors = 0;
+        lastVideoOut = clock::now();
+        pollErrsAtFrame = pollErrs.load(std::memory_order_relaxed);
+    };
+    // Read errors before the real end (a file still growing, a dropped share): retried, see below.
+    int midReadErrors = 0;
+    double lastPacketPts = -1.0;  // the newest packet time read, in seconds from the file's start
+    const double formatStart = (format != nullptr && format->start_time != AV_NOPTS_VALUE)
+                                   ? static_cast<double>(format->start_time) / AV_TIME_BASE
+                                   : 0.0;
+    bool failedIdle = false;                // given up on the decoder: read nothing until a retry
+    clock::time_point nextDecoderRetry{};   // a seek may retry the hardware decoder from then on
+    // Sleeps that end early for a stop or a seek.
+    auto nap = [&](int ms) {
+        const auto until = clock::now() + std::chrono::milliseconds(ms);
+        while (running.load() && seekTarget.load() < 0.0 && clock::now() < until) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(std::min(ms, 20)));
+        }
+    };
     auto lastSeekWall = clock::now() - std::chrono::seconds(1);
     // Frame-accurate seeking: the demuxer lands on the keyframe at or before
     // the target, so video frames and audio before the target are decoded and
@@ -1869,10 +2176,16 @@ void MediaEngine::Impl::decodeLoop() {
     };
 #endif
 
-    auto drain = [&](AVCodecContext* ctx, bool video) {
+    // Takes every frame the decoder has ready; returns how many.
+    auto drain = [&](AVCodecContext* ctx, bool video) -> int {
+        int got = 0;
+        if (ctx == nullptr) return 0;
         while (avcodec_receive_frame(ctx, frame) == 0) {
+            ++got;
             if (video) {
+                progressReset();  // (frames dropped after a seek count: the decoder works)
                 process_video();
+                lastVideoOut = clock::now();  // (process_video may have waited for a queue slot)
             }
 #ifdef PIXELVR_HAVE_PULSE
             else {
@@ -1883,9 +2196,143 @@ void MediaEngine::Impl::decodeLoop() {
                 break;
             }
         }
+        return got;
     };
 
+    auto hwDecoder = [&] {
+        return videoDecoder != nullptr && std::strstr(videoDecoder->name, "v4l2m2m") != nullptr;
+    };
+    // A hardware session that does not start or stopped: packets go in, no picture comes out. Only
+    // asked while packets are fed (not paused, not at the end), so waits for data never count.
+    auto decoderDead = [&](const char*& why) -> bool {
+        if (audioOnly || codec == nullptr || !hwDecoder()) return false;
+        const double quiet = std::chrono::duration<double>(clock::now() - lastVideoOut).count();
+        const uint32_t pe = pollErrs.load(std::memory_order_relaxed) - pollErrsAtFrame;
+        if (pe >= 64 && pktsSinceFrame >= 16) {
+            why = "the session reports POLLERR";
+            return true;
+        }
+        if (hardErrors >= 30) {
+            why = "packets refused";
+            return true;
+        }
+        // (A working decoder holds about 4 + 16 packets before its first picture.)
+        if (pktsSinceFrame >= 48 && quiet >= 3.0) {
+            why = "no picture";
+            return true;
+        }
+        return false;
+    };
+    // Where playback stands, to start again from.
+    auto resumePoint = [&] {
+        const double shown = displayPos.load();
+        return std::max(0.0, shown >= 0.0 ? shown : masterClock.load());
+    };
+    // Starts decoding again at `at` through the seek path (which reopens the decoder), unless the
+    // user asked for a seek meanwhile: theirs wins. Not a user seek: position() keeps its value.
+    auto internalSeek = [&](double at) {
+        double none = -1.0;
+        seekTarget.compare_exchange_strong(none, at);
+    };
+    constexpr int kMaxDecoderTrips = 5;  // failing sessions per file, retries included
+    // Stops a dead hardware session: first once more with fewer capture buffers (the firmware
+    // refuses a session that asks for too many), then software where it can keep up, else no picture
+    // and a reason for the user. The session is freed at once (it holds the firmware's resources).
+    auto tripDecoder = [&](const char* why) {
+        const bool hw = hwDecoder();
+        const std::string holders = hw ? decoderHolders() : std::string();
+        const double quiet = std::chrono::duration<double>(clock::now() - lastVideoOut).count();
+        // (No path here: nothing about the file is logged, so nothing about a vault file either.)
+        PIXELVR_LOG_WARN("MediaEngine: %s video decoder stopped (%s): %d packets and %.1f s without a picture, "
+                         "%u POLLERR, %d errors, %d capture buffers%s%s%s",
+                         hw ? "hardware" : "software", why, pktsSinceFrame, quiet, pollErrs.load(std::memory_order_relaxed) - pollErrsAtFrame,
+                         hardErrors, captureBuffers, holders.empty() ? "" : " (decoder also open in: ",
+                         holders.c_str(), holders.empty() ? "" : ")");
+        {
+            // Release every held dma-buf first, as for a seek.
+            std::unique_lock<std::mutex> lock(mutex);
+            clearQueues();
+            releaseReq.store(true);
+            releaseCv.wait_for(lock, std::chrono::milliseconds(150), [&] {
+                return !releaseReq.load() || !running.load();
+            });
+        }
+        if (codec != nullptr) avcodec_free_context(&codec);
+        ++hwTrips;
+        decoderSwitches.fetch_add(1, std::memory_order_relaxed);
+        AVStream* vs = format->streams[videoStream];
+        const double at = resumePoint();
+        if (hw && !reducedBuffers && captureBuffers > 0 &&
+            captureBuffers > captureBufferRequest(vs->codecpar->width, vs->codecpar->height, highBitDepth, decoderDrm, true)) {
+            reducedBuffers = true;
+            chooseCaptureBuffers(vs->codecpar);
+            PIXELVR_LOG_INFO("MediaEngine: trying the hardware decoder again with %d capture buffers", captureBuffers);
+            internalSeek(at);
+            progressReset();
+            return;
+        }
+        if (hw && swFallbackAllowed && !usingDrm.load()) {
+            // (Only before any dma-buf frame was shown: the screen then takes the copied frames as
+            // for any software file.)
+            if (const AVCodec* sw = avcodec_find_decoder(vs->codecpar->codec_id)) {
+                videoDecoder = sw;
+                decoderDrm = false;
+                chooseCaptureBuffers(vs->codecpar);
+                {
+                    std::lock_guard<std::mutex> lock(statusMutex);
+                    hwBlockedBy = holders;
+                    codecName = std::string(sw->name) + " (sw)";
+                }
+                PIXELVR_LOG_WARN("MediaEngine: playing on in software (%s)", sw->name);
+                internalSeek(at);
+                progressReset();
+                return;
+            }
+        }
+        // Given up. A later seek may try again, after a wait that grows with each failure.
+        failedIdle = true;
+        nextDecoderRetry = clock::now() + std::chrono::seconds(2 << std::min(hwTrips, 4));
+        {
+            std::lock_guard<std::mutex> lock(statusMutex);
+            if (hw) hwBlockedBy = holders;
+            lastError = !hw              ? std::string("the video could not be decoded")
+                        : holders.empty() ? std::string("the hardware video decoder would not start")
+                                          : "the hardware video decoder would not start (also in use by " + holders + ")";
+        }
+        decoderFailed.store(true);
+        PIXELVR_LOG_WARN("MediaEngine: no picture: the %s video decoder gave up (retry %s)", hw ? "hardware" : "software",
+                         hwTrips < kMaxDecoderTrips ? "on the next seek" : "when the file is opened again");
+    };
+
+    constexpr int kMaxPacketsInFlight = 64;
+    bool ptsSeen = false;  // a packet with a time was read since the start or the last seek
+
     while (running.load()) {
+        // Given up on the decoder (tripDecoder): nothing is read or fed, so a session the firmware
+        // refuses is not started again and again. A seek tries once more, when the back-off has
+        // passed (it waits until then); after kMaxDecoderTrips seeks only move the position.
+        if (failedIdle) {
+            if (seekTarget.load() >= 0.0) {
+                if (hwTrips < kMaxDecoderTrips && clock::now() >= nextDecoderRetry) {
+                    failedIdle = false;
+                    decoderFailed.store(false);
+                    {
+                        std::lock_guard<std::mutex> lock(statusMutex);
+                        lastError.clear();
+                    }
+                    decoderSwitches.fetch_add(1, std::memory_order_relaxed);
+                    PIXELVR_LOG_INFO("MediaEngine: trying the video decoder again");
+                } else if (hwTrips >= kMaxDecoderTrips) {
+                    std::lock_guard<std::mutex> lock(mutex);
+                    masterClock.store(seekTarget.exchange(-1.0));
+                    appliedSerial = seekSerial;  // (position() keeps the target: nothing is shown)
+                }
+            }
+            if (failedIdle) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+                continue;
+            }
+        }
         // Throttle seek handling to ~8/s. Rapid scrubbing otherwise flushes the
         // hardware decoder faster than it can emit a frame, wedging it so the
         // picture freezes; a deferred seek stays in seekTarget, so the latest
@@ -1945,7 +2392,16 @@ void MediaEngine::Impl::decodeLoop() {
             discardCount = 0;
             eofFlushed = false;
             readRetries = 0;
+            midReadErrors = 0;
+            lastPacketPts = seekTo;
+            ptsSeen = false;
+            audioErrors = 0;
             eof.store(false);
+            progressReset();
+            if (!reopened) {
+                tripDecoder("it could not be opened again");
+                continue;
+            }
         }
         if (paused.load()) {
             if (!wasPaused) {
@@ -1960,6 +2416,7 @@ void MediaEngine::Impl::decodeLoop() {
             }
             haveClock = false;  // re-establish the wall clock on resume
             playClock.freeze();  // hold the clock so video doesn't advance
+            lastVideoOut = clock::now();  // (a pause is no time without a picture)
             std::this_thread::sleep_for(std::chrono::milliseconds(10));
             continue;
         }
@@ -1970,41 +2427,8 @@ void MediaEngine::Impl::decodeLoop() {
 #endif
         }
         playClock.resume();  // no-op unless resuming from pause
-        const int readResult = av_read_frame(format, packet);
-        // The I/O position at the file's known size is its real end, whatever error came with it.
-        const int64_t ioSize = (format->pb != nullptr) ? avio_size(format->pb) : -1;
-        const bool atFileEnd = ioSize > 0 && avio_tell(format->pb) >= ioSize;
-        if (readResult >= 0) {
-            readRetries = 0;
-        } else if (httpSource && !eofFlushed && readRetries < 6 && !atFileEnd &&
-                   (readResult != AVERROR_EOF || duration <= 0.0 || masterClock.load() < duration - 15.0)) {
-            // A dropped connection far from the end is not the end of the file:
-            // re-seek the I/O layer to where it stopped (this clears its sticky
-            // EOF/error flag and makes the HTTP layer open a fresh request).
-            ++readRetries;
-            PIXELVR_LOG_WARN("MediaEngine: network read error (%d), retry %d", readResult, readRetries);
-            std::this_thread::sleep_for(std::chrono::milliseconds(300 * readRetries));
-            if (format->pb != nullptr) avio_seek(format->pb, avio_tell(format->pb), SEEK_SET | AVSEEK_FORCE);
-            continue;
-        }
-        if (readResult < 0) {
-            if (!eofFlushed) {
-                // A seek at the very end: show the last frames rather than none.
-                videoDiscardUntil = -1.0;
-                audioDiscardUntil = -1.0;
-                if (codec != nullptr) {
-                    avcodec_send_packet(codec, nullptr);  // flush video
-                    drain(codec, true);
-                }
-#ifdef PIXELVR_HAVE_PULSE
-                if (audioEnabled) {
-                    avcodec_send_packet(audioCodec, nullptr);
-                    drain(audioCodec, false);
-                }
-#endif
-                eofFlushed = true;
-                if (!audioOnly) eof.store(true);
-            }
+        if (eofFlushed) {
+            // The end: the decoders are drained, so nothing more would be taken. Wait for a seek.
 #ifdef PIXELVR_HAVE_PULSE
             if (audioOnly && !eof.load()) {
                 // Audio files end once the queued sound has played.
@@ -2014,20 +2438,179 @@ void MediaEngine::Impl::decodeLoop() {
 #else
             eof.store(true);
 #endif
+            lastVideoOut = clock::now();
+            std::this_thread::sleep_for(std::chrono::milliseconds(audioOnly && !eof.load() ? 15 : 50));
+            continue;
+        }
+        if (!audioOnly) {
+            if (codec == nullptr) {
+                // (A restart is on its way through the seek path, which opens one.)
+                if (seekTarget.load() >= 0.0) {
+                    std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                } else {
+                    tripDecoder("there is no decoder");
+                }
+                continue;
+            }
+            // Packets in, no picture out: let the decoder give out what it has, then feed it slowly (a
+            // refused session took them at disk speed, 8,750 a second, each logging POLLERR). Not a full
+            // stop: a decoder skipping to the next key frame (a stream entered mid-GOP, a damaged run)
+            // needs more packets before its next picture, and decoderDead() is only asked of hardware.
+            if (pktsSinceFrame >= kMaxPacketsInFlight) {
+                drain(codec, true);
+                if (pktsSinceFrame >= kMaxPacketsInFlight) {
+                    const char* why = nullptr;
+                    if (decoderDead(why)) {
+                        tripDecoder(why);
+                        continue;
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(hwDecoder() ? 10 : 2));
+                }
+            }
+        }
+        const int readResult = av_read_frame(format, packet);
+        // The I/O position at the file's known size is its real end, whatever error came with it.
+        const int64_t ioSize = (format->pb != nullptr) ? avio_size(format->pb) : -1;
+        const bool atFileEnd = ioSize > 0 && avio_tell(format->pb) >= ioSize;
+        if (readResult >= 0) {
+            readRetries = 0;
+            midReadErrors = 0;
+            const int64_t pts = packet->pts != AV_NOPTS_VALUE ? packet->pts : packet->dts;
+            if (pts != AV_NOPTS_VALUE && packet->stream_index >= 0 &&
+                packet->stream_index < static_cast<int>(format->nb_streams)) {
+                const double t = static_cast<double>(pts) * av_q2d(format->streams[packet->stream_index]->time_base) -
+                                 formatStart;
+                if (!ptsSeen || t > lastPacketPts) lastPacketPts = t;
+                ptsSeen = true;
+            }
+        } else if (httpSource && !eofFlushed && readRetries < 6 && !atFileEnd &&
+                   (readResult != AVERROR_EOF || duration <= 0.0 || masterClock.load() < duration - 15.0)) {
+            // A dropped connection far from the end is not the end of the file:
+            // re-seek the I/O layer to where it stopped (this clears its sticky
+            // EOF/error flag and makes the HTTP layer open a fresh request).
+            ++readRetries;
+            PIXELVR_LOG_WARN("MediaEngine: network read error (%d), retry %d", readResult, readRetries);
+            nap(300 * readRetries);
+            if (format->pb != nullptr) avio_seek(format->pb, avio_tell(format->pb), SEEK_SET | AVSEEK_FORCE);
+            continue;
+        }
+        if (readResult < 0 && !httpSource && readResult != AVERROR_EXIT && running.load()) {
+            // Only the real end ends playback. A read error, a short read or an "end" well before the
+            // file's length (a file still being written, a share that dropped, a damaged packet the
+            // demuxer skipped) is waited out and read again, about 11 s in all; then the file counts
+            // as ending early, with a reason.
+            const bool nearEnd = duration <= 0.0 || !ptsSeen ||
+                                 lastPacketPts >= duration - std::max(2.0, 0.01 * duration);
+            // (Near the end, at the file's last byte, any error is the end: a damaged tail.)
+            const bool realEnd = nearEnd && (readResult == AVERROR_EOF || atFileEnd);
+            // At the last byte of a file whose length promises more (a download still being written,
+            // or a length estimated too long): a short wait for it to grow, not 11 s at every such end.
+            // A share's read-ahead already retried each failing read for about 6 s: twice more is enough.
+            const int maxTries = atFileEnd ? 3 : (avio != nullptr && avio == format->pb) ? 2 : 8;
+            if (!realEnd && midReadErrors < maxTries) {
+                ++midReadErrors;
+                if (midReadErrors <= 2) {
+                    char why[96] = "";
+                    av_strerror(readResult, why, sizeof(why));
+                    // (No path: the filter would hide a vault file's, but nothing names it here at all.)
+                    PIXELVR_LOG_WARN("MediaEngine: read error before the end at %.1f s (%s), retry %d", lastPacketPts,
+                                     why, midReadErrors);
+                }
+                nap(std::min(100 << midReadErrors, 2000));
+                if (format->pb != nullptr) {
+                    // Read the same place again: clears the I/O layer's sticky end / error, and a share's
+                    // read-ahead reads from where it stopped.
+                    if (avio == format->pb) remoteReader.retry();
+                    format->pb->error = 0;
+                    avio_seek(format->pb, avio_tell(format->pb), SEEK_SET);
+                }
+                lastVideoOut = clock::now();
+                continue;
+            }
+            if (!realEnd) {
+                PIXELVR_LOG_WARN("MediaEngine: the file ends early at %.1f s of %.1f s (it may be incomplete)",
+                                 lastPacketPts, duration);
+                std::lock_guard<std::mutex> lock(statusMutex);
+                lastError = "the file ends early (it may be incomplete or still downloading)";
+            }
+        }
+        if (readResult < 0) {
+            // A seek at the very end: show the last frames rather than none.
+            videoDiscardUntil = -1.0;
+            audioDiscardUntil = -1.0;
+            if (codec != nullptr) {
+                avcodec_send_packet(codec, nullptr);  // flush video
+                drain(codec, true);
+            }
+#ifdef PIXELVR_HAVE_PULSE
+            if (audioEnabled) {
+                avcodec_send_packet(audioCodec, nullptr);
+                drain(audioCodec, false);
+            }
+#endif
+            eofFlushed = true;
+            if (!audioOnly) eof.store(true);
             // Stay alive so a seek can resume instead of ending the thread.
-            std::this_thread::sleep_for(std::chrono::milliseconds(15));
             continue;
         }
 
-        if (packet->stream_index == videoStream) {
-            if (avcodec_send_packet(codec, packet) == 0) {
-                drain(codec, true);
+        if (packet->stream_index == videoStream && !audioOnly) {
+            int rc = avcodec_send_packet(codec, packet);
+            const char* why = nullptr;
+            bool dead = false;
+            int spins = 0;
+            while (rc == AVERROR(EAGAIN) && running.load() && seekTarget.load() < 0.0) {
+                // Full: take its pictures out, then hand in the same packet again (dropping it broke
+                // the picture until the next key frame).
+                const int got = drain(codec, true);
+                rc = avcodec_send_packet(codec, packet);
+                if (rc != AVERROR(EAGAIN) || got > 0) continue;
+                dead = decoderDead(why);
+                if (dead || ++spins > 200) break;  // (about 4 s)
+                std::this_thread::sleep_for(std::chrono::milliseconds(std::min(2 * spins, 20)));
             }
+            if (!dead && rc == AVERROR(EAGAIN) && spins > 200 && hwDecoder()) {
+                dead = true;  // 4 s full with nothing coming out: the session is stuck
+                why = "it takes no more packets";
+            }
+            if (!dead) {
+                if (rc == 0) {
+                    ++pktsSinceFrame;
+                    hardErrors = 0;
+                    drain(codec, true);
+                } else if (rc != AVERROR(EAGAIN)) {
+                    ++pktsSinceFrame;
+                    ++hardErrors;
+                    if (hardErrors <= 3) {
+                        char e[96] = "";
+                        av_strerror(rc, e, sizeof(e));
+                        PIXELVR_LOG_WARN("MediaEngine: the video decoder refused a packet (%s)", e);
+                    }
+                    std::this_thread::sleep_for(std::chrono::milliseconds(std::min(5 * hardErrors, 100)));
+                }
+                dead = decoderDead(why);
+            }
+            if (dead) tripDecoder(why);
         }
 #ifdef PIXELVR_HAVE_PULSE
         else if (audioEnabled && packet->stream_index == audioStream) {
-            if (avcodec_send_packet(audioCodec, packet) == 0) {
+            int rc = avcodec_send_packet(audioCodec, packet);
+            if (rc == AVERROR(EAGAIN)) {
                 drain(audioCodec, false);
+                rc = avcodec_send_packet(audioCodec, packet);
+            }
+            if (rc == 0) {
+                audioErrors = 0;
+                drain(audioCodec, false);
+            } else if (rc != AVERROR(EAGAIN)) {
+                ++audioErrors;
+                if (audioErrors <= 3) {
+                    char e[96] = "";
+                    av_strerror(rc, e, sizeof(e));
+                    PIXELVR_LOG_WARN("MediaEngine: the audio decoder refused a packet (%s)", e);
+                }
+                // (Nothing else paces an audio file: no busy loop on a track that cannot be decoded.)
+                if (audioOnly) std::this_thread::sleep_for(std::chrono::milliseconds(std::min(2 * audioErrors, 50)));
             }
         }
 #endif
@@ -2035,6 +2618,7 @@ void MediaEngine::Impl::decodeLoop() {
         av_packet_unref(packet);
     }
 
+    fflog::t_pollErrs = nullptr;
     av_packet_free(&packet);
     av_frame_free(&frame);
 }
@@ -2133,14 +2717,26 @@ void MediaEngine::Impl::audioThreadLoop() {
 }
 
 MediaEngine::MediaEngine() : impl_(std::make_unique<Impl>()) {
+    fflog::install();  // (once: before this engine's first FFmpeg call)
     avformat_network_init();
 }
+
+void MediaEngine::installFfmpegLog() { fflog::install(); }
 
 MediaEngine::~MediaEngine() {
     close();
 }
 
-const std::string& MediaEngine::lastError() const { return impl_->lastError; }
+std::string MediaEngine::lastError() const {
+    std::lock_guard<std::mutex> lock(impl_->statusMutex);
+    return impl_->lastError;
+}
+
+bool MediaEngine::decoderFailed() const { return impl_ && impl_->decoderFailed.load(); }
+
+uint32_t MediaEngine::decoderChanges() const {
+    return impl_ ? impl_->decoderSwitches.load(std::memory_order_relaxed) : 0u;
+}
 
 void MediaEngine::resetAbort() {
     if (impl_) impl_->openAborted.store(false, std::memory_order_release);
@@ -2156,17 +2752,31 @@ void MediaEngine::abortOpen() {
 bool MediaEngine::open(const std::string& path) {
     close();
     if (impl_->openAborted.load(std::memory_order_acquire)) {
-        impl_->lastError = "cancelled";
+        impl_->setLastError("cancelled");
         return false;
     }
-    impl_->lastError = "the file could not be opened";
+    impl_->setLastError("the file could not be opened");
     impl_->httpSource = false;
     impl_->readRetries = 0;
+    impl_->decoderFailed.store(false);
+    impl_->reducedBuffers = false;
+    impl_->hwTrips = 0;
+    impl_->swFallbackAllowed = false;
+    impl_->highBitDepth = false;
 
-    if (vaultcrypto::isEncrypted(path)) {
+    const bool encrypted = vaultcrypto::isEncrypted(path);
+    // What the log calls this file: nothing for a file in the vault (encrypted, or a plain download
+    // still in its folder) or on a vault share. (The log filter hides those paths as well.)
+    const std::string shownPath =
+        (encrypted || log::is_private_path(path) || (isRemotePath(path) && SmbCredentialsManager::isVaultShareUri(path)))
+            ? std::string("(private)")
+            : path;
+    const char* const shown = shownPath.c_str();
+
+    if (encrypted) {
         // Encrypted vault file: decrypted while reading (needs the vault unlocked).
         if (!openVaultFormat(path, impl_->format, impl_->vaultIo)) {
-            impl_->lastError = vaultcrypto::hasKey() ? "the vault file could not be read" : "the vault is locked";
+            impl_->setLastError(vaultcrypto::hasKey() ? "the vault file could not be read" : "the vault is locked");
             close();
             return false;
         }
@@ -2174,20 +2784,20 @@ bool MediaEngine::open(const std::string& path) {
         std::string err;
         std::unique_ptr<RemoteFile> remote = openRemoteMedia(path, err);
         if (!remote) {
-            impl_->lastError = err;
+            impl_->setLastError(err);
             // (The reason first: for a vault share the rest of the line after the address is hidden.)
-            PIXELVR_LOG_ERROR("MediaEngine: cannot open (%s): %s", err.c_str(), path.c_str());
+            PIXELVR_LOG_ERROR("MediaEngine: cannot open (%s): %s", err.c_str(), shown);
             return false;
         }
         if (impl_->openAborted.load(std::memory_order_acquire)) {
-            impl_->lastError = "cancelled";
+            impl_->setLastError("cancelled");
             return false;
         }
         impl_->remoteReader.start(std::move(remote));
         if (impl_->openAborted.load(std::memory_order_acquire)) {
             impl_->remoteReader.abort();
             close();
-            impl_->lastError = "cancelled";
+            impl_->setLastError("cancelled");
             return false;
         }
 
@@ -2215,8 +2825,8 @@ bool MediaEngine::open(const std::string& path) {
         impl_->format->pb = impl_->avio;
         impl_->format->flags |= AVFMT_FLAG_CUSTOM_IO;
         if (avformat_open_input(&impl_->format, path.c_str(), nullptr, nullptr) < 0) {
-            if (impl_->openAborted.load(std::memory_order_acquire)) impl_->lastError = "cancelled";
-            PIXELVR_LOG_ERROR("MediaEngine: cannot open network stream %s", path.c_str());
+            if (impl_->openAborted.load(std::memory_order_acquire)) impl_->setLastError("cancelled");
+            PIXELVR_LOG_ERROR("MediaEngine: cannot open network stream %s", shown);
             close();
             return false;
         }
@@ -2248,19 +2858,22 @@ bool MediaEngine::open(const std::string& path) {
     const int openRc = avformat_open_input(&impl_->format, path.c_str(), nullptr, &httpOpts);
     av_dict_free(&httpOpts);
     if (openRc < 0) {
-        if (impl_->openAborted.load(std::memory_order_acquire)) impl_->lastError = "cancelled";
+        if (impl_->openAborted.load(std::memory_order_acquire)) impl_->setLastError("cancelled");
         char why[128] = "";
         av_strerror(openRc, why, sizeof(why));
-        PIXELVR_LOG_ERROR("MediaEngine: cannot open (%s): %s", why, path.c_str());
+        PIXELVR_LOG_ERROR("MediaEngine: cannot open (%s): %s", why, shown);
         return false;
     }
     }
+    // Packets the demuxer knows are damaged (a cut-off file, a broken transport stream) never reach
+    // the decoder: the hardware decoder's firmware does not take them well.
+    impl_->format->flags |= AVFMT_FLAG_DISCARD_CORRUPT;
     if (impl_->openAborted.load(std::memory_order_acquire) ||
         avformat_find_stream_info(impl_->format, nullptr) < 0) {
-        impl_->lastError = impl_->openAborted.load(std::memory_order_acquire)
+        impl_->setLastError(impl_->openAborted.load(std::memory_order_acquire)
                                ? "cancelled"
-                               : "unknown or damaged file format";
-        PIXELVR_LOG_ERROR("MediaEngine: no stream info in %s", path.c_str());
+                               : "unknown or damaged file format");
+        PIXELVR_LOG_ERROR("MediaEngine: no stream info in %s", shown);
         close();
         return false;
     }
@@ -2353,7 +2966,7 @@ bool MediaEngine::open(const std::string& path) {
     }
     // Subtitle files next to a local, unencrypted video: "Movie.srt", "Movie.en.ass", "Movie.forced.de.sup",
     // "Movie.idx" (+ its .sub).
-    if (!path.empty() && path[0] == '/' && !vaultcrypto::isEncrypted(path)) {
+    if (!path.empty() && path[0] == '/' && !encrypted) {
         namespace fs = std::filesystem;
         std::error_code ec;
         const fs::path video(path);
@@ -2407,8 +3020,8 @@ bool MediaEngine::open(const std::string& path) {
     impl_->audioOnly = false;
     if (impl_->videoStream < 0) {
         if (av_find_best_stream(impl_->format, AVMEDIA_TYPE_AUDIO, -1, -1, nullptr, 0) < 0) {
-            impl_->lastError = "no video or audio in the file";
-            PIXELVR_LOG_ERROR("MediaEngine: no video or audio stream in %s", path.c_str());
+            impl_->setLastError("no video or audio in the file");
+            PIXELVR_LOG_ERROR("MediaEngine: no video or audio stream in %s", shown);
             close();
             return false;
         }
@@ -2450,7 +3063,7 @@ bool MediaEngine::open(const std::string& path) {
                               ? impl_->format->duration / static_cast<double>(AV_TIME_BASE)
                               : 0.0;
         impl_->decodedCount.store(0);
-        PIXELVR_LOG_INFO("MediaEngine: %s  audio only  %.1fs  cover=%s", path.c_str(), impl_->duration,
+        PIXELVR_LOG_INFO("MediaEngine: %s  audio only  %.1fs  cover=%s", shown, impl_->duration,
                          cover.empty() ? "none" : "yes");
     }
 
@@ -2559,12 +3172,13 @@ bool MediaEngine::open(const std::string& path) {
                                                    : avcodec_find_decoder(codecId);
         }
         if (decoder == nullptr) {
-            impl_->lastError = std::string("no decoder for ") + avcodec_get_name(codecId) + " video";
-            PIXELVR_LOG_ERROR("MediaEngine: no decoder for %s", path.c_str());
+            impl_->setLastError(std::string("no decoder for ") + avcodec_get_name(codecId) + " video");
+            PIXELVR_LOG_ERROR("MediaEngine: no decoder for %s", shown);
             close();
             return false;
         }
 
+        impl_->highBitDepth = highBitDepth;
         auto open_with = [&](const AVCodec* dec) -> bool {
             if (impl_->codec != nullptr) {
                 avcodec_free_context(&impl_->codec);
@@ -2575,55 +3189,45 @@ bool MediaEngine::open(const std::string& path) {
                 return false;
             }
             impl_->codec->pkt_timebase = stream->time_base;
-            impl_->codec->thread_count = 0;  // Auto-detect and utilize all CPU cores
+            impl_->codec->thread_count = softwareDecodeThreads();  // software: all cores but two
             impl_->codec->thread_type = FF_THREAD_FRAME | FF_THREAD_SLICE;
             impl_->videoDecoder = dec;  // retained so the decode thread can reopen on seek
-            if (std::strstr(dec->name, "v4l2m2m") != nullptr) {
-                av_opt_set_int(impl_->codec->priv_data, "num_output_buffers", 4, 0);
-            }
+            const bool v4l2 = std::strstr(dec->name, "v4l2m2m") != nullptr;
             // (FS3D pairs two frames into one on the CPU, so it takes the NV12 copy path.)
-            impl_->decoderDrm = drmPrime && std::strstr(dec->name, "v4l2m2m") != nullptr && !impl_->frameSeq;
+            impl_->decoderDrm = drmPrime && v4l2 && !impl_->frameSeq;
+            // Export decoder output as DMA-BUF (AV_PIX_FMT_DRM_PRIME) for zero-copy Vulkan import
+            // (requires the dmabuf-patched libavcodec), with no more capture buffers than the Iris
+            // firmware starts a session with (captureBufferRequest).
+            impl_->chooseCaptureBuffers(stream->codecpar);
+            if (v4l2) {
+                av_opt_set_int(impl_->codec->priv_data, "num_output_buffers", 4, 0);
+                if (impl_->captureBuffers > 0) {
+                    av_opt_set_int(impl_->codec->priv_data, "num_capture_buffers", impl_->captureBuffers, 0);
+                }
+            }
             if (impl_->decoderDrm) {
-                // Export decoder output as DMA-BUF (AV_PIX_FMT_DRM_PRIME) for zero-copy
-                // Vulkan import; requires the dmabuf-patched libavcodec. Bound the
-                // decoded-buffer memory: at 8K a frame is ~40-80 MiB, so a fixed large
-                // count exhausts the decoder's DMA pool and REQBUFS fails -> POLLERR.
-                const int64_t px = static_cast<int64_t>(stream->codecpar->width) *
-                                   stream->codecpar->height;
-                const int64_t frameBytes = highBitDepth ? px * 3 : px * 3 / 2;  // P010/NV12
-                constexpr int64_t kBudget = 640ll << 20;  // ~640 MiB: 8K gets 12 buffers (6 left no slack)
-                impl_->captureBuffers = static_cast<int>(std::clamp<int64_t>(
-                    kBudget / std::max<int64_t>(frameBytes, 1), 4, 20));
-                // The Iris firmware starts a session only with at most 20 plain NV12 capture buffers
-                // once a frame (in the decoder's aligned size) is over 32 MiB; more and STREAMON fails,
-                // every packet then ends in POLLERR and no picture ever comes (7200x3600 asked for 24).
-                // The dmabuf patch adds the driver's minimum (7) to what is asked here: ask for 13.
-                // (10-bit frames use the compressed Q10C format, which has no such limit.)
-                const int64_t alignedNv12 = ((static_cast<int64_t>(stream->codecpar->width) + 127) / 128 * 128) *
-                                            ((static_cast<int64_t>(stream->codecpar->height) + 31) / 32 * 32) * 3 / 2;
-                if (!highBitDepth && alignedNv12 > (32ll << 20)) impl_->captureBuffers = std::min(impl_->captureBuffers, 13);
-                av_opt_set_int(impl_->codec->priv_data, "num_capture_buffers",
-                               impl_->captureBuffers, 0);
                 av_opt_set_int(impl_->codec->priv_data, "drm_prime", 1, 0);
                 impl_->codec->apply_cropping = 0;
-                // Leave buffers free for the decoder's DPB; the queue holds the rest.
-                // A deeper queue absorbs bursty decode output (B-frame reorder, SMB
-                // jitter) so low-framerate playback doesn't underrun and judder.
-                impl_->maxQueue =
-                    static_cast<std::size_t>(std::clamp(impl_->captureBuffers - 5, 1, 14));
             }
-            return avcodec_open2(impl_->codec, dec, nullptr) >= 0;
+            if (avcodec_open2(impl_->codec, dec, nullptr) < 0) return false;
+            if (v4l2) keepDecoderFdsFromChildren();
+            return true;
         };
 
-        impl_->hwBlockedBy.clear();
+        {
+            std::lock_guard<std::mutex> lock(impl_->statusMutex);
+            impl_->hwBlockedBy.clear();
+        }
         bool opened = open_with(decoder);
         if (!opened && hardware && !impl_->openAborted.load(std::memory_order_acquire)) {
             // The previous session (ours or a just-closed browser page's) may
             // still be winding down in the driver; give it a moment before
-            // settling for software, which can't keep up with 8K.
+            // settling for software, which can't keep up with 8K. The last two
+            // tries ask for fewer capture buffers.
             for (int attempt = 0; attempt < 4 && !opened && !impl_->openAborted.load(std::memory_order_acquire); ++attempt) {
                 std::this_thread::sleep_for(std::chrono::milliseconds(150));
                 if (impl_->openAborted.load(std::memory_order_acquire)) break;
+                if (attempt >= 2) impl_->reducedBuffers = true;
                 opened = open_with(decoder);
             }
             if (opened) PIXELVR_LOG_INFO("MediaEngine: hardware decoder opened on retry");
@@ -2634,23 +3238,26 @@ bool MediaEngine::open(const std::string& path) {
                 // big session while another process (Steam's own web helper
                 // after a store trailer, say) holds one.
                 const std::string holders = decoderHolders();
-                impl_->hwBlockedBy = holders;
+                {
+                    std::lock_guard<std::mutex> lock(impl_->statusMutex);
+                    impl_->hwBlockedBy = holders;
+                }
                 PIXELVR_LOG_WARN("MediaEngine: hardware decoder failed, trying software%s%s",
                                  holders.empty() ? "" : " (decoder also open in: ",
                                  holders.empty() ? "" : (holders + ")").c_str());
                 hardware = false;
                 decoder = avcodec_find_decoder(codecId);
                 if (decoder == nullptr || !open_with(decoder)) {
-                    impl_->lastError = std::string("cannot decode ") + avcodec_get_name(codecId) + " video";
+                    impl_->setLastError(std::string("cannot decode ") + avcodec_get_name(codecId) + " video");
                     PIXELVR_LOG_ERROR("MediaEngine: failed to open decoder for %s",
-                                      path.c_str());
+                                      shown);
                     close();
                     return false;
                 }
             } else {
-                impl_->lastError = std::string("cannot decode ") + avcodec_get_name(codecId) + " video";
+                impl_->setLastError(std::string("cannot decode ") + avcodec_get_name(codecId) + " video");
                 PIXELVR_LOG_ERROR("MediaEngine: failed to open decoder for %s",
-                                  path.c_str());
+                                  shown);
                 close();
                 return false;
             }
@@ -2678,11 +3285,18 @@ bool MediaEngine::open(const std::string& path) {
                               ? impl_->format->duration / static_cast<double>(AV_TIME_BASE)
                               : 0.0;
 
-        PIXELVR_LOG_INFO("MediaEngine: %s  %dx%d  %.1fs  codec=%s (%s)", path.c_str(),
+        PIXELVR_LOG_INFO("MediaEngine: %s  %dx%d  %.1fs  codec=%s (%s)", shown,
                          impl_->width, impl_->height, impl_->duration, decoder->name,
                          hardware ? "hardware" : "software");
-        impl_->codecName =
-            std::string(decoder->name) + (hardware ? " (hw)" : " (sw)");
+        {
+            std::lock_guard<std::mutex> lock(impl_->statusMutex);
+            impl_->codecName = std::string(decoder->name) + (hardware ? " (hw)" : " (sw)");
+        }
+        // A hardware session that stops while playing may hand over to software where software keeps
+        // up (up to 4K at 60 fps); above that it would only stutter and take every core.
+        const double pxRate = static_cast<double>(stream->codecpar->width) * stream->codecpar->height *
+                              (impl_->frameRate > 0.0 ? impl_->frameRate : 30.0);
+        impl_->swFallbackAllowed = hardware && pxRate <= 3840.0 * 2160.0 * 60.0 && avcodec_find_decoder(codecId) != nullptr;
         impl_->decodedCount.store(0);
     }
 
@@ -2740,7 +3354,10 @@ bool MediaEngine::open(const std::string& path) {
             }
             av_channel_layout_uninit(&outLayout);
         }
-        if (impl_->audioOnly) impl_->codecName = std::string(adec->name) + " (audio)";
+        if (impl_->audioOnly) {
+            std::lock_guard<std::mutex> lock(impl_->statusMutex);
+            impl_->codecName = std::string(adec->name) + " (audio)";
+        }
         if (impl_->audioEnabled) {
             PIXELVR_LOG_INFO("MediaEngine: audio %d Hz stereo",
                              MediaEngine::Impl::kOutSampleRate);
@@ -2752,19 +3369,19 @@ bool MediaEngine::open(const std::string& path) {
     if (impl_->audioOnly && !impl_->audioEnabled) {
         // Nothing would pace playback: it would end at once (and a music queue
         // would race through the folder).
-        impl_->lastError = "no audio output available";
-        PIXELVR_LOG_ERROR("MediaEngine: audio file without audio output: %s", path.c_str());
+        impl_->setLastError("no audio output available");
+        PIXELVR_LOG_ERROR("MediaEngine: audio file without audio output: %s", shown);
         close();
         return false;
     }
 
     if (impl_->openAborted.load(std::memory_order_acquire)) {
         close();
-        impl_->lastError = "cancelled";
+        impl_->setLastError("cancelled");
         return false;
     }
 
-    impl_->lastError.clear();
+    impl_->setLastError(std::string());
     impl_->eof.store(false);
     impl_->paused.store(false);
     // A fresh file starts at its beginning, with no seek carried over.
@@ -2828,13 +3445,20 @@ void MediaEngine::close() {
     impl_->duration = 0.0;
     impl_->eof.store(false);
     impl_->paused.store(false);
+    impl_->decoderFailed.store(false);
 }
 
 int MediaEngine::width() const { return impl_->width; }
 int MediaEngine::height() const { return impl_->height; }
 float MediaEngine::pixelAspect() const { return impl_->pixelAspect; }
-std::string MediaEngine::codecName() const { return impl_->codecName; }
-std::string MediaEngine::hardwareBlockedBy() const { return impl_->hwBlockedBy; }
+std::string MediaEngine::codecName() const {
+    std::lock_guard<std::mutex> lock(impl_->statusMutex);
+    return impl_->codecName;
+}
+std::string MediaEngine::hardwareBlockedBy() const {
+    std::lock_guard<std::mutex> lock(impl_->statusMutex);
+    return impl_->hwBlockedBy;
+}
 
 std::vector<MediaEngine::DecoderHolder> MediaEngine::decoderHolderList() {
     std::vector<DecoderHolder> out;

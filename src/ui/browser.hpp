@@ -78,6 +78,16 @@ public:
     void forgetPrivate();
     // A download from a vault share (into the vault) is running or queued.
     bool downloadingIntoVault() const;
+    // Shares moved into / out of the vault (a share's vault switch saved): a download whose share no
+    // longer matches where it writes stops (its partial file goes); queued ones get the new place.
+    // Returns how many downloads were stopped or failed (0: nothing to tell the user).
+    int reconcileVaultDownloads();
+    // Quit: the running download stops at once (a paused one too) and its partial file goes; the
+    // queue is dropped. Called before the XR / Vulkan teardown, so the player never waits for one.
+    void shutdownDownloads();
+    // `path` must not be played or opened now: a running or queued download writes it, or it is in
+    // the vault's download folder (a plain copy waiting to be encrypted).
+    bool isUnfinishedDownload(const std::string& path) const;
     // Shown instead of the vault while it lives on an SD card that is not inserted.
     static constexpr const char* kVaultMissing = "vault://missing";
     // A row that Move / Copy / Rename / Delete may act on (not "..", Network, placeholders, the SD card
@@ -207,13 +217,18 @@ public:
         long long total = 0;
         bool isDir = false;
         std::string error;  // why it failed ("SD card removed"), shown in the Downloads list
-        bool wrote = false; // it wrote straight to localPath (SMB): a failed one leaves a partial file there
+        bool wrote = false; // it wrote <localPath>.part itself (SMB): a failed one may leave that there
+        // Decided once, when it starts (from its share's vault state then): it writes into the vault's
+        // download folder and is encrypted into the vault when done. Everything later (logging,
+        // settling, the lock, retry, the list) goes by this, never by the share's state at that moment.
+        bool intoVault = false;
     };
     struct DownloadQueueItem {
         std::string uri;
         std::string name;
-        std::string destDir;
+        std::string destDir;  // (the target path)
         bool isDir = false;
+        bool intoVault = false;
     };
     const std::vector<DownloadJob>& downloadJobs() const { return dlJobs_; }
     // A failed or stopped job again, to the same place. False (reason in status) if that is not possible.
@@ -263,6 +278,10 @@ private:
     // its file (dlDroppedPath_) and the vault's download folder are removed.
     bool dlPrivateDropped_ = false;
     std::string dlDroppedPath_;
+    // The running download was stopped because its share moved into / out of the vault (poll() then
+    // says so once and removes its file).
+    bool dlVaultSwitched_ = false;
+    std::atomic<bool> dlQuiet_{false};  // the running download is private (read by its thread)
     void wipeVaultIncoming(const std::string& droppedPath);
     // A finished download from a vault share: encrypted from the hidden download folder into the vault.
     void settleIntoVault(DownloadJob& j);
@@ -283,8 +302,15 @@ private:
     void scanLocalInto(const std::string& dir, ScanResult& out);
     void scanSmbInto(const std::string& uri, ScanResult& out);
     void scanBookmarksInto(ScanResult& out);
-    void startDownloadFile(const std::string& uri, const std::string& local);
-    void startDownloadFolder(const std::string& uri, const std::string& name);
+    void startDownloadFile(const std::string& uri, const std::string& local, bool intoVault);
+    void startDownloadFolder(const std::string& uri, const std::string& name, bool intoVault);
+    // Where a download of `uri` goes now: the vault's download folder for a vault share, else the
+    // download folder. 0 = `target` set; else why not (kDestVaultUnusable / kDestVaultMoving).
+    static constexpr int kDestVaultUnusable = 1;
+    static constexpr int kDestVaultMoving = 2;
+    int destinationFor(const std::string& uri, const std::string& name, std::string& target, bool& intoVault);
+    // The running download names nothing in the log: it was private when it started, or its share is now.
+    bool dlPrivate(const std::string& uri) const;
     void startNextQueued();
     // SFTP / WebDAV downloads: copied in-process through remote_fs, via a .part file.
     bool copyRemoteFile(const std::string& uri, const std::string& local, bool setTotal, std::string* usedLocal = nullptr);
@@ -358,7 +384,7 @@ private:
     std::string pendingRenameLocal_;
     std::string dlCurFile_;
     bool pausedByBrowse_ = false;  // child SIGSTOPped because the panel is open
-    int spawnCurl(const std::string& uri, const std::string& local);
+    int spawnCurl(const std::string& uri, const std::string& local, bool quiet);
     // Folder size probe (background).
     std::thread measureThread_;
     std::atomic<bool> measuring_{false};
