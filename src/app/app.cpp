@@ -601,6 +601,7 @@ void App::loadMedia(const std::string& path, int slot, bool fromQueue) {
     if (!sameFile) renderer_.clearVideo(slot);
     if (slot == 0 && !sameFile) {
         renderer_.setSphereZoom(1.0f);  // reset the 360/180 viewpoint per clip
+        manualFocusDeg_ = 0.0f;         // and the Focus (grip + stick)
         renderer_.setSpherePitch(0.0f);
         renderer_.setSphereYawOffset(0.0f);
     }
@@ -1491,7 +1492,9 @@ void App::updateStereoFocus(float dtS) {
 
     // The debug test shift works without eye tracking too, so the direction can be checked.
     const float testDeg = stereo3dSphere ? settings_.autofocusTestShiftDeg() : 0.0f;
-    const float offsetDeg = focus_.offsetDeg() + testDeg;
+    // Focus (grip + stick up / down) adds the user's own shift on top; reset per video.
+    const float manualDeg = stereo3dSphere ? manualFocusDeg_ : 0.0f;
+    const float offsetDeg = focus_.offsetDeg() + testDeg + manualDeg;
     renderer_.setStereoFocusOffset(offsetDeg * 3.14159265358979f / 180.0f);
     renderer_.setFocusGazeDot(settings_.autofocusInfo() && active);
 
@@ -6791,6 +6794,10 @@ int App::run() {
                 xr_.triggerHaptic(1, 0.040f, 0.0f, 0.6f);
             }
 
+            // Focus (grip + stick up / down, used in 3D 180 / 360 playback below): the stick's Y while a
+            // full grip press is held, kept before the combo gate clears the sticks. The combo
+            // itself is face buttons only, so the stick is free for this.
+            focusStickY_ = (gripFullHeld && !recordingCombo) ? in.thumbstickY : 0.0f;
             if (comboGate && !recordingCombo) {
                 const int h = in.gripFullPressHeld[1] ? 1 : 0;
                 if (const int b = in.comboEdge; b >= 0) {
@@ -9338,13 +9345,34 @@ int App::run() {
                 } else if (dt > 0.0f) {
                     // 360/180: unshifted Stick Y zooms (consistent with Flat screen distance);
                     // holding Bumper + Stick X/Y pans yaw and tilts pitch. Silent when HUD is hidden.
-                    if (bumperHeldNow) {
+                    bool viewChanged = false;
+                    if (std::fabs(focusStickY_) > 0.15f && cur().open && rendererStereo(cur().stereo) != VulkanRenderer::StereoMode::Mono) {
+                        // Grip + stick up / down: Focus, the two eye pictures slid apart (up = the
+                        // picture farther), 8 degrees a second at full push.
+                        manualFocusDeg_ = std::clamp(manualFocusDeg_ + focusStickY_ * dt * 8.0f,
+                                                     kManualFocusMinDeg, kManualFocusMaxDeg);
+                        if (std::fabs(manualFocusDeg_) < 0.25f) manualFocusDeg_ = 0.0f;  // (back to 0 is easy)
+                        viewChanged = true;
+                    } else if (bumperHeldNow) {
                         if (std::fabs(in.thumbstickY) > 0.15f) renderer_.adjustSpherePitch(in.thumbstickY * dt * 0.6f);
                         if (std::fabs(in.thumbstickX) > 0.15f) renderer_.adjustSphereYaw(in.thumbstickX * dt * 0.6f);
                     } else if (!bumperShift && !scrubbing_ && std::fabs(in.thumbstickY) > 0.15f &&
                                std::fabs(in.thumbstickY) > std::fabs(in.thumbstickX)) {
                         // Zoom only on a mostly vertical push: a scrub (left / right) never zooms too.
                         renderer_.adjustSphereZoom(in.thumbstickY * dt * 0.6f);
+                        viewChanged = true;
+                    }
+                    if (viewChanged) {
+                        // What it is now, while it changes (a zoom of 1 shows the picture at 100 %).
+                        char buf[64];
+                        const int zoomPct = static_cast<int>(std::lround(100.0f / std::max(renderer_.sphereZoom(), 0.01f)));
+                        if (rendererStereo(cur().stereo) != VulkanRenderer::StereoMode::Mono) {
+                            std::snprintf(buf, sizeof(buf), "Zoom %d %%  \xC2\xB7  Focus %+.0f\xC2\xB0", zoomPct,
+                                          static_cast<double>(manualFocusDeg_));
+                        } else {
+                            std::snprintf(buf, sizeof(buf), "Zoom %d %%", zoomPct);
+                        }
+                        renderer_.setScreenTitle(0, buf, 1.5f);
                     }
                     if (hudShown && (std::fabs(in.thumbstickY) > 0.15f || (bumperShift && std::fabs(in.thumbstickX) > 0.15f))) {
                         interacted = true;

@@ -173,6 +173,13 @@ private:
     bool focusHaveResult_ = false;
     float focusLastValidDisp_ = 0.0f;
     bool focusHaveValid_ = false;
+    // Focus: the user's own shift of the two eye pictures (grip + stick up / down in a 3D 180 / 360
+    // video; degrees, + = the picture farther). Reset per video. The stick Y read while the grip
+    // is held (the vault combo gate clears the sticks, so it is kept before that).
+    float manualFocusDeg_ = 0.0f;
+    float focusStickY_ = 0.0f;
+    static constexpr float kManualFocusMinDeg = -6.0f;
+    static constexpr float kManualFocusMaxDeg = 20.0f;
     std::vector<std::string> focusInfoLines_;  // shown with "Autofocus Info" on, never logged
     std::chrono::steady_clock::time_point focusInfoAt_{};
     void updateStereoFocus(float dtS);
