@@ -18,6 +18,7 @@
 #include "ui/settings_menu.hpp"
 #include "ui/laser_focus.hpp"
 #include "app/playback_memory.hpp"
+#include "app/focus_log.hpp"
 #include "app/gaze_filter.hpp"
 #include "app/stereo_focus.hpp"
 #include "app/browser_host.hpp"
@@ -138,6 +139,10 @@ private:
     // only: gaze values and offsets are never logged, stored or given to plugins.
     StereoFocus focus_;
     GazeFilter focusGaze_;           // the steadied gaze the renderer measures at
+    FocusLog focusLog_;              // Record Autofocus Log (debug, the user switches it on)
+    std::string focusLogPath_;       // the video the open log belongs to
+    std::string focusLogStoppedPath_; // full / not creatable for this video: not again
+    bool focusLogVaultNoticed_ = false;
 
     // "Free Decoder": Steam's web helper held the hardware decoder, the user agreed to end it.
     // The helper is ended on a background thread (it can take a second); then the video reopens

@@ -115,6 +115,7 @@ public:
         CycleAutofocusTransition,
         ToggleAutofocusInfo,
         CycleAutofocusTestShift,
+        ToggleAutofocusLog,
         BackToDisplay,      // from the 3D Autofocus page
     };
 
@@ -237,6 +238,8 @@ public:
     bool autofocusInfo() const { return stereoAutofocus_ && autofocusInfo_; }
     // Debug: a fixed shift (0, +3 or -3 degrees) to check the direction; 0 while the info is off.
     float autofocusTestShiftDeg() const;
+    // Debug: record eye and autofocus data per frame into the logs folder (not saved).
+    bool autofocusLog() const { return stereoAutofocus_ && autofocusLog_; }
     // Whether eye tracking was asked for at the start and is there: the 3D Autofocus notes say
     // when the setting is on but does nothing yet (after a restart) or at all (no eye tracking).
     void setAutofocusAvailability(bool requested, bool supported) {
@@ -525,6 +528,7 @@ private:
     int autofocusTransitionIdx_ = 2;  // into kAutofocusTransitionMs (1 s)
     bool autofocusInfo_ = false;
     int autofocusTestShiftIdx_ = 0;   // 0 Off, 1 +3 degrees, 2 -3 degrees (not saved)
+    bool autofocusLog_ = false;       // Record Autofocus Log (not saved)
     bool autofocusRequested_ = false; // eye tracking asked for at the start (setAutofocusAvailability)
     bool autofocusSupported_ = false; // ... and there
     const char* autofocusNote() const;

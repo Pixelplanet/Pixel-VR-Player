@@ -2008,6 +2008,7 @@ bool VulkanRenderer::takeFocusMeasurement(stereo::DisparityResult& out) {
     const uint32_t want = focusPendingSerial_;
     focusPendingSerial_ = 0;
     if (serial != want) return false;  // not written (nothing to report)
+    std::memcpy(focusLastScores_, scores, sizeof(scores));
     out = stereo::evaluateScores(scores, variance);
     return true;
 }

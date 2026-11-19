@@ -1473,6 +1473,78 @@ void App::updateStereoFocus(float dtS) {
     renderer_.setStereoFocusOffset(offsetDeg * 3.14159265358979f / 180.0f);
     renderer_.setFocusGazeDot(settings_.autofocusInfo() && active);
 
+    // Record Autofocus Log: one row per frame while a 3D 180 / 360 video plays (a new file per
+    // video); never for vault / private videos (nothing about them on disk).
+    {
+        const bool privateVideo = open && VaultManager::isPrivatePath(*path);
+        const bool logOn = settings_.autofocusLog();
+        if (!logOn) {
+            focusLogStoppedPath_.clear();
+            focusLogVaultNoticed_ = false;
+        }
+        bool want = logOn && stereo3dSphere && !privateVideo && focusLogStoppedPath_ != *path;
+        if (focusLog_.isOpen() && (!want || focusLogPath_ != *path || focusLog_.full())) {
+            if (focusLog_.full()) {
+                showNotice("Autofocus log is full: recording stopped");
+                focusLogStoppedPath_ = focusLogPath_;
+                want = want && focusLogStoppedPath_ != *path;
+            }
+            focusLog_.close();
+            PIXELVR_LOG_INFO("Autofocus log closed: %s", focusLog_.name().c_str());
+        }
+        if (want && !focusLog_.isOpen()) {
+            if (focusLog_.open()) {
+                focusLogPath_ = *path;
+                PIXELVR_LOG_INFO("Autofocus log started: logs/%s.csv", focusLog_.name().c_str());
+                showNotice("Recording the autofocus log");
+            } else {
+                focusLogStoppedPath_ = *path;
+                showNotice("The autofocus log couldn't be created", true);
+            }
+        }
+        if (logOn && privateVideo && !focusLogVaultNoticed_) {
+            focusLogVaultNoticed_ = true;
+            showNotice("The autofocus log isn't recorded for vault videos");
+        }
+        if (focusLog_.isOpen()) {
+            FocusLog::Row row;
+            row.dt = dtS;
+            row.pos = pos;
+            row.paused = paused;
+            row.menu = uiShown;
+            row.projection = projection;
+            row.stereo = stereoFmt;
+            row.swap = swap;
+            row.rawOk = active && in.gazeValid;
+            for (int k = 0; k < 3; ++k) row.raw[k] = in.gazeDir[k];
+            row.filtOk = gazeValid;
+            for (int k = 0; k < 3; ++k) row.filt[k] = focusGaze_.dir()[k];
+            row.headOk = in.headValid;
+            for (int k = 0; k < 3; ++k) row.head[k] = in.headForward[k];
+            stereo::GazeSource src;
+            if (gazeValid && renderer_.focusGazeSource(src) && src.valid) {
+                row.srcOk = true;
+                row.lonDeg = src.lonDeg;
+                row.latDeg = src.latDeg;
+            }
+            row.measured = got;
+            if (got) {
+                row.mOk = r.valid;
+                row.dispDeg = r.disparityDeg;
+                row.score = r.score;
+                row.variance = r.variance;
+                row.best = r.best;
+                focusLog_.scores(renderer_.lastFocusScores(), stereo::kCandidates, r.variance, r.best);
+            }
+            row.focused = focus_.focused();
+            row.distM = focus_.focusDistanceM();
+            row.targetDeg = focus_.targetDeg();
+            row.offsetDeg = focus_.offsetDeg();
+            row.testDeg = testDeg;
+            focusLog_.frame(row);
+        }
+    }
+
     // The info lines (on screen only, never logged), a few times a second so they can be read.
     if (!settings_.autofocusInfo()) {
         focusInfoLines_.clear();

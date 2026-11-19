@@ -1063,6 +1063,9 @@ void SettingsMenu::refresh() {
                   Action::CycleAutofocusTestShift, on && autofocusInfo_);
         rows_.back().note = "Shifts the eye images by a fixed amount (not saved).";
         offBecause(!on ? kTurnOn : "Turn on Show Autofocus Info");
+        toggle("Record Autofocus Log", on && autofocusLog_, Action::ToggleAutofocusLog, on);
+        rows_.back().note = "Eye and autofocus data per frame, into the logs folder (not saved; never for vault videos).";
+        offBecause(kTurnOn);
         rows_.push_back({"Back to Display & Cinema", "", Action::BackToDisplay});
     } else if (section_ == 13) {
         // Download Folder: one full-width line per choice (a list page), each with the free space
@@ -1337,7 +1340,10 @@ SettingsMenu::Action SettingsMenu::activate() {
             break;
         case Action::ToggleStereoAutofocus:
             stereoAutofocus_ = !stereoAutofocus_;
-            if (!stereoAutofocus_) autofocusTestShiftIdx_ = 0;
+            if (!stereoAutofocus_) {
+                autofocusTestShiftIdx_ = 0;
+                autofocusLog_ = false;
+            }
             saveConfig();
             refresh();
             break;
@@ -1364,6 +1370,10 @@ SettingsMenu::Action SettingsMenu::activate() {
             break;
         case Action::CycleAutofocusTestShift:
             autofocusTestShiftIdx_ = (autofocusTestShiftIdx_ + 1) % 3;  // (not saved)
+            refresh();
+            break;
+        case Action::ToggleAutofocusLog:
+            autofocusLog_ = !autofocusLog_;  // (not saved)
             refresh();
             break;
         case Action::ToggleModels:

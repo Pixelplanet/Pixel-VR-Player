@@ -158,6 +158,8 @@ public:
     void setFocusMeasurement(bool on);
     // True once per new completed measurement (runs stereo::evaluateScores).
     bool takeFocusMeasurement(stereo::DisparityResult& out);
+    // The raw scores of the latest measurement (kCandidates values; for the autofocus log).
+    const float* lastFocusScores() const { return focusLastScores_; }
     // The gaze point of this frame's measurement attempt (made every frame while
     // measuring, the dispatch every 3rd); false if none. out.valid = on the picture.
     bool focusGazeSource(stereo::GazeSource& out) const;
@@ -1514,6 +1516,7 @@ private:
     uint32_t focusSerial_ = 0;
     uint32_t focusRecordedSerial_ = 0;  // in eye 0's command buffer, not yet submitted
     uint32_t focusPendingSerial_ = 0;   // submitted, not read yet (0 = none)
+    float focusLastScores_[stereo::kCandidates] = {};  // latest measurement (autofocus log)
     bool focusInitTried_ = false;
     bool focusShaderMissing_ = false;   // no stereo_disparity.comp.spv: measurement stays off
     VkDescriptorSetLayout focusOutSetLayout_ = VK_NULL_HANDLE;
