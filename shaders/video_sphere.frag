@@ -11,7 +11,7 @@ layout(push_constant) uniform Push {
     vec4 fov;
     vec4 mode;  // x: projection (1=360, 2=180), y: stereo (0/1/2), z: eye
     vec4 conversion;  // unused (conversion handled by the sampler)
-    vec4 range;       // z: sRGB encode flag
+    vec4 range;       // z: sRGB encode flag, w: 3D Autofocus shift
 } pc;
 
 layout(location = 0) in vec3 vDir;
@@ -29,15 +29,21 @@ void main() {
     float lon = atan(d.x, -d.z);
     float lat = asin(clamp(d.y, -1.0, 1.0));
 
+    // 3D Autofocus: the two eye images slide against each other, each by half
+    // of range.w (radians; positive = the picture farther), by the displayed
+    // eye (before the swap).
+    lon += (pc.mode.z < 0.5 ? 0.5 : -0.5) * pc.range.w;
+
     float u;
     float v = 0.5 - lat / PI;
 
     if (projection > 1.5) {
-        if (d.z > 0.0) { outColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
+        // Behind the viewer |lon| > pi/2: the range check covers it.
         u = lon / PI + 0.5;
         if (u < 0.0 || u > 1.0) { outColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
     } else {
         u = lon / (2.0 * PI) + 0.5;
+        if (u < 0.0 || u > 1.0) u = fract(u);  // shifted past the back: wrap
     }
 
     if (stereo > 1.5) {

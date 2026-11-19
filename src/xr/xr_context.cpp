@@ -45,8 +45,14 @@ XrContext::~XrContext() {
         xrDestroySpace(stageSpace_);
         stageSpace_ = XR_NULL_HANDLE;
     }
+    if (eyeGazeSpace_ != XR_NULL_HANDLE) {
+        xrDestroySpace(eyeGazeSpace_);
+    }
     if (actionSet_ != XR_NULL_HANDLE) {
         xrDestroyActionSet(actionSet_);
+    }
+    if (eyeActionSet_ != XR_NULL_HANDLE) {
+        xrDestroyActionSet(eyeActionSet_);
     }
     if (session_ != XR_NULL_HANDLE) {
         xrDestroySession(session_);
@@ -129,6 +135,14 @@ bool XrContext::createInstanceAndSystem(const char* appName) {
         PIXELVR_LOG_WARN("XR_VALVE_frame_controller_interaction unavailable");
     }
 
+    // Optional: eye gaze for 3D Autofocus, only when the setting wants it, so
+    // the eye tracking is not touched otherwise.
+    eyeGazeRequested_ = eyeGazeWant_;
+    if (eyeGazeRequested_ && has_ext(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME)) {
+        enabledExts.push_back(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
+        eyeGazeEnabled_ = true;
+    }
+
     XrInstanceCreateInfo createInfo{XR_TYPE_INSTANCE_CREATE_INFO};
     std::strncpy(createInfo.applicationInfo.applicationName, appName,
                  XR_MAX_APPLICATION_NAME_SIZE - 1);
@@ -163,6 +177,18 @@ bool XrContext::createInstanceAndSystem(const char* appName) {
     XrSystemGetInfo systemInfo{XR_TYPE_SYSTEM_GET_INFO};
     systemInfo.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
     PIXELVR_XR_CHECK(instance_, xrGetSystem(instance_, &systemInfo, &systemId_));
+
+    if (eyeGazeEnabled_) {
+        XrSystemEyeGazeInteractionPropertiesEXT eyeProps{XR_TYPE_SYSTEM_EYE_GAZE_INTERACTION_PROPERTIES_EXT};
+        XrSystemProperties sysProps{XR_TYPE_SYSTEM_PROPERTIES};
+        sysProps.next = &eyeProps;
+        eyeGazeSystemSupport_ = XR_SUCCEEDED(xrGetSystemProperties(instance_, systemId_, &sysProps)) &&
+                                eyeProps.supportsEyeGazeInteraction == XR_TRUE;
+    }
+    PIXELVR_LOG_INFO("Eye gaze: %s, extension %s, system support %s",
+                     eyeGazeRequested_ ? "requested" : "not requested",
+                     eyeGazeEnabled_ ? "enabled" : (eyeGazeRequested_ ? "not offered" : "not enabled"),
+                     eyeGazeSystemSupport_ ? "yes" : "no");
 
     if (!loadVulkanEnable2Functions()) {
         return false;
@@ -709,10 +735,64 @@ bool XrContext::createActions() {
         }
     }
 
+    // Eye gaze (3D Autofocus): its own set, attached with "gameplay" (attach
+    // runs once per session). A failure here only turns eye gaze off.
+    if (eyeGazeEnabled_ && eyeGazeSystemSupport_) {
+        bool ok = false;
+        XrActionSetCreateInfo eyeSetInfo{XR_TYPE_ACTION_SET_CREATE_INFO};
+        std::strcpy(eyeSetInfo.actionSetName, "eye_tracking");
+        std::strcpy(eyeSetInfo.localizedActionSetName, "Eye Tracking");
+        eyeSetInfo.priority = 0;
+        if (XR_SUCCEEDED(xrCreateActionSet(instance_, &eyeSetInfo, &eyeActionSet_))) {
+            XrActionCreateInfo ai{XR_TYPE_ACTION_CREATE_INFO};
+            std::strcpy(ai.actionName, "eye_gaze");
+            std::strcpy(ai.localizedActionName, "Eye Gaze");
+            ai.actionType = XR_ACTION_TYPE_POSE_INPUT;
+            if (XR_SUCCEEDED(xrCreateAction(eyeActionSet_, &ai, &eyeGazeAction_))) {
+                const XrActionSuggestedBinding b{eyeGazeAction_, path("/user/eyes_ext/input/gaze_ext/pose")};
+                XrInteractionProfileSuggestedBinding s{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+                s.interactionProfile = path("/interaction_profiles/ext/eye_gaze_interaction");
+                s.suggestedBindings = &b;
+                s.countSuggestedBindings = 1;
+                ok = XR_SUCCEEDED(xrSuggestInteractionProfileBindings(instance_, &s));
+            }
+        }
+        if (!ok) {
+            PIXELVR_LOG_WARN("Eye gaze action could not be set up; eye gaze off");
+            if (eyeActionSet_ != XR_NULL_HANDLE) xrDestroyActionSet(eyeActionSet_);
+            eyeActionSet_ = XR_NULL_HANDLE;
+            eyeGazeAction_ = XR_NULL_HANDLE;
+        }
+    }
+
+    XrActionSet attachSets[2] = {actionSet_, eyeActionSet_};
     XrSessionActionSetsAttachInfo attach{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
-    attach.countActionSets = 1;
-    attach.actionSets = &actionSet_;
-    PIXELVR_XR_CHECK(instance_, xrAttachSessionActionSets(session_, &attach));
+    attach.countActionSets = eyeActionSet_ != XR_NULL_HANDLE ? 2u : 1u;
+    attach.actionSets = attachSets;
+    XrResult attachRes = xrAttachSessionActionSets(session_, &attach);
+    if (XR_FAILED(attachRes) && attach.countActionSets == 2) {
+        // Controller input never depends on the eye set: attach "gameplay" alone.
+        PIXELVR_LOG_WARN("Eye tracking action set could not be attached; eye gaze off");
+        xrDestroyActionSet(eyeActionSet_);
+        eyeActionSet_ = XR_NULL_HANDLE;
+        eyeGazeAction_ = XR_NULL_HANDLE;
+        attach.countActionSets = 1;
+        attachRes = xrAttachSessionActionSets(session_, &attach);
+    }
+    PIXELVR_XR_CHECK(instance_, attachRes);
+
+    if (eyeGazeAction_ != XR_NULL_HANDLE) {
+        XrActionSpaceCreateInfo si{XR_TYPE_ACTION_SPACE_CREATE_INFO};
+        si.action = eyeGazeAction_;
+        si.poseInActionSpace.orientation.w = 1.0f;
+        if (XR_SUCCEEDED(xrCreateActionSpace(session_, &si, &eyeGazeSpace_))) {
+            eyeGazeReady_ = true;
+            PIXELVR_LOG_INFO("Eye gaze input ready: action set \"Eye Tracking\"");
+        } else {
+            eyeGazeSpace_ = XR_NULL_HANDLE;
+            PIXELVR_LOG_WARN("Eye gaze action space could not be created; eye gaze off");
+        }
+    }
 
     // Action spaces let us locate each controller's aim pose every frame.
     if (aimPoseAction_ != XR_NULL_HANDLE) {
@@ -761,6 +841,7 @@ void XrContext::syncActions() {
     input_.thumbstickRY = 0.0f;
     input_.gripFullPressDown[0] = false;
     input_.gripFullPressDown[1] = false;
+    eyeGazeSynced_ = false;
     if (!actionsReady_) {
         return;
     }
@@ -776,11 +857,21 @@ void XrContext::syncActions() {
         return;
     }
 
-    XrActiveActionSet active{actionSet_, XR_NULL_PATH};
+    // The eye set only while eye gaze is on (3D Autofocus).
+    const bool withEyes = eyeGazeActive_ && eyeGazeSupported();
+    XrActiveActionSet active[2] = {{actionSet_, XR_NULL_PATH}, {eyeActionSet_, XR_NULL_PATH}};
     XrActionsSyncInfo sync{XR_TYPE_ACTIONS_SYNC_INFO};
-    sync.countActiveActionSets = 1;
-    sync.activeActionSets = &active;
-    if (XR_FAILED(xrSyncActions(session_, &sync))) {
+    sync.countActiveActionSets = withEyes ? 2u : 1u;
+    sync.activeActionSets = active;
+    XrResult syncRes = xrSyncActions(session_, &sync);
+    if (withEyes && XR_FAILED(syncRes)) {
+        // The eye set must never cost controller input: sync "gameplay" alone.
+        sync.countActiveActionSets = 1;
+        syncRes = xrSyncActions(session_, &sync);
+        if (XR_SUCCEEDED(syncRes)) disableEyeGaze("syncing the eye tracking action set failed");
+    }
+    eyeGazeSynced_ = withEyes && eyeGazeSupported() && XR_SUCCEEDED(syncRes);
+    if (XR_FAILED(syncRes)) {
         bumperDown_[0] = bumperDown_[1] = false;
         return;  // Not focused yet: no input this frame.
     }
@@ -1110,6 +1201,22 @@ bool XrContext::handActive(int hand) const {
            ips.interactionProfile != XR_NULL_PATH;
 }
 
+void XrContext::setEyeGazeActive(bool on) {
+    if (on == eyeGazeActive_) return;
+    eyeGazeActive_ = on;
+    if (!on) input_.gazeValid = false;
+    PIXELVR_LOG_INFO("Eye gaze tracking %s%s", on ? "on" : "off",
+                     on && !eyeGazeSupported() ? " (not available)" : "");
+}
+
+void XrContext::disableEyeGaze(const char* why) {
+    if (!eyeGazeReady_) return;
+    eyeGazeReady_ = false;
+    eyeGazeSynced_ = false;
+    input_.gazeValid = false;
+    PIXELVR_LOG_WARN("Eye gaze off: %s", why);
+}
+
 void XrContext::triggerHaptic(int hand, float durationSec, float frequencyHz, float amplitude) {
     if (session_ == XR_NULL_HANDLE || hapticAction_ == XR_NULL_HANDLE) return;
     if (hand < 0 || hand >= 2 || handPaths_[hand] == XR_NULL_PATH) return;
@@ -1393,6 +1500,32 @@ bool XrContext::renderFrame(const RenderViewFn& renderView, const RenderLayersFn
         input_.headForward[0] = -2.0f * (q.x * q.z + q.w * q.y);
         input_.headForward[1] = -2.0f * (q.y * q.z - q.w * q.x);
         input_.headForward[2] = -(1.0f - 2.0f * (q.x * q.x + q.y * q.y));
+    }
+
+    // Eye gaze direction (3D Autofocus), in the views' reference space. Never logged.
+    input_.gazeValid = false;
+    if (eyeGazeSynced_ && eyeGazeSpace_ != XR_NULL_HANDLE) {
+        XrActionStateGetInfo gi{XR_TYPE_ACTION_STATE_GET_INFO};
+        gi.action = eyeGazeAction_;
+        XrActionStatePose ps{XR_TYPE_ACTION_STATE_POSE};
+        XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
+        if (XR_SUCCEEDED(xrGetActionStatePose(session_, &gi, &ps)) && ps.isActive == XR_TRUE &&
+            XR_SUCCEEDED(xrLocateSpace(eyeGazeSpace_, appSpace_, frameState.predictedDisplayTime, &loc))) {
+            constexpr XrSpaceLocationFlags need =
+                XR_SPACE_LOCATION_ORIENTATION_VALID_BIT |
+                XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
+            if ((loc.locationFlags & need) == need) {
+                const XrQuaternionf& q = loc.pose.orientation;  // rotates (0, 0, -1)
+                const float d[3] = {-2.0f * (q.x * q.z + q.w * q.y),
+                                    -2.0f * (q.y * q.z - q.w * q.x),
+                                    -(1.0f - 2.0f * (q.x * q.x + q.y * q.y))};
+                const float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+                if (len > 1e-6f) {
+                    for (int k = 0; k < 3; ++k) input_.gazeDir[k] = d[k] / len;
+                    input_.gazeValid = true;
+                }
+            }
+        }
     }
 
     input_.stageValid = false;

@@ -135,6 +135,8 @@ public:
     // Current playback time in seconds. From seek() until the first frame at the
     // target is shown this is the target, so it never flicks back meanwhile.
     double position() const;
+    // A seek has not shown its first frame at the target yet (the picture is still the old one).
+    bool seekPending() const;
 
     // Seek/close release handshake: before flushing, the decode thread asks the
     // renderer to free held dma-buf frames so the V4L2 decoder can reclaim its

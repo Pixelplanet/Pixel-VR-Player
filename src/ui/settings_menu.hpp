@@ -107,6 +107,15 @@ public:
         OpenStorePlugin,    // one repository plugin's details
         BackToFilesWeb,     // from Download Folder / List View Columns / Shortcuts
         ToggleMoveShowsUi,  // moving a controller brings faded player controls back
+        // Display & Cinema > 3D Autofocus (docs/concepts/AUTOFOCUS_PLAN_2026-11-19.md)
+        EnterAutofocus,
+        ToggleStereoAutofocus,
+        CycleAutofocusStrength,
+        CycleAutofocusCloser,
+        CycleAutofocusTransition,
+        ToggleAutofocusInfo,
+        CycleAutofocusTestShift,
+        BackToDisplay,      // from the 3D Autofocus page
     };
 
     // How a row's value is presented: the renderer draws a stepped slider for
@@ -219,6 +228,23 @@ public:
     void setStereoMode(int s) { stereoMode_ = s; refresh(); }
     bool swapEyes() const { return swapEyes_; }
     void setSwapEyes(bool s) { swapEyes_ = s; refresh(); }
+    // 3D Autofocus (experimental): stereo 180 / 360 videos, with eye tracking. Saved, except the test shift.
+    bool stereoAutofocus() const { return stereoAutofocus_; }
+    int autofocusStrengthPct() const { return autofocusStrengthPct_; }   // 10..100, step 10
+    int autofocusCloserThanCm() const { return autofocusCloserCm_; }     // 30..100, step 10
+    float autofocusTransitionS() const;                                  // 0.5 .. 3 s
+    // Debug: gaze dot and status line (false while 3D Autofocus is off).
+    bool autofocusInfo() const { return stereoAutofocus_ && autofocusInfo_; }
+    // Debug: a fixed shift (0, +3 or -3 degrees) to check the direction; 0 while the info is off.
+    float autofocusTestShiftDeg() const;
+    // Whether eye tracking was asked for at the start and is there: the 3D Autofocus notes say
+    // when the setting is on but does nothing yet (after a restart) or at all (no eye tracking).
+    void setAutofocusAvailability(bool requested, bool supported) {
+        if (requested == autofocusRequested_ && supported == autofocusSupported_) return;
+        autofocusRequested_ = requested;
+        autofocusSupported_ = supported;
+        refresh();
+    }
     bool drawModels() const { return drawModels_; }
     // Floating labels next to the controller buttons (Show Controls toggles them too; saved).
     bool buttonLabels() const { return buttonLabels_; }
@@ -492,6 +518,17 @@ private:
     int stereoMode_ = 0;
     bool removeBlackBars_ = true;
     bool swapEyes_ = false;
+    static constexpr int kAutofocusSection = 14;  // Display & Cinema > 3D Autofocus
+    bool stereoAutofocus_ = false;
+    int autofocusStrengthPct_ = 70;
+    int autofocusCloserCm_ = 60;
+    int autofocusTransitionIdx_ = 2;  // into kAutofocusTransitionMs (1 s)
+    bool autofocusInfo_ = false;
+    int autofocusTestShiftIdx_ = 0;   // 0 Off, 1 +3 degrees, 2 -3 degrees (not saved)
+    bool autofocusRequested_ = false; // eye tracking asked for at the start (setAutofocusAvailability)
+    bool autofocusSupported_ = false; // ... and there
+    const char* autofocusNote() const;
+    int rowOf(Action a) const;        // the first row with this action (0 if none)
     bool drawModels_ = true;   // our models (off: SteamVR draws its own controllers); laser stays
     bool buttonLabels_ = true; // floating button labels (on for new installs: shows what the buttons do)
     bool showStats_ = false;
@@ -581,7 +618,7 @@ private:
     int screenSizeIdx_ = 0;
     int glowReachIdx_ = 3;     // 0=Close, 1=Short, 2=Medium, 3=Wide (default, the look before the setting)
 
-    int section_ = 0;   // 0=Display, 1=UI, 2=Playback & Tracks, 3=Controls, 4=Vault, 5=Files & Web; 8, 9, 10..12, 13, 17, 21, 22, 23..=sub-pages; 15/16=plugins
+    int section_ = 0;   // 0=Display, 1=UI, 2=Playback & Tracks, 3=Controls, 4=Vault, 5=Files & Web; 8, 9, 10..12, 13, 14, 17, 21, 22, 23..=sub-pages; 15/16=plugins
     std::vector<std::pair<int, std::string>> videoStreams_;  // (index, label)
     std::vector<std::pair<int, std::string>> audioStreams_;
     int videoSel_ = 0;      // position within videoStreams_

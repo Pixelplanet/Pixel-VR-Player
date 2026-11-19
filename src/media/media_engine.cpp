@@ -2920,6 +2920,10 @@ double MediaEngine::position() const {
     return pending >= 0.0 ? pending : impl_->masterClock.load();
 }
 
+bool MediaEngine::seekPending() const {
+    return impl_ && impl_->displayPos.load() >= 0.0;
+}
+
 std::vector<MediaEngine::StreamInfo> MediaEngine::videoStreams() const {
     return impl_ ? impl_->videoStreamList : std::vector<StreamInfo>{};
 }

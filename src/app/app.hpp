@@ -18,6 +18,7 @@
 #include "ui/settings_menu.hpp"
 #include "ui/laser_focus.hpp"
 #include "app/playback_memory.hpp"
+#include "app/stereo_focus.hpp"
 #include "app/browser_host.hpp"
 #include "app/chromium_installer.hpp"
 #include "app/music_queue.hpp"
@@ -130,6 +131,30 @@ private:
     unsigned long long cpuPrevTotal_ = 0;
     std::vector<std::string> statsLines_;
     void updateStats();
+
+    // 3D Autofocus (docs/concepts/AUTOFOCUS_PLAN_2026-11-19.md). Everything here is in memory
+    // only: gaze values and offsets are never logged, stored or given to plugins.
+    StereoFocus focus_;
+    bool focusSettingPrev_ = false;  // the setting last frame (notice and log on a change)
+    bool focusActivePrev_ = false;   // eye gaze was in use last frame (log on a change)
+    bool focusOnPicture_ = false;    // the latest measured gaze point landed on the picture
+    bool focusUnavailableNoticed_ = false;  // "needs eye tracking, which isn't available" shown
+    bool focusSeekWasPending_ = false;      // a seek of slot 0 had not landed last frame
+    // What the focus was for last frame: a change (clip, format, swap eyes, a seek) resets it.
+    bool focusOpen_ = false;
+    std::string focusPath_;
+    int focusProjection_ = 0;
+    int focusStereo_ = 0;
+    bool focusSwap_ = false;
+    double focusLastPos_ = -1.0;
+    stereo::DisparityResult focusLastResult_;  // the latest measurement (info line only)
+    bool focusHaveResult_ = false;
+    float focusLastValidDisp_ = 0.0f;
+    bool focusHaveValid_ = false;
+    std::vector<std::string> focusInfoLines_;  // shown with "Autofocus Info" on, never logged
+    std::chrono::steady_clock::time_point focusInfoAt_{};
+    void updateStereoFocus(float dtS);
+    void resetStereoFocus();
     int64_t colorFormat_ = 0;
     // Menu nav stick auto-repeat: -1/+1 to step (initial press + hold), else 0.
     int navStep(float axisY, std::chrono::steady_clock::time_point now);

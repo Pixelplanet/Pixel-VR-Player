@@ -393,6 +393,10 @@ bool App::init(const std::string& mediaPath) {
     renderer_.prebuildFonts();
     // Before we connect: SteamVR's "Up next" launch, like Steam's own VR games.
     steamVrPrelaunch();
+    // 3D Autofocus: eye tracking is asked for only with the setting on (settings_ loaded its
+    // config in its constructor). Turning it on later takes effect at the next start.
+    focusSettingPrev_ = settings_.stereoAutofocus();
+    xr_.requestEyeGaze(focusSettingPrev_);
     if (!xr_.createInstanceAndSystem("Pixel VR Player")) {
         return false;
     }
@@ -1312,6 +1316,193 @@ void App::updateStats() {
     }
 }
 #endif
+
+void App::resetStereoFocus() {
+    focus_.reset();
+    focusOnPicture_ = false;
+    focusHaveResult_ = false;
+    focusHaveValid_ = false;
+}
+
+// 3D Autofocus, once per frame after the frame was drawn: what the renderer measured where the
+// user looks decides how far the eye images slide against each other (from the next frame on).
+// Gaze values stay in memory: never logged, stored, or given to plugins.
+void App::updateStereoFocus(float dtS) {
+    const bool setting = settings_.stereoAutofocus();
+    if (setting != focusSettingPrev_) {
+        focusSettingPrev_ = setting;
+        PIXELVR_LOG_INFO("3D Autofocus %s (eye tracking %s)", setting ? "on" : "off",
+                         !xr_.eyeGazeRequested() ? "not requested at start"
+                         : xr_.eyeGazeSupported() ? "available" : "unavailable");
+        if (setting) {
+            if (!xr_.eyeGazeRequested()) {
+                showNotice("3D Autofocus starts the next time Pixel VR Player opens");
+            } else if (!xr_.eyeGazeSupported()) {
+                showNotice("3D Autofocus needs eye tracking, which isn't available", true);
+                focusUnavailableNoticed_ = true;
+            } else {
+                showNotice("3D Autofocus on: works in 3D 180 / 360 videos");
+            }
+        }
+    }
+    const bool active = setting && xr_.eyeGazeSupported();
+    if (active != focusActivePrev_) {
+        focusActivePrev_ = active;
+        PIXELVR_LOG_INFO("3D Autofocus: eye gaze %s", active ? "in use" : "not in use");
+    }
+    xr_.setEyeGazeActive(active);
+    settings_.setAutofocusAvailability(xr_.eyeGazeRequested(), xr_.eyeGazeSupported());
+    const XrInputState& in = xr_.input();
+    renderer_.setFocusGaze(active && in.gazeValid, in.gazeDir);
+
+    // A stereo 180 / 360 video playing on the main screen (slot 0 is the only sphere).
+    bool stereo3dSphere = false;
+    bool paused = false;
+    bool open = false;
+    static const std::string kNoPath;
+    const std::string* path = &kNoPath;
+    int projection = 0;
+    int stereoFmt = 0;
+    double pos = -1.0;
+    bool seekPending = false;
+#ifdef PIXELVR_HAVE_MEDIA
+    {
+        const ScreenState& sc = screens_[0];
+        open = sc.open && !sc.web && !sc.opening && !sc.openAbandoned && !sc.engine.audioOnly();
+        if (open) {
+            path = &sc.path;
+            projection = sc.projection;
+            stereoFmt = sc.stereo;
+            pos = sc.engine.position();
+            paused = sc.engine.paused();
+            seekPending = sc.engine.seekPending();
+            stereo3dSphere = (projection == 1 || projection == 2) &&
+                             rendererStereo(stereoFmt) != VulkanRenderer::StereoMode::Mono;
+        }
+    }
+#endif
+    // Saved on at the start, but no eye tracking: say so once, when it would have worked.
+    if (setting && xr_.eyeGazeRequested() && !xr_.eyeGazeSupported() && stereo3dSphere &&
+        !focusUnavailableNoticed_) {
+        focusUnavailableNoticed_ = true;
+        showNotice("3D Autofocus needs eye tracking, which isn't available", true);
+    }
+    const bool swap = settings_.swapEyes();
+    // A new clip, a format change, swap eyes or a seek (a position jump): start again from 0.
+    // Until a seek has landed (and one frame after, for the frame drawn meanwhile) the picture is
+    // still the old one: no measurement from it either.
+    const bool seeked = focusLastPos_ >= 0.0 && pos >= 0.0 &&
+                        std::fabs(pos - focusLastPos_) > 1.0 + 2.0 * static_cast<double>(dtS);
+    const bool seekSettling = seekPending || focusSeekWasPending_;
+    focusSeekWasPending_ = seekPending;
+    bool changed = seekSettling;
+    if (open != focusOpen_ || *path != focusPath_ || projection != focusProjection_ ||
+        stereoFmt != focusStereo_ || swap != focusSwap_ || seeked) {
+        changed = true;
+        focusOpen_ = open;
+        if (*path != focusPath_) focusPath_ = *path;
+        focusProjection_ = projection;
+        focusStereo_ = stereoFmt;
+        focusSwap_ = swap;
+    }
+    focusLastPos_ = pos;
+    if (changed) {
+        resetStereoFocus();
+        // The search pending now was recorded from the picture / layout before the change.
+        renderer_.setFocusMeasurement(false);
+    }
+
+    renderer_.setFocusMeasurement(active && stereo3dSphere);
+    stereo::DisparityResult r;
+    const bool got = renderer_.takeFocusMeasurement(r);
+    // The gaze point of this frame's measurement attempt; between attempts the last one holds.
+    stereo::GazeSource gs;
+    if (!(active && in.gazeValid)) {
+        focusOnPicture_ = false;
+    } else if (renderer_.focusGazeSource(gs)) {
+        focusOnPicture_ = gs.valid;
+    }
+    const bool onPicture = active && in.gazeValid && focusOnPicture_;
+
+    StereoFocusParams p;
+    p.strength = static_cast<float>(settings_.autofocusStrengthPct()) / 100.0f;
+    p.closerThanM = static_cast<float>(settings_.autofocusCloserThanCm()) / 100.0f;
+    p.transitionS = settings_.autofocusTransitionS();
+    focus_.setParams(p);
+
+    // A panel up (the user reads it, the gaze only passes through it onto the video): hold too.
+    bool uiShown = settings_.isOpen() || downloadsWindow_ || actionMenu_.visible || smbModal_.active ||
+                   textEntry_.active;
+#ifdef PIXELVR_HAVE_FREETYPE
+    uiShown = uiShown || browser_.isOpen();
+#endif
+    if (!active || !stereo3dSphere) {
+        resetStereoFocus();
+    } else if (!paused && !uiShown) {  // paused / a panel up: the offset stays as it is
+        focus_.update(dtS, got ? &r : nullptr, onPicture);
+    }
+    if (got && active && stereo3dSphere) {
+        focusLastResult_ = r;
+        focusHaveResult_ = true;
+        if (r.valid) {
+            focusLastValidDisp_ = r.disparityDeg;
+            focusHaveValid_ = true;
+        }
+    }
+
+    // The debug test shift works without eye tracking too, so the direction can be checked.
+    const float testDeg = stereo3dSphere ? settings_.autofocusTestShiftDeg() : 0.0f;
+    const float offsetDeg = focus_.offsetDeg() + testDeg;
+    renderer_.setStereoFocusOffset(offsetDeg * 3.14159265358979f / 180.0f);
+    renderer_.setFocusGazeDot(settings_.autofocusInfo() && active);
+
+    // The info lines (on screen only, never logged), a few times a second so they can be read.
+    if (!settings_.autofocusInfo()) {
+        focusInfoLines_.clear();
+        return;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    if (!focusInfoLines_.empty() && now - focusInfoAt_ < std::chrono::milliseconds(200)) return;
+    focusInfoAt_ = now;
+    focusInfoLines_.clear();
+    char buf[200];
+    if (!setting) {
+        focusInfoLines_.emplace_back("Autofocus: off");
+    } else if (!xr_.eyeGazeRequested()) {
+        focusInfoLines_.emplace_back("Autofocus: eye tracking starts after a restart");
+    } else if (!xr_.eyeGazeSupported()) {
+        focusInfoLines_.emplace_back("Autofocus: no eye tracking available");
+    } else if (!stereo3dSphere) {
+        focusInfoLines_.emplace_back("Autofocus: not a 3D 180/360 video");
+    } else if (!in.gazeValid) {
+        focusInfoLines_.emplace_back("Autofocus: eyes not tracked");
+    } else if (!onPicture) {
+        focusInfoLines_.emplace_back("Autofocus: gaze off the picture");
+    } else if (!focusHaveResult_) {
+        focusInfoLines_.emplace_back("Autofocus: measuring");
+    } else {
+        char dist[96];
+        if (focusLastResult_.valid) {
+            std::snprintf(dist, sizeof(dist), "%.2f m  disp %.1f\xC2\xB0",
+                          stereo::disparityToMetres(focusLastResult_.disparityDeg, p.baselineM),
+                          focusLastResult_.disparityDeg);
+        } else if (focusHaveValid_) {
+            std::snprintf(dist, sizeof(dist), "no match (last %.2f m)",
+                          stereo::disparityToMetres(focusLastValidDisp_, p.baselineM));
+        } else {
+            std::snprintf(dist, sizeof(dist), "no match");
+        }
+        std::snprintf(buf, sizeof(buf), "Autofocus %s  score %.2f  tex %.4f  offset %.1f\xC2\xB0 -> %.1f\xC2\xB0%s%s",
+                      dist, focusLastResult_.score, focusLastResult_.variance, focus_.offsetDeg(),
+                      focus_.targetDeg(), focus_.focused() ? "  FOCUSED" : "",
+                      paused ? "  (paused)" : (uiShown ? "  (menu open)" : ""));
+        focusInfoLines_.emplace_back(buf);
+    }
+    if (testDeg != 0.0f) {
+        std::snprintf(buf, sizeof(buf), "Autofocus test shift %+.1f\xC2\xB0", testDeg);
+        focusInfoLines_.emplace_back(buf);
+    }
+}
 
 int App::navStep(float axisY, std::chrono::steady_clock::time_point now) {
     using namespace std::chrono_literals;
@@ -6477,6 +6668,7 @@ int App::run() {
 
             // Live settings + place the screen in front on first head tracking.
             renderer_.setSwapEyes(settings_.swapEyes());
+            updateStereoFocus(dt);
             renderer_.setDrawModels(settings_.drawModels());
             renderer_.setUiAppearance(settings_.uiTextScale(),
                                       settings_.uiTextRgb(),
@@ -9318,7 +9510,18 @@ int App::run() {
                 }
             }
 #endif
-            renderer_.setStats(settings_.showStats(), statsLines_);
+            if (settings_.autofocusInfo() && !focusInfoLines_.empty()) {
+                // The autofocus info lines, also when the statistics themselves are off.
+                if (settings_.showStats()) {
+                    std::vector<std::string> lines = statsLines_;
+                    lines.insert(lines.end(), focusInfoLines_.begin(), focusInfoLines_.end());
+                    renderer_.setStats(true, lines);
+                } else {
+                    renderer_.setStats(true, focusInfoLines_);
+                }
+            } else {
+                renderer_.setStats(settings_.showStats(), statsLines_);
+            }
         } else {
             // Idle until the runtime tells us to start rendering.
             std::this_thread::sleep_for(50ms);
