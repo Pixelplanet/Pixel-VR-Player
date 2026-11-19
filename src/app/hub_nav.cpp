@@ -57,6 +57,8 @@ std::vector<int> App::navFocusSnapshot() const {
         s.push_back(sr >= 0 && sr < static_cast<int>(rows.size()) ? rows[static_cast<std::size_t>(sr)].stepIdx : -1);
     }
     s.push_back(smbModal_.anon ? 1 : 0);
+    s.push_back(smbModal_.savePass ? 1 : 0);
+    s.push_back(shareLogin_.savePass ? 1 : 0);  // (the sign-in dialog's switch)
     {
         static const char* const kProtocols[4] = {"smb", "sftp", "dav", "davs"};
         int proto = -1;

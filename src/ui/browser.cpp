@@ -13,6 +13,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cerrno>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -99,6 +100,15 @@ std::string smb_parent(const std::string& uri) {
 std::string without_scheme(const std::string& uri) {
     const std::size_t at = uri.find("://");
     return at == std::string::npos ? uri : uri.substr(at + 3);
+}
+
+// What a folder that needs a login says (names the share, never the login itself).
+std::string login_message(const std::string& uri, bool refused) {
+    SmbCredentialsManager::LoginTarget t;
+    const std::string label =
+        SmbCredentialsManager::instance().loginTargetFor(uri, t) ? t.label : without_scheme(uri);
+    return refused ? "The user name or password for " + label + " was not accepted"
+                   : label + " needs a user name and password";
 }
 
 // Where a configured server starts: smb://host[/share], sftp://host[:port]/folder, ...
@@ -349,6 +359,12 @@ void Browser::scanSmbInto(const std::string& uri, ScanResult& out) {
         std::vector<RemoteEntry> list;
         std::string err;
         if (!remoteList(uri, list, err)) {
+            if (isRemoteLoginError(err)) {  // (remoteList sends no login known to be missing or refused)
+                const SmbCredentialsManager& creds = SmbCredentialsManager::instance();
+                out.login = (creds.loginGiven(uri) && !creds.loginMissing(uri)) ? 2 : 1;
+                out.status = login_message(uri, out.login == 2);
+                return;
+            }
             out.status = "Cannot browse " + without_scheme(uri) + ": " + err;
             return;
         }
@@ -374,6 +390,18 @@ void Browser::scanSmbInto(const std::string& uri, ScanResult& out) {
 #ifdef PIXELVR_HAVE_SMB
     std::vector<Entry> dirs, files;
     bool browsed = false;
+    int openErr = 0;  // errno of a failed smbc_opendir
+    SmbCredentialsManager& creds = SmbCredentialsManager::instance();
+    if (uri != "smb://") {
+        // A password that is not saved (asked at the first access), or a login refused here before:
+        // ask for it without sending anything to the server.
+        const bool missing = creds.loginMissing(uri);
+        if (missing || creds.loginRefused(uri)) {
+            out.login = missing ? 1 : 2;
+            out.status = login_message(uri, !missing);
+            return;
+        }
+    }
     {
         // libsmbclient is not thread-safe: hold the global SMB lock across the
         // whole enumeration so it can't race the media stream's prefetch thread
@@ -383,7 +411,9 @@ void Browser::scanSmbInto(const std::string& uri, ScanResult& out) {
             out.status = "SMB unavailable";
             return;
         }
+        errno = 0;
         const int dh = smbc_opendir(uri.c_str());
+        openErr = dh < 0 ? errno : 0;
         if (dh >= 0) {
             browsed = true;
             struct smbc_dirent* de = nullptr;
@@ -476,6 +506,13 @@ void Browser::scanSmbInto(const std::string& uri, ScanResult& out) {
     }
 
     if (!browsed) {
+        if (uri != "smb://" && SmbCredentialsManager::isLoginErrno(openErr)) {
+            // Logon failure / access denied: remembered, so this login is not sent here again.
+            creds.noteLoginRefused(uri);
+            out.login = creds.loginGiven(uri) ? 2 : 1;
+            out.status = login_message(uri, out.login == 2);
+            return;
+        }
         out.status = "Cannot browse " + uri;
         return;
     }
@@ -523,6 +560,10 @@ void Browser::beginScan(const std::string& location, bool isSmb,
     PIXELVR_LOG_INFO("beginScan '%s' smb=%d scanning=%d restore=%d", location.c_str(),
                      isSmb ? 1 : 0, scanning_.load() ? 1 : 0, restoreView ? 1 : 0);
     updateActiveFilterFor(location, isSmb);
+    if (location != location_ && !location_.empty()) {  // where a Cancel in the sign-in dialog goes back to
+        backLoc_ = location_;
+        backSmb_ = inSmb_;
+    }
     location_ = location;
     inSmb_ = isSmb;
     if (location == kVaultMissing || VaultManager::instance().isVaultPath(location)) {
@@ -574,6 +615,16 @@ void Browser::openNetwork() {
     status_.clear();
     beginScan("smb://", true);
     activeFilter_ = 2;
+}
+
+void Browser::leaveLoginFolder() {
+    const std::string here = location_;
+    quietLogin_ = true;
+    if (!backLoc_.empty() && backLoc_ != here) {
+        beginScan(backLoc_, backSmb_, true, here);
+    } else {
+        beginScan("smb://", true, true, here);
+    }
 }
 
 void Browser::openHome() {
@@ -1179,6 +1230,7 @@ void Browser::startDownloadFile(const std::string& uri, const std::string& local
     speedTime_ = {};
     dlStopped_.store(false);
     dlCardGone_.store(false);
+    dlLoginFailed_.store(false);
     dlPid_.store(-1);
     dlBaseBytes_.store(0);
     pausedByBrowse_ = false;
@@ -1238,11 +1290,25 @@ void Browser::startDownloadFile(const std::string& uri, const std::string& local
 
         struct stat st{};
         long long total = 0;
-        {
+        // The share wants a login (not saved, or refused before): stop before smbclient sends one.
+        SmbCredentialsManager& creds = SmbCredentialsManager::instance();
+        bool loginFailed = creds.loginBlocked(uri);
+        if (!loginFailed) {
             std::lock_guard<std::mutex> smb(smbGlobalLock());
+            errno = 0;
             if (smbc_stat(uri.c_str(), &st) == 0) {
                 total = static_cast<long long>(st.st_size);
+            } else if (SmbCredentialsManager::isLoginErrno(errno)) {
+                creds.noteLoginRefused(uri, true);
+                loginFailed = true;
             }
+        }
+        if (loginFailed) {
+            PIXELVR_LOG_WARN("Download: %s needs a login", name.c_str());
+            dlLoginFailed_.store(true);
+            dlDone_.store(true);
+            dlActive_.store(false);
+            return;
         }
         dlTotal_.store(total);
         PIXELVR_LOG_INFO("Download: %s size=%lld bytes", name.c_str(), total);
@@ -1311,7 +1377,23 @@ int Browser::spawnCurl(const std::string& uri, const std::string& local) {
     cmd += local;
     cmd += "\"";
 
-    std::string authFile = SmbCredentialsManager::instance().getAuthFilePath(host, share);
+    // The login goes to smbclient as an auth file read from a pipe (/dev/fd/3 in the child): the
+    // password never lands on the disk (a password kept for this session only, too).
+    std::string authText = SmbCredentialsManager::instance().authFileText(host, share);
+    int authPipe[2] = {-1, -1};
+    if (!authText.empty()) {
+        bool sent = pipe2(authPipe, O_CLOEXEC) == 0;
+        // (A few lines: they fit the pipe's buffer, so this write never waits for the reader.)
+        if (sent) sent = ::write(authPipe[1], authText.data(), authText.size()) == static_cast<ssize_t>(authText.size());
+        std::fill(authText.begin(), authText.end(), '\0');
+        if (authPipe[1] >= 0) ::close(authPipe[1]);
+        if (!sent) {
+            if (authPipe[0] >= 0) ::close(authPipe[0]);
+            PIXELVR_LOG_WARN("DL: could not hand the login to smbclient");
+            return -1;
+        }
+    }
+    const std::string authFile = authPipe[0] >= 0 ? "/dev/fd/3" : "";
     PIXELVR_LOG_INFO("DL spawn: smbclient %s %s -c '%s'", service.c_str(),
                      authFile.empty() ? "-N" : ("-A " + authFile).c_str(), cmd.c_str());
 
@@ -1334,10 +1416,12 @@ int Browser::spawnCurl(const std::string& uri, const std::string& local) {
     posix_spawn_file_actions_init(&fa);
     // Take stdin from /dev/null so smbclient can never block on an auth prompt.
     posix_spawn_file_actions_addopen(&fa, 0, "/dev/null", O_RDONLY, 0);
+    if (authPipe[0] >= 0) posix_spawn_file_actions_adddup2(&fa, authPipe[0], 3);  // (dup2 clears close-on-exec)
     pid_t pid = -1;
     const int rc = posix_spawn(&pid, "/usr/bin/smbclient", &fa, nullptr, argv,
                                environ);
     posix_spawn_file_actions_destroy(&fa);
+    if (authPipe[0] >= 0) ::close(authPipe[0]);  // (the child has its own copy)
     if (rc != 0) {
         PIXELVR_LOG_WARN("DL: posix_spawn failed rc=%d", rc);
         return -1;
@@ -1371,6 +1455,7 @@ void Browser::startDownloadFolder(const std::string& uri,
     }
     dlStopped_.store(false);
     dlCardGone_.store(false);
+    dlLoginFailed_.store(false);
     dlPaused_.store(false);
     dlAbort_.store(false);
     int existingIdx = -1;
@@ -1409,6 +1494,14 @@ void Browser::startDownloadFolder(const std::string& uri,
         long long got = 0;
         long long count = 0;
         bool ok = true;
+        SmbCredentialsManager& creds = SmbCredentialsManager::instance();
+        if (creds.loginBlocked(uri)) {  // stop before any login is sent (not saved, or refused before)
+            PIXELVR_LOG_WARN("Download folder: the share needs a login");
+            dlLoginFailed_.store(true);
+            dlDone_.store(true);
+            dlActive_.store(false);
+            return;
+        }
         // Pre-walk the tree to total the size, so % progress and ETA can be shown.
         long long total = 0;
         std::function<void(const std::string&)> sumSizes =
@@ -1500,11 +1593,18 @@ void Browser::startDownloadFolder(const std::string& uri,
         copyDir = [&](const std::string& src, const std::string& dst) {
             std::filesystem::create_directories(dst, ec);
             int d = -1;
+            int openErr = 0;
             {
                 std::lock_guard<std::mutex> smb(smbGlobalLock());
+                errno = 0;
                 d = smbc_opendir(src.c_str());
+                openErr = d < 0 ? errno : 0;
             }
             if (d < 0) {
+                if (SmbCredentialsManager::isLoginErrno(openErr)) {
+                    creds.noteLoginRefused(src);
+                    dlLoginFailed_.store(true);
+                }
                 ok = false;
                 return;
             }
@@ -1566,6 +1666,7 @@ bool Browser::copyRemoteFile(const std::string& uri, const std::string& localIn,
     auto src = remoteOpen(uri, err);
     if (!src) {
         PIXELVR_LOG_WARN("Download: cannot open %s: %s", uri.c_str(), err.c_str());
+        if (isRemoteLoginError(err)) dlLoginFailed_.store(true);
         return false;
     }
     std::string local = localIn;
@@ -1664,6 +1765,7 @@ void Browser::downloadRemoteFolder(const std::string& uri, const std::string& de
         std::string err;
         if (!remoteList(src, list, err)) {
             PIXELVR_LOG_WARN("Download: cannot list %s: %s", src.c_str(), err.c_str());
+            if (isRemoteLoginError(err)) dlLoginFailed_.store(true);
             ok = false;
             return;
         }
@@ -1937,6 +2039,13 @@ Browser::Result Browser::poll(std::string& playPath) {
             inSmb_ = scanResult_.inSmb;
             lastLocation_ = location_;  // remember for the next open()
             lastInSmb_ = inSmb_;
+            ++scanSerial_;
+            lastScanOk_ = status_.empty() && scanResult_.login == 0;
+            // A folder that wants a login: the app asks for it (not after leaving such a folder, so
+            // a Cancel never lands in a second question).
+            loginNeed_ = {};
+            if (scanResult_.login != 0 && !quietLogin_) loginNeed_ = {location_, scanResult_.login == 2};
+            quietLogin_ = false;
 
             const int n = static_cast<int>(entries_.size());
             if (restoreViewOnScan_ && n > 0) {
@@ -2052,6 +2161,9 @@ Browser::Result Browser::poll(std::string& playPath) {
             const bool gone = dlCardGone_.load() || (!dlOk_.load() && !dlStopped_.load() && removableMissing(j.localPath, true));
             j.state = gone ? 2 : dlStopped_.load() ? 3 : (dlOk_.load() ? 1 : 2);
             j.error = gone ? "SD card removed" : std::string();
+            if (!gone && !dlOk_.load() && !dlStopped_.load() && dlLoginFailed_.load()) {
+                j.error = "Needs a login: open the share in Files to sign in";
+            }
         }
         dlActiveJob_ = -1;
         if (dlCardGone_.load()) {
@@ -2073,6 +2185,8 @@ Browser::Result Browser::poll(std::string& playPath) {
             // to auto-play, and for a folder that fed a directory to the media
             // engine). Finished items are played from the downloads window.
             status_ = "Downloaded " + dlName_;
+        } else if (dlLoginFailed_.load()) {
+            status_ = "Download failed: the share needs a login (open it in Files to sign in)";
         } else {
             status_ = "Download failed: " + dlName_;
         }

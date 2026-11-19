@@ -24,6 +24,7 @@
 #include "plugins/plugin_host.hpp"
 #include "plugins/plugin_repo.hpp"
 #include "media/letterbox.hpp"
+#include "net/smb_credentials.hpp"
 #include "util/one_euro.hpp"
 #include "xr/vr_app_manifest.hpp"
 
@@ -311,8 +312,32 @@ private:
         std::string pass;
         std::string workgroup = "WORKGROUP";
         std::string label;
+        bool savePass = true;          // off: the password is not written to the file (asked when opened)
         enum class Field { None, Host, Share, User, Pass, Workgroup, Port, Label } editingField = Field::None;
     } smbModal_{};
+
+    // Sign-in dialog (page ShareLogin): a share asked for a login when a folder in it was opened.
+    // Sign In reads the folder again with the typed login (in memory); only once that worked is it
+    // kept as the switch says. The password is wiped when the dialog closes.
+    struct ShareLoginState {
+        bool active = false;
+        std::string uri;  // the folder that asked
+        SmbCredentialsManager::LoginTarget target;
+        std::string user;
+        std::string pass;
+        bool savePass = true;
+        bool busy = false;          // Sign In pressed: waiting for the folder to be read again
+        unsigned waitSerial = 0;    // the browser's scan count when it was pressed
+        std::string message;        // the header line (which share, and why it asks)
+        enum class Field { None, User, Pass } editingField = Field::None;
+    } shareLogin_{};
+    void openShareLogin(const std::string& uri, bool refused);
+    void updateShareLoginMenu();
+    void openShareLoginField(int id, bool chain);
+    void navigateShareLogin(int dx, int dy, bool fresh);
+    void submitShareLogin();
+    void closeShareLogin(bool cancelled);
+    void pollShareLogin();  // each frame: a folder that asks for a login, the result of Sign In
     void openSmbModal(bool isNew, const std::string& smbPath = "");
     void updateSmbModalMenu();
     void saveSmbModal();

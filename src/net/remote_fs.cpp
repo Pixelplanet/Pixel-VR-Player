@@ -28,6 +28,8 @@
 
 namespace pixelvr {
 
+const char* const kRemoteLoginError = "authentication failed (check the user name and password)";
+
 namespace {
 
 [[maybe_unused]] int defaultPort(const std::string& protocol) {
@@ -210,7 +212,7 @@ std::shared_ptr<SshConn> sshConnect(const RemoteUri& u, const SmbShare& cred, st
         }
     }
     if (rc != SSH_AUTH_SUCCESS) {
-        err = "authentication failed (check the user name and password)";
+        err = kRemoteLoginError;
         return nullptr;
     }
     conn->sftp = sftp_new(s);
@@ -531,7 +533,7 @@ void davPrepare(CURL* c, const RemoteUri& u, const SmbShare& cred, const std::st
 std::string httpError(long code, CURLcode rc, CURL* c) {
     if (rc != CURLE_OK && rc != CURLE_WRITE_ERROR) return curl_easy_strerror(rc);
     (void)c;
-    if (code == 401 || code == 403) return "authentication failed (check the user name and password)";
+    if (code == 401 || code == 403) return kRemoteLoginError;
     if (code == 404) return "not found";
     return "HTTP " + std::to_string(code);
 }
@@ -785,7 +787,36 @@ private:
 #endif
 
 // ---------------------------------------------------------------- facade --
+namespace {
+bool listServer(const std::string& uri, std::vector<RemoteEntry>& out, std::string& err);
+std::unique_ptr<RemoteFile> openServer(const std::string& uri, std::string& err);
+}  // namespace
+
 bool remoteList(const std::string& uri, std::vector<RemoteEntry>& out, std::string& err) {
+    // No try with a login known to be missing or refused there (a wrong password is not sent again).
+    SmbCredentialsManager& creds = SmbCredentialsManager::instance();
+    if (creds.loginBlocked(uri)) {
+        err = kRemoteLoginError;
+        return false;
+    }
+    const bool ok = listServer(uri, out, err);
+    if (!ok && isRemoteLoginError(err)) creds.noteLoginRefused(uri);
+    return ok;
+}
+
+std::unique_ptr<RemoteFile> remoteOpen(const std::string& uri, std::string& err) {
+    SmbCredentialsManager& creds = SmbCredentialsManager::instance();
+    if (creds.loginBlocked(uri)) {
+        err = kRemoteLoginError;
+        return nullptr;
+    }
+    std::unique_ptr<RemoteFile> f = openServer(uri, err);
+    if (!f && isRemoteLoginError(err)) creds.noteLoginRefused(uri, true);
+    return f;
+}
+
+namespace {
+bool listServer(const std::string& uri, std::vector<RemoteEntry>& out, std::string& err) {
     RemoteUri u;
     if (!parseRemoteUri(uri, u)) {
         err = "not a network address";
@@ -811,7 +842,7 @@ bool remoteList(const std::string& uri, std::vector<RemoteEntry>& out, std::stri
 #endif
 }
 
-std::unique_ptr<RemoteFile> remoteOpen(const std::string& uri, std::string& err) {
+std::unique_ptr<RemoteFile> openServer(const std::string& uri, std::string& err) {
     RemoteUri u;
     if (!parseRemoteUri(uri, u)) {
         err = "not a network address";
@@ -836,5 +867,6 @@ std::unique_ptr<RemoteFile> remoteOpen(const std::string& uri, std::string& err)
     return nullptr;
 #endif
 }
+}  // namespace
 
 }  // namespace pixelvr

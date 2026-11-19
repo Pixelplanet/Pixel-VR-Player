@@ -27,6 +27,7 @@ enum : int {
     MoveTo = 1,        // (old fixed destinations list; plain list page)
     DownloadJob = 1,   // a download's Options menu (the Downloads tab): the same plain list page
     Confirm = 2,       // two buttons: delete, share delete, folder download
+    ShareLogin = 3,    // sign in to a share that asked for a login (user name, password, save switch)
     ShareEditor = 4,   // network share form
     Format = 5,        // Change 3D / VR Format (and every page from here on is a plain list unless named)
     ScreenPicker = 6,  // "Play on which screen?"
@@ -691,7 +692,7 @@ public:
         // the rows ("B: Close"; empty = none).
         int dividerBefore = -1;
         std::string footer;
-        std::string error;    // share editor: why Save did not work (footer line), "" = none
+        std::string error;    // share editor / sign-in: why Save / Sign In did not work (footer line), "" = none
         int errorField = -1;  // the field it is about (red rim), -1 = none
     };
     void setActionMenu(const ActionMenuData& data) { actionMenu_ = data; }

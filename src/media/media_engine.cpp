@@ -155,9 +155,28 @@ private:
 
 }  // namespace
 
+namespace {
+// What a playback (or letterbox / subtitle open) failure says when the share wants a login: the
+// sign-in dialog is in the file browser, where the share is opened.
+std::string loginErrorText(const std::string& path) {
+    return SmbCredentialsManager::instance().loginGiven(path)
+               ? "the user name or password for this share was not accepted (open the share in Files to sign in)"
+               : "this share needs a user name and password (open the share in Files to sign in)";
+}
+}  // namespace
+
 std::unique_ptr<RemoteFile> openRemoteMedia(const std::string& path, std::string& err) {
-    if (path.rfind("smb://", 0) != 0) return remoteOpen(path, err);
+    if (path.rfind("smb://", 0) != 0) {
+        std::unique_ptr<RemoteFile> f = remoteOpen(path, err);
+        if (!f && isRemoteLoginError(err)) err = loginErrorText(path);
+        return f;
+    }
 #ifdef PIXELVR_HAVE_SMB
+    // A login known to be missing or refused: fail without sending it (again) to the server.
+    if (SmbCredentialsManager::instance().loginBlocked(path)) {
+        err = loginErrorText(path);
+        return nullptr;
+    }
     // libsmbclient is not thread-safe; serialize context setup against the
     // browser's scans/downloads, which share Samba's global state.
     std::lock_guard<std::mutex> smb(smbGlobalLock());
@@ -170,10 +189,17 @@ std::unique_ptr<RemoteFile> openRemoteMedia(const std::string& path, std::string
         }
     }
     smbc_open_fn openFn = (ctx != nullptr) ? smbc_getFunctionOpen(ctx) : nullptr;
+    errno = 0;
     SMBCFILE* file = (openFn != nullptr) ? openFn(ctx, path.c_str(), O_RDONLY, 0) : nullptr;
     if (file == nullptr) {
+        const int e = errno;
         if (ctx != nullptr) smbc_free_context(ctx, 1);
-        err = "the file on the share could not be opened";
+        if (openFn != nullptr && SmbCredentialsManager::isLoginErrno(e)) {
+            SmbCredentialsManager::instance().noteLoginRefused(path, true);
+            err = loginErrorText(path);
+        } else {
+            err = "the file on the share could not be opened";
+        }
         return nullptr;
     }
     return std::make_unique<SmbFile>(ctx, file);

@@ -2486,12 +2486,14 @@ void App::updateButtonLabels(std::chrono::steady_clock::time_point nowT, bool la
     // Left / Right in the dialogs whose choices sit side by side; the plain lists step up / down only.
     st.dialogLeftRight = actionMenu_.visible &&
                          (actionMenu_.page == menupage::Confirm || actionMenu_.page == menupage::ScreenPicker ||
-                          actionMenu_.page == menupage::Arrange || actionMenu_.page == menupage::ShareEditor);
+                          actionMenu_.page == menupage::Arrange || actionMenu_.page == menupage::ShareEditor ||
+                          actionMenu_.page == menupage::ShareLogin);
 #ifdef PIXELVR_HAVE_FREETYPE
     // Options opens File Actions on the Files tab, a download's menu on the Downloads tab, and closes
     // an open action menu (not the share editor); it does nothing in Settings.
     st.optionsWork = !settings_.isOpen() &&
-                     (actionMenu_.visible ? actionMenu_.page != menupage::ShareEditor : (browser_.isOpen() || downloadsWindow_));
+                     (actionMenu_.visible ? (actionMenu_.page != menupage::ShareEditor && actionMenu_.page != menupage::ShareLogin)
+                                         : (browser_.isOpen() || downloadsWindow_));
     st.recenterWorks = browser_.isOpen() || downloadsWindow_ || settings_.isOpen();
     // Every hub tab takes the stick and the D-pad now (Downloads moves its focused card).
     st.noStick = false;
@@ -2558,6 +2560,7 @@ void App::openSmbModal(bool isNew, const std::string& smbPath) {
         smbModal_.pass.clear();
         smbModal_.workgroup = "WORKGROUP";
         smbModal_.label.clear();
+        smbModal_.savePass = true;
     } else {
         std::string protocol = "smb";
         int port = 0;
@@ -2592,6 +2595,7 @@ void App::openSmbModal(bool isNew, const std::string& smbPath) {
         smbModal_.pass.clear();
         smbModal_.workgroup = "WORKGROUP";
         smbModal_.label.clear();
+        smbModal_.savePass = true;
 
         SmbShare existing;
         if (SmbCredentialsManager::instance().findShare(host, share, existing, protocol, port)) {
@@ -2600,6 +2604,8 @@ void App::openSmbModal(bool isNew, const std::string& smbPath) {
             smbModal_.pass = existing.password;
             smbModal_.workgroup = existing.workgroup.empty() ? "WORKGROUP" : existing.workgroup;
             smbModal_.label = existing.name;
+            // (Saving off: no password here; one typed this session is forgotten when the form saves.)
+            smbModal_.savePass = existing.savePassword;
         }
     }
 
@@ -2630,7 +2636,8 @@ void App::updateSmbModalMenu() {
     // Plain values (the renderer shows placeholders for empty fields). Option
     // ids are fixed: 0 host, 1 share / folder, 2 auth ("guest"/"account"), 3 user,
     // 4 password, 5 workgroup (SMB) or port, 6 nickname, 7 save, 8 cancel,
-    // 9 delete (empty for a new share), 10 type (SMB / SFTP / WebDAV / WebDAV (https)).
+    // 9 delete (empty for a new share), 10 type (SMB / SFTP / WebDAV / WebDAV (https)), 11 the
+    // "Save password" switch ("on" / "off"; empty for guest access).
     auto fieldVal = [&](SmbModalState::Field f, int rowIdx, const std::string& saved, bool mask) {
         if (kbActive && smbModal_.editingField == f) {
             actionMenu_.editingRow = rowIdx;
@@ -2658,6 +2665,7 @@ void App::updateSmbModalMenu() {
                                   : smbModal_.protocol == "dav"  ? "WebDAV"
                                   : smbModal_.protocol == "davs" ? "WebDAV (https)"
                                                                  : "SMB");
+    actionMenu_.options.push_back(smbModal_.anon ? "" : (smbModal_.savePass ? "on" : "off"));
 #endif
 }
 
@@ -2702,6 +2710,7 @@ void App::saveSmbModal() {
     s.name = smbModal_.label.empty() ? (s.host + (s.share.empty() ? "" : ("/" + s.share))) : smbModal_.label;
     s.id = s.host + (s.share.empty() ? "" : ("/" + s.share));
     s.anonymous = smbModal_.anon;
+    s.savePassword = smbModal_.savePass;  // off: never written to the file (kept until the player quits)
 
     SmbCredentialsManager::instance().addOrUpdateShare(s);
 
@@ -2741,6 +2750,220 @@ void App::deleteSmbModal() {
     if (textEntry_.active) cancelKeyboard();
     actionMenu_.visible = false;
     browser_.openNetwork();
+#endif
+}
+
+void App::openShareLogin(const std::string& uri, bool refused) {
+#ifdef PIXELVR_HAVE_FREETYPE
+    SmbCredentialsManager::LoginTarget t;
+    if (!SmbCredentialsManager::instance().loginTargetFor(uri, t)) return;
+    std::fill(shareLogin_.pass.begin(), shareLogin_.pass.end(), '\0');
+    shareLogin_ = ShareLoginState{};
+    shareLogin_.active = true;
+    shareLogin_.uri = uri;
+    shareLogin_.target = t;
+    shareLogin_.user = t.username;        // the saved (or this session's) user name
+    shareLogin_.savePass = t.savePassword;  // the share's own setting; on for a share that is not saved
+    shareLogin_.message = refused ? "The user name or password for " + t.label + " was not accepted"
+                                  : t.label + " needs a user name and password";
+    menuStack_.clear();
+    actionMenu_ = VulkanRenderer::ActionMenuData{};
+    actionMenu_.visible = true;
+    actionMenu_.page = menupage::ShareLogin;
+    actionMenu_.selectedOption = shareLogin_.user.empty() ? 0 : 1;  // A types what is missing
+    updateShareLoginMenu();
+    PIXELVR_LOG_INFO("Share sign-in asked (%s)", refused ? "the login was refused" : "no login");
+#else
+    (void)uri;
+    (void)refused;
+#endif
+}
+
+void App::updateShareLoginMenu() {
+#ifdef PIXELVR_HAVE_FREETYPE
+    actionMenu_.title = "Sign In";
+    actionMenu_.subtitle = shareLogin_.message;
+    actionMenu_.options.clear();
+    actionMenu_.editingRow = -1;
+    actionMenu_.cursorPos = 0;
+    using F = ShareLoginState::Field;
+    // The field being typed shows the keyboard's text (the password as '*' only).
+    auto fieldVal = [&](F f, int row, const std::string& saved, bool mask) {
+        if (textEntry_.active && shareLogin_.editingField == f) {
+            actionMenu_.editingRow = row;
+            actionMenu_.cursorPos = static_cast<int>(textEntry_.cursor);
+            return mask ? std::string(textEntry_.text.length(), '*') : textEntry_.text;
+        }
+        return mask ? std::string(saved.length(), '*') : saved;
+    };
+    // Option ids are fixed (the renderer's hub::loginField): 0 user name, 1 password, 2 "Save
+    // password" ("on" / "off"), 3 Sign In ("Signing in..." while the folder is read again), 4 Cancel.
+    actionMenu_.options.push_back(fieldVal(F::User, 0, shareLogin_.user, false));
+    actionMenu_.options.push_back(fieldVal(F::Pass, 1, shareLogin_.pass, true));
+    actionMenu_.options.push_back(shareLogin_.savePass ? "on" : "off");
+    actionMenu_.options.push_back(shareLogin_.busy ? "Signing in..." : "Sign In");
+    actionMenu_.options.push_back("Cancel");
+#endif
+}
+
+void App::openShareLoginField(int id, bool chain) {
+#ifdef PIXELVR_HAVE_FREETYPE
+    if (shareLogin_.busy || (id != 0 && id != 1)) return;
+    using F = ShareLoginState::Field;
+    shareLogin_.editingField = id == 0 ? F::User : F::Pass;
+    actionMenu_.selectedOption = id;
+    openKeyboard(
+        id == 0 ? "User name" : "Password", id == 0 ? shareLogin_.user : shareLogin_.pass, id == 1, XrInputState{},
+        [this, id](const std::string& text) {
+            if (!shareLogin_.active) return;
+            if (id == 0) {
+                shareLogin_.user = text;
+            } else {
+                std::fill(shareLogin_.pass.begin(), shareLogin_.pass.end(), '\0');
+                shareLogin_.pass = text;
+            }
+            shareLogin_.editingField = ShareLoginState::Field::None;
+            if (actionMenu_.errorField == id || actionMenu_.errorField == 1) {  // retyped: the complaint goes
+                actionMenu_.error.clear();
+                actionMenu_.errorField = -1;
+            }
+            const bool next = smbChain_;
+            smbChain_ = false;
+            // After the user name the password (Enter = Next), after the password Sign In.
+            actionMenu_.selectedOption = id == 0 ? 1 : 3;
+            updateShareLoginMenu();
+            if (id == 0 && next) openShareLoginField(1, false);
+        },
+        [this]() {
+            smbChain_ = false;
+            if (shareLogin_.active) {
+                shareLogin_.editingField = ShareLoginState::Field::None;
+                updateShareLoginMenu();
+            }
+        });
+    smbChain_ = chain && id == 0;
+    textEntry_.enterLabel = smbChain_ ? "Next" : "Done";
+    updateShareLoginMenu();
+#else
+    (void)id;
+    (void)chain;
+#endif
+}
+
+void App::navigateShareLogin(int dx, int dy, bool fresh) {
+    // The dialog as drawn: User name, Password, Save password, then Sign In | Cancel.
+    const int rowOf[5] = {0, 1, 2, 3, 3};
+    const int sel = actionMenu_.selectedOption;
+    if (sel < 0 || sel > 4) {
+        actionMenu_.selectedOption = shareLogin_.user.empty() ? 0 : 1;
+        return;
+    }
+    const int r = rowOf[sel];
+    if (dx != 0) {
+        if (sel == 2) {  // the switch: Right = on, Left = off
+            if (!shareLogin_.busy && (dx > 0) != shareLogin_.savePass) {
+                shareLogin_.savePass = dx > 0;
+                updateShareLoginMenu();
+            }
+        } else if (r == 3) {
+            actionMenu_.selectedOption = dx > 0 ? 4 : 3;
+        }
+        return;
+    }
+    if (dy != 0) {
+        int nr = r + dy;
+        if (nr < 0) nr = fresh ? 3 : 0;  // round to the other end on a fresh press only
+        if (nr > 3) nr = fresh ? 0 : 3;
+        if (nr == r) return;
+        actionMenu_.selectedOption = nr == 3 ? 3 : nr;
+    }
+}
+
+void App::submitShareLogin() {
+#ifdef PIXELVR_HAVE_FREETYPE
+    if (shareLogin_.busy) return;
+    if (shareLogin_.user.empty()) {
+        actionMenu_.error = "Enter a user name first";
+        actionMenu_.errorField = 0;
+        actionMenu_.selectedOption = 0;  // A types it right away
+        updateShareLoginMenu();
+        return;
+    }
+    // In memory only until the folder opened with it; then kept as the switch says.
+    SmbCredentialsManager::instance().setSessionLogin(shareLogin_.target, shareLogin_.user, shareLogin_.pass);
+    shareLogin_.busy = true;
+    shareLogin_.waitSerial = browser_.scanSerial();
+    actionMenu_.error.clear();
+    actionMenu_.errorField = -1;
+    browser_.retryScan(shareLogin_.uri);
+    updateShareLoginMenu();
+#endif
+}
+
+void App::closeShareLogin(bool cancelled) {
+#ifdef PIXELVR_HAVE_FREETYPE
+    if (!shareLogin_.active) return;
+    if (textEntry_.active) cancelKeyboard();
+    // A login still being tried is not known to work: it is not kept.
+    if (shareLogin_.busy) SmbCredentialsManager::instance().dropSessionLogin(shareLogin_.target);
+    const std::string label = shareLogin_.target.label;
+    std::fill(shareLogin_.pass.begin(), shareLogin_.pass.end(), '\0');
+    shareLogin_ = ShareLoginState{};
+    if (actionMenu_.visible && actionMenu_.page == menupage::ShareLogin) actionMenu_.visible = false;
+    if (cancelled) {
+        browser_.leaveLoginFolder();  // one step back: where the browser was before
+        showNotice("Not signed in: " + label + " was not opened");
+    }
+#else
+    (void)cancelled;
+#endif
+}
+
+void App::pollShareLogin() {
+#ifdef PIXELVR_HAVE_FREETYPE
+    SmbCredentialsManager& creds = SmbCredentialsManager::instance();
+    if (shareLogin_.active && !(actionMenu_.visible && actionMenu_.page == menupage::ShareLogin)) {
+        // Closed some other way (the hub closed, a video started): nothing that did not work is kept.
+        if (shareLogin_.busy) creds.dropSessionLogin(shareLogin_.target);
+        std::fill(shareLogin_.pass.begin(), shareLogin_.pass.end(), '\0');
+        shareLogin_ = ShareLoginState{};
+    }
+    if (shareLogin_.active && shareLogin_.busy) {
+        if (browser_.scanSerial() == shareLogin_.waitSerial) return;  // still reading the folder
+        shareLogin_.busy = false;
+        Browser::LoginNeed need;
+        const bool asked = browser_.takeLoginNeed(need);
+        if (!asked && browser_.currentLocation() == shareLogin_.uri && browser_.lastScanOk()) {
+            // The folder opened with it: kept as the switch says (saved, or in memory until quit).
+            creds.keepSessionLogin(shareLogin_.target, shareLogin_.savePass);
+            PIXELVR_LOG_INFO("Share sign-in accepted (password %s)",
+                             shareLogin_.savePass ? "saved" : "kept until the player quits");
+            const std::string label = shareLogin_.target.label;
+            closeShareLogin(false);
+            showNotice("Signed in to " + label);
+            return;
+        }
+        creds.dropSessionLogin(shareLogin_.target);
+        std::fill(shareLogin_.pass.begin(), shareLogin_.pass.end(), '\0');
+        shareLogin_.pass.clear();  // the user name stays
+        PIXELVR_LOG_INFO("Share sign-in %s", asked ? "not accepted" : "failed (the folder did not open)");
+        actionMenu_.error = asked ? "Not accepted: check the user name and password"
+                                  : (browser_.status().empty() ? std::string("The share could not be opened")
+                                                               : browser_.status());
+        actionMenu_.errorField = 1;
+        actionMenu_.selectedOption = 1;  // A types the password again
+        updateShareLoginMenu();
+        return;
+    }
+    if (shareLogin_.active) return;
+    Browser::LoginNeed need;
+    if (!browser_.takeLoginNeed(need)) return;
+    // Asked right where the folder was opened; with something else on top the folder's own line says it.
+    if (!browser_.isOpen() || need.uri != browser_.currentLocation() || actionMenu_.visible || textEntry_.active ||
+        settings_.isOpen() || downloadsWindow_) {
+        return;
+    }
+    openShareLogin(need.uri, need.refused);
 #endif
 }
 
@@ -2802,6 +3025,10 @@ void App::commitKeyboard() {
         smbModal_.editingField = SmbModalState::Field::None;
         updateSmbModalMenu();
     }
+    if (shareLogin_.active && !textEntry_.active) {
+        shareLogin_.editingField = ShareLoginState::Field::None;
+        updateShareLoginMenu();
+    }
 }
 
 void App::cancelKeyboard() {
@@ -2814,6 +3041,10 @@ void App::cancelKeyboard() {
     if (smbModal_.active) {
         smbModal_.editingField = SmbModalState::Field::None;
         updateSmbModalMenu();
+    }
+    if (shareLogin_.active) {
+        shareLogin_.editingField = ShareLoginState::Field::None;
+        updateShareLoginMenu();
     }
 }
 
@@ -3834,6 +4065,10 @@ bool App::menuBack() {
         closeShareEditor(true);
         return true;
     }
+    if (actionMenu_.page == menupage::ShareLogin) {
+        closeShareLogin(true);  // one step back, with a notice
+        return true;
+    }
     if (actionMenu_.page == menupage::Confirm) {
         cancelConfirm();
         return true;
@@ -3872,7 +4107,7 @@ bool App::smbModalChanged() const {
     const SmbModalState& b = smbModalOpened_;
     return a.protocol != b.protocol || a.port != b.port || a.host != b.host || a.share != b.share ||
            a.anon != b.anon || a.user != b.user || a.pass != b.pass || a.workgroup != b.workgroup ||
-           a.label != b.label;
+           a.label != b.label || a.savePass != b.savePass;
 }
 
 void App::closeShareEditor(bool ask) {
@@ -4027,7 +4262,11 @@ void App::navigateShareEditor(int dx, int dy, bool fresh) {
     };
     std::vector<std::vector<Item>> rows = {{{10, 0.0f}}, {{0, 0.0f}}, {{1, -0.28f}, {6, 0.28f}}, {{2, 0.0f}}};
     if (!smbModal_.anon) rows.push_back({{3, -0.28f}, {4, 0.28f}});
-    rows.push_back({{5, -0.28f}});
+    if (smbModal_.anon) {
+        rows.push_back({{5, -0.28f}});
+    } else {
+        rows.push_back({{5, -0.28f}, {11, 0.28f}});  // Workgroup or Port | Save password
+    }
     std::vector<Item> footer;
     if (!smbModal_.isNew) footer.push_back({9, -0.455f});
     footer.push_back({7, 0.255f});
@@ -5611,6 +5850,9 @@ int App::run() {
                 if (smbModal_.active && smbModal_.editingField != SmbModalState::Field::None) {
                     updateSmbModalMenu();
                 }
+                if (shareLogin_.active && shareLogin_.editingField != ShareLoginState::Field::None) {
+                    updateShareLoginMenu();
+                }
             }
             renderer_.setKeyboardModal(textEntry_.active, textEntry_.prompt, textEntry_.text,
                                        textEntry_.password, nullptr,
@@ -6583,6 +6825,7 @@ int App::run() {
                     browser_.setOpen(false);
                 }
             }
+            pollShareLogin();  // a folder that asks for a login; the result of Sign In
             updatePlugins();
             if (browser_.downloadActive()) {
                 downloadToastText_ = browser_.downloadText();
@@ -7348,7 +7591,7 @@ int App::run() {
                     // Y (Options): the same one step back as B. Not in the share form (what was typed
                     // would be gone at a touch).
                     if (actionBtnPressed) {
-                        if (actionMenu_.page != menupage::ShareEditor) {
+                        if (actionMenu_.page != menupage::ShareEditor && actionMenu_.page != menupage::ShareLogin) {
                             menuBack();
                             xr_.triggerHaptic(renderer_.pointerHand() == 0 ? 0 : 1, 0.025f, 0.0f, 0.5f);
                         }
@@ -7842,6 +8085,38 @@ int App::run() {
                             }
                             interacted = true;
                         }
+                    } else if (actionMenu_.page == menupage::ShareLogin) {
+                        // Sign-in dialog: Up / Down from row to row, Left / Right on the switch (off / on)
+                        // and between Sign In and Cancel.
+                        const int dy = navStep(in.thumbstickY, nowT);
+                        const bool freshY = navLastFresh_;
+                        const int dx = navStepX(in.thumbstickX, nowT);
+                        if (dx != 0 || dy != 0) navigateShareLogin(dx, dy, freshY);
+                        const int hov = renderer_.actionMenuBtnHovered();
+                        if (hov >= 0 && laserFocus_.laserOwns()) actionMenu_.selectedOption = hov;
+                        // A click beside the fields does nothing (it holds what was typed).
+                        if (in.select && hov < 0) in.select = false;
+                        if (in.select || in.togglePlay) {
+                            const int chosen =
+                                (hov >= 0 && (in.select || laserFocus_.laserOwns())) ? hov : actionMenu_.selectedOption;
+                            if (chosen >= 0) {
+                                xr_.triggerHaptic(0, 0.025f, 0.0f, 0.5f);
+                                xr_.triggerHaptic(1, 0.025f, 0.0f, 0.5f);
+                            }
+                            if (chosen == 4) {
+                                closeShareLogin(true);
+                            } else if (!shareLogin_.busy) {  // (while signing in only Cancel acts)
+                                if (chosen == 0 || chosen == 1) {
+                                    openShareLoginField(chosen, chosen == 0);  // the user name's Enter goes on to the password
+                                } else if (chosen == 2) {
+                                    shareLogin_.savePass = !shareLogin_.savePass;
+                                    updateShareLoginMenu();
+                                } else if (chosen == 3) {
+                                    submitShareLogin();
+                                }
+                            }
+                            interacted = true;
+                        }
                     } else if (actionMenu_.page == menupage::ShareEditor) {
                         // Network share form. The stick / D-pad walk it as it is drawn: Up / Down from row
                         // to row, Left / Right inside a row (on Type and Sign in they change the choice).
@@ -7874,6 +8149,10 @@ int App::run() {
                                     // Pointing at a segment picks it; stick + A toggles.
                                     const int seg = laserSeg;
                                     smbModal_.anon = (seg >= 0) ? (seg == 0) : !smbModal_.anon;
+                                    updateSmbModalMenu();
+                                } else if (chosen == 11 && !smbModal_.anon) {
+                                    // Save password: on / off (off = asked when the share opens)
+                                    smbModal_.savePass = !smbModal_.savePass;
                                     updateSmbModalMenu();
                                 } else if (chosen == 7) {
                                     // Save SMB Share

@@ -154,6 +154,27 @@ public:
     // separate process and must not block browsing).
     bool isScanning() const { return scanning_.load(); }
 
+    // A network folder that needs a login: set when its scan lands (the folder then shows only its
+    // Up row and a message). `refused`: a login was given and not accepted; else none was there.
+    struct LoginNeed {
+        std::string uri;
+        bool refused = false;
+    };
+    bool takeLoginNeed(LoginNeed& out) {
+        if (loginNeed_.uri.empty()) return false;
+        out = std::move(loginNeed_);
+        loginNeed_ = {};
+        return true;
+    }
+    // Counts the scans that landed (a sign-in waits for the one it started).
+    unsigned scanSerial() const { return scanSerial_; }
+    bool lastScanOk() const { return lastScanOk_; }  // the last landed scan read its folder (no error)
+    // Reads `uri` again (after a sign-in), keeping where the browser came from.
+    void retryScan(const std::string& uri) { beginScan(uri, true, false); }
+    // One step back from a folder that asked for a login (where the browser was before it), else the
+    // network list.
+    void leaveLoginFolder();
+
     // Directory the "Download" action copies into (default ~/Downloads).
     void setDownloadDir(const std::string& dir) { downloadDir_ = dir; }
 
@@ -219,7 +240,15 @@ private:
         std::string status;
         std::string location;
         bool inSmb = false;
+        int login = 0;  // the folder needs a login: 1 none given, 2 the one given was refused
     };
+    LoginNeed loginNeed_;
+    unsigned scanSerial_ = 0;
+    bool lastScanOk_ = false;
+    std::string backLoc_;  // the folder before the current one (for leaveLoginFolder)
+    bool backSmb_ = false;
+    bool quietLogin_ = false;  // the next landed scan does not ask for a login (it left a login folder)
+    std::atomic<bool> dlLoginFailed_{false};  // the download stopped: the share wants a login
     void beginScan(const std::string& location, bool isSmb,
                    bool restoreView = false,
                    const std::string& childPath = "");        // async navigate

@@ -367,6 +367,8 @@ if(PIXELVR_BUILD_TOOLS)
     target_link_libraries(ui_color_test PRIVATE pixelvr_core)
     add_executable(subtitle_sources_test tools/subtitle_sources_test.cpp)
     target_link_libraries(subtitle_sources_test PRIVATE pixelvr_core)
+    add_executable(smb_login_test tools/smb_login_test.cpp)
+    target_link_libraries(smb_login_test PRIVATE pixelvr_core)
 endif()
 
 # First-party plugins (docs/concepts/PLUGIN_SYSTEM_SPEC.md). Each lands in

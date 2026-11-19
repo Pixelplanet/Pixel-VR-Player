@@ -681,6 +681,7 @@ inline UiRect smbFieldWell(int i) {
         case 2: return {0.0f, -0.084f, 0.54f, kSmbWellHalfH};
         case 3: return {-kSmbColCx, -0.199f, kSmbColHalfW, kSmbWellHalfH};
         case 4: return {kSmbColCx, -0.199f, kSmbColHalfW, kSmbWellHalfH};
+        case 11: return {kSmbColCx, -0.314f, kSmbColHalfW, kSmbWellHalfH};  // "Save password" switch
         default: return {-kSmbColCx, -0.314f, kSmbColHalfW, kSmbWellHalfH};  // 5 workgroup
     }
 }
@@ -710,6 +711,36 @@ inline UiRect smbButton(int id) {
         case 8: return {0.465f, -0.404f, 0.085f, tok::kCtlM};
         case 9: return {-0.455f, -0.404f, 0.090f, tok::kCtlM};
         default: return menuCloseButton(kSmbHalfW, kSmbHalfH);  // the close X every dialog has
+    }
+}
+// A switch at the right end of a form row (the share form's "Save password", option 11; the
+// sign-in dialog's, option 2): the size of the switches in Settings.
+inline UiRect formSwitch(const UiRect& well) { return {well.cx + well.hw - 0.058f, well.cy, 0.041f, 0.017f}; }
+// Sign-in dialog (action menu page 3), opened when a share asks for a login. Option ids: 0 user
+// name, 1 password, 2 "Save password" switch ("on" / "off"), 3 Sign In, 4 Cancel; id 5 is the
+// header close button, which also cancels. The same field and footer styles as the share form.
+constexpr float kLoginHalfW = 0.52f;
+constexpr float kLoginHalfH = 0.36f;
+constexpr float kLoginHeaderDivY = kLoginHalfH - 0.148f;
+constexpr float kLoginFooterDivY = -(kLoginHalfH - 0.116f);
+constexpr float kLoginNoteY = -0.162f;  // the dim line under the switch row
+inline UiRect loginField(int i) {
+    switch (i) {
+        case 0: return {0.0f, 0.118f, 0.46f, kSmbWellHalfH};
+        case 1: return {0.0f, 0.003f, 0.46f, kSmbWellHalfH};
+        default: return {0.0f, -0.104f, 0.46f, kSmbWellHalfH};  // 2: the switch row
+    }
+}
+// Laser target: a text field with its label above it; the switch row is the row itself.
+inline UiRect loginFieldHit(int i) {
+    const UiRect w = loginField(i);
+    return i == 2 ? UiRect{w.cx, w.cy, w.hw, w.hh + 0.006f} : UiRect{w.cx, w.cy + 0.020f, w.hw, w.hh + 0.024f};
+}
+inline UiRect loginButton(int id) {
+    switch (id) {
+        case 3: return {0.200f, -(kLoginHalfH - 0.066f), 0.115f, tok::kCtlM};
+        case 4: return {0.420f, -(kLoginHalfH - 0.066f), 0.085f, tok::kCtlM};
+        default: return menuCloseButton(kLoginHalfW, kLoginHalfH);
     }
 }
 // In-app keyboard (text entry for SMB fields, rename): a glass sheet over the
@@ -892,10 +923,12 @@ inline UiRect arrangePreview() { return {0.210f, 0.012f, 0.520f, 0.212f}; }
 inline void actionMenuHalfSize(int page, int optCount, float& hw, float& hh) {
     const float span = static_cast<float>(std::max(0, optCount - 1)) * kActionMenuStepY;
     hw = (page == menupage::ShareEditor) ? kSmbHalfW
+       : (page == menupage::ShareLogin) ? kLoginHalfW
        : (page == menupage::ScreenPicker) ? kPickHalfW
        : (page == menupage::Arrange) ? kArrHalfW
        : (page == menupage::Tracks) ? kTracksHalfW : kConfirmHalfW;
     hh = (page == menupage::ShareEditor) ? kSmbHalfH
+       : (page == menupage::ShareLogin) ? kLoginHalfH
        : (page == menupage::ScreenPicker) ? kPickHalfH
        : (page == menupage::Arrange) ? kArrHalfH
        : (page == menupage::Confirm) ? kConfirmHalfH : std::max(0.22f, 0.5f * span + 0.125f);
@@ -3199,7 +3232,11 @@ bool VulkanRenderer::focusedElementCentre(float& x, float& y) const {
         if (page == menupage::Confirm) return sel < 2 && at(hub::deleteConfirmButton(sel));
         if (page == menupage::ShareEditor) {
             if (sel == 7 || sel == 8 || sel == 9) return at(hub::smbButton(sel));
-            return (sel <= 6 || sel == 10) && at(hub::smbFieldWell(sel));
+            return (sel <= 6 || sel == 10 || sel == 11) && at(hub::smbFieldWell(sel));
+        }
+        if (page == menupage::ShareLogin) {
+            if (sel == 3 || sel == 4) return at(hub::loginButton(sel));
+            return sel <= 2 && at(hub::loginField(sel));
         }
         if (page == menupage::ScreenPicker) {
             if (sel == 3) return at(hub::pickerCancel());
@@ -3516,6 +3553,7 @@ void VulkanRenderer::updatePointer() {
                     hub::actionMenuHalfSize(actionMenu_.page, optCount, mhw, mhh);
                     actionMenuInside_ = std::fabs(hx) <= mhw && std::fabs(hyy) <= mhh;
                     actionMenuCloseHovered_ = actionMenu_.page != menupage::ShareEditor &&
+                                              actionMenu_.page != menupage::ShareLogin &&
                                               hub::menuCloseButton(mhw, mhh).contains(hx, hyy, 0.006f);
                 }
                 if (actionMenuCloseHovered_) {
@@ -3575,7 +3613,8 @@ void VulkanRenderer::updatePointer() {
                     }
                 } else if (actionMenu_.page == menupage::ShareEditor) {
                     // SMB share editor form (fixed option ids, see hub::smbFieldWell)
-                    for (int i : {0, 1, 2, 3, 4, 5, 6, 10}) {
+                    for (int i : {0, 1, 2, 3, 4, 5, 6, 10, 11}) {
+                        if (i == 11 && (optCount < 12 || actionMenu_.options[11].empty())) continue;  // (guest: no password)
                         if (i < optCount && hub::smbFieldHit(i).contains(hx, hyy)) {
                             actionMenuBtnHovered_ = i;
                             break;
@@ -3596,6 +3635,22 @@ void VulkanRenderer::updatePointer() {
                             if (id == 9 && (optCount < 10 || actionMenu_.options[9].empty())) continue;  // no Delete for a new share
                             if (hub::smbButton(id).contains(hx, hyy, 0.004f)) {
                                 actionMenuBtnHovered_ = (id == 10) ? 8 : id;  // close X = cancel
+                                break;
+                            }
+                        }
+                    }
+                } else if (actionMenu_.page == menupage::ShareLogin) {
+                    // Sign-in dialog (fixed option ids, see hub::loginField)
+                    for (int i : {0, 1, 2}) {
+                        if (i < optCount && hub::loginFieldHit(i).contains(hx, hyy)) {
+                            actionMenuBtnHovered_ = i;
+                            break;
+                        }
+                    }
+                    if (actionMenuBtnHovered_ < 0) {
+                        for (int id : {3, 4, 5}) {
+                            if (hub::loginButton(id).contains(hx, hyy, 0.004f)) {
+                                actionMenuBtnHovered_ = (id == 5) ? 4 : id;  // close X = Cancel
                                 break;
                             }
                         }
@@ -9824,10 +9879,12 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         const float menuDynHalfH = std::max(0.22f, 0.5f * menuSpanY + 0.125f);
 
         const float mHalfW = (actionMenu_.page == menupage::ShareEditor) ? hub::kSmbHalfW
+                           : (actionMenu_.page == menupage::ShareLogin) ? hub::kLoginHalfW
                            : (actionMenu_.page == menupage::ScreenPicker) ? hub::kPickHalfW
                            : (actionMenu_.page == menupage::Arrange) ? hub::kArrHalfW
                            : (actionMenu_.page == menupage::Tracks) ? hub::kTracksHalfW : 0.44f;
         const float mHalfH = (actionMenu_.page == menupage::ShareEditor) ? hub::kSmbHalfH
+                           : (actionMenu_.page == menupage::ShareLogin) ? hub::kLoginHalfH
                            : (actionMenu_.page == menupage::ScreenPicker) ? hub::kPickHalfH
                            : (actionMenu_.page == menupage::Arrange) ? hub::kArrHalfH
                            : ((actionMenu_.page == menupage::Confirm) ? 0.24f : menuDynHalfH);
@@ -9851,6 +9908,19 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         const float* dimCol = textDisabledCol;
         // What A presses right now (row, button, field): the shared focus look (accent glow + rim).
         const float menuFocusGlow[4] = {themeAccentCol[0], themeAccentCol[1], themeAccentCol[2], tok::kGlowAlpha};
+        // A switch in a form row ("Save password"): the look of the switches in Settings, the knob
+        // right and the track in the accent when on.
+        const float formSwitchOff[4] = {0.20f, 0.23f, 0.29f, 0.95f};
+        const float formSwitchOn[4] = {themeAccentCol[0] * 0.80f, themeAccentCol[1] * 0.80f,
+                                       themeAccentCol[2] * 0.85f, 0.98f};
+        auto drawFormSwitch = [&](const UiRect& r, bool on) {
+            const float knobR = r.hh * 0.78f;
+            const float knobX = on ? (r.cx + r.hw - r.hh) : (r.cx - r.hw + r.hh);
+            if (on) drawGlow(vpPanel, r.cx, r.cy, r.hw, r.hh, 0.010f, menuFocusGlow);
+            drawUiElement(vpPanel, r.cx, r.cy, r.hw, r.hh, UiShape::RoundedBox, on ? formSwitchOn : formSwitchOff, 1.0f);
+            drawUiElement(vpPanel, knobX, r.cy, knobR, knobR, UiShape::RoundedBox,
+                          on ? tok::kKnob.data() : tok::kKnobOff.data(), 1.0f);
+        };
 
         auto tileVp = [&](const UiRect& r) {
             // Place a flat tile on the (possibly curved) panel: bend its centre
@@ -10350,8 +10420,9 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 drawUiElement(vpPanel, 0.0f, hub::kSmbFooterDivY, hub::kSmbHalfW - 0.04f, 0.0012f,
                               UiShape::RoundedBox, kGlassDivider, 1.0f);
             }
-            for (int i : {0, 1, 2, 3, 4, 5, 6, 10}) {
+            for (int i : {0, 1, 2, 3, 4, 5, 6, 10, 11}) {
                 if (i >= optCount) continue;
+                if (i == 11 && actionMenu_.options[11].empty()) continue;  // (guest access: no password to save)
                 const UiRect w = hub::smbFieldWell(i);
                 const bool hov = (actionMenuBtnHovered_ == i) || (actionMenu_.selectedOption == i);
                 const bool editing = (actionMenu_.editingRow == i);
@@ -10368,6 +10439,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                         (editing || focused) ? tabActiveBord
                         : faulty             ? redBorder
                                              : ((hov && !disabled) ? kGlassRim : kGlassRimFaint));
+                if (i == 11) drawFormSwitch(hub::formSwitch(w), actionMenu_.options[11] == "on");
                 if (i == 2) {
                     for (int seg = 0; seg < 2; ++seg) {
                         const UiRect r = hub::smbAuthSegment(seg);
@@ -10420,9 +10492,62 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     drawSemantic(vpPanel, r, tok::kDanger, laser, focused, accentLikeDanger);
                 }
             }
+        } else if (actionMenu_.page == menupage::ShareLogin) {
+            // Sign-in dialog: the share form's fields and footer, one column (layout in hub::loginField).
+            const int optCount = static_cast<int>(actionMenu_.options.size());
+            const bool busy = optCount > 3 && actionMenu_.options[3] != "Sign In";  // ("Signing in..." meanwhile)
+            {
+                const UiRect cr = hub::loginButton(5);
+                tok::State st;
+                st.hover = (actionMenuBtnHovered_ == 4);  // close X and Cancel share id 4
+                drawControl(vpPanel, cr, st);
+                drawUiElement(vpPanel, cr.cx, cr.cy, tok::kIconS, tok::kIconS, UiShape::Close, themeTextCol);
+                drawUiElement(vpPanel, 0.0f, hub::kLoginHeaderDivY, hub::kLoginHalfW - 0.04f, 0.0012f,
+                              UiShape::RoundedBox, kGlassDivider, 1.0f);
+                drawUiElement(vpPanel, 0.0f, hub::kLoginFooterDivY, hub::kLoginHalfW - 0.04f, 0.0012f,
+                              UiShape::RoundedBox, kGlassDivider, 1.0f);
+            }
+            for (int i : {0, 1, 2}) {
+                if (i >= optCount) continue;
+                const UiRect w = hub::loginField(i);
+                const bool hov = (actionMenuBtnHovered_ == i) || (actionMenu_.selectedOption == i);
+                const bool editing = (actionMenu_.editingRow == i);
+                const bool focused = !editing && !busy && actionMenu_.selectedOption == i;
+                const bool faulty = actionMenu_.errorField == i && !editing;
+                if (editing || focused) {
+                    drawGlow(vpPanel, w.cx, w.cy, w.hw, w.hh, tok::kGlowSpread, menuFocusGlow);
+                }
+                drawBox(vpPanel, w.cx, w.cy, w.hw, w.hh, busy ? glassRailT.data() : glassWellT.data(), tok::kRadiusPill,
+                        (editing || focused || faulty) ? tok::kBorderStrong : tok::kBorderRest,
+                        (editing || focused) ? tabActiveBord
+                        : faulty             ? redBorder
+                                             : ((hov && !busy) ? kGlassRim : kGlassRimFaint));
+                if (i == 2) drawFormSwitch(hub::formSwitch(w), actionMenu_.options[2] == "on");
+                if (editing) {
+                    const TextFieldLayout lay =
+                        layoutTextField(w.cx - w.hw + 0.022f, w.cx + w.hw - 0.022f, scBody,
+                                        actionMenu_.options[static_cast<std::size_t>(i)], actionMenu_.cursorPos, false, false);
+                    drawUiElement(vpPanel, lay.cursorX + 0.002f, w.cy, 0.0022f, w.hh * 0.55f, UiShape::RoundedBox,
+                                  tok::kKnob.data(), 1.0f);
+                }
+            }
+            // Footer: Sign In (the primary), Cancel.
+            for (int id : {3, 4}) {
+                const UiRect r = hub::loginButton(id);
+                const bool laser = actionMenuBtnHovered_ == id;
+                const bool focused = actionMenu_.selectedOption == id;
+                if (id == 3) {
+                    drawPrimary(vpPanel, r, laser && !busy, focused && !busy);
+                } else {
+                    tok::State st;
+                    st.hover = laser;
+                    st.focus = focused;
+                    drawControl(vpPanel, r, st);
+                }
+            }
         }
 
-        if (actionMenu_.page != menupage::ShareEditor) {
+        if (actionMenu_.page != menupage::ShareEditor && actionMenu_.page != menupage::ShareLogin) {
             // Close X in the top-right corner: a fixed place to dismiss the dialog with the laser (as B).
             const UiRect cr = hub::menuCloseButton(mHalfW, mHalfH);
             tok::State st;
@@ -10441,12 +10566,12 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         const float scDlgTitle = scTitle;
         const float scDlgSub = scSecondary;
 
-        if (actionMenu_.page != menupage::ShareEditor && actionMenu_.page != menupage::ScreenPicker && actionMenu_.page != menupage::Arrange) {  // own header
+        if (actionMenu_.page != menupage::ShareEditor && actionMenu_.page != menupage::ShareLogin && actionMenu_.page != menupage::ScreenPicker && actionMenu_.page != menupage::Arrange) {  // own header
             withHeadingFont([&] {
                 drawFitCentered(0.0f, mHalfH - 0.050f, (mHalfW - 0.11f) * 2.0f, scDlgTitle, themeTextCol, actionMenu_.title);
             });
         }
-        if (!actionMenu_.subtitle.empty() && actionMenu_.page != menupage::Confirm && actionMenu_.page != menupage::ShareEditor &&
+        if (!actionMenu_.subtitle.empty() && actionMenu_.page != menupage::Confirm && actionMenu_.page != menupage::ShareEditor && actionMenu_.page != menupage::ShareLogin &&
             actionMenu_.page != menupage::ScreenPicker && actionMenu_.page != menupage::Arrange) {
             // Too long for one line: break at the space nearest the middle and
             // use a second line (then cut, if even that is too long).
@@ -10655,9 +10780,10 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
             const std::string labels[11] = {"Server / host", smbKind ? "Share" : "Folder", "Sign in",
                                             "Username", "Password", smbKind ? "Workgroup / domain" : "Port",
                                             "Nickname", "", "", "", ""};
+            const bool savePass = optCount <= 11 || actionMenu_.options[11] != "off";
             const std::string placeholders[11] = {"IP address or hostname",
                                                   smbKind ? "All shares" : (kind == "SFTP" ? "Home, or /absolute/path" : "Start folder (optional)"),
-                                                  "", "Username", "Password",
+                                                  "", "Username", savePass ? "Password" : "Asked when the share opens",
                                                   smbKind ? "WORKGROUP" : defPort + " (default)",
                                                   "Optional display name", "", "", "", ""};
             // Header: title (heading weight, the size and height of every dialog title; left-aligned,
@@ -10719,6 +10845,17 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     drawFit(left, w.cy, right - left, valSc, themeTextCol, val);
                 }
             }
+            if (optCount > 11 && !actionMenu_.options[11].empty()) {
+                // "Save password": what the switch means, left of it.
+                const UiRect w = hub::smbFieldWell(11);
+                const UiRect sw = hub::formSwitch(w);
+                const bool hov = (actionMenuBtnHovered_ == 11) || (actionMenu_.selectedOption == 11);
+                drawFit(w.cx - w.hw + 0.010f, w.cy + hub::kSmbLabelLift, w.hw * 2.0f, labelSc,
+                        hov ? themeTextCol : slateCol, "Save password");
+                const float left = w.cx - w.hw + 0.022f;
+                drawFit(left, w.cy, sw.cx - sw.hw - 0.015f - left, valSc, savePass ? themeTextCol : slateCol,
+                        savePass ? "Saved on this headset" : "Asked each time");
+            }
             // Footer
             const tok::Rgba saveText = tok::labelOnAccent(themeAccentCol);
             const float* darkText = saveText.data();
@@ -10731,6 +10868,64 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                 withHeadingFont([&] {
                     drawFitCentered(r.cx, r.cy, r.hw * 2.0f - 0.02f, valSc,
                                     id == 7 ? darkText : (id == 9 ? redText : themeTextCol), label);
+                });
+            }
+        } else if (actionMenu_.page == menupage::ShareLogin) {
+            const int optCount = static_cast<int>(actionMenu_.options.size());
+            const bool busy = optCount > 3 && actionMenu_.options[3] != "Sign In";
+            const float labelSc = scSecondary;
+            const float valSc = scBody;
+            const float* dimText = textDisabledCol;
+            const float* errCol = tok::kDanger.text.data();
+            const float left0 = -hub::kLoginHalfW + tok::kPadL;
+            // Header: title + the message (which share, and why it asks)
+            withHeadingFont([&] {
+                drawFit(left0, hub::kLoginHalfH - 0.050f, 0.90f, scDlgTitle, themeTextCol, actionMenu_.title);
+            });
+            drawFit(left0, hub::kLoginHalfH - 0.095f, 2.0f * (hub::kLoginHalfW - tok::kPadL), labelSc, slateCol,
+                    actionMenu_.subtitle);
+            static const char* const kLabels[2] = {"User name", "Password"};
+            for (int i : {0, 1}) {
+                if (i >= optCount) continue;
+                const UiRect w = hub::loginField(i);
+                const bool hov = (actionMenuBtnHovered_ == i) || (actionMenu_.selectedOption == i);
+                const bool editing = (actionMenu_.editingRow == i);
+                drawFit(w.cx - w.hw + 0.010f, w.cy + hub::kSmbLabelLift, w.hw * 2.0f, labelSc,
+                        hov && !busy ? themeTextCol : slateCol, kLabels[i]);
+                const std::string& val = actionMenu_.options[static_cast<std::size_t>(i)];
+                const float left = w.cx - w.hw + 0.022f;
+                const float right = w.cx + w.hw - 0.022f;
+                if (editing) {
+                    const TextFieldLayout lay = layoutTextField(left, right, valSc, val, actionMenu_.cursorPos, false, false);
+                    drawString(lay.startX, w.cy - 0.35f * fontAtlas_.ascent * valSc, valSc, themeTextCol, lay.visibleStr);
+                } else if (val.empty()) {
+                    drawFit(left, w.cy, right - left, valSc, dimText, kLabels[i]);
+                } else {
+                    drawFit(left, w.cy, right - left, valSc, busy ? slateCol : themeTextCol, val);
+                }
+            }
+            if (optCount > 2) {
+                const UiRect w = hub::loginField(2);
+                const UiRect sw = hub::formSwitch(w);
+                const bool on = actionMenu_.options[2] == "on";
+                const float left = w.cx - w.hw + 0.022f;
+                drawFit(left, w.cy, sw.cx - sw.hw - 0.015f - left, valSc, busy ? slateCol : themeTextCol, "Save password");
+                drawFit(w.cx - w.hw + 0.010f, hub::kLoginNoteY, w.hw * 2.0f, labelSc, slateCol,
+                        on ? "Saved on this headset: the share opens without asking"
+                           : "Kept until the player quits: asked again after that");
+            }
+            // Why Sign In did not work: on the footer line, left of the buttons.
+            if (!actionMenu_.error.empty()) {
+                const UiRect signIn = hub::loginButton(3);
+                drawFit(left0, signIn.cy, signIn.cx - signIn.hw - 0.015f - left0, valSc, errCol, actionMenu_.error);
+            }
+            const tok::Rgba signText = tok::labelOnAccent(themeAccentCol);
+            for (int id : {3, 4}) {
+                if (id >= optCount) continue;
+                const UiRect r = hub::loginButton(id);
+                withHeadingFont([&] {
+                    drawFitCentered(r.cx, r.cy, r.hw * 2.0f - 0.02f, valSc, id == 3 ? signText.data() : themeTextCol,
+                                    actionMenu_.options[static_cast<std::size_t>(id)]);
                 });
             }
         }

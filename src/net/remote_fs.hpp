@@ -59,6 +59,12 @@ bool parseRemoteUri(const std::string& uri, RemoteUri& out);
 // "sftp://host:22/a/b" -> "sftp://host:22/a" ("" above the server root)
 std::string remoteParent(const std::string& uri);
 
+// A share that needs a login, or refused the one given (SFTP / WebDAV): `err` is then exactly
+// kRemoteLoginError, so callers can ask for a login instead of showing a plain failure. Where a
+// login was refused, further tries fail at once until it changes (no wrong password sent again).
+extern const char* const kRemoteLoginError;
+inline bool isRemoteLoginError(const std::string& err) { return err == kRemoteLoginError; }
+
 bool remoteList(const std::string& uri, std::vector<RemoteEntry>& out, std::string& err);
 std::unique_ptr<RemoteFile> remoteOpen(const std::string& uri, std::string& err);
 

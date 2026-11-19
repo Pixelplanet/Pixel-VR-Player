@@ -16,6 +16,7 @@
 #ifdef PIXELVR_HAVE_SMB
 #include "net/smb_credentials.hpp"
 
+#include <cerrno>
 #include <cstring>
 #include <fcntl.h>
 #include <libsmbclient.h>
@@ -102,14 +103,27 @@ bool listFiles(const std::string& dir, std::vector<std::string>& names, std::str
     names.clear();
     if (dir.rfind("smb://", 0) == 0) {
 #ifdef PIXELVR_HAVE_SMB
+        // A login known to be missing or refused is not sent (again): it waits for the sign-in.
+        if (SmbCredentialsManager::instance().loginBlocked(dir)) {
+            err = "the share needs a login";
+            return false;
+        }
         SmbContext c;
         SMBCFILE* d = nullptr;
+        int e = 0;
         if (c.ctx) {
             std::lock_guard<std::mutex> lk(smbGlobalLock());
+            errno = 0;
             d = smbc_getFunctionOpendir(c.ctx)(c.ctx, dir.c_str());
+            e = errno;
         }
         if (!d) {
-            err = "cannot list the folder";
+            if (c.ctx && SmbCredentialsManager::isLoginErrno(e)) {
+                SmbCredentialsManager::instance().noteLoginRefused(dir);
+                err = "the share refused the login";
+            } else {
+                err = "cannot list the folder";
+            }
             return false;
         }
         for (;;) {
@@ -157,14 +171,26 @@ bool readFile(const std::string& uri, std::size_t maxBytes, std::string& out, st
     out.clear();
     if (uri.rfind("smb://", 0) == 0) {
 #ifdef PIXELVR_HAVE_SMB
+        if (SmbCredentialsManager::instance().loginBlocked(uri)) {
+            err = "the share needs a login";
+            return false;
+        }
         SmbContext c;
         SMBCFILE* fd = nullptr;
+        int e = 0;
         if (c.ctx) {
             std::lock_guard<std::mutex> lk(smbGlobalLock());
+            errno = 0;
             fd = smbc_getFunctionOpen(c.ctx)(c.ctx, uri.c_str(), O_RDONLY, 0);
+            e = errno;
         }
         if (!fd) {
-            err = "cannot open the file";
+            if (c.ctx && SmbCredentialsManager::isLoginErrno(e)) {
+                SmbCredentialsManager::instance().noteLoginRefused(uri, true);
+                err = "the share refused the login";
+            } else {
+                err = "cannot open the file";
+            }
             return false;
         }
         char buf[65536];
