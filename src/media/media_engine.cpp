@@ -247,11 +247,12 @@ int captureBufferRequest(int width, int height, bool highBitDepth, bool drm, boo
     const int64_t frameBytes = highBitDepth ? px * 3 : px * 3 / 2;  // P010 / NV12
     constexpr int64_t kBudget = 640ll << 20;
     int n = static_cast<int>(std::clamp<int64_t>(kBudget / std::max<int64_t>(frameBytes, 1), 4, 20));
-    // Plus the minimum of 4-5: 8192x4096 14-15 of 16, 7200x3600 16-17 of 18, 10-bit 7200x3600 14-15
-    // of 16 (with the old driver's 7: 17 / 19 of its 20).
-    if (huge) n = std::min(n, highBitDepth ? 8 : 10);
-    else if (big) n = std::min(n, highBitDepth ? 10 : 12);
-    if (reduced) n = std::min(n, 8);
+    // In the player (dma-buf export, and often a session of Steam's web helper open too) the first
+    // open was refused with 10 at 8192x4096 and with 12 at 7200x3600, and started with 8 on the retry
+    // (2026-11-20): start there, plus the minimum of 4-5. The retry goes to 6.
+    if (huge) n = std::min(n, highBitDepth ? 6 : 8);
+    else if (big) n = std::min(n, highBitDepth ? 8 : 10);
+    if (reduced) n = std::min(n, 6);
     return n;
 }
 
