@@ -6944,6 +6944,7 @@ int App::run() {
                 focusGripMaxStick_ = std::max(focusGripMaxStick_, std::fabs(in.thumbstickY));
                 if (!focusGripHeld_) focusGripStartDeg_ = manualFocusDeg_;
             } else if (focusGripHeld_) {
+                if (std::fabs(manualFocusDeg_) < 0.5f) manualFocusDeg_ = 0.0f;  // near 0: exactly 0
                 // (No gaze, no file: only how the control was used, to see why it may not react.)
                 PIXELVR_LOG_INFO("Focus grip released: stick max %.2f, grip %.2f / %.2f, Focus %+.1f -> %+.1f deg",
                                  focusGripMaxStick_, in.gripValue[0], in.gripValue[1], focusGripStartDeg_,
@@ -9506,7 +9507,8 @@ int App::run() {
                         // picture farther), 8 degrees a second at full push.
                         manualFocusDeg_ = std::clamp(manualFocusDeg_ + focusStickY_ * dt * 8.0f,
                                                      kManualFocusMinDeg, kManualFocusMaxDeg);
-                        if (std::fabs(manualFocusDeg_) < 0.25f) manualFocusDeg_ = 0.0f;  // (back to 0 is easy)
+                        // (Back to 0 is easy: a value near it snaps there when the grip is let go,
+                        // see focusGripHeld_; never here, a frame's step is only about 0.1 deg.)
                         viewChanged = true;
                     } else if (bumperHeldNow) {
                         if (std::fabs(in.thumbstickY) > 0.15f) renderer_.adjustSpherePitch(in.thumbstickY * dt * 0.6f);
