@@ -51,6 +51,13 @@ void StereoFocus::reset() {
     gazeLostS_ = 0.0f;
     invalidS_ = 0.0f;
     invalidRun_ = false;
+    focusDisparity_ = 0.0f;
+    recent_.fill(0.0f);
+    recentCount_ = 0;
+    recentNext_ = 0;
+    steady_ = 0.0f;
+    fartherPending_ = false;
+    fartherS_ = 0.0f;
     event_ = Event::None;
 }
 
@@ -64,8 +71,11 @@ void StereoFocus::release() {
     focused_ = false;
     target_ = 0.0f;
     focusDistanceM_ = 0.0f;
+    focusDisparity_ = 0.0f;
     invalidS_ = 0.0f;
     invalidRun_ = false;
+    fartherPending_ = false;
+    fartherS_ = 0.0f;
 }
 
 void StereoFocus::update(float dtS, const stereo::DisparityResult* measurement, bool gazeOnPicture) {
@@ -82,31 +92,65 @@ void StereoFocus::update(float dtS, const stereo::DisparityResult* measurement, 
     }
 
     const bool valid = measurement && measurement->valid && std::isfinite(measurement->disparityDeg);
+    // Farther readings in a row: their time counts every frame (results come every few frames),
+    // not while the gaze is off the picture.
+    if (fartherPending_ && gazeOnPicture) fartherS_ += dt;
     if (valid) {
         invalidRun_ = false;
         invalidS_ = 0.0f;
         lastDisparity_ = measurement->disparityDeg;
-        const float distance = stereo::disparityToMetres(measurement->disparityDeg, params_.baselineM);
+        // Single readings jump by several degrees when the window takes in the subject's edge
+        // and the background (field test: 30-39 % of them by over 3 deg); the median of the last
+        // few does not.
+        recent_[static_cast<std::size_t>(recentNext_)] = measurement->disparityDeg;
+        recentNext_ = (recentNext_ + 1) % kMedianOf;
+        recentCount_ = std::min(recentCount_ + 1, kMedianOf);
+        std::array<float, kMedianOf> sorted = recent_;
+        std::sort(sorted.begin(), sorted.begin() + recentCount_);
+        steady_ = (recentCount_ % 2 == 1)
+                      ? sorted[static_cast<std::size_t>(recentCount_ / 2)]
+                      : 0.5f * (sorted[static_cast<std::size_t>(recentCount_ / 2 - 1)] +
+                                sorted[static_cast<std::size_t>(recentCount_ / 2)]);
+        const float disparity = steady_;
+        const float distance = stereo::disparityToMetres(disparity, params_.baselineM);
         const float h = params_.hysteresis;
+        const float band = std::max(kRetargetDeg, h * std::fabs(focusDisparity_));
+        auto focusOn = [&](Event e) {
+            focused_ = true;
+            focusDisparity_ = disparity;
+            focusDistanceM_ = distance;
+            target_ = targetFor(distance);
+            fartherPending_ = false;
+            fartherS_ = 0.0f;
+            event_ = e;
+        };
         if (params_.strength <= 0.0f) {
             if (focused_) {
                 release();
                 event_ = Event::ReleaseStrength;
             }
         } else if (!focused_) {
-            if (!params_.nearOnly || distance <= params_.closerThanM) {
-                focused_ = true;
-                focusDistanceM_ = distance;
-                target_ = targetFor(distance);
-                event_ = Event::Engage;
+            if (!params_.nearOnly || distance <= params_.closerThanM) focusOn(Event::Engage);
+        } else if (disparity > focusDisparity_ + band) {
+            focusOn(Event::Retarget);  // nearer: at once
+        } else if (disparity < focusDisparity_ - band ||
+                   (params_.nearOnly && distance > params_.closerThanM * (1.0f + h))) {
+            // Farther (or beyond Near Only's limit): only once it held for kFartherHoldS.
+            if (!fartherPending_) {
+                fartherPending_ = true;
+                fartherS_ = 0.0f;
             }
-        } else if (params_.nearOnly && distance > params_.closerThanM * (1.0f + h)) {
-            release();
-            event_ = Event::ReleaseFar;
-        } else if (std::fabs(distance - focusDistanceM_) > h * focusDistanceM_) {
-            focusDistanceM_ = distance;
-            target_ = targetFor(distance);
-            event_ = Event::Retarget;
+            if (fartherS_ >= kFartherHoldS) {
+                if (params_.nearOnly && distance > params_.closerThanM * (1.0f + h)) {
+                    release();
+                    event_ = Event::ReleaseFar;
+                } else {
+                    focusOn(Event::Retarget);
+                }
+            }
+        } else {
+            fartherPending_ = false;  // back within the band: the subject is still there
+            fartherS_ = 0.0f;
         }
     } else if (measurement) {
         // Invalid: the time counts from the first invalid result of a run, every frame, since

@@ -71,7 +71,7 @@ Trace run(StereoFocus& f, float seconds, const stereo::DisparityResult* m, bool 
 }
 
 float expectedTarget(float metres, float strength = 0.7f) {
-    return std::min(strength * std::max(0.0f, stereo::metresToDisparity(metres) - 3.6f), 6.0f);
+    return std::min(strength * std::max(0.0f, stereo::metresToDisparity(metres) - 3.6f), 12.0f);
 }
 
 bool approx(float a, float b, float tol) { return std::fabs(a - b) <= tol; }
@@ -111,7 +111,7 @@ int main() {
         const auto m = at(0.4f);
         f.update(kDt, &m, true);  // engages on this frame
         check(f.focused(), "near subject (0.4 m): engages");
-        check(approx(f.targetDeg(), target04, 1e-4f), "target = 0.7 * (disparity(0.4 m) - 3.6), capped at 6");
+        check(approx(f.targetDeg(), target04, 1e-4f), "target = 0.7 * (disparity(0.4 m) - 3.6), capped at 12");
         check(approx(f.focusDistanceM(), 0.4f, 1e-3f), "focus distance reported");
         const Trace t = run(f, 1.0f - kDt, &m);
         const float share = f.offsetDeg() / target04;
@@ -125,9 +125,9 @@ int main() {
 
     {  // The cap.
         StereoFocus f;
-        const auto m = at(0.2f);
+        const auto m = at(0.12f);
         run(f, 5.0f, &m);
-        check(f.focused() && approx(f.targetDeg(), 6.0f, 1e-5f) && f.offsetDeg() <= 6.0f, "very near (0.2 m): capped at 6 deg");
+        check(f.focused() && approx(f.targetDeg(), 12.0f, 1e-5f) && f.offsetDeg() <= 12.0f, "very near (0.12 m): capped at 12 deg");
     }
 
     {  // Hysteresis: 0.65 m stays focused, 0.72 m releases (closer than 0.6 m, hysteresis 15 %).
@@ -136,8 +136,10 @@ int main() {
         run(f, 1.0f, &m65);
         check(f.focused(), "focused, 0.65 m: stays focused");
         const auto m72 = at(0.72f);
-        run(f, 0.1f, &m72);
-        check(!f.focused() && f.targetDeg() == 0.0f, "focused, 0.72 m: releases (target 0)");
+        run(f, 0.5f, &m72);
+        check(f.focused(), "focused, 0.72 m for 0.5 s: still holds (farther needs 0.8 s)");
+        run(f, 0.7f, &m72);
+        check(!f.focused() && f.targetDeg() == 0.0f, "focused, 0.72 m for 1.2 s: releases (target 0)");
         const Trace t = run(f, 3.0f, &m72);
         check(t.falling && t.minOffset >= 0.0f && approx(f.offsetDeg(), 0.0f, 1e-3f), "after release: falls smoothly to 0");
 
@@ -188,7 +190,7 @@ int main() {
         const auto far = at(2.0f);
         run(f, 3.0f, &far, false);
         check(f.focused() && approx(f.offsetDeg(), target04, 1e-3f), "gaze off the picture 3 s: holds");
-        run(f, 0.1f, &far, true);
+        run(f, 1.2f, &far, true);
         check(!f.focused() && f.targetDeg() == 0.0f, "gaze back on a far subject: releases (Near Only)");
     }
 
@@ -221,7 +223,7 @@ int main() {
         f.update(kDt, &m, true);
         check(f.offsetDeg() == f.targetDeg() && approx(f.offsetDeg(), target04, 1e-4f), "transition 0: snaps to the target");
         const auto far = at(2.0f);
-        f.update(kDt, &far, true);
+        run(f, 1.2f, &far);
         check(f.offsetDeg() == 0.0f, "transition 0: snaps back on release");
     }
 
@@ -260,17 +262,48 @@ int main() {
         const auto m = at(0.4f);
         const Trace t = run(f, 10.0f, &m, true, 1.0f);
         check(t.finite && t.maxOffset <= target04 + 1e-5f && t.rising, "dt 1 s: no overshoot, no NaN");
+        run(f, 3.0f, &m);  // settled first: farther readings hold for 0.8 s before it falls
         const auto far = at(2.0f);
         const Trace t2 = run(f, 10.0f, &far, true, 1.0f);
         check(t2.finite && t2.falling && t2.minOffset >= 0.0f, "dt 1 s, release: no undershoot, no NaN");
         f.update(std::nanf(""), &m, true);
         f.update(-1.0f, &m, true);
         f.update(INFINITY, &m, true);
-        check(std::isfinite(f.offsetDeg()) && f.offsetDeg() >= 0.0f && f.offsetDeg() <= 6.0f, "NaN / negative / infinite dt: stays sane");
+        check(std::isfinite(f.offsetDeg()) && f.offsetDeg() >= 0.0f && f.offsetDeg() <= 12.0f, "NaN / negative / infinite dt: stays sane");
         stereo::DisparityResult nanM = at(0.4f);
         nanM.disparityDeg = std::nanf("");
         f.update(kDt, &nanM, true);
         check(std::isfinite(f.offsetDeg()) && std::isfinite(f.targetDeg()), "NaN disparity: ignored");
+    }
+
+    {  // Steadiness (field test 2026-11-19): readings that jump between the subject and the background.
+        StereoFocusParams p;
+        p.nearOnly = false;
+        StereoFocus f;
+        f.setParams(p);
+        const auto nearM = at(0.4f);
+        run(f, 2.0f, &nearM);
+        const float settled = f.targetDeg();
+        // Every third reading lands on the background (2 m): the median keeps the near subject.
+        const auto farM = at(2.0f);
+        bool kept = true;
+        for (int i = 0; i < 900; ++i) {
+            const stereo::DisparityResult* m = nullptr;
+            if (i % kEvery == 0) m = ((i / kEvery) % 3 == 2) ? &farM : &nearM;
+            f.update(kDt, m, true);
+            if (std::fabs(f.targetDeg() - settled) > 1e-4f) kept = false;
+        }
+        check(kept && f.focused(), "1 reading in 3 on the background: the target holds");
+        // A short glance onto the background (0.5 s of far readings) keeps the focus.
+        run(f, 0.5f, &farM);
+        check(approx(f.targetDeg(), settled, 1e-4f), "0.5 s glance at the background: holds");
+        // Looking at the background for longer lets go.
+        run(f, 1.0f, &farM);
+        check(f.targetDeg() == 0.0f, "1.5 s at the background: lets go (target 0)");
+        // Something near again: taken within a few readings.
+        run(f, 0.15f, &nearM);
+        check(approx(f.targetDeg(), settled, 1e-3f), "near again: taken at once (within 0.15 s)");
+        check(approx(f.steadyDisparityDeg(), stereo::metresToDisparity(0.4f), 1e-3f), "steadied disparity reported");
     }
 
     {  // Parameter clamping.

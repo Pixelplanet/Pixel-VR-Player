@@ -48,6 +48,8 @@ public:
         float velocity = 0, invalidS = 0, gazeLostS = 0;
         bool onPicture = false;
         float zoom = 1;
+        float steadyDeg = 0;           // the median of the last valid readings (what decides)
+        float manualDeg = 0;           // Focus (grip + stick)
     };
 
     ~FocusLog() { close(); }
@@ -80,7 +82,7 @@ public:
         bytes_ += std::fprintf(frames_,
             "t,dt,pos,paused,menu,proj,stereo,swap,raw_ok,rx,ry,rz,filt_ok,fx,fy,fz,head_ok,hx,hy,hz,"
             "src_ok,lon,lat,meas,m_ok,disp,score,var,best,focused,dist,target,offset,test,"
-            "event,vel,invalid_s,gaze_lost_s,on_pic,zoom\n");
+            "event,vel,invalid_s,gaze_lost_s,on_pic,zoom,steady,manual\n");
         bytes_ += std::fprintf(scores_, "t,var,best,scores (candidate 0..127; candidate 16 = no shift, "
                                         "step 0.1667 deg; nan = reads past the picture)\n");
         return true;
@@ -97,12 +99,12 @@ public:
         const double t = seconds();
         bytes_ += std::fprintf(frames_,
             "%.4f,%.4f,%.3f,%d,%d,%d,%d,%d,%d,%.5f,%.5f,%.5f,%d,%.5f,%.5f,%.5f,%d,%.5f,%.5f,%.5f,"
-            "%d,%.3f,%.3f,%d,%d,%.3f,%.4f,%.6f,%d,%d,%.3f,%.3f,%.3f,%.2f,%d,%.3f,%.3f,%.3f,%d,%.3f\n",
+            "%d,%.3f,%.3f,%d,%d,%.3f,%.4f,%.6f,%d,%d,%.3f,%.3f,%.3f,%.2f,%d,%.3f,%.3f,%.3f,%d,%.3f,%.3f,%.2f\n",
             t, r.dt, r.pos, r.paused, r.menu, r.projection, r.stereo, r.swap, r.rawOk, r.raw[0], r.raw[1],
             r.raw[2], r.filtOk, r.filt[0], r.filt[1], r.filt[2], r.headOk, r.head[0], r.head[1], r.head[2],
             r.srcOk, r.lonDeg, r.latDeg, r.measured, r.mOk, r.dispDeg, r.score, r.variance, r.best,
             r.focused, r.distM, r.targetDeg, r.offsetDeg, r.testDeg, r.event, r.velocity, r.invalidS,
-            r.gazeLostS, r.onPicture, r.zoom);
+            r.gazeLostS, r.onPicture, r.zoom, r.steadyDeg, r.manualDeg);
         maybeFlush();
     }
 

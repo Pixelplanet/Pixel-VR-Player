@@ -7,6 +7,8 @@
 
 #include "gfx/stereo_disparity.hpp"
 
+#include <array>
+
 namespace pixelvr {
 
 struct StereoFocusParams {
@@ -15,7 +17,7 @@ struct StereoFocusParams {
     float hysteresis = 0.15f;   // release beyond closerThan * (1 + hysteresis); re-target only on
                                 // a distance change larger than hysteresis * current distance
     float transitionS = 1.0f;   // ~95 % of the way to the target after this long; 0 = snap
-    float capDeg = 6.0f;        // most offset ever applied
+    float capDeg = 12.0f;       // most offset ever applied (field test: close-ups needed 6.4-8.7 deg)
     float comfortDeg = 3.6f;    // the disparity a focused subject is brought to (about 1 m)
     float baselineM = 0.063f;   // assumed camera baseline
     // true = "Near Only": engage only nearer than closerThanM, release beyond it (+ hysteresis).
@@ -51,6 +53,14 @@ public:
     Event lastEvent() const { return event_; }
     float velocityDegS() const { return velocity_; }
     float invalidS() const { return invalidRun_ ? invalidS_ : 0.0f; }
+    // The steadied reading the decisions use: the median of the last kMedianOf valid ones.
+    float steadyDisparityDeg() const { return steady_; }
+    static constexpr int kMedianOf = 5;
+    // A change of the focused disparity smaller than this (or than hysteresis x it) is noise.
+    static constexpr float kRetargetDeg = 1.5f;
+    // Nearer is taken at once; farther (or a release) only after this long of farther readings,
+    // so a glance past the subject's edge onto the background does not drop the focus.
+    static constexpr float kFartherHoldS = 0.8f;
     float gazeLostS() const { return gazeLostS_; }
 
 private:
@@ -67,6 +77,13 @@ private:
     float gazeLostS_ = 0.0f;
     float invalidS_ = 0.0f;
     bool invalidRun_ = false;      // the latest measurement was invalid (invalidS_ is running)
+    float focusDisparity_ = 0.0f;  // the steadied disparity the target was set from
+    std::array<float, kMedianOf> recent_{};  // the last valid readings (ring)
+    int recentCount_ = 0;
+    int recentNext_ = 0;
+    float steady_ = 0.0f;
+    bool fartherPending_ = false;  // the latest steadied reading is farther than the focus
+    float fartherS_ = 0.0f;
     Event event_ = Event::None;
 };
 

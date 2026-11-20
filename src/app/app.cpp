@@ -1589,6 +1589,8 @@ void App::updateStereoFocus(float dtS) {
             row.gazeLostS = focus_.gazeLostS();
             row.onPicture = onPicture;
             row.zoom = renderer_.sphereZoom();
+            row.steadyDeg = focus_.steadyDisparityDeg();
+            row.manualDeg = manualDeg;
             focusLog_.frame(row);
         }
     }
