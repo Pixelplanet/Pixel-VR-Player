@@ -703,8 +703,14 @@ bool XrContext::createActions() {
         probe(hapticAction_, "/user/hand/right/output/haptic");
         probe(act(IA::Select), "/user/hand/left/input/trigger/value");
         probe(act(IA::Select), "/user/hand/right/input/trigger/value");
+        const std::size_t beforeClick = frameBinds.size();
         probe(act(IA::LaserHand), "/user/hand/left/input/squeeze/click");
         probe(act(IA::LaserHand), "/user/hand/right/input/squeeze/click");
+        squeezeClickBound_ = frameBinds.size() > beforeClick;
+        // The grip's analog value (the Frame's grip has click, value and touch): a light press,
+        // which Focus (grip + stick in 3D 180 / 360) uses; the full press stays the click.
+        probe(squeezeValueAction_, "/user/hand/left/input/squeeze/value");
+        probe(squeezeValueAction_, "/user/hand/right/input/squeeze/value");
         probe(act(IA::PlayOk), "/user/hand/right/input/a/click");
         probe(act(IA::Back), "/user/hand/right/input/b/click");
         probe(act(IA::Recenter), "/user/hand/right/input/x/click");
@@ -1068,8 +1074,10 @@ void XrContext::syncActions() {
             }
         }
         // Fallback for hardware profiles where squeeze/click is not exposed separately:
-        // Use a strict bottom-out threshold (>= 0.90f to engage, < 0.80f to release)
-        if (!fullHeld) {
+        // Use a strict bottom-out threshold (>= 0.90f to engage, < 0.80f to release).
+        // (Not where the click is bound: there the click alone is the full press, the value
+        // only the light one.)
+        if (!fullHeld && !squeezeClickBound_) {
             if (prevFull_[h]) {
                 if (sqVal >= 0.80f) {
                     fullHeld = true;
@@ -1497,6 +1505,16 @@ bool XrContext::renderFrame(const RenderViewFn& renderView, const RenderLayersFn
         input_.headPos[1] = 0.5f * (l.position.y + r.position.y);
         input_.headPos[2] = 0.5f * (l.position.z + r.position.z);
         const XrQuaternionf& q = l.orientation;
+        {
+            // The head's orientation: both views' averaged (the same when the views are not canted).
+            const XrQuaternionf& b = r.orientation;
+            const float sgn = (q.x * b.x + q.y * b.y + q.z * b.z + q.w * b.w) < 0.0f ? -1.0f : 1.0f;
+            float h[4] = {q.x + sgn * b.x, q.y + sgn * b.y, q.z + sgn * b.z, q.w + sgn * b.w};
+            const float n = std::sqrt(h[0] * h[0] + h[1] * h[1] + h[2] * h[2] + h[3] * h[3]);
+            if (n > 1e-6f) {
+                for (int k = 0; k < 4; ++k) input_.headOri[k] = h[k] / n;
+            }
+        }
         input_.headForward[0] = -2.0f * (q.x * q.z + q.w * q.y);
         input_.headForward[1] = -2.0f * (q.y * q.z - q.w * q.x);
         input_.headForward[2] = -(1.0f - 2.0f * (q.x * q.x + q.y * q.y));
@@ -1531,6 +1549,9 @@ bool XrContext::renderFrame(const RenderViewFn& renderView, const RenderLayersFn
                 const float len = std::sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
                 if (len > 1e-6f) {
                     for (int k = 0; k < 3; ++k) input_.gazeDir[k] = d[k] / len;
+                    input_.gazePos[0] = loc.pose.position.x;
+                    input_.gazePos[1] = loc.pose.position.y;
+                    input_.gazePos[2] = loc.pose.position.z;
                     input_.gazeValid = true;
                 }
             }

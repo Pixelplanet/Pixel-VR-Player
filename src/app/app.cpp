@@ -25,6 +25,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <ctime>
 #include <filesystem>
 #include <fstream>
 #include <string>
@@ -1368,6 +1369,128 @@ void App::resetStereoFocus() {
 // 3D Autofocus, once per frame after the frame was drawn: what the renderer measured where the
 // user looks decides how far the eye images slide against each other (from the next frame on).
 // Gaze values stay in memory: never logged, stored, or given to plugins.
+namespace {
+
+// The Gaze Test's dots: direction from the head at the start (yaw + = right, pitch + = up, degrees)
+// and distance; near and far alternate so neither is judged after getting used to it.
+struct GazeTarget {
+    float yawDeg, pitchDeg, depthM;
+};
+constexpr GazeTarget kGazeTargets[] = {
+    {0.0f, 0.0f, 5.0f},    {0.0f, 0.0f, 0.5f},   {-15.0f, 0.0f, 5.0f}, {-15.0f, 0.0f, 0.5f},
+    {15.0f, 0.0f, 5.0f},   {15.0f, 0.0f, 0.5f},  {0.0f, 12.0f, 5.0f},  {0.0f, 12.0f, 0.5f},
+    {0.0f, -12.0f, 5.0f},  {0.0f, -12.0f, 0.5f},
+};
+constexpr int kGazeTargetCount = static_cast<int>(sizeof(kGazeTargets) / sizeof(kGazeTargets[0]));
+constexpr double kGazeTargetS = 2.5;   // each dot this long
+constexpr double kGazeSettleS = 1.0;   // the first second is not used (the eyes get there)
+
+// q * v for a unit quaternion (x y z w).
+void rotateByQuat(const float q[4], const float v[3], float out[3]) {
+    const float x = q[0], y = q[1], z = q[2], w = q[3];
+    const float tx = 2.0f * (y * v[2] - z * v[1]);
+    const float ty = 2.0f * (z * v[0] - x * v[2]);
+    const float tz = 2.0f * (x * v[1] - y * v[0]);
+    out[0] = v[0] + w * tx + (y * tz - z * ty);
+    out[1] = v[1] + w * ty + (z * tx - x * tz);
+    out[2] = v[2] + w * tz + (x * ty - y * tx);
+}
+
+std::string playerLogsDir() {
+    char buf[4096];
+    const ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
+    if (n <= 0) return "logs";
+    buf[n] = '\0';
+    return (std::filesystem::path(buf).parent_path() / "logs").string();
+}
+
+}  // namespace
+
+void App::startGazeTest() {
+    if (gazeTest_.active) return;
+    const XrInputState& in = xr_.input();
+    if (!xr_.eyeGazeSupported()) {
+        showNotice("The Gaze Test needs eye tracking, which isn't available", true);
+        return;
+    }
+    if (!in.headValid) return;
+    std::error_code ec;
+    const std::string dir = playerLogsDir();
+    std::filesystem::create_directories(dir, ec);
+    const std::time_t now = std::time(nullptr);
+    std::tm tm{};
+    localtime_r(&now, &tm);
+    char stamp[32];
+    std::strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", &tm);
+    gazeTest_.name = std::string("gazetest-") + stamp + ".csv";
+    gazeTest_.file = std::fopen((dir + "/" + gazeTest_.name).c_str(), "w");
+    if (gazeTest_.file == nullptr) {
+        showNotice("The Gaze Test could not write to the logs folder", true);
+        return;
+    }
+    std::fprintf(gazeTest_.file,
+                 "# Gaze Test: directions are unit vectors in the app reference space (x right, y up, -z forward);"
+                 " target = the dot, true = from the eye midpoint to the dot, gaze = as the headset reports it\n"
+                 "t,idx,yaw,pitch,depth,used,gaze_ok,gx,gy,gz,gox,goy,goz,tx,ty,tz,ex,ey,ez,qx,qy,qz,qw\n");
+    for (int k = 0; k < 3; ++k) gazeTest_.eyeMid[k] = in.headPos[k];
+    for (int k = 0; k < 4; ++k) gazeTest_.headOri[k] = in.headOri[k];
+    gazeTest_.start = std::chrono::steady_clock::now();
+    gazeTest_.lastIndex = -1;
+    gazeTest_.active = true;
+    settings_.close();
+    PIXELVR_LOG_INFO("Gaze Test started (%d dots)", kGazeTargetCount);
+    showNotice("Gaze Test: look at the white dot until it moves (keep your head still)");
+}
+
+void App::stopGazeTest(bool finished) {
+    if (!gazeTest_.active) return;
+    gazeTest_.active = false;
+    if (gazeTest_.file != nullptr) std::fclose(gazeTest_.file);
+    gazeTest_.file = nullptr;
+    const float none[3] = {0.0f, 0.0f, -1.0f};
+    renderer_.setGazeTestTarget(false, none, 0.0f);
+    PIXELVR_LOG_INFO("Gaze Test %s: logs/%s", finished ? "done" : "stopped", gazeTest_.name.c_str());
+    showNotice(finished ? "Gaze Test done: saved in the logs folder" : "Gaze Test stopped");
+}
+
+void App::updateGazeTest() {
+    if (!gazeTest_.active) return;
+    const XrInputState& in = xr_.input();
+    const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - gazeTest_.start).count();
+    const int idx = static_cast<int>(t / kGazeTargetS);
+    if (idx >= kGazeTargetCount) {
+        stopGazeTest(true);
+        return;
+    }
+    const GazeTarget& g = kGazeTargets[idx];
+    const float yaw = g.yawDeg * 3.14159265f / 180.0f;
+    const float pitch = g.pitchDeg * 3.14159265f / 180.0f;
+    const float local[3] = {std::sin(yaw) * std::cos(pitch), std::sin(pitch), -std::cos(yaw) * std::cos(pitch)};
+    float dirApp[3];
+    rotateByQuat(gazeTest_.headOri, local, dirApp);
+    float pos[3];
+    for (int k = 0; k < 3; ++k) pos[k] = gazeTest_.eyeMid[k] + dirApp[k] * g.depthM;
+    // About 0.6 degrees wide at any distance.
+    renderer_.setGazeTestTarget(true, pos, g.depthM * 0.0052f);
+    if (idx != gazeTest_.lastIndex) {
+        gazeTest_.lastIndex = idx;
+        xr_.triggerHaptic(1, 0.02f, 0.0f, 0.3f);
+    }
+    if (gazeTest_.file == nullptr || !in.headValid) return;
+    float tr[3] = {pos[0] - in.headPos[0], pos[1] - in.headPos[1], pos[2] - in.headPos[2]};
+    const float len = std::sqrt(tr[0] * tr[0] + tr[1] * tr[1] + tr[2] * tr[2]);
+    if (len > 1e-6f) {
+        for (float& v : tr) v /= len;
+    }
+    const bool used = t - idx * kGazeTargetS >= kGazeSettleS;
+    std::fprintf(gazeTest_.file,
+                 "%.4f,%d,%.1f,%.1f,%.2f,%d,%d,%.5f,%.5f,%.5f,%.4f,%.4f,%.4f,%.5f,%.5f,%.5f,%.4f,%.4f,%.4f,%.5f,%.5f,%.5f,%.5f\n",
+                 t, idx, static_cast<double>(g.yawDeg), static_cast<double>(g.pitchDeg), static_cast<double>(g.depthM),
+                 used ? 1 : 0, in.gazeValid ? 1 : 0, in.gazeDir[0], in.gazeDir[1], in.gazeDir[2], in.gazePos[0],
+                 in.gazePos[1], in.gazePos[2], tr[0], tr[1], tr[2], in.headPos[0], in.headPos[1], in.headPos[2],
+                 in.headOri[0], in.headOri[1], in.headOri[2], in.headOri[3]);
+}
+
 void App::updateStereoFocus(float dtS) {
     const bool setting = settings_.stereoAutofocus();
     if (setting != focusSettingPrev_) {
@@ -1391,7 +1514,8 @@ void App::updateStereoFocus(float dtS) {
         focusActivePrev_ = active;
         PIXELVR_LOG_INFO("3D Autofocus: eye gaze %s", active ? "in use" : "not in use");
     }
-    xr_.setEyeGazeActive(active);
+    xr_.setEyeGazeActive(active || gazeTest_.active);
+    updateGazeTest();
     settings_.setAutofocusAvailability(xr_.eyeGazeRequested(), xr_.eyeGazeSupported());
     const XrInputState& in = xr_.input();
     // The raw gaze trembles by a degree or more: the dot and the measurement use it steadied.
@@ -1507,7 +1631,7 @@ void App::updateStereoFocus(float dtS) {
     const float manualDeg = stereo3dSphere ? manualFocusDeg_ : 0.0f;
     const float offsetDeg = focus_.offsetDeg() + testDeg + manualDeg;
     renderer_.setStereoFocusOffset(offsetDeg * 3.14159265358979f / 180.0f);
-    renderer_.setFocusGazeDot(settings_.autofocusInfo() && active);
+    renderer_.setFocusGazeDot(settings_.autofocusInfo() && active && !gazeTest_.active);
 
     // Record Autofocus Log: one row per frame while a 3D 180 / 360 video plays (a new file per
     // video); never for vault / private videos (nothing about them on disk).
@@ -6812,7 +6936,21 @@ int App::run() {
             // Focus (grip + stick up / down, used in 3D 180 / 360 playback below): the stick's Y while a
             // full grip press is held, kept before the combo gate clears the sticks. The combo
             // itself is face buttons only, so the stick is free for this.
-            focusStickY_ = (gripFullHeld && !recordingCombo) ? in.thumbstickY : 0.0f;
+            // A light press (the analog value, the Frame's grip has one) or the full press.
+            const bool gripForFocus = !recordingCombo && (gripFullHeld || in.gripValue[0] >= kFocusGripValue ||
+                                                          in.gripValue[1] >= kFocusGripValue);
+            focusStickY_ = gripForFocus ? in.thumbstickY : 0.0f;
+            if (gripForFocus) {
+                focusGripMaxStick_ = std::max(focusGripMaxStick_, std::fabs(in.thumbstickY));
+                if (!focusGripHeld_) focusGripStartDeg_ = manualFocusDeg_;
+            } else if (focusGripHeld_) {
+                // (No gaze, no file: only how the control was used, to see why it may not react.)
+                PIXELVR_LOG_INFO("Focus grip released: stick max %.2f, grip %.2f / %.2f, Focus %+.1f -> %+.1f deg",
+                                 focusGripMaxStick_, in.gripValue[0], in.gripValue[1], focusGripStartDeg_,
+                                 manualFocusDeg_);
+                focusGripMaxStick_ = 0.0f;
+            }
+            focusGripHeld_ = gripForFocus;
             if (comboGate && !recordingCombo) {
                 const int h = in.gripFullPressHeld[1] ? 1 : 0;
                 if (const int b = in.comboEdge; b >= 0) {
@@ -8974,7 +9112,9 @@ int App::run() {
                                 (!listPage || laserRow >= 0 || listA))) {
                     const int seg = (!stepped && laserRow >= 0) ? renderer_.settingsSegmentHovered() : -1;
                     auto act = stepped ? stepAct : (seg >= 0) ? settings_.activateSegment(seg) : settings_.press();
-                        if (act == SettingsMenu::Action::PickDownloadFolder) {
+                        if (act == SettingsMenu::Action::StartGazeTest) {
+                            startGazeTest();
+                        } else if (act == SettingsMenu::Action::PickDownloadFolder) {
                             startDownloadDirPick();
                         } else if (act == SettingsMenu::Action::StartVaultMoveLock) {
                             startVaultMove(true);

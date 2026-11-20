@@ -11730,6 +11730,42 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
     }
 
+    // Gaze Test: the dot to look at (white, a dark ring around it), at its real distance.
+    if (drawWorld && gazeTestOn_ && uiPipeline_ != VK_NULL_HANDLE) {
+        const Vec3 eyePos{view.pose.position.x, view.pose.position.y, view.pose.position.z};
+        const Vec3 c{gazeTestPos_[0], gazeTestPos_[1], gazeTestPos_[2]};
+        const Vec3 toEye = normalize(eyePos - c);
+        Vec3 right = cross(Vec3{0.0f, 1.0f, 0.0f}, toEye);
+        if (length(right) < 1e-4f) right = Vec3{1.0f, 0.0f, 0.0f};
+        right = normalize(right);
+        const Vec3 up = normalize(cross(toEye, right));
+        bindPipe(uiPipeline_);
+        for (int ring = 0; ring < 2; ++ring) {
+            const float halfSize = gazeTestRadius_ * (ring == 0 ? 2.2f : 1.0f);
+            Mat4 model;
+            model.m[0] = right.x * halfSize; model.m[1] = right.y * halfSize;
+            model.m[2] = right.z * halfSize; model.m[3] = 0.0f;
+            model.m[4] = up.x * halfSize; model.m[5] = up.y * halfSize;
+            model.m[6] = up.z * halfSize; model.m[7] = 0.0f;
+            model.m[8] = toEye.x * halfSize; model.m[9] = toEye.y * halfSize;
+            model.m[10] = toEye.z * halfSize; model.m[11] = 0.0f;
+            const Vec3 at = c + toEye * (ring == 0 ? 0.0f : 0.001f);
+            model.m[12] = at.x; model.m[13] = at.y; model.m[14] = at.z;
+            model.m[15] = 1.0f;
+            const Mat4 mvp = multiply(proj, multiply(viewMat, model));
+            UiPush push{};
+            std::memcpy(push.mvp, mvp.m, sizeof(push.mvp));
+            const float dark[4] = {0.0f, 0.0f, 0.0f, 0.85f};
+            const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
+            std::memcpy(push.color, ring == 0 ? dark : white, sizeof(push.color));
+            push.params[0] = static_cast<float>(UiShape::Cursor);
+            push.params[1] = 1.0f;
+            vkCmdPushConstants(commandBuffer_, uiPipelineLayout_,
+                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(UiPush), &push);
+            vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
+        }
+    }
+
     // Debug statistics overlay: head-locked text pinned to the upper-left FOV.
     if (drawWorld && statsVisible_ && textReady_ && !statsLines_.empty()) {
         bindPipe(textPipeline_);

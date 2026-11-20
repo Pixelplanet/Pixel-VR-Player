@@ -109,6 +109,7 @@ struct XrInputState {
     bool headValid = false;
     float headPos[3] = {0.0f, 0.0f, 0.0f};
     float headForward[3] = {0.0f, 0.0f, -1.0f};
+    float headOri[4] = {0.0f, 0.0f, 0.0f, 1.0f};  // x y z w: the two views' orientations averaged
     bool stageValid = false;
     XrPosef appToStagePose{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 1.65f, 0.0f}};
     float headPosStage[3] = {0.0f, 1.65f, 0.0f};
@@ -117,6 +118,7 @@ struct XrInputState {
     // only when its orientation is valid and tracked this frame. Never logged.
     bool gazeValid = false;
     float gazeDir[3] = {0.0f, 0.0f, -1.0f};
+    float gazePos[3] = {0.0f, 0.0f, 0.0f};  // the gaze ray's origin (Gaze Test only)
 
     // Tracked controller aim poses (index 0 = left, 1 = right). The pointer ray
     // is the -Z axis of `orientation` from `position`, in the app reference space.
@@ -347,6 +349,7 @@ private:
     XrSpace gripSpaces_[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
     bool actionsReady_ = false;
     bool prevFull_[2] = {false, false};  // squeeze-value full-press hysteresis
+    bool squeezeClickBound_ = false;     // the Frame profile's squeeze/click was accepted
     // Bumpers (Previous / Next): a TAP counts when the bumper is let go; held, it is a shift.
     bool bumperDown_[2] = {false, false};
     bool bumperUsed_[2] = {false, false};  // served as a shift (a mirrored button) or held too long

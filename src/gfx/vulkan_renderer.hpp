@@ -154,6 +154,12 @@ public:
     void setStereoFocusOffset(float radians) { stereoFocusOffset_ = radians; }
     // Latest eye-gaze direction, app reference space (normalized here).
     void setFocusGaze(bool valid, const float dirApp[3]);
+    // Gaze Test: a white dot at `posApp` (app reference space), `radiusM` wide, over everything.
+    void setGazeTestTarget(bool on, const float posApp[3], float radiusM) {
+        gazeTestOn_ = on;
+        for (int k = 0; k < 3; ++k) gazeTestPos_[k] = posApp[k];
+        gazeTestRadius_ = radiusM;
+    }
     // Record the disparity dispatch (every 3rd frame) while on.
     void setFocusMeasurement(bool on);
     // True once per new completed measurement (runs stereo::evaluateScores).
@@ -1508,6 +1514,9 @@ private:
     bool focusGazeValid_ = false;
     float focusGazeDir_[3] = {0.0f, 0.0f, -1.0f};
     float focusEyeMid_[3] = {0.0f, 0.0f, 0.0f};  // this frame's eye midpoint (gaze dot)
+    bool gazeTestOn_ = false;
+    float gazeTestPos_[3] = {0.0f, 0.0f, -1.0f};
+    float gazeTestRadius_ = 0.01f;
     bool focusEyeMidValid_ = false;
     bool focusMeasurable_ = false;      // cleared at frame start (renderLayersBefore)
     bool focusGazeSrcValid_ = false;    // an attempt this frame

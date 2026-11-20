@@ -1074,6 +1074,9 @@ void SettingsMenu::refresh() {
         toggle("Record Autofocus Log", on && autofocusLog_, Action::ToggleAutofocusLog, on);
         rows_.back().note = "Eye and autofocus data per frame, into the logs folder (not saved; never for vault videos).";
         offBecause(kTurnOn);
+        rows_.push_back({"Gaze Test", on ? "Start" : "", on ? Action::StartGazeTest : Action::None});
+        rows_.back().note = "Look at 10 dots, near and far (about 30 s): where the headset says you look goes into the logs folder.";
+        offBecause(kTurnOn);
         rows_.push_back({"Back to Display & Cinema", "", Action::BackToDisplay});
     } else if (section_ == 13) {
         // Download Folder: one full-width line per choice (a list page), each with the free space

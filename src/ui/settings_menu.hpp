@@ -117,6 +117,7 @@ public:
         ToggleAutofocusInfo,
         CycleAutofocusTestShift,
         ToggleAutofocusLog,
+        StartGazeTest,  // the app runs it (Gaze Test: dots near and far, the gaze recorded)
         BackToDisplay,      // from the 3D Autofocus page
     };
 

@@ -176,8 +176,27 @@ private:
     // Focus: the user's own shift of the two eye pictures (grip + stick up / down in a 3D 180 / 360
     // video; degrees, + = the picture farther). Reset per video. The stick Y read while the grip
     // is held (the vault combo gate clears the sticks, so it is kept before that).
+    // Gaze Test (Settings > 3D Autofocus): 10 dots, near (0.5 m) and far (5 m), each looked at
+    // for 2.5 s while the reported gaze is written to logs/gazetest-<date>-<time>.csv. Only when
+    // the user starts it; no video, no file names, nothing else in it.
+    struct GazeTest {
+        bool active = false;
+        std::chrono::steady_clock::time_point start{};
+        float eyeMid[3] = {0.0f, 0.0f, 0.0f};    // where the head was at the start
+        float headOri[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+        std::FILE* file = nullptr;
+        std::string name;
+        int lastIndex = -1;
+    } gazeTest_;
+    void startGazeTest();
+    void updateGazeTest();
+    void stopGazeTest(bool finished);
     float manualFocusDeg_ = 0.0f;
     float focusStickY_ = 0.0f;
+    static constexpr float kFocusGripValue = 0.3f;  // a light grip press (analog value) counts
+    bool focusGripHeld_ = false;                    // (for the "Focus grip released" log line)
+    float focusGripMaxStick_ = 0.0f;
+    float focusGripStartDeg_ = 0.0f;
     static constexpr float kManualFocusMinDeg = -6.0f;
     static constexpr float kManualFocusMaxDeg = 20.0f;
     std::vector<std::string> focusInfoLines_;  // shown with "Autofocus Info" on, never logged
