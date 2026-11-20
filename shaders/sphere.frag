@@ -23,7 +23,7 @@ layout(push_constant) uniform Push {
     vec4 fov;
     vec4 mode;  // x: projection (1=360, 2=180), y: stereo (0=mono,1=SBS,2=TB), z: eye
     vec4 conversion;
-    vec4 range;  // x: luma offset, y: luma scale, z: sRGB encode flag, w: 3D Autofocus shift
+    vec4 range;  // x: luma offset, y: luma scale, z: sRGB encode flag, w: Focus shift (grip + stick)
 } pc;
 
 layout(location = 0) in vec3 vDir;
@@ -100,7 +100,7 @@ void main() {
     dLon -= TWO_PI * round(dLon * (1.0 / TWO_PI));
     vec2 dLat = vec2(dFdx(lat), dFdy(lat));
 
-    // 3D Autofocus: the two eye images slide against each other, each by half
+    // Focus (grip + stick): the two eye images slide against each other, each by half
     // of range.w (radians; positive = the picture farther), by the displayed
     // eye (before the swap).
     lon += (pc.mode.z < 0.5 ? 0.5 : -0.5) * pc.range.w;

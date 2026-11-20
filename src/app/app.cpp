@@ -394,10 +394,6 @@ bool App::init(const std::string& mediaPath) {
     renderer_.prebuildFonts();
     // Before we connect: SteamVR's "Up next" launch, like Steam's own VR games.
     steamVrPrelaunch();
-    // 3D Autofocus: eye tracking is asked for only with the setting on (settings_ loaded its
-    // config in its constructor). Turning it on later takes effect at the next start.
-    focusSettingPrev_ = settings_.stereoAutofocus();
-    xr_.requestEyeGaze(focusSettingPrev_);
     if (!xr_.createInstanceAndSystem("Pixel VR Player")) {
         return false;
     }
@@ -1359,423 +1355,20 @@ void App::updateStats() {
 }
 #endif
 
-void App::resetStereoFocus() {
-    focus_.reset();
-    focusOnPicture_ = false;
-    focusHaveResult_ = false;
-    focusHaveValid_ = false;
-}
-
-// 3D Autofocus, once per frame after the frame was drawn: what the renderer measured where the
-// user looks decides how far the eye images slide against each other (from the next frame on).
-// Gaze values stay in memory: never logged, stored, or given to plugins.
-namespace {
-
-// The Gaze Test's dots: direction from the head at the start (yaw + = right, pitch + = up, degrees)
-// and distance; near and far alternate so neither is judged after getting used to it.
-struct GazeTarget {
-    float yawDeg, pitchDeg, depthM;
-};
-constexpr GazeTarget kGazeTargets[] = {
-    {0.0f, 0.0f, 5.0f},    {0.0f, 0.0f, 0.5f},   {-15.0f, 0.0f, 5.0f}, {-15.0f, 0.0f, 0.5f},
-    {15.0f, 0.0f, 5.0f},   {15.0f, 0.0f, 0.5f},  {0.0f, 12.0f, 5.0f},  {0.0f, 12.0f, 0.5f},
-    {0.0f, -12.0f, 5.0f},  {0.0f, -12.0f, 0.5f},
-};
-constexpr int kGazeTargetCount = static_cast<int>(sizeof(kGazeTargets) / sizeof(kGazeTargets[0]));
-constexpr double kGazeTargetS = 2.5;   // each dot this long
-constexpr double kGazeSettleS = 1.0;   // the first second is not used (the eyes get there)
-
-// q * v for a unit quaternion (x y z w).
-void rotateByQuat(const float q[4], const float v[3], float out[3]) {
-    const float x = q[0], y = q[1], z = q[2], w = q[3];
-    const float tx = 2.0f * (y * v[2] - z * v[1]);
-    const float ty = 2.0f * (z * v[0] - x * v[2]);
-    const float tz = 2.0f * (x * v[1] - y * v[0]);
-    out[0] = v[0] + w * tx + (y * tz - z * ty);
-    out[1] = v[1] + w * ty + (z * tx - x * tz);
-    out[2] = v[2] + w * tz + (x * ty - y * tx);
-}
-
-std::string playerLogsDir() {
-    char buf[4096];
-    const ssize_t n = readlink("/proc/self/exe", buf, sizeof(buf) - 1);
-    if (n <= 0) return "logs";
-    buf[n] = '\0';
-    return (std::filesystem::path(buf).parent_path() / "logs").string();
-}
-
-}  // namespace
-
-void App::startGazeTest() {
-    if (gazeTest_.active) return;
-    const XrInputState& in = xr_.input();
-    if (!xr_.eyeGazeSupported()) {
-        showNotice("The Gaze Test needs eye tracking, which isn't available", true);
-        return;
-    }
-    if (!in.headValid) return;
-    std::error_code ec;
-    const std::string dir = playerLogsDir();
-    std::filesystem::create_directories(dir, ec);
-    const std::time_t now = std::time(nullptr);
-    std::tm tm{};
-    localtime_r(&now, &tm);
-    char stamp[32];
-    std::strftime(stamp, sizeof(stamp), "%Y%m%d-%H%M%S", &tm);
-    gazeTest_.name = std::string("gazetest-") + stamp + ".csv";
-    gazeTest_.file = std::fopen((dir + "/" + gazeTest_.name).c_str(), "w");
-    if (gazeTest_.file == nullptr) {
-        showNotice("The Gaze Test could not write to the logs folder", true);
-        return;
-    }
-    std::fprintf(gazeTest_.file,
-                 "# Gaze Test: directions are unit vectors in the app reference space (x right, y up, -z forward);"
-                 " target = the dot, true = from the eye midpoint to the dot, gaze = as the headset reports it\n"
-                 "t,idx,yaw,pitch,depth,used,gaze_ok,gx,gy,gz,gox,goy,goz,tx,ty,tz,ex,ey,ez,qx,qy,qz,qw\n");
-    for (int k = 0; k < 3; ++k) gazeTest_.eyeMid[k] = in.headPos[k];
-    for (int k = 0; k < 4; ++k) gazeTest_.headOri[k] = in.headOri[k];
-    gazeTest_.start = std::chrono::steady_clock::now();
-    gazeTest_.lastIndex = -1;
-    gazeTest_.active = true;
-    settings_.close();
-    PIXELVR_LOG_INFO("Gaze Test started (%d dots)", kGazeTargetCount);
-    showNotice("Gaze Test: look at the white dot until it moves (keep your head still)");
-}
-
-void App::stopGazeTest(bool finished) {
-    if (!gazeTest_.active) return;
-    gazeTest_.active = false;
-    if (gazeTest_.file != nullptr) std::fclose(gazeTest_.file);
-    gazeTest_.file = nullptr;
-    const float none[3] = {0.0f, 0.0f, -1.0f};
-    renderer_.setGazeTestTarget(false, none, 0.0f);
-    PIXELVR_LOG_INFO("Gaze Test %s: logs/%s", finished ? "done" : "stopped", gazeTest_.name.c_str());
-    showNotice(finished ? "Gaze Test done: saved in the logs folder" : "Gaze Test stopped");
-}
-
-void App::updateGazeTest() {
-    if (!gazeTest_.active) return;
-    const XrInputState& in = xr_.input();
-    const double t = std::chrono::duration<double>(std::chrono::steady_clock::now() - gazeTest_.start).count();
-    const int idx = static_cast<int>(t / kGazeTargetS);
-    if (idx >= kGazeTargetCount) {
-        stopGazeTest(true);
-        return;
-    }
-    const GazeTarget& g = kGazeTargets[idx];
-    const float yaw = g.yawDeg * 3.14159265f / 180.0f;
-    const float pitch = g.pitchDeg * 3.14159265f / 180.0f;
-    const float local[3] = {std::sin(yaw) * std::cos(pitch), std::sin(pitch), -std::cos(yaw) * std::cos(pitch)};
-    float dirApp[3];
-    rotateByQuat(gazeTest_.headOri, local, dirApp);
-    float pos[3];
-    for (int k = 0; k < 3; ++k) pos[k] = gazeTest_.eyeMid[k] + dirApp[k] * g.depthM;
-    // About 0.6 degrees wide at any distance.
-    renderer_.setGazeTestTarget(true, pos, g.depthM * 0.0052f);
-    if (idx != gazeTest_.lastIndex) {
-        gazeTest_.lastIndex = idx;
-        xr_.triggerHaptic(1, 0.02f, 0.0f, 0.3f);
-    }
-    if (gazeTest_.file == nullptr || !in.headValid) return;
-    float tr[3] = {pos[0] - in.headPos[0], pos[1] - in.headPos[1], pos[2] - in.headPos[2]};
-    const float len = std::sqrt(tr[0] * tr[0] + tr[1] * tr[1] + tr[2] * tr[2]);
-    if (len > 1e-6f) {
-        for (float& v : tr) v /= len;
-    }
-    const bool used = t - idx * kGazeTargetS >= kGazeSettleS;
-    std::fprintf(gazeTest_.file,
-                 "%.4f,%d,%.1f,%.1f,%.2f,%d,%d,%.5f,%.5f,%.5f,%.4f,%.4f,%.4f,%.5f,%.5f,%.5f,%.4f,%.4f,%.4f,%.5f,%.5f,%.5f,%.5f\n",
-                 t, idx, static_cast<double>(g.yawDeg), static_cast<double>(g.pitchDeg), static_cast<double>(g.depthM),
-                 used ? 1 : 0, in.gazeValid ? 1 : 0, in.gazeDir[0], in.gazeDir[1], in.gazeDir[2], in.gazePos[0],
-                 in.gazePos[1], in.gazePos[2], tr[0], tr[1], tr[2], in.headPos[0], in.headPos[1], in.headPos[2],
-                 in.headOri[0], in.headOri[1], in.headOri[2], in.headOri[3]);
-}
-
-void App::updateStereoFocus(float dtS) {
-    const bool setting = settings_.stereoAutofocus();
-    if (setting != focusSettingPrev_) {
-        focusSettingPrev_ = setting;
-        PIXELVR_LOG_INFO("3D Autofocus %s (eye tracking %s)", setting ? "on" : "off",
-                         !xr_.eyeGazeRequested() ? "not requested at start"
-                         : xr_.eyeGazeSupported() ? "available" : "unavailable");
-        if (setting) {
-            if (!xr_.eyeGazeRequested()) {
-                showNotice("3D Autofocus starts the next time Pixel VR Player opens");
-            } else if (!xr_.eyeGazeSupported()) {
-                showNotice("3D Autofocus needs eye tracking, which isn't available", true);
-                focusUnavailableNoticed_ = true;
-            } else {
-                showNotice("3D Autofocus on: works in 3D 180 / 360 videos");
-            }
-        }
-    }
-    const bool active = setting && xr_.eyeGazeSupported();
-    if (active != focusActivePrev_) {
-        focusActivePrev_ = active;
-        PIXELVR_LOG_INFO("3D Autofocus: eye gaze %s", active ? "in use" : "not in use");
-    }
-    xr_.setEyeGazeActive(active || gazeTest_.active);
-    updateGazeTest();
-    settings_.setAutofocusAvailability(xr_.eyeGazeRequested(), xr_.eyeGazeSupported());
-    const XrInputState& in = xr_.input();
-    // The raw gaze trembles by a degree or more: the dot and the measurement use it steadied.
-    if (active) {
-        focusGaze_.update(in.gazeValid, in.gazeDir, dtS);
-    } else {
-        focusGaze_.reset();
-    }
-    const bool gazeValid = active && focusGaze_.valid();
-    renderer_.setFocusGaze(gazeValid, focusGaze_.dir());
-
-    // A stereo 180 / 360 video playing on the main screen (slot 0 is the only sphere).
+// Focus (grip + stick up / down): the user's own shift of the two eye pictures, only for a
+// stereo 180 / 360 video on the main screen (slot 0 is the only sphere); reset per video.
+void App::updateStereoShift() {
     bool stereo3dSphere = false;
-    bool paused = false;
-    bool open = false;
-    static const std::string kNoPath;
-    const std::string* path = &kNoPath;
-    int projection = 0;
-    int stereoFmt = 0;
-    double pos = -1.0;
-    bool seekPending = false;
 #ifdef PIXELVR_HAVE_MEDIA
     {
         const ScreenState& sc = screens_[0];
-        open = sc.open && !sc.web && !sc.opening && !sc.openAbandoned && !sc.engine.audioOnly();
-        if (open) {
-            path = &sc.path;
-            projection = sc.projection;
-            stereoFmt = sc.stereo;
-            pos = sc.engine.position();
-            paused = sc.engine.paused();
-            seekPending = sc.engine.seekPending();
-            stereo3dSphere = (projection == 1 || projection == 2) &&
-                             rendererStereo(stereoFmt) != VulkanRenderer::StereoMode::Mono;
-        }
+        const bool open = sc.open && !sc.web && !sc.opening && !sc.openAbandoned && !sc.engine.audioOnly();
+        stereo3dSphere = open && (sc.projection == 1 || sc.projection == 2) &&
+                         rendererStereo(sc.stereo) != VulkanRenderer::StereoMode::Mono;
     }
 #endif
-    // Saved on at the start, but no eye tracking: say so once, when it would have worked.
-    if (setting && xr_.eyeGazeRequested() && !xr_.eyeGazeSupported() && stereo3dSphere &&
-        !focusUnavailableNoticed_) {
-        focusUnavailableNoticed_ = true;
-        showNotice("3D Autofocus needs eye tracking, which isn't available", true);
-    }
-    const bool swap = settings_.swapEyes();
-    // A new clip, a format change, swap eyes or a seek (a position jump): start again from 0.
-    // Until a seek has landed (and one frame after, for the frame drawn meanwhile) the picture is
-    // still the old one: no measurement from it either.
-    const bool seeked = focusLastPos_ >= 0.0 && pos >= 0.0 &&
-                        std::fabs(pos - focusLastPos_) > 1.0 + 2.0 * static_cast<double>(dtS);
-    const bool seekSettling = seekPending || focusSeekWasPending_;
-    focusSeekWasPending_ = seekPending;
-    bool changed = seekSettling;
-    if (open != focusOpen_ || *path != focusPath_ || projection != focusProjection_ ||
-        stereoFmt != focusStereo_ || swap != focusSwap_ || seeked) {
-        changed = true;
-        focusOpen_ = open;
-        if (*path != focusPath_) focusPath_ = *path;
-        focusProjection_ = projection;
-        focusStereo_ = stereoFmt;
-        focusSwap_ = swap;
-    }
-    focusLastPos_ = pos;
-    if (changed) {
-        resetStereoFocus();
-        // The search pending now was recorded from the picture / layout before the change.
-        renderer_.setFocusMeasurement(false);
-    }
-
-    renderer_.setFocusMeasurement(active && stereo3dSphere);
-    stereo::DisparityResult r;
-    const bool got = renderer_.takeFocusMeasurement(r);
-    // The gaze point of this frame's measurement attempt; between attempts the last one holds.
-    stereo::GazeSource gs;
-    if (!gazeValid) {
-        focusOnPicture_ = false;
-    } else if (renderer_.focusGazeSource(gs)) {
-        focusOnPicture_ = gs.valid;
-    }
-    const bool onPicture = gazeValid && focusOnPicture_;
-
-    StereoFocusParams p;
-    p.strength = static_cast<float>(settings_.autofocusStrengthPct()) / 100.0f;
-    p.closerThanM = static_cast<float>(settings_.autofocusCloserThanCm()) / 100.0f;
-    p.transitionS = settings_.autofocusTransitionS();
-    p.nearOnly = settings_.autofocusNearOnly();
-    focus_.setParams(p);
-
-    // A panel up (the user reads it, the gaze only passes through it onto the video): hold too.
-    bool uiShown = settings_.isOpen() || downloadsWindow_ || actionMenu_.visible || smbModal_.active ||
-                   textEntry_.active;
-#ifdef PIXELVR_HAVE_FREETYPE
-    uiShown = uiShown || browser_.isOpen();
-#endif
-    // (Paused or with a panel up it keeps working, as in Stereonaut: a paused close-up is a fine
-    // picture to measure, and the autofocus is tried out with its own settings page open.)
-    if (!active || !stereo3dSphere) {
-        resetStereoFocus();
-    } else {
-        focus_.update(dtS, got ? &r : nullptr, onPicture);
-    }
-    if (got && active && stereo3dSphere) {
-        focusLastResult_ = r;
-        focusHaveResult_ = true;
-        if (r.valid) {
-            focusLastValidDisp_ = r.disparityDeg;
-            focusHaveValid_ = true;
-        }
-    }
-
-    // The debug test shift works without eye tracking too, so the direction can be checked.
-    const float testDeg = stereo3dSphere ? settings_.autofocusTestShiftDeg() : 0.0f;
-    // Focus (grip + stick up / down) adds the user's own shift on top; reset per video.
     const float manualDeg = stereo3dSphere ? manualFocusDeg_ : 0.0f;
-    const float offsetDeg = focus_.offsetDeg() + testDeg + manualDeg;
-    renderer_.setStereoFocusOffset(offsetDeg * 3.14159265358979f / 180.0f);
-    renderer_.setFocusGazeDot(settings_.autofocusInfo() && active && !gazeTest_.active);
-
-    // Record Autofocus Log: one row per frame while a 3D 180 / 360 video plays (a new file per
-    // video); never for vault / private videos (nothing about them on disk).
-    {
-        const bool privateVideo = open && VaultManager::isPrivatePath(*path);
-        const bool logOn = settings_.autofocusLog();
-        if (!logOn) {
-            focusLogStoppedPath_.clear();
-            focusLogVaultNoticed_ = false;
-        }
-        bool want = logOn && stereo3dSphere && !privateVideo && focusLogStoppedPath_ != *path;
-        if (focusLog_.isOpen() && (!want || focusLogPath_ != *path || focusLog_.full())) {
-            if (focusLog_.full()) {
-                showNotice("Autofocus log is full: recording stopped");
-                focusLogStoppedPath_ = focusLogPath_;
-                want = want && focusLogStoppedPath_ != *path;
-            }
-            focusLog_.close();
-            PIXELVR_LOG_INFO("Autofocus log closed: %s", focusLog_.name().c_str());
-        }
-        if (want && !focusLog_.isOpen()) {
-            char cfg[200];
-            std::snprintf(cfg, sizeof(cfg),
-                          "strength=%.2f near_only=%d closer_than_m=%.2f hysteresis=%.2f transition_s=%.2f "
-                          "cap_deg=%.1f comfort_deg=%.1f baseline_m=%.3f",
-                          p.strength, p.nearOnly ? 1 : 0, p.closerThanM, p.hysteresis, p.transitionS, p.capDeg,
-                          p.comfortDeg, p.baselineM);
-            if (focusLog_.open(cfg)) {
-                focusLogPath_ = *path;
-                PIXELVR_LOG_INFO("Autofocus log started: logs/%s.csv", focusLog_.name().c_str());
-                showNotice("Recording the autofocus log");
-            } else {
-                focusLogStoppedPath_ = *path;
-                showNotice("The autofocus log couldn't be created", true);
-            }
-        }
-        if (logOn && privateVideo && !focusLogVaultNoticed_) {
-            focusLogVaultNoticed_ = true;
-            showNotice("The autofocus log isn't recorded for vault videos");
-        }
-        if (focusLog_.isOpen()) {
-            FocusLog::Row row;
-            row.dt = dtS;
-            row.pos = pos;
-            row.paused = paused;
-            row.menu = uiShown;
-            row.projection = projection;
-            row.stereo = stereoFmt;
-            row.swap = swap;
-            row.rawOk = active && in.gazeValid;
-            for (int k = 0; k < 3; ++k) row.raw[k] = in.gazeDir[k];
-            row.filtOk = gazeValid;
-            for (int k = 0; k < 3; ++k) row.filt[k] = focusGaze_.dir()[k];
-            row.headOk = in.headValid;
-            for (int k = 0; k < 3; ++k) row.head[k] = in.headForward[k];
-            stereo::GazeSource src;
-            if (gazeValid && renderer_.focusGazeSource(src) && src.valid) {
-                row.srcOk = true;
-                row.lonDeg = src.lonDeg;
-                row.latDeg = src.latDeg;
-            }
-            row.measured = got;
-            if (got) {
-                row.mOk = r.valid;
-                row.dispDeg = r.disparityDeg;
-                row.score = r.score;
-                row.variance = r.variance;
-                row.best = r.best;
-                focusLog_.scores(renderer_.lastFocusScores(), stereo::kCandidates, r.variance, r.best);
-            }
-            row.focused = focus_.focused();
-            row.distM = focus_.focusDistanceM();
-            row.targetDeg = focus_.targetDeg();
-            row.offsetDeg = focus_.offsetDeg();
-            row.testDeg = testDeg;
-            row.event = static_cast<int>(focus_.lastEvent());
-            row.velocity = focus_.velocityDegS();
-            row.invalidS = focus_.invalidS();
-            row.gazeLostS = focus_.gazeLostS();
-            row.onPicture = onPicture;
-            row.zoom = renderer_.sphereZoom();
-            row.steadyDeg = focus_.steadyDisparityDeg();
-            row.manualDeg = manualDeg;
-            focusLog_.frame(row);
-        }
-    }
-
-    // The info lines (on screen only, never logged), a few times a second so they can be read.
-    if (!settings_.autofocusInfo()) {
-        focusInfoLines_.clear();
-        return;
-    }
-    const auto now = std::chrono::steady_clock::now();
-    if (!focusInfoLines_.empty() && now - focusInfoAt_ < std::chrono::milliseconds(200)) return;
-    focusInfoAt_ = now;
-    focusInfoLines_.clear();
-    // Short rows: the overlay has room for about 24 characters before the edge of the view.
-    char buf[96];
-    if (!setting) {
-        focusInfoLines_.emplace_back("Autofocus: off");
-    } else if (!xr_.eyeGazeRequested()) {
-        focusInfoLines_.emplace_back("Autofocus: restart needed");
-    } else if (!xr_.eyeGazeSupported()) {
-        focusInfoLines_.emplace_back("Autofocus: no eye tracking");
-    } else if (!stereo3dSphere) {
-        focusInfoLines_.emplace_back("Autofocus: not 3D 180/360");
-    } else if (!gazeValid) {
-        focusInfoLines_.emplace_back("Autofocus: eyes not seen");
-    } else if (!onPicture) {
-        focusInfoLines_.emplace_back("Autofocus: off the picture");
-    } else if (!focusHaveResult_) {
-        focusInfoLines_.emplace_back("Autofocus: measuring");
-    } else {
-        focusInfoLines_.emplace_back(focus_.focused() && focus_.targetDeg() > 0.0f ? "Autofocus: FOCUSED"
-                                                                                   : "Autofocus: watching");
-        if (focusLastResult_.valid) {
-            std::snprintf(buf, sizeof(buf), "Subject %.2f m (%.1f\xC2\xB0)",
-                          stereo::disparityToMetres(focusLastResult_.disparityDeg, p.baselineM),
-                          focusLastResult_.disparityDeg);
-        } else if (focusHaveValid_) {
-            std::snprintf(buf, sizeof(buf), "No match (was %.2f m)",
-                          stereo::disparityToMetres(focusLastValidDisp_, p.baselineM));
-        } else {
-            std::snprintf(buf, sizeof(buf), "No match");
-        }
-        focusInfoLines_.emplace_back(buf);
-        std::snprintf(buf, sizeof(buf), "Match %.2f  Texture %.0f", focusLastResult_.score,
-                      focusLastResult_.variance * 10000.0f);
-        focusInfoLines_.emplace_back(buf);
-        std::snprintf(buf, sizeof(buf), "Shift %.1f\xC2\xB0 > %.1f\xC2\xB0", focus_.offsetDeg(), focus_.targetDeg());
-        focusInfoLines_.emplace_back(buf);
-        if (paused || uiShown) focusInfoLines_.emplace_back(paused ? "(paused)" : "(menu open)");
-    }
-    if (active) {
-        // How the tracker behaves: new samples per second, how much the raw gaze trembles, and
-        // how often the eyes were seen.
-        std::snprintf(buf, sizeof(buf), "Eyes %.0f Hz  %.1f\xC2\xB0  %.0f%%", focusGaze_.sampleRateHz(),
-                      focusGaze_.noiseDeg(), focusGaze_.validShare() * 100.0f);
-        focusInfoLines_.emplace_back(buf);
-    }
-    if (testDeg != 0.0f) {
-        std::snprintf(buf, sizeof(buf), "Test shift %+.1f\xC2\xB0", testDeg);
-        focusInfoLines_.emplace_back(buf);
-    }
+    renderer_.setStereoFocusOffset(manualDeg * 3.14159265358979f / 180.0f);
 }
 
 int App::navStep(float axisY, std::chrono::steady_clock::time_point now) {
@@ -6945,7 +6538,7 @@ int App::run() {
                 if (!focusGripHeld_) focusGripStartDeg_ = manualFocusDeg_;
             } else if (focusGripHeld_) {
                 if (std::fabs(manualFocusDeg_) < 0.5f) manualFocusDeg_ = 0.0f;  // near 0: exactly 0
-                // (No gaze, no file: only how the control was used, to see why it may not react.)
+                // (No file: only how the control was used, to see why it may not react.)
                 PIXELVR_LOG_INFO("Focus grip released: stick max %.2f, grip %.2f / %.2f, Focus %+.1f -> %+.1f deg",
                                  focusGripMaxStick_, in.gripValue[0], in.gripValue[1], focusGripStartDeg_,
                                  manualFocusDeg_);
@@ -7055,7 +6648,7 @@ int App::run() {
 
             // Live settings + place the screen in front on first head tracking.
             renderer_.setSwapEyes(settings_.swapEyes());
-            updateStereoFocus(dt);
+            updateStereoShift();
             pollDecoderFree();
             renderer_.setDrawModels(settings_.drawModels());
             renderer_.setUiAppearance(settings_.uiTextScale(),
@@ -9113,9 +8706,7 @@ int App::run() {
                                 (!listPage || laserRow >= 0 || listA))) {
                     const int seg = (!stepped && laserRow >= 0) ? renderer_.settingsSegmentHovered() : -1;
                     auto act = stepped ? stepAct : (seg >= 0) ? settings_.activateSegment(seg) : settings_.press();
-                        if (act == SettingsMenu::Action::StartGazeTest) {
-                            startGazeTest();
-                        } else if (act == SettingsMenu::Action::PickDownloadFolder) {
+                        if (act == SettingsMenu::Action::PickDownloadFolder) {
                             startDownloadDirPick();
                         } else if (act == SettingsMenu::Action::StartVaultMoveLock) {
                             startVaultMove(true);
@@ -9918,18 +9509,7 @@ int App::run() {
                 }
             }
 #endif
-            if (settings_.autofocusInfo() && !focusInfoLines_.empty()) {
-                // The autofocus info lines, also when the statistics themselves are off.
-                if (settings_.showStats()) {
-                    std::vector<std::string> lines = statsLines_;
-                    lines.insert(lines.end(), focusInfoLines_.begin(), focusInfoLines_.end());
-                    renderer_.setStats(true, lines);
-                } else {
-                    renderer_.setStats(true, focusInfoLines_);
-                }
-            } else {
-                renderer_.setStats(settings_.showStats(), statsLines_);
-            }
+            renderer_.setStats(settings_.showStats(), statsLines_);
         } else {
             // Idle until the runtime tells us to start rendering.
             std::this_thread::sleep_for(50ms);

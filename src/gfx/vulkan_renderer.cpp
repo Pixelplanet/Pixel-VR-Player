@@ -1121,7 +1121,6 @@ VulkanRenderer::~VulkanRenderer() {
             destroyVideoResources(v);
             destroyYcbcr(v);
         }
-        destroyFocusResources();
         if (sampler_ != VK_NULL_HANDLE) vkDestroySampler(device_, sampler_, nullptr);
         if (descriptorPool_ != VK_NULL_HANDLE)
             vkDestroyDescriptorPool(device_, descriptorPool_, nullptr);
@@ -1932,8 +1931,7 @@ VkPipeline VulkanRenderer::eyePipeline(VkPipeline p) const {
     return p;
 }
 
-// --- 3D Autofocus (docs/concepts/AUTOFOCUS_PLAN_2026-11-19.md) -------------
-// Eye-gaze values stay in memory here: never logged, stored or handed on.
+// --- Sphere video path --------------------------------------------------------
 
 bool VulkanRenderer::videoResolved(const VideoSlot& v) {
     return v.usingDmabuf && v.resolveImage != VK_NULL_HANDLE && v.ycbcrQuadPipeline != VK_NULL_HANDLE &&
@@ -1967,287 +1965,6 @@ VulkanRenderer::SphereVideoPath VulkanRenderer::sphereVideoPath(const VideoSlot&
         p.set = v.descriptorSet;
     }
     return p;
-}
-
-void VulkanRenderer::setFocusGaze(bool valid, const float dirApp[3]) {
-    focusGazeValid_ = false;
-    if (!valid || dirApp == nullptr) return;
-    const float len = std::sqrt(dirApp[0] * dirApp[0] + dirApp[1] * dirApp[1] + dirApp[2] * dirApp[2]);
-    if (!(len > 1e-6f)) return;  // (also NaN)
-    for (int k = 0; k < 3; ++k) focusGazeDir_[k] = dirApp[k] / len;
-    focusGazeValid_ = true;
-}
-
-void VulkanRenderer::setFocusMeasurement(bool on) {
-    if (!on) {  // a result from before is stale by the time it is turned on again
-        focusPendingSerial_ = 0;
-        focusRecordedSerial_ = 0;
-        focusGazeSrcValid_ = false;
-    }
-    focusMeasureOn_ = on;
-}
-
-bool VulkanRenderer::focusGazeSource(stereo::GazeSource& out) const {
-    if (!focusGazeSrcValid_) return false;
-    out = focusGazeSrc_;
-    return true;
-}
-
-bool VulkanRenderer::takeFocusMeasurement(stereo::DisparityResult& out) {
-    if (focusPendingSerial_ == 0 || focusOutMapped_ == nullptr) return false;
-    // Done on the GPU: eye 0's fence was waited for (the end of the frame) or
-    // has signalled. A later submission on it signals after ours.
-    if (viewFenceInFlight_[0] && vkGetFenceStatus(device_, viewFences_[0]) != VK_SUCCESS) return false;
-    const auto* bytes = static_cast<const uint8_t*>(focusOutMapped_);
-    float scores[stereo::kCandidates];
-    float variance = 0.0f;
-    uint32_t serial = 0;
-    std::memcpy(scores, bytes, sizeof(scores));
-    std::memcpy(&variance, bytes + sizeof(scores), sizeof(float));
-    std::memcpy(&serial, bytes + sizeof(scores) + sizeof(float), sizeof(uint32_t));
-    const uint32_t want = focusPendingSerial_;
-    focusPendingSerial_ = 0;
-    if (serial != want) return false;  // not written (nothing to report)
-    std::memcpy(focusLastScores_, scores, sizeof(scores));
-    out = stereo::evaluateScores(scores, variance);
-    return true;
-}
-
-bool VulkanRenderer::initFocusResources() {
-    if (focusOutSet_ != VK_NULL_HANDLE) return true;
-    if (focusInitTried_) return false;  // failed before: stays off
-    focusInitTried_ = true;
-    // The search runs on the graphics queue.
-    uint32_t familyCount = 0;
-    vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice_, &familyCount, nullptr);
-    std::vector<VkQueueFamilyProperties> families(familyCount);
-    vkGetPhysicalDeviceQueueFamilyProperties(physicalDevice_, &familyCount, families.data());
-    if (queueFamilyIndex_ >= familyCount || (families[queueFamilyIndex_].queueFlags & VK_QUEUE_COMPUTE_BIT) == 0) {
-        PIXELVR_LOG_WARN("3D Autofocus: the queue has no compute, the measurement stays off");
-        return false;
-    }
-    // The shader's shared memory is above the 16 KiB every device offers.
-    VkPhysicalDeviceProperties pdp{};
-    vkGetPhysicalDeviceProperties(physicalDevice_, &pdp);
-    if (pdp.limits.maxComputeSharedMemorySize < stereo::kSharedBytes) {
-        PIXELVR_LOG_WARN("3D Autofocus: %u bytes of compute shared memory (needs %u), the measurement stays off",
-                         pdp.limits.maxComputeSharedMemorySize, stereo::kSharedBytes);
-        return false;
-    }
-
-    VkDescriptorSetLayoutBinding b{};
-    b.binding = 0;
-    b.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    b.descriptorCount = 1;
-    b.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    VkDescriptorSetLayoutCreateInfo li{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
-    li.bindingCount = 1;
-    li.pBindings = &b;
-    PIXELVR_VK_CHECK(vkCreateDescriptorSetLayout(device_, &li, nullptr, &focusOutSetLayout_));
-
-    // FocusOut (std430): float scores[128]; float variance; uint serial. One
-    // buffer: eye 0's fence is waited for before it is written again.
-    constexpr VkDeviceSize kOutBytes = sizeof(float) * (stereo::kCandidates + 1) + sizeof(uint32_t);
-    VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    bi.size = (kOutBytes + 63) & ~VkDeviceSize(63);
-    bi.usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
-    bi.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
-    PIXELVR_VK_CHECK(vkCreateBuffer(device_, &bi, nullptr, &focusOutBuffer_));
-    VkMemoryRequirements req{};
-    vkGetBufferMemoryRequirements(device_, focusOutBuffer_, &req);
-    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-    ai.allocationSize = req.size;
-    ai.memoryTypeIndex = findMemoryType(req.memoryTypeBits,
-                                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    PIXELVR_VK_CHECK(vkAllocateMemory(device_, &ai, nullptr, &focusOutMemory_));
-    PIXELVR_VK_CHECK(vkBindBufferMemory(device_, focusOutBuffer_, focusOutMemory_, 0));
-    PIXELVR_VK_CHECK(vkMapMemory(device_, focusOutMemory_, 0, VK_WHOLE_SIZE, 0, &focusOutMapped_));
-    std::memset(focusOutMapped_, 0, static_cast<std::size_t>(bi.size));  // serial 0 = nothing yet
-
-    VkDescriptorPoolSize ps{};
-    ps.type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    ps.descriptorCount = 1;
-    VkDescriptorPoolCreateInfo pi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
-    pi.maxSets = 1;
-    pi.poolSizeCount = 1;
-    pi.pPoolSizes = &ps;
-    PIXELVR_VK_CHECK(vkCreateDescriptorPool(device_, &pi, nullptr, &focusOutPool_));
-    VkDescriptorSetAllocateInfo si{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO};
-    si.descriptorPool = focusOutPool_;
-    si.descriptorSetCount = 1;
-    si.pSetLayouts = &focusOutSetLayout_;
-    VkDescriptorSet set = VK_NULL_HANDLE;
-    PIXELVR_VK_CHECK(vkAllocateDescriptorSets(device_, &si, &set));
-    VkDescriptorBufferInfo dbi{};
-    dbi.buffer = focusOutBuffer_;
-    dbi.offset = 0;
-    dbi.range = kOutBytes;
-    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-    w.dstSet = set;
-    w.dstBinding = 0;
-    w.descriptorCount = 1;
-    w.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-    w.pBufferInfo = &dbi;
-    vkUpdateDescriptorSets(device_, 1, &w, 0, nullptr);
-    focusOutSet_ = set;
-    PIXELVR_LOG_INFO("3D Autofocus: disparity search ready");
-    return true;
-}
-
-bool VulkanRenderer::buildFocusPipeline(VkDescriptorSetLayout videoSetLayout, VkPipelineLayout& layout,
-                                        VkPipeline& pipe) {
-    if (focusShaderMissing_ || videoSetLayout == VK_NULL_HANDLE || focusOutSetLayout_ == VK_NULL_HANDLE) {
-        return false;
-    }
-    const VkShaderModule module = loadShaderModule("stereo_disparity.comp.spv");
-    if (module == VK_NULL_HANDLE) {
-        focusShaderMissing_ = true;  // (logged once by loadShaderModule)
-        PIXELVR_LOG_WARN("3D Autofocus: no disparity shader, the measurement stays off");
-        return false;
-    }
-    const VkDescriptorSetLayout setLayouts[2] = {videoSetLayout, focusOutSetLayout_};
-    VkPushConstantRange range{};
-    range.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
-    range.offset = 0;
-    range.size = sizeof(stereo::DisparityPush);
-    VkPipelineLayoutCreateInfo li{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
-    li.setLayoutCount = 2;
-    li.pSetLayouts = setLayouts;
-    li.pushConstantRangeCount = 1;
-    li.pPushConstantRanges = &range;
-    VkResult res = vkCreatePipelineLayout(device_, &li, nullptr, &layout);
-    if (res == VK_SUCCESS) {
-        VkComputePipelineCreateInfo ci{VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO};
-        ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
-        ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
-        ci.stage.module = module;
-        ci.stage.pName = "main";
-        ci.layout = layout;
-        res = vkCreateComputePipelines(device_, VK_NULL_HANDLE, 1, &ci, nullptr, &pipe);
-    } else {
-        layout = VK_NULL_HANDLE;
-    }
-    vkDestroyShaderModule(device_, module, nullptr);
-    if (res != VK_SUCCESS) {
-        pipe = VK_NULL_HANDLE;
-        destroyFocusPipeline(layout, pipe);
-        PIXELVR_LOG_WARN("3D Autofocus: disparity pipeline failed: VkResult(%d)", static_cast<int>(res));
-        return false;
-    }
-    return true;
-}
-
-void VulkanRenderer::destroyFocusPipeline(VkPipelineLayout& layout, VkPipeline& pipe) {
-    if (device_ == VK_NULL_HANDLE) return;
-    if (pipe != VK_NULL_HANDLE) vkDestroyPipeline(device_, pipe, nullptr);
-    if (layout != VK_NULL_HANDLE) vkDestroyPipelineLayout(device_, layout, nullptr);
-    pipe = VK_NULL_HANDLE;
-    layout = VK_NULL_HANDLE;
-}
-
-void VulkanRenderer::destroyFocusResources() {
-    if (device_ == VK_NULL_HANDLE) return;
-    destroyFocusPipeline(focusCpuLayout_, focusCpuPipeline_);
-    if (focusOutPool_ != VK_NULL_HANDLE) vkDestroyDescriptorPool(device_, focusOutPool_, nullptr);
-    focusOutPool_ = VK_NULL_HANDLE;
-    focusOutSet_ = VK_NULL_HANDLE;
-    if (focusOutBuffer_ != VK_NULL_HANDLE) vkDestroyBuffer(device_, focusOutBuffer_, nullptr);
-    focusOutBuffer_ = VK_NULL_HANDLE;
-    if (focusOutMemory_ != VK_NULL_HANDLE) vkFreeMemory(device_, focusOutMemory_, nullptr);  // (unmaps)
-    focusOutMemory_ = VK_NULL_HANDLE;
-    focusOutMapped_ = nullptr;
-    if (focusOutSetLayout_ != VK_NULL_HANDLE) vkDestroyDescriptorSetLayout(device_, focusOutSetLayout_, nullptr);
-    focusOutSetLayout_ = VK_NULL_HANDLE;
-    focusPendingSerial_ = 0;
-    focusRecordedSerial_ = 0;
-}
-
-void VulkanRenderer::recordFocusMeasurement(const XrView& view) {
-    focusRecordedSerial_ = 0;
-    VideoSlot& v = videoSlots_[0];
-    // Slot 0 drawn as a stereo sphere this frame (the video loop's conditions
-    // for it, and the same path choice).
-    if (projectionMode_ == ProjectionMode::Flat || stereoMode_ == StereoMode::Mono || !v.hasVideo) return;
-    const SphereVideoPath path = sphereVideoPath(v);
-    if (!path.draw || path.set == VK_NULL_HANDLE) return;
-    focusMeasurable_ = true;
-    if (!focusMeasureOn_ || !focusGazeValid_) return;
-
-    // The gaze point on the source video, through this view's sphere mapping
-    // (as the sphere push in recordView).
-    stereo::SphereView sv;
-    sv.headRot[0] = view.pose.orientation.x;
-    sv.headRot[1] = view.pose.orientation.y;
-    sv.headRot[2] = view.pose.orientation.z;
-    sv.headRot[3] = view.pose.orientation.w;
-    sv.zoom = sphereZoom_;
-    sv.pitchTotal = spherePitch_ - recenterPitch_;
-    sv.yawTotal = sphereYaw_ + sphereYawOffset_;
-    sv.projection = (projectionMode_ == ProjectionMode::Equirect180) ? 2 : 1;
-    sv.stereo = (stereoMode_ == StereoMode::TopBottom) ? 2 : 1;
-    sv.swapEyes = swapEyes_;
-    focusGazeSrc_ = stereo::gazeToSource(sv, focusGazeDir_);
-    focusGazeSrcValid_ = true;
-    if (!focusGazeSrc_.valid) return;
-    if (focusFrame_++ % 3 != 0) return;  // the search every 3rd frame
-    if (!initFocusResources()) return;
-
-    // A compute pipeline for the set the sphere binds (built on first use).
-    VkPipeline pipe = VK_NULL_HANDLE;
-    VkPipelineLayout layout = VK_NULL_HANDLE;
-    int32_t lumaOnly = 0;
-    float uvScaleX = v.drmUvScaleX;  // the crop the sphere push applies (conversion.xy)
-    float uvScaleY = v.drmUvScaleY;
-    if (path.direct) {
-        if (!v.focusDirectTried) {
-            v.focusDirectTried = true;
-            buildFocusPipeline(v.ycbcrSetLayout, v.focusDirectLayout, v.focusDirectPipeline);
-        }
-        pipe = v.focusDirectPipeline;
-        layout = v.focusDirectLayout;
-    } else if (path.resolved) {
-        if (!v.focusResolvedTried) {
-            v.focusResolvedTried = true;
-            buildFocusPipeline(v.resolveSetLayout, v.focusResolvedLayout, v.focusResolvedPipeline);
-        }
-        pipe = v.focusResolvedPipeline;
-        layout = v.focusResolvedLayout;
-    } else {  // CPU textures: luma at binding 0, no crop
-        if (!focusCpuTried_) {
-            focusCpuTried_ = true;
-            buildFocusPipeline(descriptorSetLayout_, focusCpuLayout_, focusCpuPipeline_);
-        }
-        pipe = focusCpuPipeline_;
-        layout = focusCpuLayout_;
-        lumaOnly = 1;
-        uvScaleX = 1.0f;
-        uvScaleY = 1.0f;
-    }
-    if (pipe == VK_NULL_HANDLE || layout == VK_NULL_HANDLE) return;
-
-    stereo::DisparityPush pc{};
-    pc.lon0Deg = focusGazeSrc_.lonDeg;
-    pc.lat0Deg = focusGazeSrc_.latDeg;
-    pc.uvScaleX = uvScaleX;
-    pc.uvScaleY = uvScaleY;
-    pc.projection = focusGazeSrc_.projection;
-    pc.stereo = focusGazeSrc_.stereo;
-    pc.leftHalf = focusGazeSrc_.leftHalf;
-    pc.lumaOnly = lumaOnly;
-    if (++focusSerial_ == 0) focusSerial_ = 1;  // 0 = nothing
-    pc.serial = focusSerial_;
-    vkCmdBindPipeline(commandBuffer_, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
-    const VkDescriptorSet sets[2] = {path.set, focusOutSet_};
-    vkCmdBindDescriptorSets(commandBuffer_, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 2, sets, 0, nullptr);
-    vkCmdPushConstants(commandBuffer_, layout, VK_SHADER_STAGE_COMPUTE_BIT, 0, sizeof(pc), &pc);
-    vkCmdDispatch(commandBuffer_, 1, 1, 1);
-    // The scores for the CPU once eye 0's fence has signalled (takeFocusMeasurement).
-    VkMemoryBarrier mb{VK_STRUCTURE_TYPE_MEMORY_BARRIER};
-    mb.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
-    mb.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
-    vkCmdPipelineBarrier(commandBuffer_, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb,
-                         0, nullptr, 0, nullptr);
-    focusRecordedSerial_ = pc.serial;  // pending once submitted (end of recordView)
 }
 
 void VulkanRenderer::waitIdle() const {
@@ -4777,17 +4494,6 @@ void VulkanRenderer::renderLayersBefore(XrContext& xr, const XrView* views, uint
     (void)out;  // the UI layer is submitted by renderLayersAfter, over the screens
     gpuTimerNewFrame();  // this frame's timestamp slot (reads the one 4 frames old)
     updateVisibilityMask(xr, views, viewCount);
-    // 3D Autofocus: this frame's state is set by eye 0's pass.
-    focusMeasurable_ = false;
-    focusGazeSrcValid_ = false;
-    focusEyeMidValid_ = views != nullptr && viewCount > 0;
-    if (focusEyeMidValid_) {
-        const XrView& e0 = views[0];
-        const XrView& e1 = views[viewCount > 1 ? 1 : 0];
-        focusEyeMid_[0] = 0.5f * (e0.pose.position.x + e1.pose.position.x);
-        focusEyeMid_[1] = 0.5f * (e0.pose.position.y + e1.pose.position.y);
-        focusEyeMid_[2] = 0.5f * (e0.pose.position.z + e1.pose.position.z);
-    }
     uiLayerPending_ = false;
     modelsInView_ = controllerModelsInView(views, viewCount);
     layoutButtonLabels(views, viewCount);
@@ -6525,9 +6231,6 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
     rpBegin.renderArea = clearArea;
     rpBegin.clearValueCount = layerPass ? 1u : (msaa ? 3u : 2u);
     rpBegin.pClearValues = clears;
-    // 3D Autofocus: the gaze point and (every 3rd frame) the disparity search,
-    // a compute dispatch outside the render pass.
-    if (!layerPass && viewIndex == 0) recordFocusMeasurement(view);
     vkCmdBeginRenderPass(commandBuffer_, &rpBegin, VK_SUBPASS_CONTENTS_INLINE);
 
     VkViewport vp{};
@@ -7750,8 +7453,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
 
             } else {
                 // Straight from the decoder's frame, the resolved RGBA copy or
-                // the CPU-uploaded texture, or nothing (sphereVideoPath; the 3D
-                // Autofocus search makes the same choice).
+                // the CPU-uploaded texture, or nothing (sphereVideoPath).
                 const SphereVideoPath path = sphereVideoPath(v);
                 if (!path.draw) continue;
                 const bool direct = path.direct;
@@ -7795,7 +7497,7 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
                     push.conversion[0] = v.drmUvScaleX;
                     push.conversion[1] = v.drmUvScaleY;
                 }
-                // 3D Autofocus: the per-eye shift (stereo only; mono stays as it is).
+                // Focus (grip + stick): the per-eye shift (stereo only; mono stays as it is).
                 push.range[3] = (stereo != StereoMode::Mono) ? stereoFocusOffset_ : 0.0f;
                 vkCmdPushConstants(
                     commandBuffer_, layout,
@@ -11696,76 +11398,6 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         }
     }
 
-    // 3D Autofocus debug: a small orange dot where the eye gaze points, 2 m out
-    // from between the eyes, over everything drawn so far (no depth test).
-    if (drawWorld && focusGazeDot_ && focusGazeValid_ && focusEyeMidValid_ && uiPipeline_ != VK_NULL_HANDLE) {
-        const Vec3 eyePos{view.pose.position.x, view.pose.position.y, view.pose.position.z};
-        const Vec3 c = Vec3{focusEyeMid_[0], focusEyeMid_[1], focusEyeMid_[2]} +
-                       Vec3{focusGazeDir_[0], focusGazeDir_[1], focusGazeDir_[2]} * 2.0f;
-        const Vec3 toEye = normalize(eyePos - c);
-        Vec3 right = cross(Vec3{0.0f, 1.0f, 0.0f}, toEye);
-        if (length(right) < 1e-4f) right = Vec3{1.0f, 0.0f, 0.0f};
-        right = normalize(right);
-        const Vec3 up = normalize(cross(toEye, right));
-        const float halfSize = 0.012f;
-        Mat4 model;
-        model.m[0] = right.x * halfSize; model.m[1] = right.y * halfSize;
-        model.m[2] = right.z * halfSize; model.m[3] = 0.0f;
-        model.m[4] = up.x * halfSize; model.m[5] = up.y * halfSize;
-        model.m[6] = up.z * halfSize; model.m[7] = 0.0f;
-        model.m[8] = toEye.x * halfSize; model.m[9] = toEye.y * halfSize;
-        model.m[10] = toEye.z * halfSize; model.m[11] = 0.0f;
-        model.m[12] = c.x; model.m[13] = c.y; model.m[14] = c.z;
-        model.m[15] = 1.0f;
-        bindPipe(uiPipeline_);
-        const Mat4 mvp = multiply(proj, multiply(viewMat, model));
-        UiPush push{};
-        std::memcpy(push.mvp, mvp.m, sizeof(push.mvp));
-        const float orange[4] = {1.0f, 0.55f, 0.1f, 0.95f};
-        std::memcpy(push.color, orange, sizeof(push.color));
-        push.params[0] = static_cast<float>(UiShape::Cursor);
-        push.params[1] = 1.0f;
-        vkCmdPushConstants(commandBuffer_, uiPipelineLayout_,
-                           VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(UiPush), &push);
-        vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
-    }
-
-    // Gaze Test: the dot to look at (white, a dark ring around it), at its real distance.
-    if (drawWorld && gazeTestOn_ && uiPipeline_ != VK_NULL_HANDLE) {
-        const Vec3 eyePos{view.pose.position.x, view.pose.position.y, view.pose.position.z};
-        const Vec3 c{gazeTestPos_[0], gazeTestPos_[1], gazeTestPos_[2]};
-        const Vec3 toEye = normalize(eyePos - c);
-        Vec3 right = cross(Vec3{0.0f, 1.0f, 0.0f}, toEye);
-        if (length(right) < 1e-4f) right = Vec3{1.0f, 0.0f, 0.0f};
-        right = normalize(right);
-        const Vec3 up = normalize(cross(toEye, right));
-        bindPipe(uiPipeline_);
-        for (int ring = 0; ring < 2; ++ring) {
-            const float halfSize = gazeTestRadius_ * (ring == 0 ? 2.2f : 1.0f);
-            Mat4 model;
-            model.m[0] = right.x * halfSize; model.m[1] = right.y * halfSize;
-            model.m[2] = right.z * halfSize; model.m[3] = 0.0f;
-            model.m[4] = up.x * halfSize; model.m[5] = up.y * halfSize;
-            model.m[6] = up.z * halfSize; model.m[7] = 0.0f;
-            model.m[8] = toEye.x * halfSize; model.m[9] = toEye.y * halfSize;
-            model.m[10] = toEye.z * halfSize; model.m[11] = 0.0f;
-            const Vec3 at = c + toEye * (ring == 0 ? 0.0f : 0.001f);
-            model.m[12] = at.x; model.m[13] = at.y; model.m[14] = at.z;
-            model.m[15] = 1.0f;
-            const Mat4 mvp = multiply(proj, multiply(viewMat, model));
-            UiPush push{};
-            std::memcpy(push.mvp, mvp.m, sizeof(push.mvp));
-            const float dark[4] = {0.0f, 0.0f, 0.0f, 0.85f};
-            const float white[4] = {1.0f, 1.0f, 1.0f, 1.0f};
-            std::memcpy(push.color, ring == 0 ? dark : white, sizeof(push.color));
-            push.params[0] = static_cast<float>(UiShape::Cursor);
-            push.params[1] = 1.0f;
-            vkCmdPushConstants(commandBuffer_, uiPipelineLayout_,
-                               VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof(UiPush), &push);
-            vkCmdDraw(commandBuffer_, 6, 1, 0, 0);
-        }
-    }
-
     // Debug statistics overlay: head-locked text pinned to the upper-left FOV.
     if (drawWorld && statsVisible_ && textReady_ && !statsLines_.empty()) {
         bindPipe(textPipeline_);
@@ -11806,11 +11438,6 @@ void VulkanRenderer::recordView(uint32_t viewIndex, uint32_t imageIndex,
         return;
     }
     viewFenceInFlight_[slot] = true;
-    // A disparity search in this submission: read once viewFences_[0] is done.
-    if (!layerPass && viewIndex == 0 && focusRecordedSerial_ != 0) {
-        focusPendingSerial_ = focusRecordedSerial_;
-        focusRecordedSerial_ = 0;
-    }
     // Only the last eye waits: until then the UI layer's and first eye's GPU
     // work overlaps the later recording. Everything the app mutates between
     // frames (video textures, dma-buf frames, thumbnails, glyph buffers) is
@@ -12870,7 +12497,6 @@ bool VulkanRenderer::createSamplerAndDescriptors() {
         bindings[i].descriptorCount = 1;
         bindings[i].stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     }
-    bindings[0].stageFlags |= VK_SHADER_STAGE_COMPUTE_BIT;  // luma: the 3D Autofocus search
 
     VkDescriptorSetLayoutCreateInfo layoutInfo{
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
@@ -13141,8 +12767,7 @@ bool VulkanRenderer::createYcbcrPipeline(VideoSlot& v, uint32_t fourcc, int colo
     binding.binding = 0;
     binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
     binding.descriptorCount = 1;
-    // (compute: the 3D Autofocus search on the frame drawn straight from the decoder)
-    binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;
+    binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
     binding.pImmutableSamplers = &v.ycbcrSampler;  // required immutable for ycbcr
     VkDescriptorSetLayoutCreateInfo li{
         VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
@@ -13198,7 +12823,7 @@ bool VulkanRenderer::createYcbcrPipeline(VideoSlot& v, uint32_t fourcc, int colo
         b.binding = 0;
         b.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
         b.descriptorCount = 1;
-        b.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT | VK_SHADER_STAGE_COMPUTE_BIT;  // (+ 3D Autofocus)
+        b.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
         VkDescriptorSetLayoutCreateInfo li{
             VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
         li.bindingCount = 1;
@@ -13370,11 +12995,6 @@ void VulkanRenderer::destroyYcbcr(VideoSlot& v) {
     if (device_ == VK_NULL_HANDLE) {
         return;
     }
-    // The 3D Autofocus pipelines on this slot's set layouts (rebuilt on next use).
-    destroyFocusPipeline(v.focusDirectLayout, v.focusDirectPipeline);
-    destroyFocusPipeline(v.focusResolvedLayout, v.focusResolvedPipeline);
-    v.focusDirectTried = false;
-    v.focusResolvedTried = false;
     if (v.drmView != VK_NULL_HANDLE) {
         vkDestroyImageView(device_, v.drmView, nullptr);
         v.drmView = VK_NULL_HANDLE;
@@ -14694,9 +14314,9 @@ void VulkanRenderer::resolveFrame(VideoSlot& v, VkImage importedImage, bool acqu
     begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(cmd, &begin);
     // Earlier frames may still be sampling the resolve image: wait for their
-    // fragment shaders (and the 3D Autofocus search) before writing it again
-    // (later frames are ordered by the barrier at the end).
-    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+    // fragment shaders before writing it again (later frames are ordered by the
+    // barrier at the end).
+    vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT,
                          VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
                          nullptr, 0, nullptr, 0, nullptr);
     // GPU time of the conversion + mip chain (video); not for a frame drawn
@@ -14718,10 +14338,9 @@ void VulkanRenderer::resolveFrame(VideoSlot& v, VkImage importedImage, bool acqu
     acq.srcAccessMask = 0;
     acq.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     if (!acquired) {  // (a frame drawn directly was acquired when it arrived)
-        // (compute: the 3D Autofocus search reads a frame drawn directly)
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
-                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0,
-                             nullptr, 0, nullptr, 1, &acq);
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
+                             nullptr, 1, &acq);
     }
     if (acquireOnly) {  // drawn straight from this image: no conversion
         vkEndCommandBuffer(cmd);
@@ -14807,8 +14426,8 @@ void VulkanRenderer::resolveFrame(VideoSlot& v, VkImage importedImage, bool acqu
     sr.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
     sr.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
     vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0,
-                         nullptr, 0, nullptr, 1, &sr);
+                         VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0,
+                         nullptr, 1, &sr);
     gpuTimerEnd(cmd, tsResolve);
 
     vkEndCommandBuffer(cmd);
@@ -15041,7 +14660,6 @@ void VulkanRenderer::updateVideoTexture(int width, int height, const uint8_t* y,
 
     const bool wasInit = v.videoLayoutInitialized;
 
-    // (The compute stage too: the 3D Autofocus search reads the luma.)
     auto upload_plane = [&](VkImage image, int w, int h, uint32_t mipLevels,
                             VkDeviceSize bufferOffset) {
         // Transition ALL mip levels to TRANSFER_DST.
@@ -15059,9 +14677,8 @@ void VulkanRenderer::updateVideoTexture(int width, int height, const uint8_t* y,
         toDst.srcAccessMask = wasInit ? VK_ACCESS_SHADER_READ_BIT : 0;
         toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         vkCmdPipelineBarrier(uploadCmd_,
-                             wasInit ? VkPipelineStageFlags(VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT |
-                                                            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT)
-                                     : VkPipelineStageFlags(VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT),
+                             wasInit ? VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT
+                                     : VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
                              VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0,
                              nullptr, 1, &toDst);
 
@@ -15125,7 +14742,7 @@ void VulkanRenderer::updateVideoTexture(int width, int height, const uint8_t* y,
             readBarrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
             readBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
             vkCmdPipelineBarrier(uploadCmd_, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0,
+                                 VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0,
                                  nullptr, 0, nullptr, 1, &readBarrier);
 
             mipW = nextW;
@@ -15146,7 +14763,7 @@ void VulkanRenderer::updateVideoTexture(int width, int height, const uint8_t* y,
         lastBarrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
         lastBarrier.dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
         vkCmdPipelineBarrier(uploadCmd_, VK_PIPELINE_STAGE_TRANSFER_BIT,
-                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0, 0,
+                             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0,
                              nullptr, 0, nullptr, 1, &lastBarrier);
     };
 

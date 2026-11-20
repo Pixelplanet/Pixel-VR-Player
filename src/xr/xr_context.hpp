@@ -109,16 +109,10 @@ struct XrInputState {
     bool headValid = false;
     float headPos[3] = {0.0f, 0.0f, 0.0f};
     float headForward[3] = {0.0f, 0.0f, -1.0f};
-    float headOri[4] = {0.0f, 0.0f, 0.0f, 1.0f};  // x y z w: the two views' orientations averaged
     bool stageValid = false;
     XrPosef appToStagePose{{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 1.65f, 0.0f}};
     float headPosStage[3] = {0.0f, 1.65f, 0.0f};
     float headForwardStage[3] = {0.0f, 0.0f, -1.0f};
-    // Eye gaze (3D Autofocus): unit direction in the app reference space, valid
-    // only when its orientation is valid and tracked this frame. Never logged.
-    bool gazeValid = false;
-    float gazeDir[3] = {0.0f, 0.0f, -1.0f};
-    float gazePos[3] = {0.0f, 0.0f, 0.0f};  // the gaze ray's origin (Gaze Test only)
 
     // Tracked controller aim poses (index 0 = left, 1 = right). The pointer ray
     // is the -Z axis of `orientation` from `position`, in the app reference space.
@@ -213,19 +207,6 @@ public:
     // (bindings may have been edited in the dashboard meanwhile).
     uint32_t bindingsGeneration() const { return bindingsGeneration_; }
     void triggerHaptic(int hand, float durationSec = 0.015f, float frequencyHz = 0.0f, float amplitude = 0.5f);
-
-    // Eye gaze (XR_EXT_eye_gaze_interaction) for 3D Autofocus, in its own
-    // action set ("Eye Tracking") so "gameplay" and its bindings stay as they
-    // are. Only on/off and availability are logged, never gaze values.
-    // Call requestEyeGaze before createInstanceAndSystem: the extension is
-    // enabled only if wanted (and offered).
-    void requestEyeGaze(bool want) { eyeGazeWant_ = want; }
-    bool eyeGazeRequested() const { return eyeGazeRequested_; }  // wanted at instance creation
-    // Extension enabled, the system supports eye gaze, and the action and its
-    // space were created.
-    bool eyeGazeSupported() const { return eyeGazeEnabled_ && eyeGazeSystemSupport_ && eyeGazeReady_; }
-    // Sync the eye action set and locate the gaze each frame only while on.
-    void setEyeGazeActive(bool on);
 
     // --- Runtime ---------------------------------------------------------
     // Pumps the event queue and advances the session state machine.
@@ -361,19 +342,6 @@ private:
     bool lastHandActive_[2] = {false, false};
     int handCheckFrames_ = 0;
     XrInputState input_;
-
-    // Eye gaze (see requestEyeGaze).
-    void disableEyeGaze(const char* why);
-    bool eyeGazeWant_ = false;
-    bool eyeGazeRequested_ = false;     // eyeGazeWant_ at instance creation
-    bool eyeGazeEnabled_ = false;       // XR_EXT_eye_gaze_interaction enabled
-    bool eyeGazeSystemSupport_ = false; // supportsEyeGazeInteraction
-    bool eyeGazeReady_ = false;         // action set attached, action space created
-    bool eyeGazeActive_ = false;        // setEyeGazeActive
-    bool eyeGazeSynced_ = false;        // this frame's xrSyncActions included the eye set
-    XrActionSet eyeActionSet_ = XR_NULL_HANDLE;
-    XrAction eyeGazeAction_ = XR_NULL_HANDLE;
-    XrSpace eyeGazeSpace_ = XR_NULL_HANDLE;
 
     // XR_KHR_vulkan_enable2 entry points (resolved at runtime).
     PFN_xrGetVulkanGraphicsRequirements2KHR pfnGetVulkanGraphicsRequirements2_ = nullptr;

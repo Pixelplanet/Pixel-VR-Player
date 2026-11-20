@@ -117,15 +117,6 @@ constexpr int kDistanceSteps = 8;
 const char* kScreenSizeNames[] = {"Standard", "Large", "Cinema", "Original Pixels"};
 constexpr int kScreenSizeCount = 4;
 
-// 3D Autofocus: how long the eye images take to slide (saved in ms).
-const int kAutofocusTransitionMs[] = {0, 500, 750, 1000, 1500, 2000, 3000};
-const char* kAutofocusTransitionNames[] = {"Instant", "0.5 s", "0.75 s", "1 s", "1.5 s", "2 s", "3 s"};
-constexpr int kAutofocusTransitionCount = 7;
-// Debug test shift (degrees): Off, then both directions.
-const float kAutofocusTestShiftDeg[] = {0.0f, 3.0f, 6.0f, -3.0f, -6.0f};
-constexpr int kAutofocusTestShiftCount = 5;
-const char* const kAutofocusNote = "Experimental. 3D 180 / 360 videos, needs eye tracking";
-
 std::string getConfigPath() {
 #ifdef _WIN32
     const char* appData = std::getenv("APPDATA");
@@ -254,7 +245,6 @@ int SettingsMenu::parentOf(int s) const {
     if (s == 10 || s == 11 || s == 12) return 2;  // track lists -> Playback & Tracks
     if (s == 13 || s == 21 || s == 22) return kFilesWebSection;  // Download Folder, List View Columns, Shortcuts
     if (s == kTextColorSection || s == kAccentColorSection) return 1;  // colour pickers -> UI & Appearance
-    if (s == kAutofocusSection) return 0;          // 3D Autofocus -> Display & Cinema
     if (s == 17) return 22;                       // one shortcut -> Shortcuts
     if (s == kPluginSection || s == kStoreSection) return kPluginsSection;
     if (s == kStoreItemSection) return storeUpdate_ ? kPluginsSection : kStoreSection;
@@ -308,15 +298,7 @@ bool SettingsMenu::navigateBack() {
     deleteArmedIdx_ = -1;
     vaultMoveArmed_ = false;
     refresh();
-    if (from == kAutofocusSection) selected_ = rowOf(Action::EnterAutofocus);
     return true;
-}
-
-int SettingsMenu::rowOf(Action a) const {
-    for (std::size_t i = 0; i < rows_.size(); ++i) {
-        if (rows_[i].action == a) return static_cast<int>(i);
-    }
-    return 0;
 }
 
 const std::string& SettingsMenu::status() const {
@@ -438,8 +420,6 @@ void SettingsMenu::refresh() {
                screenSizeIdx_ % kScreenSizeCount, Action::CycleScreenSize, flat, kScreenSizeNames);
         offBecause("Flat screens only");
         toggle("Swap Left/Right Eye", swapEyes_, Action::ToggleSwapEyes);
-        rows_.push_back({"3D Autofocus", stereoAutofocus_ ? "On" : "Off", Action::EnterAutofocus});
-        rows_.back().note = autofocusNote();
         toggle("Multiple Screens", multiScreen_, Action::ToggleMultiScreen);
         toggle("Remove Black Bars", removeBlackBars_, Action::ToggleRemoveBlackBars);
         toggle("Debug Statistics", showStats_, Action::ToggleStats);
@@ -1035,49 +1015,6 @@ void SettingsMenu::refresh() {
         toggle("File Size", listShowSize_, Action::ToggleListColSize);
         toggle("Video Duration", listShowDuration_, Action::ToggleListColDuration);
         rows_.push_back({"Back to Files & Web", "", Action::BackToFilesWeb});
-    } else if (section_ == kAutofocusSection) {
-        // Slides the two eye images against each other so a near subject you look at fuses at about 1 m.
-        title_ = "Settings > Display & Cinema > 3D Autofocus";
-        const bool on = stereoAutofocus_;
-        const char* const kTurnOn = "Turn on 3D Autofocus";
-        toggle("3D Autofocus", on, Action::ToggleStereoAutofocus);
-        rows_.back().note = autofocusNote();
-        std::vector<std::string> pctNames, cmNames;
-        for (int p = 10; p <= 100; p += 10) pctNames.push_back(std::to_string(p) + "%");
-        for (int c = 30; c <= 100; c += 10) cmNames.push_back(std::to_string(c) + " cm");
-        const int pctIdx = std::clamp(autofocusStrengthPct_ / 10 - 1, 0, 9);
-        choice("Strength", pctNames[static_cast<std::size_t>(pctIdx)], 10, pctIdx, Action::CycleAutofocusStrength, on);
-        rows_.back().options = pctNames;
-        offBecause(kTurnOn);
-        segmented("Activation", {"Always", "Near Only"}, autofocusNearOnly_ ? 1 : 0, Action::CycleAutofocusActivation, on);
-        rows_.back().note = "Always: whatever you look at nearer than about 1 m. Near Only: only closer than Closer Than.";
-        offBecause(kTurnOn);
-        const int cmIdx = std::clamp(autofocusCloserCm_ / 10 - 3, 0, 7);
-        choice("Closer Than", cmNames[static_cast<std::size_t>(cmIdx)], 8, cmIdx, Action::CycleAutofocusCloser,
-               on && autofocusNearOnly_);
-        rows_.back().options = cmNames;
-        rows_.back().note = "Near Only acts only on what you look at closer than this.";
-        offBecause(!on ? kTurnOn : "Only with Activation: Near Only");
-        const int trIdx = autofocusTransitionIdx_ % kAutofocusTransitionCount;
-        choice("Transition", kAutofocusTransitionNames[trIdx], kAutofocusTransitionCount, trIdx,
-               Action::CycleAutofocusTransition, on, kAutofocusTransitionNames);
-        offBecause(kTurnOn);
-        toggle("Show Autofocus Info", on && autofocusInfo_, Action::ToggleAutofocusInfo, on);
-        rows_.back().note = "A dot where you look and a status line.";
-        offBecause(kTurnOn);
-        // (Not saved: a fixed shift so the direction can be checked without eye tracking.)
-        segmented("Test Shift", {"Off", "+3\xC2\xB0", "+6\xC2\xB0", "-3\xC2\xB0", "-6\xC2\xB0"},
-                  autofocusTestShiftIdx_ % kAutofocusTestShiftCount,
-                  Action::CycleAutofocusTestShift, on && autofocusInfo_);
-        rows_.back().note = "Shifts the eye images by a fixed amount (not saved).";
-        offBecause(!on ? kTurnOn : "Turn on Show Autofocus Info");
-        toggle("Record Autofocus Log", on && autofocusLog_, Action::ToggleAutofocusLog, on);
-        rows_.back().note = "Eye and autofocus data per frame, into the logs folder (not saved; never for vault videos).";
-        offBecause(kTurnOn);
-        rows_.push_back({"Gaze Test", on ? "Start" : "", on ? Action::StartGazeTest : Action::None});
-        rows_.back().note = "Look at 10 dots, near and far (about 30 s): where the headset says you look goes into the logs folder.";
-        offBecause(kTurnOn);
-        rows_.push_back({"Back to Display & Cinema", "", Action::BackToDisplay});
     } else if (section_ == 13) {
         // Download Folder: one full-width line per choice (a list page), each with the free space
         // of the drive it is on.
@@ -1337,59 +1274,6 @@ SettingsMenu::Action SettingsMenu::activate() {
         case Action::ToggleSwapEyes:
             swapEyes_ = !swapEyes_;
             saveConfig();
-            refresh();
-            break;
-        case Action::EnterAutofocus:
-            section_ = kAutofocusSection;
-            selected_ = 0;
-            refresh();
-            break;
-        case Action::BackToDisplay:
-            section_ = 0;
-            refresh();
-            selected_ = rowOf(Action::EnterAutofocus);  // on the row the page was opened from
-            break;
-        case Action::ToggleStereoAutofocus:
-            stereoAutofocus_ = !stereoAutofocus_;
-            if (!stereoAutofocus_) {
-                autofocusTestShiftIdx_ = 0;
-                autofocusLog_ = false;
-            }
-            saveConfig();
-            refresh();
-            break;
-        case Action::CycleAutofocusStrength:
-            autofocusStrengthPct_ = autofocusStrengthPct_ >= 100 ? 10 : autofocusStrengthPct_ + 10;
-            saveConfig();
-            refresh();
-            break;
-        case Action::CycleAutofocusActivation:
-            autofocusNearOnly_ = !autofocusNearOnly_;
-            saveConfig();
-            refresh();
-            break;
-        case Action::CycleAutofocusCloser:
-            autofocusCloserCm_ = autofocusCloserCm_ >= 100 ? 30 : autofocusCloserCm_ + 10;
-            saveConfig();
-            refresh();
-            break;
-        case Action::CycleAutofocusTransition:
-            autofocusTransitionIdx_ = (autofocusTransitionIdx_ + 1) % kAutofocusTransitionCount;
-            saveConfig();
-            refresh();
-            break;
-        case Action::ToggleAutofocusInfo:
-            autofocusInfo_ = !autofocusInfo_;
-            if (!autofocusInfo_) autofocusTestShiftIdx_ = 0;
-            saveConfig();
-            refresh();
-            break;
-        case Action::CycleAutofocusTestShift:
-            autofocusTestShiftIdx_ = (autofocusTestShiftIdx_ + 1) % kAutofocusTestShiftCount;  // (not saved)
-            refresh();
-            break;
-        case Action::ToggleAutofocusLog:
-            autofocusLog_ = !autofocusLog_;  // (not saved)
             refresh();
             break;
         case Action::ToggleModels:
@@ -2140,21 +2024,6 @@ const char* SettingsMenu::hoverHapticsStrengthStr() const {
     return kHoverHapticsStrengthNames[hoverHapticsStrengthIdx_ % kHoverHapticsStrengthCount];
 }
 
-float SettingsMenu::autofocusTransitionS() const {
-    return static_cast<float>(kAutofocusTransitionMs[autofocusTransitionIdx_ % kAutofocusTransitionCount]) / 1000.0f;
-}
-
-const char* SettingsMenu::autofocusNote() const {
-    if (stereoAutofocus_ && !autofocusRequested_) return "On: starts the next time Pixel VR Player opens";
-    if (stereoAutofocus_ && !autofocusSupported_) return "Eye tracking isn't available: 3D Autofocus does nothing";
-    return kAutofocusNote;
-}
-
-float SettingsMenu::autofocusTestShiftDeg() const {
-    if (!autofocusInfo()) return 0.0f;
-    return kAutofocusTestShiftDeg[autofocusTestShiftIdx_ % kAutofocusTestShiftCount];
-}
-
 float SettingsMenu::glowReach() const { return kGlowReachValues[glowReachIdx_ % kGlowReachCount]; }
 
 float SettingsMenu::ambilightIntensity() const {
@@ -2207,22 +2076,6 @@ void SettingsMenu::loadConfig() {
             else if (key == "stereo") stereoMode_ = std::clamp(std::stoi(val), 0, 3);
             else if (key == "remove_bars") removeBlackBars_ = val != "0";
             else if (key == "swap_eyes") swapEyes_ = (val == "1");
-            else if (key == "autofocus") stereoAutofocus_ = (val == "1");
-            else if (key == "autofocus_strength") {  // (a hand-edited value: the nearest step)
-                autofocusStrengthPct_ = std::clamp(static_cast<int>(std::lround(std::stoi(val) / 10.0)) * 10, 10, 100);
-            } else if (key == "autofocus_closer_cm") {
-                autofocusCloserCm_ = std::clamp(static_cast<int>(std::lround(std::stoi(val) / 10.0)) * 10, 30, 100);
-            } else if (key == "autofocus_near_only") {
-                autofocusNearOnly_ = (val == "1");
-            } else if (key == "autofocus_transition_ms") {
-                const int ms = std::stoi(val);
-                int best = 0;
-                for (int i = 1; i < kAutofocusTransitionCount; ++i) {
-                    if (std::abs(kAutofocusTransitionMs[i] - ms) < std::abs(kAutofocusTransitionMs[best] - ms)) best = i;
-                }
-                autofocusTransitionIdx_ = best;
-            }
-            else if (key == "autofocus_info") autofocusInfo_ = (val == "1");
             else if (key == "draw_models") drawModels_ = (val == "1");
             else if (key == "button_labels") buttonLabels_ = (val == "1");
             else if (key == "show_stats") showStats_ = (val == "1");
@@ -2326,12 +2179,6 @@ void SettingsMenu::saveConfig() const {
             file << "stereo=" << stereoMode_ << "\n";
             file << "remove_bars=" << (removeBlackBars_ ? 1 : 0) << "\n";
             file << "swap_eyes=" << (swapEyes_ ? 1 : 0) << "\n";
-            file << "autofocus=" << (stereoAutofocus_ ? 1 : 0) << "\n";
-            file << "autofocus_strength=" << autofocusStrengthPct_ << "\n";
-            file << "autofocus_near_only=" << (autofocusNearOnly_ ? 1 : 0) << "\n";
-            file << "autofocus_closer_cm=" << autofocusCloserCm_ << "\n";
-            file << "autofocus_transition_ms=" << kAutofocusTransitionMs[autofocusTransitionIdx_ % kAutofocusTransitionCount] << "\n";
-            file << "autofocus_info=" << (autofocusInfo_ ? 1 : 0) << "\n";
             file << "draw_models=" << (drawModels_ ? 1 : 0) << "\n";
             file << "button_labels=" << (buttonLabels_ ? 1 : 0) << "\n";
             file << "show_stats=" << (showStats_ ? 1 : 0) << "\n";

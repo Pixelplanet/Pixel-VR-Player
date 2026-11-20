@@ -117,8 +117,7 @@ set(PIXELVR_SHADERS
     shaders/glass_nv12.frag
     shaders/glass_rgba.frag
     shaders/mask.vert
-    shaders/mask.frag
-    shaders/stereo_disparity.comp)
+    shaders/mask.frag)
 pixelvr_compile_shaders(pixelvr_shaders
     OUTPUT_DIR "${CMAKE_BINARY_DIR}/shaders"
     SOURCES ${PIXELVR_SHADERS})
@@ -137,7 +136,6 @@ add_library(pixelvr_core STATIC
     src/net/remote_fs.cpp
     src/gfx/vulkan_renderer.cpp
     src/gfx/gltf_mesh.cpp
-    src/gfx/stereo_disparity.cpp
     src/ui/settings_menu.cpp
     src/ui/button_labels.cpp
     src/ui/thumbnail_cache.cpp
@@ -152,7 +150,6 @@ add_library(pixelvr_core STATIC
     src/app/file_ops.cpp
     src/app/chromium_installer.cpp
     src/app/hub_nav.cpp
-    src/app/stereo_focus.cpp
     src/app/app.cpp)
 
 target_include_directories(pixelvr_core PUBLIC
@@ -372,10 +369,6 @@ if(PIXELVR_BUILD_TOOLS)
     target_link_libraries(subtitle_sources_test PRIVATE pixelvr_core)
     add_executable(smb_login_test tools/smb_login_test.cpp)
     target_link_libraries(smb_login_test PRIVATE pixelvr_core)
-    add_executable(stereo_disparity_test tools/stereo_disparity_test.cpp)
-    target_link_libraries(stereo_disparity_test PRIVATE pixelvr_core)
-    add_executable(stereo_focus_test tools/stereo_focus_test.cpp)
-    target_link_libraries(stereo_focus_test PRIVATE pixelvr_core)
 endif()
 
 # First-party plugins (docs/concepts/PLUGIN_SYSTEM_SPEC.md). Each lands in

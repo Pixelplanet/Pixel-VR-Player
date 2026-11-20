@@ -65,3 +65,6 @@ Thumbs.db
 /tools/headset-build.sh
 /tools/chroma_check.py
 /tools/probe_smb.sh
+
+# Local stash of removed features (never committed)
+/stash/

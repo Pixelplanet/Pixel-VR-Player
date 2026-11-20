@@ -1,6 +1,5 @@
 #pragma once
 
-#include "gfx/stereo_disparity.hpp"
 #include "gfx/text_atlas.hpp"
 #include "ui/button_labels.hpp"
 #include "ui/ui_colors.hpp"
@@ -148,31 +147,9 @@ public:
     float sphereYawOffset() const { return sphereYawOffset_; }
     void setSwapEyes(bool on) { swapEyes_ = on; }
 
-    // 3D Autofocus (docs/concepts/AUTOFOCUS_PLAN_2026-11-19.md)
-    // Per-eye longitude shift, left eye +radians/2, right -radians/2 (positive =
-    // picture farther); applied only to stereo 180/360 spheres.
+    // Focus (grip + stick): per-eye longitude shift, left eye +radians/2, right
+    // -radians/2 (positive = picture farther); applied only to stereo 180/360 spheres.
     void setStereoFocusOffset(float radians) { stereoFocusOffset_ = radians; }
-    // Latest eye-gaze direction, app reference space (normalized here).
-    void setFocusGaze(bool valid, const float dirApp[3]);
-    // Gaze Test: a white dot at `posApp` (app reference space), `radiusM` wide, over everything.
-    void setGazeTestTarget(bool on, const float posApp[3], float radiusM) {
-        gazeTestOn_ = on;
-        for (int k = 0; k < 3; ++k) gazeTestPos_[k] = posApp[k];
-        gazeTestRadius_ = radiusM;
-    }
-    // Record the disparity dispatch (every 3rd frame) while on.
-    void setFocusMeasurement(bool on);
-    // True once per new completed measurement (runs stereo::evaluateScores).
-    bool takeFocusMeasurement(stereo::DisparityResult& out);
-    // The raw scores of the latest measurement (kCandidates values; for the autofocus log).
-    const float* lastFocusScores() const { return focusLastScores_; }
-    // The gaze point of this frame's measurement attempt (made every frame while
-    // measuring, the dispatch every 3rd); false if none. out.valid = on the picture.
-    bool focusGazeSource(stereo::GazeSource& out) const;
-    // The last frame drew a stereo 180/360 sphere from video slot 0.
-    bool focusMeasurable() const { return focusMeasurable_; }
-    // Debug: a small dot where the gaze points (2 m along the gaze ray from the eye midpoint).
-    void setFocusGazeDot(bool on) { focusGazeDot_ = on; }
 
     // Multi-screen placement. Slots 1..2 are extra flat screens and are drawn
     // only while `active`; slot 0 (the main screen) follows the recenter pose
@@ -1488,9 +1465,8 @@ private:
     float spherePitch_ = 0.0f;  // 360/180 viewpoint tilt (radians)
     float sphereZoom_ = 1.0f;   // 360/180 FOV scale (>1 pushes content farther)
 
-    // --- 3D Autofocus ------------------------------------------------------
     // The sphere draw's choice for a video slot (which pipeline / set, or
-    // nothing this frame); the disparity dispatch reads the same set.
+    // nothing this frame).
     struct SphereVideoPath {
         bool draw = false;      // false: the sphere shows nothing this frame
         bool direct = false;    // straight from the decoder's frame (Y'CbCr sampler)
@@ -1501,42 +1477,7 @@ private:
     };
     static bool videoResolved(const VideoSlot& v);  // draws from the resolved RGBA copy
     SphereVideoPath sphereVideoPath(const VideoSlot& v) const;
-    // Eye 0, before its render pass: the gaze point and, every 3rd frame, the search.
-    void recordFocusMeasurement(const XrView& view);
-    bool initFocusResources();
-    void destroyFocusResources();
-    // A compute pipeline for stereo_disparity.comp with `videoSetLayout` as set 0.
-    bool buildFocusPipeline(VkDescriptorSetLayout videoSetLayout, VkPipelineLayout& layout, VkPipeline& pipe);
-    void destroyFocusPipeline(VkPipelineLayout& layout, VkPipeline& pipe);
     float stereoFocusOffset_ = 0.0f;  // radians: range.w of a stereo sphere push
-    bool focusMeasureOn_ = false;
-    bool focusGazeDot_ = false;
-    bool focusGazeValid_ = false;
-    float focusGazeDir_[3] = {0.0f, 0.0f, -1.0f};
-    float focusEyeMid_[3] = {0.0f, 0.0f, 0.0f};  // this frame's eye midpoint (gaze dot)
-    bool gazeTestOn_ = false;
-    float gazeTestPos_[3] = {0.0f, 0.0f, -1.0f};
-    float gazeTestRadius_ = 0.01f;
-    bool focusEyeMidValid_ = false;
-    bool focusMeasurable_ = false;      // cleared at frame start (renderLayersBefore)
-    bool focusGazeSrcValid_ = false;    // an attempt this frame
-    stereo::GazeSource focusGazeSrc_;
-    uint32_t focusFrame_ = 0;           // dispatch on every 3rd
-    uint32_t focusSerial_ = 0;
-    uint32_t focusRecordedSerial_ = 0;  // in eye 0's command buffer, not yet submitted
-    uint32_t focusPendingSerial_ = 0;   // submitted, not read yet (0 = none)
-    float focusLastScores_[stereo::kCandidates] = {};  // latest measurement (autofocus log)
-    bool focusInitTried_ = false;
-    bool focusShaderMissing_ = false;   // no stereo_disparity.comp.spv: measurement stays off
-    VkDescriptorSetLayout focusOutSetLayout_ = VK_NULL_HANDLE;
-    VkDescriptorPool focusOutPool_ = VK_NULL_HANDLE;
-    VkDescriptorSet focusOutSet_ = VK_NULL_HANDLE;
-    VkBuffer focusOutBuffer_ = VK_NULL_HANDLE;  // FocusOut: 128 scores, variance, serial
-    VkDeviceMemory focusOutMemory_ = VK_NULL_HANDLE;
-    void* focusOutMapped_ = nullptr;
-    VkPipelineLayout focusCpuLayout_ = VK_NULL_HANDLE;  // CPU path (luma at binding 0)
-    VkPipeline focusCpuPipeline_ = VK_NULL_HANDLE;
-    bool focusCpuTried_ = false;
     float screenDistance_ = 3.0f;
     float screenCurvature_ = 0.0f;  // 0.0 = flat plane (default), 1.0 = deep cinema curve
 
@@ -1955,13 +1896,6 @@ private:
         VkPipeline ycbcrSpherePipeline1x = VK_NULL_HANDLE;
         VkPipeline ycbcrSphereDirectPipeline1x = VK_NULL_HANDLE;
         bool ycbcr1xTried = false;
-        // 3D Autofocus search on this slot's sets (built on first use, with the set layouts).
-        VkPipelineLayout focusDirectLayout = VK_NULL_HANDLE;
-        VkPipeline focusDirectPipeline = VK_NULL_HANDLE;
-        bool focusDirectTried = false;
-        VkPipelineLayout focusResolvedLayout = VK_NULL_HANDLE;
-        VkPipeline focusResolvedPipeline = VK_NULL_HANDLE;
-        bool focusResolvedTried = false;
         struct RetiredFrame {
             VkImage image = VK_NULL_HANDLE;
             VkDeviceMemory memory = VK_NULL_HANDLE;
